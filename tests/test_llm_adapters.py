@@ -168,6 +168,33 @@ async def test_assessor_interview_uses_injected_llm_port() -> None:
     assert adapter.requests[0].task == "interview.generate-questions"
 
 
+@pytest.mark.asyncio
+async def test_assessor_exposes_llm_trace_id_on_assessment_response() -> None:
+    adapter = MockLLMAdapter(
+        content=(
+            '{"scores":{"scalability":80,"reliability":70,'
+            '"security":60,"maintainability":90},"feedback":[],'
+            '"findings":[],"strengths":[],"improvements":[],'
+            '"missing_components":[],"suggestions":[]}'
+        ),
+        trace_id="0123456789abcdef0123456789abcdef",
+    )
+    service = AIAssessorService(llm=adapter)
+    request = AssessmentRequest(
+        components=[
+            SystemComponent(
+                id="api",
+                type=ComponentType.BACKEND,
+                label="API",
+            )
+        ]
+    )
+
+    response = await service.assess_design(request)
+
+    assert response.trace_id == "0123456789abcdef0123456789abcdef"
+
+
 def test_azure_factory_builds_azure_client_and_uses_deployment_name() -> None:
     settings = make_settings(
         llm_provider="azure_openai",

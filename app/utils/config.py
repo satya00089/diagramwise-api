@@ -101,7 +101,14 @@ class Settings(BaseSettings):
 
     # CORS Configuration
     allowed_origins: list[str] = Field(
-        ["*"],
+        [
+            "http://localhost:3000",
+            "http://localhost:5173",
+            "http://localhost:5174",
+            "https://diagramwise.com",
+            "https://www.diagramwise.com",
+            "https://diagrammatic.next-zen.dev",
+        ],
         validation_alias="ALLOWED_ORIGINS",
     )
 
@@ -147,7 +154,7 @@ class Settings(BaseSettings):
     )
     # Frontend URL (used to build public solution links)
     frontend_url: str = Field(
-        "https://diagrammatic.next-zen.dev",
+        "https://diagramwise.com",
         validation_alias="FRONTEND_URL",
     )
 
@@ -156,7 +163,7 @@ class Settings(BaseSettings):
     # service-unavailable response until it is configured.
     resend_api_key: str | None = Field(None, validation_alias="RESEND_API_KEY")
     resend_from_email: str = Field(
-        "Diagrammatic <no-reply@diagrammatic.next-zen.dev>",
+        "Diagramwise <no-reply@diagrammatic.next-zen.dev>",
         validation_alias="RESEND_FROM_EMAIL",
     )
     brand_logo_url: str | None = Field(None, validation_alias="BRAND_LOGO_URL")

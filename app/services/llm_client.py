@@ -88,6 +88,17 @@ def _langfuse_client_class(provider: str) -> Any:
     return getattr(langfuse_openai, class_name)
 
 
+def _new_langfuse_trace_id() -> str | None:
+    """Create a trace ID that can be returned to the browser for feedback."""
+    try:
+        from langfuse import Langfuse
+
+        return Langfuse.create_trace_id()
+    except Exception:
+        logger.exception("Could not create a Langfuse trace ID")
+        return None
+
+
 def _build_sdk_client(settings: Settings) -> tuple[Any, bool]:
     """Build the selected SDK client, including optional tracing."""
 
@@ -214,13 +225,16 @@ class OpenAICompatibleAdapter:
         elif request.temperature is not None:
             completion_options["temperature"] = request.temperature
 
+        trace_id: str | None = None
         if self._tracing_enabled:
+            trace_id = _new_langfuse_trace_id()
             completion_options.update(
                 langfuse_options(
                     self._settings,
                     name=request.task,
                     tags=request.tags,
                     metadata=request.metadata,
+                    trace_id=trace_id,
                 )
             )
         response = await self._client.chat.completions.create(**completion_options)
@@ -232,6 +246,7 @@ class OpenAICompatibleAdapter:
         return LLMResponse(
             content=getattr(message, "content", None),
             model=getattr(response, "model", self._model),
+            trace_id=trace_id,
             finish_reason=getattr(choice, "finish_reason", None),
             refusal=getattr(message, "refusal", None),
             usage=LLMUsage(
@@ -264,6 +279,7 @@ def langfuse_options(
     name: str,
     tags: tuple[str, ...] = (),
     metadata: Mapping[str, Any] | None = None,
+    trace_id: str | None = None,
 ) -> dict[str, Any]:
     """Build Langfuse-only request attributes when tracing is enabled.
 
@@ -286,7 +302,65 @@ def langfuse_options(
     # assigning the generation to a session. Keep it non-empty even when the
     # caller does not provide an application-level conversation id.
     trace_metadata["langfuse_session_id"] = session_id
-    return {"name": name, "metadata": trace_metadata}
+    options: dict[str, Any] = {"name": name, "metadata": trace_metadata}
+    if trace_id:
+        options["trace_id"] = trace_id
+    return options
+
+
+def record_langfuse_feedback(
+    *,
+    trace_id: str | None,
+    helpful: bool | None,
+    rating: int | None,
+    source: str,
+    category: str,
+    reasons: list[str],
+    feedback_id: str | None = None,
+    settings: Settings | None = None,
+) -> None:
+    """Attach user feedback scores to an existing Langfuse trace.
+
+    Feedback remains durable in DynamoDB; Langfuse receives only the
+    structured signal and whitelisted context, not the free-text message.
+    Observability failures must never make feedback submission fail.
+    """
+    resolved_settings = settings or get_settings()
+    if not trace_id or not is_langfuse_configured(resolved_settings):
+        return
+
+    try:
+        _configure_langfuse_environment(resolved_settings)
+        from langfuse import get_client
+
+        client = get_client()
+        metadata = {
+            "source": source,
+            "category": category,
+            "reasons": reasons,
+            **({"feedback_id": feedback_id} if feedback_id else {}),
+        }
+        if helpful is not None:
+            client.create_score(
+                name="user-helpfulness",
+                value=1 if helpful else 0,
+                trace_id=trace_id,
+                data_type="BOOLEAN",
+                metadata=metadata,
+            )
+        if rating is not None:
+            client.create_score(
+                name="user-rating",
+                value=float(rating),
+                trace_id=trace_id,
+                data_type="NUMERIC",
+                metadata=metadata,
+            )
+        client.flush()
+    except Exception:
+        logger.exception(
+            "Could not record Langfuse user feedback trace_id=%s", trace_id
+        )
 
 
 def flush_langfuse(settings: Settings | None = None) -> None:

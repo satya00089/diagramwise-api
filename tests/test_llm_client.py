@@ -1,4 +1,8 @@
-from app.services.llm_client import is_langfuse_configured, langfuse_options
+from app.services.llm_client import (
+    is_langfuse_configured,
+    langfuse_options,
+    record_langfuse_feedback,
+)
 from app.utils.config import Settings
 
 
@@ -57,6 +61,54 @@ def test_langfuse_options_preserve_explicit_session_id() -> None:
     )
 
     assert options["metadata"]["langfuse_session_id"] == "browser-session-123"
+
+
+def test_langfuse_options_include_trace_id_when_provided() -> None:
+    settings = make_settings()
+
+    options = langfuse_options(
+        settings,
+        name="assessment.evaluate-design",
+        trace_id="0123456789abcdef0123456789abcdef",
+    )
+
+    assert options["trace_id"] == "0123456789abcdef0123456789abcdef"
+
+
+def test_record_langfuse_feedback_creates_structured_scores(monkeypatch) -> None:
+    class FakeLangfuse:
+        def __init__(self) -> None:
+            self.scores = []
+            self.flushed = False
+
+        def create_score(self, **kwargs):
+            self.scores.append(kwargs)
+
+        def flush(self):
+            self.flushed = True
+
+    client = FakeLangfuse()
+    monkeypatch.setattr("langfuse.get_client", lambda: client)
+
+    record_langfuse_feedback(
+        trace_id="0123456789abcdef0123456789abcdef",
+        helpful=False,
+        rating=2,
+        source="assessment",
+        category="assessment",
+        reasons=["too_generic"],
+        feedback_id="feedback-1",
+        settings=make_settings(),
+    )
+
+    assert [score["name"] for score in client.scores] == [
+        "user-helpfulness",
+        "user-rating",
+    ]
+    assert client.scores[0]["value"] == 0
+    assert client.scores[0]["data_type"] == "BOOLEAN"
+    assert client.scores[1]["value"] == 2.0
+    assert client.flushed is True
 
 
 def test_langfuse_enabled_flag_can_turn_tracing_off() -> None:

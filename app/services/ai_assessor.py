@@ -227,6 +227,7 @@ class AIAssessorService:
 
             # Transform to response model
             assessment = self._transform_ai_response(ai_result)
+            assessment.trace_id = response.trace_id
 
             # Post-process: suppress description feedback when coverage threshold is met
             assessment = self._filter_description_feedback(assessment, coverage)

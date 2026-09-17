@@ -10,11 +10,24 @@ def test_feedback_accepts_contextual_assessment_helpfulness() -> None:
         category=FeedbackCategory.ASSESSMENT,
         helpful=False,
         reasons=["too_generic"],
-        context={"problemId": "problem-1", "assessmentId": "assessment-1"},
+        context={
+            "problemId": "problem-1",
+            "assessmentId": "assessment-1",
+            "traceId": "0123456789abcdef0123456789abcdef",
+        },
     )
 
     assert feedback.helpful is False
     assert feedback.context.problemId == "problem-1"
+    assert feedback.context.traceId == "0123456789abcdef0123456789abcdef"
+
+
+def test_feedback_rejects_invalid_langfuse_trace_id() -> None:
+    with pytest.raises(ValidationError):
+        FeedbackCreate(
+            helpful=True,
+            context={"traceId": "not-a-trace-id"},
+        )
 
 
 def test_feedback_requires_a_signal() -> None:

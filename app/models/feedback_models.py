@@ -40,6 +40,11 @@ class FeedbackContext(BaseModel):
 
     problemId: Optional[str] = Field(default=None, max_length=128)
     assessmentId: Optional[str] = Field(default=None, max_length=128)
+    traceId: Optional[str] = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{32}$",
+        description="Langfuse trace ID associated with the reviewed output",
+    )
     diagramId: Optional[str] = Field(default=None, max_length=128)
     lessonId: Optional[str] = Field(default=None, max_length=128)
 
@@ -82,4 +87,4 @@ class FeedbackResponse(BaseModel):
 
     id: str
     createdAt: str
-    message: str = "Thanks for helping us improve Diagrammatic."
+    message: str = "Thanks for helping us improve Diagramwise."

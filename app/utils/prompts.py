@@ -193,7 +193,7 @@ You are assessing a system design solution. Please evaluate the architecture com
 {reasoning_context}
 {interview_context}
 
-The review context above is supplied by Diagrammatic from the problem brief and current canvas. Treat explicit problem and canvas facts as context, but do not treat missing targets as facts and do not invent traffic, latency, availability, or consistency values. Do not penalize a choice merely because it differs from a common default; evaluate whether it is coherent with the available context and explain what the candidate should clarify in Interview Mode.
+The review context above is supplied by Diagramwise from the problem brief and current canvas. Treat explicit problem and canvas facts as context, but do not treat missing targets as facts and do not invent traffic, latency, availability, or consistency values. Do not penalize a choice merely because it differs from a common default; evaluate whether it is coherent with the available context and explain what the candidate should clarify in Interview Mode.
 
 **ASSESSMENT CRITERIA:**
 Rate each aspect from 0-100, considering the problem context, requirements, and component descriptions:

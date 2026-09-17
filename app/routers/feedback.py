@@ -10,6 +10,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from app.models.feedback_models import FeedbackCreate, FeedbackResponse
 from app.services.auth_service import auth_service
 from app.services.dynamodb_service import dynamodb_service
+from app.services.llm_client import record_langfuse_feedback
 
 router = APIRouter()
 optional_security = HTTPBearer(auto_error=False)
@@ -88,7 +89,19 @@ async def submit_feedback(
 
     user_id = current_user.get("user_id") if current_user else None
     try:
-        return dynamodb_service.create_feedback(feedback, user_id=user_id)
+        saved_feedback = dynamodb_service.create_feedback(
+            feedback, user_id=user_id
+        )
+        record_langfuse_feedback(
+            trace_id=feedback.context.traceId,
+            helpful=feedback.helpful,
+            rating=feedback.rating,
+            source=feedback.source.value,
+            category=feedback.category.value,
+            reasons=[reason.value for reason in feedback.reasons],
+            feedback_id=saved_feedback.id,
+        )
+        return saved_feedback
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

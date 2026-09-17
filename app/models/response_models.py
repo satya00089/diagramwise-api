@@ -102,5 +102,6 @@ class AssessmentResponse(BaseModel):
     detailed_analysis: Optional[Dict[str, str]] = None
     interview_questions: Optional[List[str]] = None
     assessment_id: Optional[str] = None
+    trace_id: Optional[str] = None
     processing_time_ms: Optional[int] = None
     source: AssessmentSource = AssessmentSource.AI

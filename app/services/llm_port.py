@@ -38,6 +38,7 @@ class LLMResponse:
 
     content: str | None
     model: str | None = None
+    trace_id: str | None = None
     finish_reason: str | None = None
     refusal: str | None = None
     usage: LLMUsage = field(default_factory=LLMUsage)
@@ -60,10 +61,16 @@ class LLMPort(Protocol):
 class MockLLMAdapter:
     """Deterministic adapter for service tests and local development."""
 
-    def __init__(self, content: str = "{}") -> None:
+    def __init__(self, content: str = "{}", trace_id: str | None = None) -> None:
         self.content = content
+        self.trace_id = trace_id
         self.requests: list[LLMRequest] = []
 
     async def generate(self, request: LLMRequest) -> LLMResponse:
         self.requests.append(request)
-        return LLMResponse(content=self.content, model="mock", finish_reason="stop")
+        return LLMResponse(
+            content=self.content,
+            model="mock",
+            trace_id=self.trace_id,
+            finish_reason="stop",
+        )
