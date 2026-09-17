@@ -68,7 +68,7 @@ async def publish_attempt(
         )
 
     settings = get_settings()
-    base = getattr(settings, "frontend_url", "https://diagrammatic.next-zen.dev").rstrip("/")
+    base = getattr(settings, "frontend_url", "https://diagramwise.com").rstrip("/")
     public_url = f"{base}/public/{quote(attempt_id, safe='')}"
 
     return PublishResponse(
@@ -138,7 +138,7 @@ async def publish_diagram(
         )
 
     settings = get_settings()
-    base = getattr(settings, "frontend_url", "https://diagrammatic.next-zen.dev").rstrip("/")
+    base = getattr(settings, "frontend_url", "https://diagramwise.com").rstrip("/")
     public_url = f"{base}/public/{diagram_id}"
 
     return PublishDiagramResponse(
@@ -268,7 +268,7 @@ async def generate_share_article(
 
     prompt = f"""You are a technical-content writer helping a software engineer share their achievement.
 
-They just solved "{payload.problemTitle}" on Diagrammatic and scored {payload.score}/100.
+They just solved "{payload.problemTitle}" on Diagramwise and scored {payload.score}/100.
 
 Design stats: {payload.nodeCount} components, {payload.edgeCount} connections.
 Strengths: {strengths_text}

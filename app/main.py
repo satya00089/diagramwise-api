@@ -126,7 +126,7 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(
-    title="Diagrammatic API",
+    title="Diagramwise API",
     description="AI-powered assessment service for system design solutions",
     version="1.0.0",
     lifespan=lifespan,

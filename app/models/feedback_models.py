@@ -87,4 +87,4 @@ class FeedbackResponse(BaseModel):
 
     id: str
     createdAt: str
-    message: str = "Thanks for helping us improve Diagrammatic."
+    message: str = "Thanks for helping us improve Diagramwise."
