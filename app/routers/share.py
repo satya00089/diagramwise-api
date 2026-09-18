@@ -139,10 +139,11 @@ async def publish_diagram(
 
     settings = get_settings()
     base = getattr(settings, "frontend_url", "https://diagramwise.com").rstrip("/")
-    public_url = f"{base}/public/{diagram_id}"
+    public_diagram_id = published.get("diagramId", diagram_id)
+    public_url = f"{base}/public/{public_diagram_id}"
 
     return PublishDiagramResponse(
-        diagramId=diagram_id,
+        diagramId=public_diagram_id,
         publicUrl=public_url,
         publishedAt=published["publishedAt"],
     )

@@ -38,6 +38,10 @@ DIAGRAM_SUMMARY_ATTRIBUTES = (
     "nodeCount",
     "edgeCount",
     "collaborators",
+    "recordType",
+    "familyId",
+    "sourceDiagramId",
+    "publicSnapshotId",
 )
 DIAGRAM_SUMMARY_PROJECTION = ", ".join(
     f"#{index}" for index, _ in enumerate(DIAGRAM_SUMMARY_ATTRIBUTES)
@@ -415,6 +419,8 @@ class DynamoDBService:
         nodes: List[Any],
         edges: List[Any],
         reasoning_context: Optional[Dict[str, Any]] = None,
+        source_diagram_id: Optional[str] = None,
+        family_id: Optional[str] = None,
     ) -> Diagram:
         """Create a new diagram in DynamoDB."""
         diagram_id = str(uuid4())
@@ -438,7 +444,11 @@ class DynamoDBService:
             else None,
             "createdAt": now,
             "updatedAt": now,
+            "recordType": "remix" if source_diagram_id else "canonical",
+            "familyId": family_id or diagram_id,
         }
+        if source_diagram_id:
+            item["sourceDiagramId"] = source_diagram_id
 
         self.diagrams_table.put_item(Item=item)
 
@@ -455,6 +465,9 @@ class DynamoDBService:
             reasoningContext=reasoning_context,
             createdAt=now,
             updatedAt=now,
+            recordType="remix" if source_diagram_id else "canonical",
+            familyId=family_id or diagram_id,
+            sourceDiagramId=source_diagram_id,
         )
 
     def get_diagrams_by_user(self, user_id: str) -> List[Diagram]:
@@ -522,6 +535,8 @@ class DynamoDBService:
                 "ProjectionExpression": DIAGRAM_SUMMARY_PROJECTION,
                 "ExpressionAttributeNames": DIAGRAM_SUMMARY_NAMES,
                 "Limit": limit,
+                "FilterExpression": Attr("recordType").not_exists()
+                | Attr("recordType").ne("public_snapshot"),
             }
             if exclusive_start_key:
                 query_kwargs["ExclusiveStartKey"] = exclusive_start_key
@@ -623,7 +638,12 @@ class DynamoDBService:
     def delete_diagram(self, user_id: str, diagram_id: str) -> bool:
         """Delete a diagram."""
         try:
+            diagram = self.get_diagram(user_id, diagram_id)
             self.diagrams_table.delete_item(Key={"userId": user_id, "id": diagram_id})
+            if diagram and diagram.publicSnapshotId:
+                self.diagrams_table.delete_item(
+                    Key={"userId": user_id, "id": diagram.publicSnapshotId}
+                )
             return True
         except ClientError:
             return False
@@ -1498,30 +1518,59 @@ class DynamoDBService:
         author_name: str,
         author_picture: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Mark a free-design diagram as publicly visible."""
+        """Publish an immutable snapshot of a free-design diagram."""
         try:
             diagram = self.get_diagram(user_id, diagram_id)
             if not diagram:
                 return None
 
             now = datetime.now(timezone.utc).isoformat()
-
+            snapshot_id = diagram.publicSnapshotId or str(uuid4())
+            previous_snapshot = self.get_diagram(user_id, snapshot_id)
+            family_id = diagram.familyId or diagram.id
+            snapshot_item: Dict[str, Any] = {
+                "id": snapshot_id,
+                "userId": user_id,
+                "title": diagram.title,
+                "description": diagram.description,
+                "nodes": convert_floats_to_decimal(diagram.nodes),
+                "edges": convert_floats_to_decimal(diagram.edges),
+                "nodeCount": diagram.nodeCount,
+                "edgeCount": diagram.edgeCount,
+                "reasoningContext": convert_floats_to_decimal(
+                    diagram.reasoningContext
+                )
+                if diagram.reasoningContext is not None
+                else None,
+                "createdAt": previous_snapshot.createdAt if previous_snapshot else now,
+                "updatedAt": now,
+                "isPublic": True,
+                "publishedAt": now,
+                "viewCount": previous_snapshot.viewCount if previous_snapshot else 0,
+                "collaborators": [],
+                "recordType": "public_snapshot",
+                "familyId": family_id,
+                "sourceDiagramId": diagram.id,
+                "authorName": author_name,
+                "authorPicture": author_picture or "",
+            }
+            self.diagrams_table.put_item(Item=snapshot_item)
             self.diagrams_table.update_item(
                 Key={"userId": user_id, "id": diagram_id},
                 UpdateExpression=(
                     "SET isPublic = :pub, publishedAt = :ts, "
-                    "authorName = :name, authorPicture = :pic, "
-                    "viewCount = if_not_exists(viewCount, :zero)"
+                    "publicSnapshotId = :snapshot, familyId = :family, "
+                    "viewCount = :views"
                 ),
                 ExpressionAttributeValues={
                     ":pub": True,
                     ":ts": now,
-                    ":name": author_name,
-                    ":pic": author_picture or "",
-                    DDB_ZERO_VALUE: 0,
+                    ":snapshot": snapshot_id,
+                    ":family": family_id,
+                    ":views": snapshot_item["viewCount"],
                 },
             )
-            return {"publishedAt": now}
+            return {"publishedAt": now, "diagramId": snapshot_id}
         except ClientError as e:
             print(f"Error publishing diagram: {e}")
             return None
@@ -1529,11 +1578,30 @@ class DynamoDBService:
     def unpublish_diagram(self, user_id: str, diagram_id: str) -> bool:
         """Remove public visibility from a free-design diagram."""
         try:
+            diagram = self.get_diagram(user_id, diagram_id)
+            if not diagram:
+                return False
+            source_id = (
+                diagram.sourceDiagramId
+                if diagram.recordType == "public_snapshot" and diagram.sourceDiagramId
+                else diagram.id
+            )
+            snapshot_id = (
+                diagram.id
+                if diagram.recordType == "public_snapshot"
+                else diagram.publicSnapshotId
+            )
             self.diagrams_table.update_item(
-                Key={"userId": user_id, "id": diagram_id},
+                Key={"userId": user_id, "id": source_id},
                 UpdateExpression="SET isPublic = :f",
                 ExpressionAttributeValues={":f": False},
             )
+            if snapshot_id and snapshot_id != source_id:
+                self.diagrams_table.update_item(
+                    Key={"userId": user_id, "id": snapshot_id},
+                    UpdateExpression="SET isPublic = :f",
+                    ExpressionAttributeValues={":f": False},
+                )
             return True
         except ClientError as e:
             print(f"Error unpublishing diagram: {e}")
@@ -1564,6 +1632,18 @@ class DynamoDBService:
             raw = convert_decimal_to_float(items[0])
             owner_user_id = raw.get("userId", "")
 
+            # Keep old source URLs working after the source gains a snapshot.
+            snapshot_id = raw.get("publicSnapshotId")
+            if snapshot_id and raw.get("recordType") != "public_snapshot":
+                snapshot_response = self.diagrams_table.get_item(
+                    Key={"userId": owner_user_id, "id": snapshot_id}
+                )
+                snapshot_raw = snapshot_response.get("Item")
+                if snapshot_raw and snapshot_raw.get("isPublic"):
+                    raw = convert_decimal_to_float(snapshot_raw)
+                    owner_user_id = raw.get("userId", owner_user_id)
+                    diagram_id = raw.get("id", diagram_id)
+
             # Increment view count
             try:
                 updated = self.diagrams_table.update_item(
@@ -1587,6 +1667,9 @@ class DynamoDBService:
                 authorPicture=raw.get("authorPicture"),
                 publishedAt=raw.get("publishedAt"),
                 viewCount=int(raw.get("viewCount", 0)),
+                recordType=raw.get("recordType", "public_snapshot"),
+                familyId=raw.get("familyId"),
+                sourceDiagramId=raw.get("sourceDiagramId"),
             )
         except ClientError as e:
             print(f"get_public_diagram error: {e}")

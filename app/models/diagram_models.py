@@ -48,6 +48,8 @@ class DiagramCreate(BaseModel):
     nodes: List[Any] = Field(default_factory=list)
     edges: List[Any] = Field(default_factory=list)
     reasoningContext: Optional[ReasoningContext] = None
+    sourceDiagramId: Optional[str] = None
+    familyId: Optional[str] = None
 
 
 class DiagramUpdate(BaseModel):
@@ -81,6 +83,10 @@ class DiagramResponse(BaseModel):
         default=None, description="When the diagram was last published"
     )
     viewCount: int = Field(default=0, description="Number of public views")
+    recordType: str = Field(default="canonical")
+    familyId: Optional[str] = None
+    sourceDiagramId: Optional[str] = None
+    publicSnapshotId: Optional[str] = None
     collaborators: List[Collaborator] = Field(
         default_factory=lambda: cast(List[Collaborator], []),
         description="List of collaborators with access",
@@ -120,6 +126,10 @@ class Diagram(BaseModel):
     isPublic: bool = Field(default=False)
     publishedAt: Optional[str] = None
     viewCount: int = 0
+    recordType: str = "canonical"
+    familyId: Optional[str] = None
+    sourceDiagramId: Optional[str] = None
+    publicSnapshotId: Optional[str] = None
     collaborators: List[Collaborator] = Field(
         default_factory=lambda: cast(List[Collaborator], [])
     )
@@ -137,6 +147,10 @@ class DiagramSummaryResponse(BaseModel):
     isPublic: bool = False
     publishedAt: Optional[str] = None
     viewCount: int = 0
+    recordType: str = "canonical"
+    familyId: Optional[str] = None
+    sourceDiagramId: Optional[str] = None
+    publicSnapshotId: Optional[str] = None
     nodeCount: int = Field(..., description="Number of nodes in the diagram")
     edgeCount: int = Field(..., description="Number of edges in the diagram")
     isOwner: bool
@@ -164,6 +178,9 @@ class PublicDiagramResponse(BaseModel):
     authorPicture: Optional[str] = None
     publishedAt: Optional[str] = None
     viewCount: int = 0
+    recordType: str = "public_snapshot"
+    familyId: Optional[str] = None
+    sourceDiagramId: Optional[str] = None
 
 
 class PublishDiagramResponse(BaseModel):

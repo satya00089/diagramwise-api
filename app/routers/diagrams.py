@@ -109,6 +109,10 @@ def enrich_diagram_response(diagram: Diagram, current_user_id: str) -> DiagramRe
         isPublic=diagram.isPublic,
         publishedAt=diagram.publishedAt,
         viewCount=diagram.viewCount,
+        recordType=diagram.recordType,
+        familyId=diagram.familyId,
+        sourceDiagramId=diagram.sourceDiagramId,
+        publicSnapshotId=diagram.publicSnapshotId,
         collaborators=diagram.collaborators,
         isOwner=is_owner,
         permission=permission,
@@ -163,6 +167,10 @@ def enrich_diagram_summary_response(
         isPublic=diagram.isPublic,
         publishedAt=diagram.publishedAt,
         viewCount=diagram.viewCount,
+        recordType=diagram.recordType,
+        familyId=diagram.familyId,
+        sourceDiagramId=diagram.sourceDiagramId,
+        publicSnapshotId=diagram.publicSnapshotId,
         nodeCount=diagram.nodeCount,
         edgeCount=diagram.edgeCount,
         isOwner=is_owner,
@@ -191,6 +199,8 @@ async def create_diagram(
             if request.reasoningContext
             else None
         ),
+        source_diagram_id=request.sourceDiagramId,
+        family_id=request.familyId,
     )
 
     return enrich_diagram_response(diagram, user_id)
