@@ -48,6 +48,8 @@ class DiagramCreate(BaseModel):
     nodes: List[Any] = Field(default_factory=list)
     edges: List[Any] = Field(default_factory=list)
     reasoningContext: Optional[ReasoningContext] = None
+    sourceDiagramId: Optional[str] = None
+    familyId: Optional[str] = None
 
 
 class DiagramUpdate(BaseModel):
@@ -69,6 +71,8 @@ class DiagramResponse(BaseModel):
     description: Optional[str] = None
     nodes: List[Any]
     edges: List[Any]
+    nodeCount: int = Field(default=0, description="Number of nodes in the diagram")
+    edgeCount: int = Field(default=0, description="Number of edges in the diagram")
     reasoningContext: Optional[ReasoningContext] = None
     createdAt: str
     updatedAt: str
@@ -79,6 +83,10 @@ class DiagramResponse(BaseModel):
         default=None, description="When the diagram was last published"
     )
     viewCount: int = Field(default=0, description="Number of public views")
+    recordType: str = Field(default="canonical")
+    familyId: Optional[str] = None
+    sourceDiagramId: Optional[str] = None
+    publicSnapshotId: Optional[str] = None
     collaborators: List[Collaborator] = Field(
         default_factory=lambda: cast(List[Collaborator], []),
         description="List of collaborators with access",
@@ -108,17 +116,54 @@ class Diagram(BaseModel):
     userId: str
     title: str
     description: Optional[str] = None
-    nodes: List[Any]
-    edges: List[Any]
+    nodes: List[Any] = Field(default_factory=list)
+    edges: List[Any] = Field(default_factory=list)
+    nodeCount: int = Field(default=0)
+    edgeCount: int = Field(default=0)
     reasoningContext: Optional[ReasoningContext] = None
     createdAt: str
     updatedAt: str
     isPublic: bool = Field(default=False)
     publishedAt: Optional[str] = None
     viewCount: int = 0
+    recordType: str = "canonical"
+    familyId: Optional[str] = None
+    sourceDiagramId: Optional[str] = None
+    publicSnapshotId: Optional[str] = None
     collaborators: List[Collaborator] = Field(
         default_factory=lambda: cast(List[Collaborator], [])
     )
+
+
+class DiagramSummaryResponse(BaseModel):
+    """Metadata returned by the diagram list endpoint."""
+
+    id: str
+    userId: str
+    title: str
+    description: Optional[str] = None
+    createdAt: str
+    updatedAt: str
+    isPublic: bool = False
+    publishedAt: Optional[str] = None
+    viewCount: int = 0
+    recordType: str = "canonical"
+    familyId: Optional[str] = None
+    sourceDiagramId: Optional[str] = None
+    publicSnapshotId: Optional[str] = None
+    nodeCount: int = Field(..., description="Number of nodes in the diagram")
+    edgeCount: int = Field(..., description="Number of edges in the diagram")
+    isOwner: bool
+    permission: str
+    owner: Optional[Dict[str, Any]] = None
+
+
+class DiagramPage(BaseModel):
+    """One cursor-paginated page of diagram metadata."""
+
+    items: List[DiagramSummaryResponse]
+    next_cursor: Optional[str] = None
+    has_more: bool = False
 
 
 class PublicDiagramResponse(BaseModel):
@@ -133,6 +178,9 @@ class PublicDiagramResponse(BaseModel):
     authorPicture: Optional[str] = None
     publishedAt: Optional[str] = None
     viewCount: int = 0
+    recordType: str = "public_snapshot"
+    familyId: Optional[str] = None
+    sourceDiagramId: Optional[str] = None
 
 
 class PublishDiagramResponse(BaseModel):

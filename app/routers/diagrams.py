@@ -1,15 +1,20 @@
 """Diagrams router for CRUD operations on diagrams."""
 
+import base64
+import binascii
+import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.models.diagram_models import (
     DiagramCreate,
     Diagram,
     DiagramUpdate,
     DiagramResponse,
+    DiagramSummaryResponse,
+    DiagramPage,
     ShareRequest,
     ShareResponse,
     Collaborator,
@@ -23,6 +28,41 @@ router = APIRouter()
 
 # Constants
 DIAGRAM_NOT_FOUND = "Diagram not found"
+DIAGRAM_PAGE_SIZE = 24
+DIAGRAM_PAGE_MAX_SIZE = 100
+
+
+def _encode_diagram_cursor(state: Dict[str, Any]) -> str:
+    """Encode DynamoDB continuation keys as an opaque URL-safe cursor."""
+    payload = json.dumps(state, separators=(",", ":"), sort_keys=True).encode()
+    return base64.urlsafe_b64encode(payload).decode().rstrip("=")
+
+
+def _decode_diagram_cursor(cursor: Optional[str]) -> Dict[str, Any]:
+    """Decode and validate a diagram page cursor."""
+    if not cursor:
+        return {"source": "owned", "owned_cursor": None, "shared_cursor": None}
+
+    try:
+        padding = "=" * (-len(cursor) % 4)
+        state = json.loads(base64.urlsafe_b64decode(cursor + padding).decode())
+    except (ValueError, UnicodeDecodeError, binascii.Error) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid diagrams cursor",
+        ) from exc
+
+    if (
+        not isinstance(state, dict)
+        or state.get("source") not in {"owned", "shared"}
+        or ("owned_cursor" not in state and state.get("source") == "owned")
+        or ("shared_cursor" not in state and state.get("source") == "shared")
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid diagrams cursor",
+        )
+    return state
 
 
 def enrich_diagram_response(diagram: Diagram, current_user_id: str) -> DiagramResponse:
@@ -61,16 +101,81 @@ def enrich_diagram_response(diagram: Diagram, current_user_id: str) -> DiagramRe
         description=diagram.description,
         nodes=diagram.nodes,
         edges=diagram.edges,
+        nodeCount=diagram.nodeCount,
+        edgeCount=diagram.edgeCount,
         reasoningContext=diagram.reasoningContext,
         createdAt=diagram.createdAt,
         updatedAt=diagram.updatedAt,
         isPublic=diagram.isPublic,
         publishedAt=diagram.publishedAt,
         viewCount=diagram.viewCount,
+        recordType=diagram.recordType,
+        familyId=diagram.familyId,
+        sourceDiagramId=diagram.sourceDiagramId,
+        publicSnapshotId=diagram.publicSnapshotId,
         collaborators=diagram.collaborators,
         isOwner=is_owner,
         permission=permission,
         owner=owner_info,
+    )
+
+
+def _owner_info(
+    owner_id: str,
+    owner_cache: Dict[str, Optional[Dict[str, Any]]],
+) -> Optional[Dict[str, Any]]:
+    if owner_id not in owner_cache:
+        owner = dynamodb_service.get_user_by_id(owner_id)
+        owner_cache[owner_id] = (
+            {
+                "id": owner.id,
+                "name": owner.name or "Anonymous",
+                "email": owner.email,
+                "pictureUrl": owner.picture or None,
+            }
+            if owner
+            else None
+        )
+    return owner_cache[owner_id]
+
+
+def enrich_diagram_summary_response(
+    diagram: Diagram,
+    current_user_id: str,
+    owner_cache: Dict[str, Optional[Dict[str, Any]]],
+) -> DiagramSummaryResponse:
+    """Enrich list metadata without including canvas contents."""
+    is_owner = diagram.userId == current_user_id
+    permission = "owner"
+    if not is_owner:
+        permission = next(
+            (
+                collab.permission.value
+                for collab in diagram.collaborators or []
+                if collab.userId == current_user_id
+            ),
+            "read",
+        )
+
+    return DiagramSummaryResponse(
+        id=diagram.id,
+        userId=diagram.userId,
+        title=diagram.title,
+        description=diagram.description,
+        createdAt=diagram.createdAt,
+        updatedAt=diagram.updatedAt,
+        isPublic=diagram.isPublic,
+        publishedAt=diagram.publishedAt,
+        viewCount=diagram.viewCount,
+        recordType=diagram.recordType,
+        familyId=diagram.familyId,
+        sourceDiagramId=diagram.sourceDiagramId,
+        publicSnapshotId=diagram.publicSnapshotId,
+        nodeCount=diagram.nodeCount,
+        edgeCount=diagram.edgeCount,
+        isOwner=is_owner,
+        permission=permission,
+        owner=_owner_info(diagram.userId, owner_cache),
     )
 
 
@@ -94,26 +199,84 @@ async def create_diagram(
             if request.reasoningContext
             else None
         ),
+        source_diagram_id=request.sourceDiagramId,
+        family_id=request.familyId,
     )
 
     return enrich_diagram_response(diagram, user_id)
 
 
-@router.get("/diagrams", response_model=List[DiagramResponse])
-async def get_diagrams(current_user: Dict[str, Any] = Depends(get_current_user)):
-    """Get all diagrams for the authenticated user (owned + shared)."""
+@router.get("/diagrams", response_model=DiagramPage)
+async def get_diagrams(
+    limit: int = Query(
+        default=DIAGRAM_PAGE_SIZE,
+        ge=1,
+        le=DIAGRAM_PAGE_MAX_SIZE,
+        description="Maximum number of diagram summaries to return",
+    ),
+    cursor: Optional[str] = Query(default=None),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> DiagramPage:
+    """Get one cursor-paginated page of diagram metadata and counts."""
     user_id = current_user["user_id"]
+    page_state = _decode_diagram_cursor(cursor)
+    owner_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+    page_items: List[Diagram] = []
+    next_state: Optional[Dict[str, Any]] = None
 
-    # Get owned diagrams
-    owned_diagrams = dynamodb_service.get_diagrams_by_user(user_id)
+    if page_state["source"] == "owned":
+        owned_diagrams, owned_cursor = dynamodb_service.get_diagram_summary_page_by_user(
+            user_id=user_id,
+            limit=limit,
+            exclusive_start_key=page_state.get("owned_cursor"),
+        )
+        page_items.extend(owned_diagrams)
 
-    # Get shared diagrams
-    shared_diagrams = dynamodb_service.get_shared_diagrams_for_user(user_id)
+        if owned_cursor:
+            next_state = {
+                "source": "owned",
+                "owned_cursor": owned_cursor,
+                "shared_cursor": None,
+            }
+        elif len(page_items) < limit:
+            shared_diagrams, shared_cursor = (
+                dynamodb_service.get_shared_diagram_summary_page_for_user(
+                    user_id=user_id,
+                    limit=limit - len(page_items),
+                    exclusive_start_key=page_state.get("shared_cursor"),
+                )
+            )
+            page_items.extend(shared_diagrams)
+            if shared_cursor:
+                next_state = {
+                    "source": "shared",
+                    "owned_cursor": None,
+                    "shared_cursor": shared_cursor,
+                }
+    else:
+        shared_diagrams, shared_cursor = (
+            dynamodb_service.get_shared_diagram_summary_page_for_user(
+                user_id=user_id,
+                limit=limit,
+                exclusive_start_key=page_state.get("shared_cursor"),
+            )
+        )
+        page_items.extend(shared_diagrams)
+        if shared_cursor:
+            next_state = {
+                "source": "shared",
+                "owned_cursor": None,
+                "shared_cursor": shared_cursor,
+            }
 
-    # Combine and enrich all diagrams
-    all_diagrams = owned_diagrams + shared_diagrams
-
-    return [enrich_diagram_response(diagram, user_id) for diagram in all_diagrams]
+    return DiagramPage(
+        items=[
+            enrich_diagram_summary_response(diagram, user_id, owner_cache)
+            for diagram in page_items
+        ],
+        next_cursor=_encode_diagram_cursor(next_state) if next_state else None,
+        has_more=next_state is not None,
+    )
 
 
 @router.get("/diagrams/{diagram_id}", response_model=DiagramResponse)

@@ -25,6 +25,32 @@ DDB_COLLABORATORS_UPDATE = (
     "SET collaborators = :collaborators, updatedAt = :updated"
 )
 
+DIAGRAM_SUMMARY_ATTRIBUTES = (
+    "userId",
+    "id",
+    "title",
+    "description",
+    "createdAt",
+    "updatedAt",
+    "isPublic",
+    "publishedAt",
+    "viewCount",
+    "nodeCount",
+    "edgeCount",
+    "collaborators",
+    "recordType",
+    "familyId",
+    "sourceDiagramId",
+    "publicSnapshotId",
+)
+DIAGRAM_SUMMARY_PROJECTION = ", ".join(
+    f"#{index}" for index, _ in enumerate(DIAGRAM_SUMMARY_ATTRIBUTES)
+)
+DIAGRAM_SUMMARY_NAMES = {
+    f"#{index}": attribute
+    for index, attribute in enumerate(DIAGRAM_SUMMARY_ATTRIBUTES)
+}
+
 
 def convert_floats_to_decimal(obj: Any) -> Any:
     """
@@ -393,6 +419,8 @@ class DynamoDBService:
         nodes: List[Any],
         edges: List[Any],
         reasoning_context: Optional[Dict[str, Any]] = None,
+        source_diagram_id: Optional[str] = None,
+        family_id: Optional[str] = None,
     ) -> Diagram:
         """Create a new diagram in DynamoDB."""
         diagram_id = str(uuid4())
@@ -409,12 +437,18 @@ class DynamoDBService:
             "description": description,
             "nodes": nodes_decimal,
             "edges": edges_decimal,
+            "nodeCount": len(nodes),
+            "edgeCount": len(edges),
             "reasoningContext": convert_floats_to_decimal(reasoning_context)
             if reasoning_context is not None
             else None,
             "createdAt": now,
             "updatedAt": now,
+            "recordType": "remix" if source_diagram_id else "canonical",
+            "familyId": family_id or diagram_id,
         }
+        if source_diagram_id:
+            item["sourceDiagramId"] = source_diagram_id
 
         self.diagrams_table.put_item(Item=item)
 
@@ -426,9 +460,14 @@ class DynamoDBService:
             description=description,
             nodes=nodes,
             edges=edges,
+            nodeCount=len(nodes),
+            edgeCount=len(edges),
             reasoningContext=reasoning_context,
             createdAt=now,
             updatedAt=now,
+            recordType="remix" if source_diagram_id else "canonical",
+            familyId=family_id or diagram_id,
+            sourceDiagramId=source_diagram_id,
         )
 
     def get_diagrams_by_user(self, user_id: str) -> List[Diagram]:
@@ -457,6 +496,60 @@ class DynamoDBService:
         except ClientError as e:
             print(f"Error querying diagrams: {e}")
             return []
+
+    def get_diagram_summaries_by_user(self, user_id: str) -> List[Diagram]:
+        """Get owned diagram metadata without loading canvas arrays."""
+        try:
+            items: List[Dict[str, Any]] = []
+            query_kwargs = {
+                "KeyConditionExpression": Key("userId").eq(user_id),
+                "ProjectionExpression": DIAGRAM_SUMMARY_PROJECTION,
+                "ExpressionAttributeNames": DIAGRAM_SUMMARY_NAMES,
+            }
+            response = self.diagrams_table.query(**query_kwargs)
+            items.extend(response.get("Items", []))
+
+            while response.get("LastEvaluatedKey"):
+                response = self.diagrams_table.query(
+                    **query_kwargs,
+                    ExclusiveStartKey=response["LastEvaluatedKey"],
+                )
+                items.extend(response.get("Items", []))
+
+            items_float = [convert_decimal_to_float(item) for item in items]
+            return [Diagram(**item) for item in items_float]
+        except ClientError as e:
+            print(f"Error querying diagram summaries: {e}")
+            return []
+
+    def get_diagram_summary_page_by_user(
+        self,
+        user_id: str,
+        limit: int,
+        exclusive_start_key: Optional[Dict[str, Any]] = None,
+    ) -> tuple[List[Diagram], Optional[Dict[str, Any]]]:
+        """Get one projected page of owned diagram metadata."""
+        try:
+            query_kwargs: Dict[str, Any] = {
+                "KeyConditionExpression": Key("userId").eq(user_id),
+                "ProjectionExpression": DIAGRAM_SUMMARY_PROJECTION,
+                "ExpressionAttributeNames": DIAGRAM_SUMMARY_NAMES,
+                "Limit": limit,
+                "FilterExpression": Attr("recordType").not_exists()
+                | Attr("recordType").ne("public_snapshot"),
+            }
+            if exclusive_start_key:
+                query_kwargs["ExclusiveStartKey"] = exclusive_start_key
+
+            response = self.diagrams_table.query(**query_kwargs)
+            items = [
+                Diagram(**convert_decimal_to_float(item))
+                for item in response.get("Items", [])
+            ]
+            return items, response.get("LastEvaluatedKey")
+        except ClientError as e:
+            print(f"Error querying diagram summary page: {e}")
+            return [], None
 
     def get_diagram(self, user_id: str, diagram_id: str) -> Optional[Diagram]:
         """Get a specific diagram."""
@@ -504,12 +597,16 @@ class DynamoDBService:
                 # Convert floats to Decimal for DynamoDB
                 expression_values[":nodes"] = convert_floats_to_decimal(nodes)
                 expression_names["#nodes"] = "nodes"
+                update_expression += ", nodeCount = :node_count"
+                expression_values[":node_count"] = len(nodes)
 
             if edges is not None:
                 update_expression += ", #edges = :edges"
                 # Convert floats to Decimal for DynamoDB
                 expression_values[":edges"] = convert_floats_to_decimal(edges)
                 expression_names["#edges"] = "edges"
+                update_expression += ", edgeCount = :edge_count"
+                expression_values[":edge_count"] = len(edges)
 
             if reasoning_context is not None:
                 update_expression += ", reasoningContext = :reasoning_context"
@@ -541,7 +638,12 @@ class DynamoDBService:
     def delete_diagram(self, user_id: str, diagram_id: str) -> bool:
         """Delete a diagram."""
         try:
+            diagram = self.get_diagram(user_id, diagram_id)
             self.diagrams_table.delete_item(Key={"userId": user_id, "id": diagram_id})
+            if diagram and diagram.publicSnapshotId:
+                self.diagrams_table.delete_item(
+                    Key={"userId": user_id, "id": diagram.publicSnapshotId}
+                )
             return True
         except ClientError:
             return False
@@ -695,7 +797,7 @@ class DynamoDBService:
             return None
 
     def get_shared_diagrams_for_user(self, user_id: str) -> List[Diagram]:
-        """Get all diagrams shared with a user."""
+        """Get all full diagrams shared with a user."""
         try:
             shared_diagrams: List[Diagram] = []
 
@@ -743,6 +845,82 @@ class DynamoDBService:
             return items
         except ClientError:
             return []
+
+    def get_shared_diagram_summaries_for_user(self, user_id: str) -> List[Diagram]:
+        """Get shared diagram metadata without loading canvas arrays."""
+        try:
+            shared_diagrams: List[Diagram] = []
+            scan_kwargs = {
+                "ProjectionExpression": DIAGRAM_SUMMARY_PROJECTION,
+                "ExpressionAttributeNames": DIAGRAM_SUMMARY_NAMES,
+            }
+            response = self.diagrams_table.scan(**scan_kwargs)
+            items = response.get("Items", [])
+
+            while response.get("LastEvaluatedKey"):
+                response = self.diagrams_table.scan(
+                    **scan_kwargs,
+                    ExclusiveStartKey=response["LastEvaluatedKey"],
+                )
+                items.extend(response.get("Items", []))
+
+            for item in items:
+                item_float = convert_decimal_to_float(item)
+                collaborators = item_float.get("collaborators", [])
+                if any(
+                    collab_data.get("userId") == user_id
+                    for collab_data in collaborators
+                ):
+                    shared_diagrams.append(Diagram(**item_float))
+
+            return shared_diagrams
+        except ClientError:
+            return []
+
+    def get_shared_diagram_summary_page_for_user(
+        self,
+        user_id: str,
+        limit: int,
+        exclusive_start_key: Optional[Dict[str, Any]] = None,
+    ) -> tuple[List[Diagram], Optional[Dict[str, Any]]]:
+        """Get one projected page of shared diagram metadata.
+
+        DynamoDB's scan limit applies before the collaborator filter, so keep
+        scanning until this page is full or the table is exhausted.
+        """
+        try:
+            shared_diagrams: List[Diagram] = []
+            last_key = exclusive_start_key
+
+            while len(shared_diagrams) < limit:
+                scan_kwargs: Dict[str, Any] = {
+                    "ProjectionExpression": DIAGRAM_SUMMARY_PROJECTION,
+                    "ExpressionAttributeNames": DIAGRAM_SUMMARY_NAMES,
+                    "Limit": max(limit - len(shared_diagrams), 1),
+                }
+                if last_key:
+                    scan_kwargs["ExclusiveStartKey"] = last_key
+
+                response = self.diagrams_table.scan(**scan_kwargs)
+                for item in response.get("Items", []):
+                    item_float = convert_decimal_to_float(item)
+                    collaborators = item_float.get("collaborators", [])
+                    if any(
+                        collab_data.get("userId") == user_id
+                        for collab_data in collaborators
+                    ):
+                        shared_diagrams.append(Diagram(**item_float))
+                        if len(shared_diagrams) >= limit:
+                            break
+
+                last_key = response.get("LastEvaluatedKey")
+                if not last_key:
+                    return shared_diagrams, None
+
+            return shared_diagrams, last_key
+        except ClientError as e:
+            print(f"Error scanning shared diagram summary page: {e}")
+            return [], None
 
     def get_problems_page(
         self,
@@ -1340,30 +1518,59 @@ class DynamoDBService:
         author_name: str,
         author_picture: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Mark a free-design diagram as publicly visible."""
+        """Publish an immutable snapshot of a free-design diagram."""
         try:
             diagram = self.get_diagram(user_id, diagram_id)
             if not diagram:
                 return None
 
             now = datetime.now(timezone.utc).isoformat()
-
+            snapshot_id = diagram.publicSnapshotId or str(uuid4())
+            previous_snapshot = self.get_diagram(user_id, snapshot_id)
+            family_id = diagram.familyId or diagram.id
+            snapshot_item: Dict[str, Any] = {
+                "id": snapshot_id,
+                "userId": user_id,
+                "title": diagram.title,
+                "description": diagram.description,
+                "nodes": convert_floats_to_decimal(diagram.nodes),
+                "edges": convert_floats_to_decimal(diagram.edges),
+                "nodeCount": diagram.nodeCount,
+                "edgeCount": diagram.edgeCount,
+                "reasoningContext": convert_floats_to_decimal(
+                    diagram.reasoningContext
+                )
+                if diagram.reasoningContext is not None
+                else None,
+                "createdAt": previous_snapshot.createdAt if previous_snapshot else now,
+                "updatedAt": now,
+                "isPublic": True,
+                "publishedAt": now,
+                "viewCount": previous_snapshot.viewCount if previous_snapshot else 0,
+                "collaborators": [],
+                "recordType": "public_snapshot",
+                "familyId": family_id,
+                "sourceDiagramId": diagram.id,
+                "authorName": author_name,
+                "authorPicture": author_picture or "",
+            }
+            self.diagrams_table.put_item(Item=snapshot_item)
             self.diagrams_table.update_item(
                 Key={"userId": user_id, "id": diagram_id},
                 UpdateExpression=(
                     "SET isPublic = :pub, publishedAt = :ts, "
-                    "authorName = :name, authorPicture = :pic, "
-                    "viewCount = if_not_exists(viewCount, :zero)"
+                    "publicSnapshotId = :snapshot, familyId = :family, "
+                    "viewCount = :views"
                 ),
                 ExpressionAttributeValues={
                     ":pub": True,
                     ":ts": now,
-                    ":name": author_name,
-                    ":pic": author_picture or "",
-                    DDB_ZERO_VALUE: 0,
+                    ":snapshot": snapshot_id,
+                    ":family": family_id,
+                    ":views": snapshot_item["viewCount"],
                 },
             )
-            return {"publishedAt": now}
+            return {"publishedAt": now, "diagramId": snapshot_id}
         except ClientError as e:
             print(f"Error publishing diagram: {e}")
             return None
@@ -1371,11 +1578,30 @@ class DynamoDBService:
     def unpublish_diagram(self, user_id: str, diagram_id: str) -> bool:
         """Remove public visibility from a free-design diagram."""
         try:
+            diagram = self.get_diagram(user_id, diagram_id)
+            if not diagram:
+                return False
+            source_id = (
+                diagram.sourceDiagramId
+                if diagram.recordType == "public_snapshot" and diagram.sourceDiagramId
+                else diagram.id
+            )
+            snapshot_id = (
+                diagram.id
+                if diagram.recordType == "public_snapshot"
+                else diagram.publicSnapshotId
+            )
             self.diagrams_table.update_item(
-                Key={"userId": user_id, "id": diagram_id},
+                Key={"userId": user_id, "id": source_id},
                 UpdateExpression="SET isPublic = :f",
                 ExpressionAttributeValues={":f": False},
             )
+            if snapshot_id and snapshot_id != source_id:
+                self.diagrams_table.update_item(
+                    Key={"userId": user_id, "id": snapshot_id},
+                    UpdateExpression="SET isPublic = :f",
+                    ExpressionAttributeValues={":f": False},
+                )
             return True
         except ClientError as e:
             print(f"Error unpublishing diagram: {e}")
@@ -1406,6 +1632,18 @@ class DynamoDBService:
             raw = convert_decimal_to_float(items[0])
             owner_user_id = raw.get("userId", "")
 
+            # Keep old source URLs working after the source gains a snapshot.
+            snapshot_id = raw.get("publicSnapshotId")
+            if snapshot_id and raw.get("recordType") != "public_snapshot":
+                snapshot_response = self.diagrams_table.get_item(
+                    Key={"userId": owner_user_id, "id": snapshot_id}
+                )
+                snapshot_raw = snapshot_response.get("Item")
+                if snapshot_raw and snapshot_raw.get("isPublic"):
+                    raw = convert_decimal_to_float(snapshot_raw)
+                    owner_user_id = raw.get("userId", owner_user_id)
+                    diagram_id = raw.get("id", diagram_id)
+
             # Increment view count
             try:
                 updated = self.diagrams_table.update_item(
@@ -1429,6 +1667,9 @@ class DynamoDBService:
                 authorPicture=raw.get("authorPicture"),
                 publishedAt=raw.get("publishedAt"),
                 viewCount=int(raw.get("viewCount", 0)),
+                recordType=raw.get("recordType", "public_snapshot"),
+                familyId=raw.get("familyId"),
+                sourceDiagramId=raw.get("sourceDiagramId"),
             )
         except ClientError as e:
             print(f"get_public_diagram error: {e}")
