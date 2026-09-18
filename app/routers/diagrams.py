@@ -10,6 +10,7 @@ from app.models.diagram_models import (
     Diagram,
     DiagramUpdate,
     DiagramResponse,
+    DiagramSummaryResponse,
     ShareRequest,
     ShareResponse,
     Collaborator,
@@ -61,6 +62,8 @@ def enrich_diagram_response(diagram: Diagram, current_user_id: str) -> DiagramRe
         description=diagram.description,
         nodes=diagram.nodes,
         edges=diagram.edges,
+        nodeCount=diagram.nodeCount,
+        edgeCount=diagram.edgeCount,
         reasoningContext=diagram.reasoningContext,
         createdAt=diagram.createdAt,
         updatedAt=diagram.updatedAt,
@@ -71,6 +74,61 @@ def enrich_diagram_response(diagram: Diagram, current_user_id: str) -> DiagramRe
         isOwner=is_owner,
         permission=permission,
         owner=owner_info,
+    )
+
+
+def _owner_info(
+    owner_id: str,
+    owner_cache: Dict[str, Optional[Dict[str, Any]]],
+) -> Optional[Dict[str, Any]]:
+    if owner_id not in owner_cache:
+        owner = dynamodb_service.get_user_by_id(owner_id)
+        owner_cache[owner_id] = (
+            {
+                "id": owner.id,
+                "name": owner.name or "Anonymous",
+                "email": owner.email,
+                "pictureUrl": owner.picture or None,
+            }
+            if owner
+            else None
+        )
+    return owner_cache[owner_id]
+
+
+def enrich_diagram_summary_response(
+    diagram: Diagram,
+    current_user_id: str,
+    owner_cache: Dict[str, Optional[Dict[str, Any]]],
+) -> DiagramSummaryResponse:
+    """Enrich list metadata without including canvas contents."""
+    is_owner = diagram.userId == current_user_id
+    permission = "owner"
+    if not is_owner:
+        permission = next(
+            (
+                collab.permission.value
+                for collab in diagram.collaborators or []
+                if collab.userId == current_user_id
+            ),
+            "read",
+        )
+
+    return DiagramSummaryResponse(
+        id=diagram.id,
+        userId=diagram.userId,
+        title=diagram.title,
+        description=diagram.description,
+        createdAt=diagram.createdAt,
+        updatedAt=diagram.updatedAt,
+        isPublic=diagram.isPublic,
+        publishedAt=diagram.publishedAt,
+        viewCount=diagram.viewCount,
+        nodeCount=diagram.nodeCount,
+        edgeCount=diagram.edgeCount,
+        isOwner=is_owner,
+        permission=permission,
+        owner=_owner_info(diagram.userId, owner_cache),
     )
 
 
@@ -99,21 +157,25 @@ async def create_diagram(
     return enrich_diagram_response(diagram, user_id)
 
 
-@router.get("/diagrams", response_model=List[DiagramResponse])
+@router.get("/diagrams", response_model=List[DiagramSummaryResponse])
 async def get_diagrams(current_user: Dict[str, Any] = Depends(get_current_user)):
-    """Get all diagrams for the authenticated user (owned + shared)."""
+    """Get diagram metadata and counts for the authenticated user."""
     user_id = current_user["user_id"]
 
     # Get owned diagrams
-    owned_diagrams = dynamodb_service.get_diagrams_by_user(user_id)
+    owned_diagrams = dynamodb_service.get_diagram_summaries_by_user(user_id)
 
     # Get shared diagrams
-    shared_diagrams = dynamodb_service.get_shared_diagrams_for_user(user_id)
+    shared_diagrams = dynamodb_service.get_shared_diagram_summaries_for_user(user_id)
 
     # Combine and enrich all diagrams
     all_diagrams = owned_diagrams + shared_diagrams
+    owner_cache: Dict[str, Optional[Dict[str, Any]]] = {}
 
-    return [enrich_diagram_response(diagram, user_id) for diagram in all_diagrams]
+    return [
+        enrich_diagram_summary_response(diagram, user_id, owner_cache)
+        for diagram in all_diagrams
+    ]
 
 
 @router.get("/diagrams/{diagram_id}", response_model=DiagramResponse)

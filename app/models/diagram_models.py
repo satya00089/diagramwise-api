@@ -69,6 +69,8 @@ class DiagramResponse(BaseModel):
     description: Optional[str] = None
     nodes: List[Any]
     edges: List[Any]
+    nodeCount: int = Field(default=0, description="Number of nodes in the diagram")
+    edgeCount: int = Field(default=0, description="Number of edges in the diagram")
     reasoningContext: Optional[ReasoningContext] = None
     createdAt: str
     updatedAt: str
@@ -108,8 +110,10 @@ class Diagram(BaseModel):
     userId: str
     title: str
     description: Optional[str] = None
-    nodes: List[Any]
-    edges: List[Any]
+    nodes: List[Any] = Field(default_factory=list)
+    edges: List[Any] = Field(default_factory=list)
+    nodeCount: int = Field(default=0)
+    edgeCount: int = Field(default=0)
     reasoningContext: Optional[ReasoningContext] = None
     createdAt: str
     updatedAt: str
@@ -119,6 +123,25 @@ class Diagram(BaseModel):
     collaborators: List[Collaborator] = Field(
         default_factory=lambda: cast(List[Collaborator], [])
     )
+
+
+class DiagramSummaryResponse(BaseModel):
+    """Metadata returned by the diagram list endpoint."""
+
+    id: str
+    userId: str
+    title: str
+    description: Optional[str] = None
+    createdAt: str
+    updatedAt: str
+    isPublic: bool = False
+    publishedAt: Optional[str] = None
+    viewCount: int = 0
+    nodeCount: int = Field(..., description="Number of nodes in the diagram")
+    edgeCount: int = Field(..., description="Number of edges in the diagram")
+    isOwner: bool
+    permission: str
+    owner: Optional[Dict[str, Any]] = None
 
 
 class PublicDiagramResponse(BaseModel):

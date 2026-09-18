@@ -25,6 +25,28 @@ DDB_COLLABORATORS_UPDATE = (
     "SET collaborators = :collaborators, updatedAt = :updated"
 )
 
+DIAGRAM_SUMMARY_ATTRIBUTES = (
+    "userId",
+    "id",
+    "title",
+    "description",
+    "createdAt",
+    "updatedAt",
+    "isPublic",
+    "publishedAt",
+    "viewCount",
+    "nodeCount",
+    "edgeCount",
+    "collaborators",
+)
+DIAGRAM_SUMMARY_PROJECTION = ", ".join(
+    f"#{index}" for index, _ in enumerate(DIAGRAM_SUMMARY_ATTRIBUTES)
+)
+DIAGRAM_SUMMARY_NAMES = {
+    f"#{index}": attribute
+    for index, attribute in enumerate(DIAGRAM_SUMMARY_ATTRIBUTES)
+}
+
 
 def convert_floats_to_decimal(obj: Any) -> Any:
     """
@@ -409,6 +431,8 @@ class DynamoDBService:
             "description": description,
             "nodes": nodes_decimal,
             "edges": edges_decimal,
+            "nodeCount": len(nodes),
+            "edgeCount": len(edges),
             "reasoningContext": convert_floats_to_decimal(reasoning_context)
             if reasoning_context is not None
             else None,
@@ -426,6 +450,8 @@ class DynamoDBService:
             description=description,
             nodes=nodes,
             edges=edges,
+            nodeCount=len(nodes),
+            edgeCount=len(edges),
             reasoningContext=reasoning_context,
             createdAt=now,
             updatedAt=now,
@@ -456,6 +482,31 @@ class DynamoDBService:
             return [Diagram(**item) for item in items_float]
         except ClientError as e:
             print(f"Error querying diagrams: {e}")
+            return []
+
+    def get_diagram_summaries_by_user(self, user_id: str) -> List[Diagram]:
+        """Get owned diagram metadata without loading canvas arrays."""
+        try:
+            items: List[Dict[str, Any]] = []
+            query_kwargs = {
+                "KeyConditionExpression": Key("userId").eq(user_id),
+                "ProjectionExpression": DIAGRAM_SUMMARY_PROJECTION,
+                "ExpressionAttributeNames": DIAGRAM_SUMMARY_NAMES,
+            }
+            response = self.diagrams_table.query(**query_kwargs)
+            items.extend(response.get("Items", []))
+
+            while response.get("LastEvaluatedKey"):
+                response = self.diagrams_table.query(
+                    **query_kwargs,
+                    ExclusiveStartKey=response["LastEvaluatedKey"],
+                )
+                items.extend(response.get("Items", []))
+
+            items_float = [convert_decimal_to_float(item) for item in items]
+            return [Diagram(**item) for item in items_float]
+        except ClientError as e:
+            print(f"Error querying diagram summaries: {e}")
             return []
 
     def get_diagram(self, user_id: str, diagram_id: str) -> Optional[Diagram]:
@@ -504,12 +555,16 @@ class DynamoDBService:
                 # Convert floats to Decimal for DynamoDB
                 expression_values[":nodes"] = convert_floats_to_decimal(nodes)
                 expression_names["#nodes"] = "nodes"
+                update_expression += ", nodeCount = :node_count"
+                expression_values[":node_count"] = len(nodes)
 
             if edges is not None:
                 update_expression += ", #edges = :edges"
                 # Convert floats to Decimal for DynamoDB
                 expression_values[":edges"] = convert_floats_to_decimal(edges)
                 expression_names["#edges"] = "edges"
+                update_expression += ", edgeCount = :edge_count"
+                expression_values[":edge_count"] = len(edges)
 
             if reasoning_context is not None:
                 update_expression += ", reasoningContext = :reasoning_context"
@@ -695,7 +750,7 @@ class DynamoDBService:
             return None
 
     def get_shared_diagrams_for_user(self, user_id: str) -> List[Diagram]:
-        """Get all diagrams shared with a user."""
+        """Get all full diagrams shared with a user."""
         try:
             shared_diagrams: List[Diagram] = []
 
@@ -741,6 +796,37 @@ class DynamoDBService:
                 items.extend(response.get("Items", []))
 
             return items
+        except ClientError:
+            return []
+
+    def get_shared_diagram_summaries_for_user(self, user_id: str) -> List[Diagram]:
+        """Get shared diagram metadata without loading canvas arrays."""
+        try:
+            shared_diagrams: List[Diagram] = []
+            scan_kwargs = {
+                "ProjectionExpression": DIAGRAM_SUMMARY_PROJECTION,
+                "ExpressionAttributeNames": DIAGRAM_SUMMARY_NAMES,
+            }
+            response = self.diagrams_table.scan(**scan_kwargs)
+            items = response.get("Items", [])
+
+            while response.get("LastEvaluatedKey"):
+                response = self.diagrams_table.scan(
+                    **scan_kwargs,
+                    ExclusiveStartKey=response["LastEvaluatedKey"],
+                )
+                items.extend(response.get("Items", []))
+
+            for item in items:
+                item_float = convert_decimal_to_float(item)
+                collaborators = item_float.get("collaborators", [])
+                if any(
+                    collab_data.get("userId") == user_id
+                    for collab_data in collaborators
+                ):
+                    shared_diagrams.append(Diagram(**item_float))
+
+            return shared_diagrams
         except ClientError:
             return []
 
