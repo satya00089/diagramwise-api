@@ -509,6 +509,33 @@ class DynamoDBService:
             print(f"Error querying diagram summaries: {e}")
             return []
 
+    def get_diagram_summary_page_by_user(
+        self,
+        user_id: str,
+        limit: int,
+        exclusive_start_key: Optional[Dict[str, Any]] = None,
+    ) -> tuple[List[Diagram], Optional[Dict[str, Any]]]:
+        """Get one projected page of owned diagram metadata."""
+        try:
+            query_kwargs: Dict[str, Any] = {
+                "KeyConditionExpression": Key("userId").eq(user_id),
+                "ProjectionExpression": DIAGRAM_SUMMARY_PROJECTION,
+                "ExpressionAttributeNames": DIAGRAM_SUMMARY_NAMES,
+                "Limit": limit,
+            }
+            if exclusive_start_key:
+                query_kwargs["ExclusiveStartKey"] = exclusive_start_key
+
+            response = self.diagrams_table.query(**query_kwargs)
+            items = [
+                Diagram(**convert_decimal_to_float(item))
+                for item in response.get("Items", [])
+            ]
+            return items, response.get("LastEvaluatedKey")
+        except ClientError as e:
+            print(f"Error querying diagram summary page: {e}")
+            return [], None
+
     def get_diagram(self, user_id: str, diagram_id: str) -> Optional[Diagram]:
         """Get a specific diagram."""
         try:
@@ -829,6 +856,51 @@ class DynamoDBService:
             return shared_diagrams
         except ClientError:
             return []
+
+    def get_shared_diagram_summary_page_for_user(
+        self,
+        user_id: str,
+        limit: int,
+        exclusive_start_key: Optional[Dict[str, Any]] = None,
+    ) -> tuple[List[Diagram], Optional[Dict[str, Any]]]:
+        """Get one projected page of shared diagram metadata.
+
+        DynamoDB's scan limit applies before the collaborator filter, so keep
+        scanning until this page is full or the table is exhausted.
+        """
+        try:
+            shared_diagrams: List[Diagram] = []
+            last_key = exclusive_start_key
+
+            while len(shared_diagrams) < limit:
+                scan_kwargs: Dict[str, Any] = {
+                    "ProjectionExpression": DIAGRAM_SUMMARY_PROJECTION,
+                    "ExpressionAttributeNames": DIAGRAM_SUMMARY_NAMES,
+                    "Limit": max(limit - len(shared_diagrams), 1),
+                }
+                if last_key:
+                    scan_kwargs["ExclusiveStartKey"] = last_key
+
+                response = self.diagrams_table.scan(**scan_kwargs)
+                for item in response.get("Items", []):
+                    item_float = convert_decimal_to_float(item)
+                    collaborators = item_float.get("collaborators", [])
+                    if any(
+                        collab_data.get("userId") == user_id
+                        for collab_data in collaborators
+                    ):
+                        shared_diagrams.append(Diagram(**item_float))
+                        if len(shared_diagrams) >= limit:
+                            break
+
+                last_key = response.get("LastEvaluatedKey")
+                if not last_key:
+                    return shared_diagrams, None
+
+            return shared_diagrams, last_key
+        except ClientError as e:
+            print(f"Error scanning shared diagram summary page: {e}")
+            return [], None
 
     def get_problems_page(
         self,

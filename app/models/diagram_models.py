@@ -144,6 +144,14 @@ class DiagramSummaryResponse(BaseModel):
     owner: Optional[Dict[str, Any]] = None
 
 
+class DiagramPage(BaseModel):
+    """One cursor-paginated page of diagram metadata."""
+
+    items: List[DiagramSummaryResponse]
+    next_cursor: Optional[str] = None
+    has_more: bool = False
+
+
 class PublicDiagramResponse(BaseModel):
     """Response model for a publicly shared free diagram."""
 

@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -63,6 +64,55 @@ def test_summary_query_uses_projection_without_canvas_arrays(monkeypatch):
     assert diagrams[0].nodeCount == 3
     assert "nodes" not in table.calls[0]["ExpressionAttributeNames"].values()
     assert "edges" not in table.calls[0]["ExpressionAttributeNames"].values()
+
+
+def test_summary_page_query_returns_projected_page_and_cursor():
+    class FakeTable:
+        def query(self, **kwargs):
+            assert kwargs["Limit"] == 2
+            return {
+                "Items": [summary_item()],
+                "LastEvaluatedKey": {"userId": "owner-1", "id": "diagram-1"},
+            }
+
+    service = DynamoDBService.__new__(DynamoDBService)
+    service.diagrams_table = FakeTable()
+
+    diagrams, cursor = service.get_diagram_summary_page_by_user("owner-1", 2)
+
+    assert len(diagrams) == 1
+    assert diagrams[0].edgeCount == 2
+    assert cursor == {"userId": "owner-1", "id": "diagram-1"}
+
+
+def test_diagram_list_route_returns_cursor_page(monkeypatch):
+    monkeypatch.setattr(
+        diagrams_router.dynamodb_service,
+        "get_diagram_summary_page_by_user",
+        lambda **_: ([Diagram(**summary_item())], {"userId": "owner-1", "id": "diagram-1"}),
+    )
+    monkeypatch.setattr(
+        diagrams_router.dynamodb_service,
+        "get_user_by_id",
+        lambda user_id: SimpleNamespace(
+            id=user_id, name="Owner", email="owner@example.com", picture=None
+        ),
+    )
+
+    response = asyncio.run(
+        diagrams_router.get_diagrams(
+            limit=1,
+            cursor=None,
+            current_user={"user_id": "owner-1"},
+        )
+    )
+
+    payload = response.model_dump()
+    assert payload["has_more"] is True
+    assert payload["next_cursor"]
+    assert payload["items"][0]["nodeCount"] == 3
+    assert "nodes" not in payload["items"][0]
+    assert "edges" not in payload["items"][0]
 
 
 def test_update_writes_counts_with_canvas_updates():
