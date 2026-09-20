@@ -115,6 +115,19 @@ class Settings(BaseSettings):
     # Trusted Hosts Configuration
     trusted_hosts: list[str] = Field(["*"], validation_alias="TRUSTED_HOSTS")
 
+    # Server-to-server MCP integration. The endpoint remains disabled unless
+    # both values are configured; user-facing MCP writes must use OAuth at the
+    # MCP boundary rather than exposing this service credential.
+    mcp_integration_token: str | None = Field(
+        None, validation_alias="MCP_INTEGRATION_TOKEN"
+    )
+    mcp_integration_user_id: str | None = Field(
+        None, validation_alias="MCP_INTEGRATION_USER_ID"
+    )
+    mcp_integration_author_name: str = Field(
+        "Diagramwise MCP", validation_alias="MCP_INTEGRATION_AUTHOR_NAME"
+    )
+
     # Rate Limiting
     rate_limit_per_minute: int = Field(30, validation_alias="RATE_LIMIT_PER_MINUTE")
     # Only these direct peer IPs may supply X-Forwarded-For / X-Real-IP.

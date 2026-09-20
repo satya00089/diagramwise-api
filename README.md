@@ -47,6 +47,18 @@ fail an AI request.
 Set `DYNAMODB_FEEDBACK_TABLE` (defaults to `diagrammatic_feedback`) and create
 the table before enabling feedback in a deployed environment:
 
+## MCP architecture publishing
+
+The MCP service can publish a compiled architecture through the private route
+`POST /api/v1/integrations/mcp/architectures`. Configure both
+`MCP_INTEGRATION_TOKEN` and `MCP_INTEGRATION_USER_ID` on the API. The route
+accepts only `visibility: "public"`, uses an idempotency key to make retries
+safe, and returns the existing public URL when the same request is repeated.
+
+This route is intended for the server-to-server MCP service credential. A
+user-facing ChatGPT write flow should use OAuth rather than sharing this
+service token.
+
 ```powershell
 python scripts/create_feedback_table.py
 ```
