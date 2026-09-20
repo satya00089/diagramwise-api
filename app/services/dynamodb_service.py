@@ -421,9 +421,10 @@ class DynamoDBService:
         reasoning_context: Optional[Dict[str, Any]] = None,
         source_diagram_id: Optional[str] = None,
         family_id: Optional[str] = None,
+        diagram_id: Optional[str] = None,
     ) -> Diagram:
         """Create a new diagram in DynamoDB."""
-        diagram_id = str(uuid4())
+        diagram_id = diagram_id or str(uuid4())
         now = datetime.now(timezone.utc).isoformat()
 
         # Convert floats to Decimal for DynamoDB
