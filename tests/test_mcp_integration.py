@@ -1,0 +1,97 @@
+import asyncio
+from types import SimpleNamespace
+
+import pytest
+from fastapi import HTTPException
+
+from app.routers import mcp_integration
+
+
+def request_payload(**overrides):
+    payload = {
+        "schemaVersion": "1.0",
+        "title": "Redis-backed API",
+        "description": "A public MCP-created architecture",
+        "nodes": [{"id": "api", "type": "custom", "position": {"x": 0, "y": 0}, "data": {}}],
+        "edges": [],
+        "reasoningContext": {"source": "diagramwise-mcp"},
+        "idempotencyKey": "redis-api-v1",
+        "visibility": "public",
+    }
+    payload.update(overrides)
+    return mcp_integration.McpArchitectureCreateRequest(**payload)
+
+
+def test_service_auth_requires_configured_token(monkeypatch):
+    monkeypatch.setattr(
+        mcp_integration,
+        "get_settings",
+        lambda: SimpleNamespace(mcp_integration_token=None, mcp_integration_user_id=None),
+    )
+
+    with pytest.raises(HTTPException) as error:
+        mcp_integration._require_mcp_service(None)
+
+    assert error.value.status_code == 503
+
+
+def test_mcp_architecture_creation_publishes_and_returns_public_url(monkeypatch):
+    class FakeDynamo:
+        def __init__(self):
+            self.created = None
+
+        def get_diagram(self, **kwargs):
+            return None
+
+        def create_diagram(self, **kwargs):
+            self.created = kwargs
+            return SimpleNamespace(id=kwargs["diagram_id"])
+
+        def publish_diagram(self, **kwargs):
+            return {"diagramId": "public-123"}
+
+    fake = FakeDynamo()
+    monkeypatch.setattr(mcp_integration, "dynamodb_service", fake)
+    monkeypatch.setattr(
+        mcp_integration,
+        "get_settings",
+        lambda: SimpleNamespace(
+            frontend_url="https://diagramwise.com",
+            mcp_integration_author_name="Diagramwise MCP",
+        ),
+    )
+
+    response = asyncio.run(
+        mcp_integration.create_mcp_architecture(
+            request_payload(),
+            service=("mcp-service-user", "Diagramwise MCP"),
+        )
+    )
+
+    assert response.status == "created"
+    assert response.architectureId == "public-123"
+    assert response.url == "https://diagramwise.com/public/public-123"
+    assert fake.created["diagram_id"]
+
+
+def test_mcp_architecture_rejects_idempotency_conflict(monkeypatch):
+    existing = SimpleNamespace(
+        id="existing",
+        publicSnapshotId="public-existing",
+        isPublic=True,
+        title="Different title",
+        description="Different",
+        nodes=[],
+        edges=[],
+    )
+    monkeypatch.setattr(mcp_integration.dynamodb_service, "get_diagram", lambda **_: existing)
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(
+            mcp_integration.create_mcp_architecture(
+                request_payload(),
+                service=("mcp-service-user", "Diagramwise MCP"),
+            )
+        )
+
+    assert error.value.status_code == 409
