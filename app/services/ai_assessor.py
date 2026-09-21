@@ -119,7 +119,8 @@ class AIAssessorService:
         comps_with_desc = sum(
             1 for c in request.components
             if self._has_meaningful_description(
-                (c.properties or {}).get("description", "")
+                (c.properties or {}).get("purpose")
+                or (c.properties or {}).get("description", "")
             )
         )
         total_conns = len(request.connections or [])
@@ -503,7 +504,10 @@ class AIAssessorService:
         components_with_descriptions = sum(
             1
             for c in request.components
-            if c.properties and c.properties.get("description", "").strip()
+            if c.properties and (
+                c.properties.get("purpose")
+                or c.properties.get("description", "")
+            ).strip()
         )
         description_score = min(components_with_descriptions * 20, 80)
 
@@ -518,7 +522,8 @@ class AIAssessorService:
             c.label
             for c in request.components
             if not self._has_meaningful_description(
-                (c.properties or {}).get("description", "")
+                (c.properties or {}).get("purpose")
+                or (c.properties or {}).get("description", "")
             )
         ]
 
