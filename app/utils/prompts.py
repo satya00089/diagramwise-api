@@ -26,7 +26,8 @@ def _coverage_note(request: AssessmentRequest) -> str:
     components_with_desc = sum(
         1 for c in request.components
         if _has_meaningful_description(
-            (c.properties or {}).get("description", "")
+            (c.properties or {}).get("purpose")
+            or (c.properties or {}).get("description", "")
         )
     )
     total_connections = len(request.connections) if request.connections else 0
@@ -66,14 +67,14 @@ def _components_text(request: AssessmentRequest) -> str:
 
         if comp.properties:
             # Extract and format component description if available
-            description = comp.properties.get("description", "")
-            if description:
-                comp_desc += f"\n  Description: {description}"
+            purpose = comp.properties.get("purpose") or comp.properties.get("description", "")
+            if purpose:
+                comp_desc += f"\n  Purpose: {purpose}"
 
             # Include other relevant properties, excluding internal frontend-only keys
             other_props = {
                 k: v for k, v in comp.properties.items()
-                if k != "description" and k not in _INTERNAL_PROPS
+                if k not in {"purpose", "description"} and k not in _INTERNAL_PROPS
             }
             if other_props:
                 comp_desc += f"\n  Additional Properties: {other_props}"
