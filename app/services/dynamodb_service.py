@@ -9,6 +9,7 @@ import boto3
 from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import ClientError
 from mypy_boto3_dynamodb.service_resource import Table
+from pydantic import BaseModel
 
 from app.utils.config import get_settings
 from app.models.auth_models import User
@@ -57,6 +58,8 @@ def convert_floats_to_decimal(obj: Any) -> Any:
     Recursively convert all float values to Decimal for DynamoDB compatibility.
     DynamoDB doesn't support Python float type - requires Decimal instead.
     """
+    if isinstance(obj, BaseModel):
+        return convert_floats_to_decimal(obj.model_dump(mode="python"))
     if isinstance(obj, list):
         return [convert_floats_to_decimal(item) for item in obj]  # type: ignore[misc]
     elif isinstance(obj, dict):
