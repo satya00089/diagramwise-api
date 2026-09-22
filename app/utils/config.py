@@ -170,6 +170,10 @@ class Settings(BaseSettings):
         "https://diagramwise.com",
         validation_alias="FRONTEND_URL",
     )
+    public_api_url: str = Field(
+        "https://api.diagramwise.com",
+        validation_alias="PUBLIC_API_URL",
+    )
 
     # Transactional email / email verification.  Keep the API key optional so
     # local development can start without Resend; signup will return a clear
