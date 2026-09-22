@@ -10,6 +10,7 @@ class SignupRequest(BaseModel):
     email: EmailStr
     password: str = Field(..., min_length=6)
     name: Optional[str] = None
+    verificationReturnUrl: Optional[str] = None
 
 
 class LoginRequest(BaseModel):
