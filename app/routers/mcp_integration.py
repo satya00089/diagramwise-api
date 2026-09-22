@@ -127,7 +127,7 @@ async def create_mcp_architecture(
         links = {
             "previewUrl": (
                 f"{getattr(settings, 'public_api_url', 'https://api.diagramwise.com').rstrip('/')}/api/v1/public/diagrams/"
-                f"{public_id}/preview.svg"
+                f"{public_id}/preview.png"
             )
         }
         if delegated_user:
