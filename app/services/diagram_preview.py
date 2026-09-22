@@ -1,9 +1,12 @@
-"""Small dependency-free SVG renderer for public architecture previews."""
+"""SVG and raster renderers for public architecture previews."""
 
 from __future__ import annotations
 
+from io import BytesIO
 from html import escape
 from typing import Any
+
+from PIL import Image, ImageDraw, ImageFont
 
 
 CARD_WIDTH = 320
@@ -121,3 +124,91 @@ def render_architecture_svg(
 
     parts.append("</svg>")
     return "".join(parts)
+
+
+def render_architecture_png(
+    *,
+    title: str,
+    nodes: list[Any],
+    edges: list[Any],
+) -> bytes:
+    """Render a raster preview for hosts that do not accept SVG tool images.
+
+    The layout and visual treatment intentionally mirror the dependency-free
+    SVG preview. The PNG is used for MCP image content because Claude's image
+    input formats are raster-oriented, while the SVG route remains available
+    for browsers and direct public links.
+    """
+
+    normalized_nodes = [node for node in nodes if isinstance(node, dict)]
+    by_id: dict[str, dict[str, Any]] = {
+        str(node.get("id")): node for node in normalized_nodes if node.get("id") is not None
+    }
+    positions: dict[str, tuple[float, float]] = {}
+    max_right = 0.0
+    max_bottom = 0.0
+    for node_id, node in by_id.items():
+        position = node.get("position") or {}
+        x = float(position.get("x", 0) or 0) + PADDING
+        y = float(position.get("y", 0) or 0) + PADDING
+        positions[node_id] = (x, y)
+        max_right = max(max_right, x + CARD_WIDTH)
+        max_bottom = max(max_bottom, y + CARD_HEIGHT)
+
+    width = max(800, min(2400, int(max_right + PADDING)))
+    height = max(420, min(1600, int(max_bottom + PADDING)))
+    image = Image.new("RGB", (width, height), "#111827")
+    draw = ImageDraw.Draw(image)
+    title_font = ImageFont.load_default(size=20)
+    label_font = ImageFont.load_default(size=12)
+    node_font = ImageFont.load_default(size=16)
+    subtitle_font = ImageFont.load_default(size=13)
+
+    draw.text((PADDING, 18), str(title or "Diagramwise architecture"), fill="#f9fafb", font=title_font)
+
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        source = positions.get(str(edge.get("source")))
+        target = positions.get(str(edge.get("target")))
+        if not source or not target:
+            continue
+        sx = source[0] + CARD_WIDTH
+        sy_mid = source[1] + CARD_HEIGHT / 2
+        tx, ty = target[0], target[1] + CARD_HEIGHT / 2
+        if tx < sx:
+            sx, tx = source[0], target[0] + CARD_WIDTH
+        midpoint = (sx + tx) / 2
+        draw.line((sx, sy_mid, midpoint, sy_mid, midpoint, ty, tx, ty), fill="#9ca3af", width=2)
+        # A small triangle makes the direction clear without relying on SVG
+        # markers, which are not available in a raster canvas.
+        arrow_size = 8
+        draw.polygon(
+            [(tx, ty), (tx - arrow_size, ty - arrow_size / 2), (tx - arrow_size, ty + arrow_size / 2)],
+            fill="#9ca3af",
+        )
+        label = str((edge.get("data") or {}).get("label") or edge.get("label") or "").strip()
+        if label:
+            draw.text((midpoint, (sy_mid + ty) / 2 - 8), label, fill="#d1d5db", font=label_font, anchor="mm")
+
+    for node_id, node in by_id.items():
+        x, y = positions[node_id]
+        data = node.get("data") or {}
+        label = str(data.get("label") or node.get("label") or node_id)
+        subtitle = str(data.get("subtitle") or data.get("description") or "")
+        draw.rounded_rectangle(
+            (x, y, x + CARD_WIDTH, y + CARD_HEIGHT),
+            radius=14,
+            fill="#1f2937",
+            outline="#4b5563",
+            width=2,
+        )
+        draw.ellipse((x + 20, y + 22, x + 48, y + 50), fill="#374151")
+        draw.ellipse((x + 30, y + 32, x + 38, y + 40), fill="#f9fafb")
+        draw.text((x + 60, y + 28), label, fill="#f9fafb", font=node_font)
+        for index, line in enumerate(_wrap(subtitle)):
+            draw.text((x + 24, y + 74 + index * 20), line, fill="#d1d5db", font=subtitle_font)
+
+    output = BytesIO()
+    image.save(output, format="PNG", optimize=True)
+    return output.getvalue()

@@ -17,7 +17,7 @@ from app.routers.auth import get_current_user
 from app.utils.config import get_settings
 from app.services.llm_client import create_llm_provider
 from app.services.llm_port import LLMRequest
-from app.services.diagram_preview import render_architecture_svg
+from app.services.diagram_preview import render_architecture_png, render_architecture_svg
 
 router = APIRouter()
 
@@ -201,6 +201,32 @@ async def get_public_diagram_preview(diagram_id: str):
     return Response(
         content=svg,
         media_type="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=300"},
+    )
+
+
+@router.get(
+    "/public/diagrams/{diagram_id}/preview.png",
+    response_class=Response,
+    responses={200: {"content": {"image/png": {}}}},
+)
+async def get_public_diagram_preview_png(diagram_id: str):
+    """Render a cacheable raster preview for MCP and image clients."""
+
+    diagram = dynamodb_service.get_public_diagram(diagram_id=diagram_id)
+    if not diagram:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Diagram not found or not publicly available.",
+        )
+    png = render_architecture_png(
+        title=diagram.title,
+        nodes=diagram.nodes,
+        edges=diagram.edges,
+    )
+    return Response(
+        content=png,
+        media_type="image/png",
         headers={"Cache-Control": "public, max-age=300"},
     )
 
