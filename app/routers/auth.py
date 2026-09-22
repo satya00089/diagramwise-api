@@ -3,8 +3,10 @@
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
+import os
 import secrets
 from typing import Annotated, Any, Dict
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -53,7 +55,20 @@ def _verification_resend_available(user: Any) -> bool:
     )
 
 
-async def _issue_verification_email(user: Any) -> None:
+def _safe_verification_return_url(value: str | None) -> str | None:
+    if not value:
+        return None
+    parsed = urlparse(value)
+    allowed_issuer = os.getenv("MCP_OAUTH_ISSUER", "https://mcp.diagramwise.com").rstrip("/")
+    issuer = urlparse(allowed_issuer)
+    if parsed.scheme != issuer.scheme or parsed.netloc != issuer.netloc or parsed.path != "/oauth/continue":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid verification continuation")
+    if not parsed.query or parsed.fragment:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid verification continuation")
+    return value
+
+
+async def _issue_verification_email(user: Any, verification_return_url: str | None = None) -> None:
     """Persist a new token before delivery, so any older link is immediately invalid."""
     token = secrets.token_urlsafe(32)
     now = datetime.now(timezone.utc)
@@ -65,7 +80,15 @@ async def _issue_verification_email(user: Any) -> None:
     if not saved:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Unable to create activation link")
     try:
-        await email_service.send_verification_email(user.email, user.id, token)
+        if verification_return_url:
+            await email_service.send_verification_email(
+                user.email,
+                user.id,
+                token,
+                verification_return_url=verification_return_url,
+            )
+        else:
+            await email_service.send_verification_email(user.email, user.id, token)
     except EmailDeliveryError as exc:
         dynamodb_service.restore_email_verification_state(user, token_hash)
         raise HTTPException(
@@ -98,6 +121,7 @@ def get_current_user(
 @router.post("/auth/signup", response_model=SignupPendingResponse)
 async def signup(request: SignupRequest):
     """Register a new user with email and password."""
+    verification_return_url = _safe_verification_return_url(request.verificationReturnUrl)
     # bcrypt only accepts up to 72 bytes; reject longer passwords early so we
     # return a clean client-facing error instead of a 500 from the hash layer.
     if len(request.password.encode("utf-8")) > 72:
@@ -115,7 +139,7 @@ async def signup(request: SignupRequest):
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                     detail="Please wait a minute before requesting another activation email.",
                 )
-            await _issue_verification_email(existing_user)
+            await _issue_verification_email(existing_user, verification_return_url)
             return SignupPendingResponse(
                 message="Check your inbox to activate your account.", email=existing_user.email
             )
@@ -131,7 +155,7 @@ async def signup(request: SignupRequest):
     user = dynamodb_service.create_user(
         email=request.email, password_hash=password_hash, name=request.name
     )
-    await _issue_verification_email(user)
+    await _issue_verification_email(user, verification_return_url)
     return SignupPendingResponse(
         message="Check your inbox to activate your account.", email=user.email
     )

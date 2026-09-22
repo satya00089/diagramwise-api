@@ -3,7 +3,7 @@
 from typing import Any, Dict, List
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel
 
 from app.models.attempt_models import (
@@ -17,6 +17,7 @@ from app.routers.auth import get_current_user
 from app.utils.config import get_settings
 from app.services.llm_client import create_llm_provider
 from app.services.llm_port import LLMRequest
+from app.services.diagram_preview import render_architecture_svg
 
 router = APIRouter()
 
@@ -176,6 +177,32 @@ async def get_public_diagram(diagram_id: str):
             detail="Diagram not found or not publicly available.",
         )
     return diagram
+
+
+@router.get(
+    "/public/diagrams/{diagram_id}/preview.svg",
+    response_class=Response,
+    responses={200: {"content": {"image/svg+xml": {}}}},
+)
+async def get_public_diagram_preview(diagram_id: str):
+    """Render a cacheable visual preview for a public diagram."""
+
+    diagram = dynamodb_service.get_public_diagram(diagram_id=diagram_id)
+    if not diagram:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Diagram not found or not publicly available.",
+        )
+    svg = render_architecture_svg(
+        title=diagram.title,
+        nodes=diagram.nodes,
+        edges=diagram.edges,
+    )
+    return Response(
+        content=svg,
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=300"},
+    )
 
 
 # ---------------------------------------------------------------------------

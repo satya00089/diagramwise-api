@@ -6,7 +6,7 @@ import hmac
 from typing import Any, Literal
 from uuid import NAMESPACE_URL, uuid5
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
@@ -39,20 +39,28 @@ class McpArchitectureCreateResponse(BaseModel):
     status: Literal["created", "existing"]
     architectureId: str
     url: str
+    editorUrl: str | None = None
+    previewUrl: str | None = None
     public: bool = True
 
 
 def _require_mcp_service(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
-) -> tuple[str, str]:
+) -> tuple[str, str, bool]:
     """Authenticate the private MCP-to-API hop and resolve its service owner."""
 
     settings = get_settings()
     expected_token = settings.mcp_integration_token
     service_user_id = settings.mcp_integration_user_id
-    supplied_token = credentials.credentials if credentials else ""
+    supplied_token = getattr(credentials, "credentials", "")
+    delegated_user_id = (
+        request.headers.get("X-Diagramwise-MCP-User-ID", "").strip()
+        if request
+        else ""
+    )
 
-    if not expected_token or not service_user_id:
+    if not expected_token or (not service_user_id and not delegated_user_id):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={
@@ -66,7 +74,26 @@ def _require_mcp_service(
             detail={"code": "UNAUTHORIZED", "message": "A valid integration token is required"},
             headers={"WWW-Authenticate": "Bearer"},
         )
-    return service_user_id, settings.mcp_integration_author_name
+    if delegated_user_id:
+        if len(delegated_user_id) > 128:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={"code": "INVALID_DELEGATED_USER", "message": "The delegated user is invalid"},
+            )
+        delegated_user = dynamodb_service.get_user_by_id(delegated_user_id)
+        if not delegated_user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={"code": "INVALID_DELEGATED_USER", "message": "The delegated user is not available"},
+            )
+        author_name = (
+            getattr(delegated_user, "name", None)
+            or getattr(delegated_user, "email", None)
+            or settings.mcp_integration_author_name
+        )
+        return delegated_user.id, author_name, True
+
+    return service_user_id, settings.mcp_integration_author_name, False
 
 
 def _stable_diagram_id(user_id: str, idempotency_key: str) -> str:
@@ -80,18 +107,34 @@ def _stable_diagram_id(user_id: str, idempotency_key: str) -> str:
 )
 async def create_mcp_architecture(
     request: McpArchitectureCreateRequest,
-    service: tuple[str, str] = Depends(_require_mcp_service),
+    service: tuple[str, str, bool] | tuple[str, str] = Depends(_require_mcp_service),
 ) -> McpArchitectureCreateResponse:
     """Persist and publish one explicitly public MCP-created architecture.
 
     This route is intentionally separate from the user JWT diagram routes. It
     is not a browser endpoint and is disabled unless the integration token and
-    dedicated service owner are configured.
+    fallback service owner is configured. OAuth-scoped requests use the
+    authenticated Diagramwise user instead.
     """
 
-    user_id, author_name = service
+    user_id, author_name = service[:2]
+    delegated_user = len(service) > 2 and bool(service[2])
     diagram_id = _stable_diagram_id(user_id, request.idempotencyKey)
     existing = dynamodb_service.get_diagram(user_id=user_id, diagram_id=diagram_id)
+
+    def response_links(public_id: str, canonical_id: str) -> dict[str, str]:
+        settings = get_settings()
+        links = {
+            "previewUrl": (
+                f"{getattr(settings, 'public_api_url', 'https://api.diagramwise.com').rstrip('/')}/api/v1/public/diagrams/"
+                f"{public_id}/preview.svg"
+            )
+        }
+        if delegated_user:
+            links["editorUrl"] = (
+                f"{settings.frontend_url.rstrip('/')}/playground/free?diagramId={canonical_id}"
+            )
+        return links
 
     if existing:
         if (
@@ -129,6 +172,7 @@ async def create_mcp_architecture(
             status="existing",
             architectureId=public_id,
             url=f"{get_settings().frontend_url.rstrip('/')}/public/{public_id}",
+            **response_links(public_id, existing.id),
         )
 
     diagram = dynamodb_service.create_diagram(
@@ -159,4 +203,5 @@ async def create_mcp_architecture(
         status="created",
         architectureId=public_id,
         url=f"{get_settings().frontend_url.rstrip('/')}/public/{public_id}",
+        **response_links(public_id, diagram.id),
     )

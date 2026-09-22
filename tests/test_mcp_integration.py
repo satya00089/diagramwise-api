@@ -3,6 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from fastapi.security import HTTPAuthorizationCredentials
+from starlette.requests import Request
 
 from app.routers import mcp_integration
 
@@ -95,3 +97,35 @@ def test_mcp_architecture_rejects_idempotency_conflict(monkeypatch):
         )
 
     assert error.value.status_code == 409
+
+
+def test_service_auth_delegates_oauth_user_without_fallback_owner(monkeypatch):
+    monkeypatch.setattr(
+        mcp_integration,
+        "get_settings",
+        lambda: SimpleNamespace(
+            mcp_integration_token="integration-token",
+            mcp_integration_user_id=None,
+            mcp_integration_author_name="Diagramwise MCP",
+        ),
+    )
+    monkeypatch.setattr(
+        mcp_integration.dynamodb_service,
+        "get_user_by_id",
+        lambda user_id: SimpleNamespace(id=user_id, name="Satya", email="satya@example.com"),
+    )
+    request = Request(
+        {
+            "type": "http",
+            "headers": [(b"x-diagramwise-mcp-user-id", b"user-123")],
+        }
+    )
+
+    result = mcp_integration._require_mcp_service(
+        request,
+        HTTPAuthorizationCredentials(
+            scheme="Bearer", credentials="integration-token"
+        ),
+    )
+
+    assert result == ("user-123", "Satya", True)

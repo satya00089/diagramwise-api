@@ -16,13 +16,22 @@ class EmailService:
     def __init__(self) -> None:
         self.settings = get_settings()
 
-    async def send_verification_email(self, email: str, user_id: str, token: str) -> None:
+    async def send_verification_email(
+        self,
+        email: str,
+        user_id: str,
+        token: str,
+        verification_return_url: str | None = None,
+    ) -> None:
         if not self.settings.resend_api_key:
             raise EmailDeliveryError("Email delivery has not been configured")
 
         # Keep the secret in the fragment. Browsers do not send fragments to
         # static hosting/CDN access logs or HTTP referrers.
-        query = urlencode({"uid": user_id})
+        query_values = {"uid": user_id}
+        if verification_return_url:
+            query_values["return_to"] = verification_return_url
+        query = urlencode(query_values)
         activation_url = f"{self.settings.frontend_url.rstrip('/')}/verify-email?{query}#token={token}"
         escaped_activation_url = escape(activation_url, quote=True)
         logo_url = self.settings.brand_logo_url or f"{self.settings.frontend_url.rstrip('/')}/logo.png"
