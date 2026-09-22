@@ -196,7 +196,11 @@ def render_architecture_png(
     nodes: list[Any],
     edges: list[Any],
 ) -> bytes:
-    """Render a raster preview for hosts that do not accept SVG tool images."""
+    """Render a raster preview for hosts that do not accept SVG tool images.
+
+    Keep this path intentionally independent from browser rendering so MCP
+    responses remain available in serverless environments.
+    """
 
     geometry = _build_preview_geometry(nodes)
     image = Image.new("RGB", (geometry.width, geometry.height), "#111827")
