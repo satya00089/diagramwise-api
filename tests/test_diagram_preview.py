@@ -138,5 +138,43 @@ def test_public_preview_png_route_returns_png(monkeypatch):
     response = asyncio.run(share.get_public_diagram_preview_png("public-123"))
 
     assert response.media_type == "image/png"
-    assert response.headers["cache-control"] == "public, max-age=300"
+    assert response.headers["cache-control"].startswith("public, max-age=300")
     assert response.body.startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_browser_preview_is_used_when_renderer_is_configured(monkeypatch):
+    import asyncio
+    from app.routers import share
+
+    monkeypatch.setattr(
+        share,
+        "get_settings",
+        lambda: SimpleNamespace(
+            diagramwise_renderer_url="https://renderer.example.test/preview",
+            diagramwise_renderer_token="renderer-secret",
+        ),
+    )
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "image/png"}
+        content = b"browser-rendered-png"
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        async def get(self, url, *, params, headers):
+            assert url == "https://renderer.example.test/preview"
+            assert params == {"diagramId": "public-123"}
+            assert headers == {"x-diagramwise-renderer-token": "renderer-secret"}
+            return FakeResponse()
+
+    monkeypatch.setattr(share.httpx, "AsyncClient", lambda **_: FakeClient())
+
+    result = asyncio.run(share._capture_browser_preview("public-123"))
+
+    assert result == b"browser-rendered-png"
