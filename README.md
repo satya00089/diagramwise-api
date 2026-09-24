@@ -59,6 +59,15 @@ trusted MCP-to-API hop; those diagrams are saved under that user's account.
 The response includes an owner-scoped editor URL when available and a public
 SVG preview URL at `/api/v1/public/diagrams/{id}/preview.svg`.
 
+### Product-faithful MCP preview images
+
+The PNG preview route first asks the isolated Diagramwise Chromium renderer to
+capture the real public React Flow canvas. Configure
+`DIAGRAMWISE_RENDERER_URL` and `DIAGRAMWISE_RENDERER_TOKEN` on this API to
+enable it. If the renderer is unavailable, times out, returns a non-PNG
+response, or is not configured, the route falls back to the deterministic
+server-side preview so architecture creation is not blocked.
+
 This route is intended for the server-to-server MCP service credential. A
 user-facing ChatGPT write flow should use OAuth rather than sharing this
 service token.

@@ -174,6 +174,15 @@ class Settings(BaseSettings):
         "https://api.diagramwise.com",
         validation_alias="PUBLIC_API_URL",
     )
+    # Optional browser renderer used for product-faithful MCP previews. When
+    # unset, the public preview route keeps using the local deterministic
+    # renderer as a safe fallback.
+    diagramwise_renderer_url: str | None = Field(
+        None, validation_alias="DIAGRAMWISE_RENDERER_URL"
+    )
+    diagramwise_renderer_token: str | None = Field(
+        None, validation_alias="DIAGRAMWISE_RENDERER_TOKEN"
+    )
 
     # Transactional email / email verification.  Keep the API key optional so
     # local development can start without Resend; signup will return a clear

@@ -1,8 +1,10 @@
 """Router for public solution sharing and leaderboard features."""
 
+import logging
 from typing import Any, Dict, List
 from urllib.parse import quote
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel
 
@@ -20,6 +22,46 @@ from app.services.llm_port import LLMRequest
 from app.services.diagram_preview import render_architecture_png, render_architecture_svg
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+async def _capture_browser_preview(diagram_id: str) -> bytes | None:
+    """Ask the isolated Chromium renderer for a product-faithful PNG.
+
+    The renderer is intentionally optional. During rollout, or if Chromium is
+    unavailable, callers receive ``None`` and keep the deterministic local
+    preview instead of failing the public diagram route.
+    """
+
+    settings = get_settings()
+    renderer_url = getattr(settings, "diagramwise_renderer_url", None)
+    renderer_token = getattr(settings, "diagramwise_renderer_token", None)
+    if not renderer_url or not renderer_token:
+        return None
+
+    try:
+        async with httpx.AsyncClient(timeout=32.0, follow_redirects=False) as client:
+            response = await client.get(
+                renderer_url,
+                params={"diagramId": diagram_id},
+                headers={"x-diagramwise-renderer-token": renderer_token},
+            )
+        content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
+        if response.status_code != 200 or content_type != "image/png":
+            logger.warning(
+                "Browser preview unavailable status=%s content_type=%s diagram_id=%s",
+                response.status_code,
+                content_type or "<missing>",
+                diagram_id,
+            )
+            return None
+        if len(response.content) > 5_000_000:
+            logger.warning("Browser preview too large diagram_id=%s", diagram_id)
+            return None
+        return response.content
+    except httpx.HTTPError:
+        logger.warning("Browser preview request failed diagram_id=%s", diagram_id, exc_info=True)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -219,15 +261,20 @@ async def get_public_diagram_preview_png(diagram_id: str):
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Diagram not found or not publicly available.",
         )
-    png = render_architecture_png(
-        title=diagram.title,
-        nodes=diagram.nodes,
-        edges=diagram.edges,
-    )
+    png = await _capture_browser_preview(diagram_id)
+    if png is None:
+        png = render_architecture_png(
+            title=diagram.title,
+            description=getattr(diagram, "description", "") or "",
+            nodes=diagram.nodes,
+            edges=diagram.edges,
+        )
     return Response(
         content=png,
         media_type="image/png",
-        headers={"Cache-Control": "public, max-age=300"},
+        headers={
+            "Cache-Control": "public, max-age=300, s-maxage=3600, stale-while-revalidate=86400"
+        },
     )
 
 
