@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional, cast
 from pydantic import BaseModel, Field
 from enum import Enum
 
+from app.models.architecture_models import ArchitectureDocument
 from app.models.reasoning_models import ReasoningContext
 
 
@@ -71,6 +72,7 @@ class DiagramResponse(BaseModel):
     description: Optional[str] = None
     nodes: List[Any]
     edges: List[Any]
+    canonicalDocument: Optional[ArchitectureDocument] = None
     nodeCount: int = Field(default=0, description="Number of nodes in the diagram")
     edgeCount: int = Field(default=0, description="Number of edges in the diagram")
     reasoningContext: Optional[ReasoningContext] = None
@@ -118,6 +120,7 @@ class Diagram(BaseModel):
     description: Optional[str] = None
     nodes: List[Any] = Field(default_factory=list)
     edges: List[Any] = Field(default_factory=list)
+    canonicalDocument: Optional[ArchitectureDocument] = None
     nodeCount: int = Field(default=0)
     edgeCount: int = Field(default=0)
     reasoningContext: Optional[ReasoningContext] = None
@@ -174,6 +177,7 @@ class PublicDiagramResponse(BaseModel):
     description: Optional[str] = None
     nodes: List[Any]
     edges: List[Any]
+    canonicalDocument: Optional[ArchitectureDocument] = None
     authorName: Optional[str] = None
     authorPicture: Optional[str] = None
     publishedAt: Optional[str] = None
