@@ -8,8 +8,9 @@ from uuid import NAMESPACE_URL, uuid5
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
+from app.models.architecture_models import ArchitectureDocument
 from app.services.dynamodb_service import dynamodb_service
 from app.utils.config import get_settings
 
@@ -19,11 +20,12 @@ bearer = HTTPBearer(auto_error=False)
 
 
 class McpArchitectureCreateRequest(BaseModel):
-    """Compiled Diagramwise canvas payload accepted from the MCP adapter."""
+    """Canonical document plus compiled compatibility payload from MCP."""
 
     schemaVersion: Literal["1.0"] = "1.0"
     title: str = Field(min_length=1, max_length=200)
     description: str = Field(default="", max_length=1000)
+    document: ArchitectureDocument | None = None
     nodes: list[Any] = Field(default_factory=list, max_length=100)
     edges: list[Any] = Field(default_factory=list, max_length=200)
     reasoningContext: dict[str, Any] = Field(default_factory=dict)
@@ -33,6 +35,55 @@ class McpArchitectureCreateRequest(BaseModel):
         pattern=r"^[A-Za-z0-9._:-]+$",
     )
     visibility: Literal["public"] = "public"
+
+    @model_validator(mode="after")
+    def validate_canonical_document_alignment(self) -> "McpArchitectureCreateRequest":
+        """Keep canonical and legacy representations aligned during migration."""
+
+        if self.document is None:
+            return self
+        if self.document.schema_version != self.schemaVersion:
+            raise ValueError("document schema version must match request schema version")
+        if self.document.title != self.title:
+            raise ValueError("document title must match request title")
+        if (
+            self.document.idempotency_key is not None
+            and self.document.idempotency_key != self.idempotencyKey
+        ):
+            raise ValueError("document idempotency key must match request")
+
+        expected_node_refs = {component.ref for component in self.document.components}
+        actual_node_refs = {
+            node.get("id")
+            for node in self.nodes
+            if isinstance(node, dict) and isinstance(node.get("id"), str)
+        }
+        if (
+            actual_node_refs != expected_node_refs
+            or len(actual_node_refs) != len(self.nodes)
+        ):
+            raise ValueError(
+                "compiled nodes must contain exactly the canonical component refs"
+            )
+
+        expected_edges = {
+            (
+                connection.ref or f"connection-{index + 1}",
+                connection.source,
+                connection.target,
+            )
+            for index, connection in enumerate(self.document.connections)
+        }
+        actual_edges = {
+            (edge.get("id"), edge.get("source"), edge.get("target"))
+            for edge in self.edges
+            if isinstance(edge, dict)
+        }
+        if actual_edges != expected_edges or len(actual_edges) != len(self.edges):
+            raise ValueError(
+                "compiled edges must contain exactly the canonical connections"
+            )
+        return self
 
 
 class McpArchitectureCreateResponse(BaseModel):
@@ -121,6 +172,7 @@ async def create_mcp_architecture(
     delegated_user = len(service) > 2 and bool(service[2])
     diagram_id = _stable_diagram_id(user_id, request.idempotencyKey)
     existing = dynamodb_service.get_diagram(user_id=user_id, diagram_id=diagram_id)
+    reasoning_context = dict(request.reasoningContext)
 
     def response_links(public_id: str, canonical_id: str) -> dict[str, str]:
         settings = get_settings()
@@ -137,11 +189,17 @@ async def create_mcp_architecture(
         return links
 
     if existing:
+        existing_document = getattr(existing, "canonicalDocument", None)
         if (
             existing.title != request.title
             or existing.description != request.description
             or existing.nodes != request.nodes
             or existing.edges != request.edges
+            or (
+                existing_document is not None
+                and request.document is not None
+                and existing_document != request.document
+            )
         ):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -181,8 +239,13 @@ async def create_mcp_architecture(
         description=request.description,
         nodes=request.nodes,
         edges=request.edges,
-        reasoning_context=request.reasoningContext,
+        reasoning_context=reasoning_context,
         diagram_id=diagram_id,
+        canonical_document=(
+            request.document.model_dump(by_alias=True, exclude_none=True)
+            if request.document is not None
+            else None
+        ),
     )
     published = dynamodb_service.publish_diagram(
         user_id=user_id,
