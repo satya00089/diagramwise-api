@@ -101,6 +101,7 @@ def enrich_diagram_response(diagram: Diagram, current_user_id: str) -> DiagramRe
         description=diagram.description,
         nodes=diagram.nodes,
         edges=diagram.edges,
+        canonicalDocument=diagram.canonicalDocument,
         nodeCount=diagram.nodeCount,
         edgeCount=diagram.edgeCount,
         reasoningContext=diagram.reasoningContext,
