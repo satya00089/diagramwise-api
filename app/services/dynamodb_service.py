@@ -425,6 +425,7 @@ class DynamoDBService:
         source_diagram_id: Optional[str] = None,
         family_id: Optional[str] = None,
         diagram_id: Optional[str] = None,
+        canonical_document: Optional[Dict[str, Any]] = None,
     ) -> Diagram:
         """Create a new diagram in DynamoDB."""
         diagram_id = diagram_id or str(uuid4())
@@ -441,6 +442,9 @@ class DynamoDBService:
             "description": description,
             "nodes": nodes_decimal,
             "edges": edges_decimal,
+            "canonicalDocument": convert_floats_to_decimal(canonical_document)
+            if canonical_document is not None
+            else None,
             "nodeCount": len(nodes),
             "edgeCount": len(edges),
             "reasoningContext": convert_floats_to_decimal(reasoning_context)
@@ -464,6 +468,7 @@ class DynamoDBService:
             description=description,
             nodes=nodes,
             edges=edges,
+            canonicalDocument=canonical_document,
             nodeCount=len(nodes),
             edgeCount=len(edges),
             reasoningContext=reasoning_context,
@@ -1667,6 +1672,7 @@ class DynamoDBService:
                 description=raw.get("description"),
                 nodes=raw.get("nodes", []),
                 edges=raw.get("edges", []),
+                canonicalDocument=raw.get("canonicalDocument"),
                 authorName=raw.get("authorName"),
                 authorPicture=raw.get("authorPicture"),
                 publishedAt=raw.get("publishedAt"),

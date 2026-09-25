@@ -14,6 +14,20 @@ def request_payload(**overrides):
         "schemaVersion": "1.0",
         "title": "Redis-backed API",
         "description": "A public MCP-created architecture",
+        "document": {
+            "schemaVersion": "1.0",
+            "title": "Redis-backed API",
+            "summary": "A public MCP-created architecture",
+            "components": [
+                {
+                    "ref": "api",
+                    "catalogRef": "generic.custom-component",
+                    "label": "API",
+                }
+            ],
+            "connections": [],
+            "idempotencyKey": "redis-api-v1",
+        },
         "nodes": [{"id": "api", "type": "custom", "position": {"x": 0, "y": 0}, "data": {}}],
         "edges": [],
         "reasoningContext": {"source": "diagramwise-mcp"},
@@ -74,6 +88,64 @@ def test_mcp_architecture_creation_publishes_and_returns_public_url(monkeypatch)
     assert response.architectureId == "public-123"
     assert response.url == "https://diagramwise.com/public/public-123"
     assert fake.created["diagram_id"]
+    assert fake.created["reasoning_context"] == {"source": "diagramwise-mcp"}
+    assert fake.created["canonical_document"]["schemaVersion"] == "1.0"
+
+
+def test_canonical_document_is_validated_at_the_api_seam():
+    request = request_payload()
+
+    assert request.document is not None
+    assert request.document.title == request.title
+    assert request.document.idempotency_key == request.idempotencyKey
+
+
+def test_legacy_compiled_payload_remains_accepted_during_migration():
+    payload = request_payload().model_dump(by_alias=True)
+    payload.pop("document")
+
+    request = mcp_integration.McpArchitectureCreateRequest(**payload)
+
+    assert request.document is None
+
+
+def test_canonical_document_must_match_compatibility_fields():
+    with pytest.raises(ValueError, match="document title must match request title"):
+        request_payload(
+            document={
+                "schemaVersion": "1.0",
+                "title": "Different title",
+                "components": [],
+                "connections": [],
+                "idempotencyKey": "redis-api-v1",
+            }
+        )
+
+    with pytest.raises(ValueError, match="document idempotency key must match request"):
+        request_payload(
+            document={
+                "schemaVersion": "1.0",
+                "title": "Redis-backed API",
+                "components": [],
+                "connections": [],
+                "idempotencyKey": "different-key",
+            }
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="compiled nodes must contain exactly the canonical component refs",
+    ):
+        request_payload(
+            nodes=[
+                {
+                    "id": "database",
+                    "type": "custom",
+                    "position": {"x": 0, "y": 0},
+                    "data": {},
+                }
+            ]
+        )
 
 
 def test_mcp_architecture_rejects_idempotency_conflict(monkeypatch):
