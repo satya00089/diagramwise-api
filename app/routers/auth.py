@@ -1,13 +1,15 @@
 """Authentication router for signup, login, and Google OAuth."""
 
 from datetime import datetime, timedelta, timezone
+import base64
 import hashlib
 import hmac
 import os
 import secrets
 from typing import Annotated, Any, Dict
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlencode, urlparse
 
+import httpx
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.responses import RedirectResponse
@@ -69,6 +71,39 @@ def _safe_verification_return_url(value: str | None) -> str | None:
     if not parsed.query or parsed.fragment:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid verification continuation")
     return value
+
+
+def _safe_google_return_url(value: str | None) -> str:
+    """Allow only a local frontend path or the known MCP continuation URL."""
+    if not value:
+        return "/"
+
+    parsed = urlparse(value)
+    frontend = urlparse(settings.frontend_url)
+    if parsed.scheme or parsed.netloc:
+        if parsed.scheme != frontend.scheme or parsed.netloc != frontend.netloc:
+            if not _safe_verification_return_url(value):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid Google continuation",
+                )
+            return value
+    elif not value.startswith("/") or value.startswith("//"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid Google continuation",
+        )
+
+    return value
+
+
+def _google_redirect_uri() -> str:
+    return f"{settings.public_api_url.rstrip('/')}/api/v1/auth/google/redirect"
+
+
+def _pkce_challenge(verifier: str) -> str:
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
 
 
 async def _issue_verification_email(user: Any, verification_return_url: str | None = None) -> None:
@@ -319,6 +354,108 @@ def _authenticate_google_credential(credential: str) -> AuthResponse:
 async def google_auth(request: GoogleAuthRequest):
     """Authenticate user with Google Sign-In credential."""
     return _authenticate_google_credential(request.credential)
+
+
+@router.get("/auth/google/redirect/start", include_in_schema=False)
+async def google_auth_redirect_start(return_to: str | None = None):
+    """Start a top-level Google OAuth redirect without a GIS iframe."""
+    safe_return_to = _safe_google_return_url(return_to)
+    code_verifier = secrets.token_urlsafe(64)
+    state = google_auth_handoff_store.create(
+        {"code_verifier": code_verifier, "return_to": safe_return_to}
+    )
+    if not state:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Google authentication is temporarily unavailable",
+        )
+
+    query = urlencode(
+        {
+            "client_id": settings.google_client_id,
+            "redirect_uri": _google_redirect_uri(),
+            "response_type": "code",
+            "scope": "openid email profile",
+            "state": state,
+            "code_challenge": _pkce_challenge(code_verifier),
+            "code_challenge_method": "S256",
+            "access_type": "online",
+            "prompt": "select_account",
+        }
+    )
+    return RedirectResponse(
+        url=f"https://accounts.google.com/o/oauth2/v2/auth?{query}",
+        status_code=status.HTTP_307_TEMPORARY_REDIRECT,
+    )
+
+
+@router.get("/auth/google/redirect", include_in_schema=False)
+async def google_auth_oauth_callback(
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+):
+    """Exchange Google's authorization code and create the normal handoff."""
+    if error or not code or not state:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google authentication was cancelled or incomplete",
+        )
+
+    oauth_state = google_auth_handoff_store.consume(state)
+    if not oauth_state:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google authentication state is invalid or expired",
+        )
+
+    code_verifier = oauth_state.get("code_verifier")
+    if not isinstance(code_verifier, str) or not code_verifier:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google authentication state is invalid",
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            token_response = await client.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "code": code,
+                    "client_id": settings.google_client_id,
+                    "code_verifier": code_verifier,
+                    "redirect_uri": _google_redirect_uri(),
+                    "grant_type": "authorization_code",
+                },
+            )
+        token_response.raise_for_status()
+        token_payload = token_response.json()
+        credential = token_payload.get("id_token")
+    except (httpx.HTTPError, ValueError, TypeError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google authorization code could not be exchanged",
+        ) from exc
+
+    if not isinstance(credential, str) or not credential:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google authorization did not return an identity token",
+        )
+
+    auth_response = _authenticate_google_credential(credential)
+    handoff_code = google_auth_handoff_store.create(
+        auth_response.model_dump(mode="json")
+    )
+    if not handoff_code:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Google authentication handoff is temporarily unavailable",
+        )
+
+    frontend_url = settings.frontend_url.rstrip("/")
+    callback_url = f"{frontend_url}/auth/callback?code={quote(handoff_code)}"
+    return RedirectResponse(url=callback_url, status_code=status.HTTP_303_SEE_OTHER)
 
 
 @router.post("/auth/google/redirect")
