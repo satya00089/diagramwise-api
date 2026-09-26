@@ -85,6 +85,7 @@ async def test_google_oauth_callback_exchanges_code_and_redirects(monkeypatch):
     store.payload = {"code_verifier": "verifier", "return_to": "/"}
     monkeypatch.setattr(auth, "google_auth_handoff_store", store)
     monkeypatch.setattr(auth.settings, "google_client_id", "client-id")
+    monkeypatch.setattr(auth.settings, "google_client_secret", "client-secret")
     monkeypatch.setattr(auth.settings, "public_api_url", "https://api.example.com")
     monkeypatch.setattr(auth, "_authenticate_google_credential", lambda _: auth_response())
 
@@ -106,6 +107,7 @@ async def test_google_oauth_callback_exchanges_code_and_redirects(monkeypatch):
 
         async def post(self, _url, data):
             assert data["code"] == "google-code"
+            assert data["client_secret"] == "client-secret"
             assert data["code_verifier"] == "verifier"
             return FakeResponse()
 

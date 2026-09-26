@@ -420,15 +420,18 @@ async def google_auth_oauth_callback(
 
     try:
         async with httpx.AsyncClient(timeout=10) as client:
+            token_data = {
+                "code": code,
+                "client_id": settings.google_client_id,
+                "code_verifier": code_verifier,
+                "redirect_uri": _google_redirect_uri(),
+                "grant_type": "authorization_code",
+            }
+            if settings.google_client_secret:
+                token_data["client_secret"] = settings.google_client_secret
             token_response = await client.post(
                 "https://oauth2.googleapis.com/token",
-                data={
-                    "code": code,
-                    "client_id": settings.google_client_id,
-                    "code_verifier": code_verifier,
-                    "redirect_uri": _google_redirect_uri(),
-                    "grant_type": "authorization_code",
-                },
+                data=token_data,
             )
         if token_response.is_error:
             try:

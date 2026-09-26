@@ -145,6 +145,9 @@ class Settings(BaseSettings):
 
     # Google OAuth Configuration
     google_client_id: str = Field(..., validation_alias="GOOGLE_CLIENT_ID")
+    google_client_secret: str | None = Field(
+        None, validation_alias="GOOGLE_CLIENT_SECRET"
+    )
 
     # AWS DynamoDB Configuration
     aws_region: str = Field("us-east-1", validation_alias="AWS_REGION")
