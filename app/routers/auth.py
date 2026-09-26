@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import base64
 import hashlib
 import hmac
+import logging
 import os
 import secrets
 from typing import Annotated, Any, Dict
@@ -35,6 +36,7 @@ from app.utils.config import get_settings
 router = APIRouter()
 security = HTTPBearer()
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 def _is_email_verified(user: Any) -> bool:
@@ -427,6 +429,17 @@ async def google_auth_oauth_callback(
                     "redirect_uri": _google_redirect_uri(),
                     "grant_type": "authorization_code",
                 },
+            )
+        if token_response.is_error:
+            try:
+                google_error = token_response.json()
+            except ValueError:
+                google_error = {}
+            logger.warning(
+                "[OAUTH-TOKEN-EXCHANGE] status=%s error=%s description=%s",
+                token_response.status_code,
+                google_error.get("error"),
+                google_error.get("error_description"),
             )
         token_response.raise_for_status()
         token_payload = token_response.json()

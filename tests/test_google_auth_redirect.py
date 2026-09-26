@@ -89,6 +89,8 @@ async def test_google_oauth_callback_exchanges_code_and_redirects(monkeypatch):
     monkeypatch.setattr(auth, "_authenticate_google_credential", lambda _: auth_response())
 
     class FakeResponse:
+        is_error = False
+
         def raise_for_status(self):
             return None
 
