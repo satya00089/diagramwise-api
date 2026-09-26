@@ -26,6 +26,12 @@ class GoogleAuthRequest(BaseModel):
     credential: str
 
 
+class GoogleAuthHandoffRequest(BaseModel):
+    """Request model for exchanging a browser redirect handoff."""
+
+    code: str = Field(..., min_length=20, max_length=512)
+
+
 class VerifyEmailRequest(BaseModel):
     """A token received from an email activation link."""
 

@@ -6,15 +6,17 @@ import hmac
 import os
 import secrets
 from typing import Annotated, Any, Dict
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from starlette.responses import RedirectResponse
 
 from app.models.auth_models import (
     SignupRequest,
     LoginRequest,
     GoogleAuthRequest,
+    GoogleAuthHandoffRequest,
     AuthResponse,
     SignupPendingResponse,
     VerifyEmailRequest,
@@ -25,6 +27,7 @@ from app.models.auth_models import (
 from app.services.auth_service import auth_service
 from app.services.dynamodb_service import dynamodb_service
 from app.services.email_service import email_service, EmailDeliveryError
+from app.services.google_auth_handoff import google_auth_handoff_store
 from app.utils.config import get_settings
 
 router = APIRouter()
@@ -250,11 +253,10 @@ async def login(request: LoginRequest):
     )
 
 
-@router.post("/auth/google", response_model=AuthResponse)
-async def google_auth(request: GoogleAuthRequest):
-    """Authenticate user with Google Sign-In credential."""
+def _authenticate_google_credential(credential: str) -> AuthResponse:
+    """Resolve one verified Google credential into a Diagramwise session."""
     # Verify Google credential
-    google_info = auth_service.verify_google_token(request.credential)
+    google_info = auth_service.verify_google_token(credential)
 
     # Check if user exists by Google ID
     user = dynamodb_service.get_user_by_google_id(google_info["google_id"])
@@ -311,6 +313,64 @@ async def google_auth(request: GoogleAuthRequest):
         ),
         token=token,
     )
+
+
+@router.post("/auth/google", response_model=AuthResponse)
+async def google_auth(request: GoogleAuthRequest):
+    """Authenticate user with Google Sign-In credential."""
+    return _authenticate_google_credential(request.credential)
+
+
+@router.post("/auth/google/redirect")
+async def google_auth_redirect(
+    request: Request,
+    credential: Annotated[str, Form(...)],
+    csrf_token: Annotated[str | None, Form(alias="g_csrf_token")] = None,
+):
+    """Receive Google's redirect credential and return a one-time handoff."""
+    # Google Identity Services uses a double-submit cookie for its redirect
+    # POST. Rejecting a missing/mismatched pair keeps this endpoint from being
+    # a credential injection surface.
+    cookie_token = request.cookies.get("g_csrf_token")
+    if not csrf_token or not cookie_token or not hmac.compare_digest(
+        csrf_token, cookie_token
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid Google authentication request",
+        )
+
+    auth_response = _authenticate_google_credential(credential)
+    handoff_code = google_auth_handoff_store.create(
+        auth_response.model_dump(mode="json")
+    )
+    if not handoff_code:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Google authentication handoff is temporarily unavailable",
+        )
+
+    frontend_url = settings.frontend_url.rstrip("/")
+    callback_url = f"{frontend_url}/auth/callback?code={quote(handoff_code)}"
+    return RedirectResponse(url=callback_url, status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post("/auth/google/redirect/exchange", response_model=AuthResponse)
+async def exchange_google_auth_handoff(request: GoogleAuthHandoffRequest):
+    """Consume a redirect handoff and return the normal Diagramwise session."""
+    payload = google_auth_handoff_store.consume(request.code)
+    if not payload:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google authentication link is invalid or expired",
+        )
+    try:
+        return AuthResponse.model_validate(payload)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Invalid Google authentication handoff",
+        ) from exc
 
 
 @router.get("/auth/me")
