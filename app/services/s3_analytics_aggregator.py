@@ -18,6 +18,7 @@ from mypy_boto3_s3 import S3Client
 from redis import Redis
 
 from app.models.analytics_models import AnalyticsEvent
+from app.services.api_latency import API_LATENCY_SCHEMA_VERSION, LATENCY_BUCKETS_MS
 from app.utils.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,7 @@ class RedisAnalyticsAggregator:
             aws_secret_access_key=settings.aws_secret_access_key,
         )
         self._prefix = "analytics:aggregate"
+        self._latency_prefix = f"analytics:api-latency:v{API_LATENCY_SCHEMA_VERSION}"
 
     @staticmethod
     def _encode(value: str) -> str:
@@ -58,6 +60,9 @@ class RedisAnalyticsAggregator:
 
     def _redis_key(self, date: str) -> str:
         return f"{self._prefix}:{date}"
+
+    def _latency_redis_key(self, date: str) -> str:
+        return f"{self._latency_prefix}:{date}"
 
     def _session_hash(self, session_id: str) -> str | None:
         secret = get_settings().analytics_hmac_secret
@@ -92,6 +97,30 @@ class RedisAnalyticsAggregator:
         pipe.expire(key, 60 * 60 * 24 * 8)
         pipe.execute()
 
+    def record_api_latency(
+        self, route: str, status_code: int, duration_ms: float
+    ) -> None:
+        """Increment a bounded histogram bucket without storing request data."""
+        if self._redis is None:
+            return
+        if not route.startswith("/api/") or len(route) > 200:
+            return
+
+        from app.services.api_latency import bucket_for_duration
+
+        status_group = f"{status_code // 100}xx"
+        if status_group not in {"2xx", "3xx", "4xx", "5xx"}:
+            status_group = "5xx"
+        encoded_route = self._encode(route)
+        bucket = bucket_for_duration(duration_ms)
+        key = self._latency_redis_key(self._date())
+        pipe = self._redis.pipeline(transaction=True)
+        pipe.hincrby(key, f"latency|{encoded_route}|{status_group}|{bucket}", 1)
+        # Preserve enough hot history for the 90-day dashboard range, even if
+        # a serverless instance does not live long enough to run its S3 flusher.
+        pipe.expire(key, 60 * 60 * 24 * 95)
+        pipe.execute()
+
     def _s3_key(self, date: str) -> str:
         year, month, day = date.split("-")
         return f"analytics/aggregates/{year}/{month}/{day}.json"
@@ -112,6 +141,13 @@ class RedisAnalyticsAggregator:
     ) -> Dict[str, Any]:
         events_map = existing.setdefault("events", {})
         session_keys = existing.setdefault("_session_keys", {})
+        latency_map = existing.setdefault("api_latency", {})
+        stored_latency_version = existing.get("api_latency_schema_version")
+        if stored_latency_version not in (None, API_LATENCY_SCHEMA_VERSION):
+            raise ValueError(
+                "Cannot merge an unsupported API latency histogram schema"
+            )
+        existing["api_latency_schema_version"] = API_LATENCY_SCHEMA_VERSION
         total = int(existing.get("total_events", 0)) + int(
             fields.get("total_events", 0)
         )
@@ -119,6 +155,25 @@ class RedisAnalyticsAggregator:
         for field, value in fields.items():
             parts = field.split("|")
             if len(parts) < 3 or parts[0] not in ("count", "session"):
+                if len(parts) != 4 or parts[0] != "latency":
+                    continue
+                route = self._decode(parts[1])
+                status_group = parts[2]
+                try:
+                    bucket = int(parts[3])
+                except ValueError:
+                    continue
+                if (
+                    status_group not in {"2xx", "3xx", "4xx", "5xx"}
+                    or not 0 <= bucket < len(LATENCY_BUCKETS_MS)
+                ):
+                    continue
+                counts = (
+                    latency_map.setdefault(route, {})
+                    .setdefault(status_group, {})
+                )
+                bucket_key = str(bucket)
+                counts[bucket_key] = counts.get(bucket_key, 0) + int(value)
                 continue
             name = self._decode(parts[1])
             route = self._decode(parts[2])
@@ -137,6 +192,90 @@ class RedisAnalyticsAggregator:
         existing["total_events"] = total
         existing["updated_at"] = datetime.now(timezone.utc).isoformat()
         return existing
+
+    def summarize_api_latency(self, from_date: str, to_date: str) -> Dict[str, Any]:
+        """Merge daily histogram counts, then derive estimates for the range."""
+        from app.services.api_latency import summarize_buckets
+
+        start = datetime.fromisoformat(from_date).date()
+        end = datetime.fromisoformat(to_date).date()
+        route_counts: Dict[str, List[int]] = {}
+        overall_counts = [0] * len(LATENCY_BUCKETS_MS)
+
+        def add_snapshot(snapshot: Dict[str, Any]) -> None:
+            schema_version = snapshot.get("api_latency_schema_version", 1)
+            if schema_version != API_LATENCY_SCHEMA_VERSION:
+                return
+            for route, status_groups in snapshot.get("api_latency", {}).items():
+                if not isinstance(status_groups, dict):
+                    continue
+                counts = route_counts.setdefault(
+                    route, [0] * len(LATENCY_BUCKETS_MS)
+                )
+                for bucket_map in status_groups.values():
+                    if not isinstance(bucket_map, dict):
+                        continue
+                    for bucket_text, count in bucket_map.items():
+                        try:
+                            bucket = int(bucket_text)
+                            value = max(0, int(count))
+                        except (TypeError, ValueError):
+                            continue
+                        if 0 <= bucket < len(LATENCY_BUCKETS_MS):
+                            counts[bucket] += value
+
+        cursor = start
+        while cursor <= end:
+            date_key = cursor.isoformat()
+            snapshot, _etag = self._get_existing(self._s3_key(date_key))
+            add_snapshot(snapshot)
+
+            # Include observations that have not yet been exported to S3.
+            if self._redis is not None:
+                for field, value in self._redis.hgetall(
+                    self._latency_redis_key(date_key)
+                ).items():
+                    parts = field.split("|")
+                    if len(parts) != 4 or parts[0] != "latency":
+                        continue
+                    try:
+                        route = self._decode(parts[1])
+                        bucket = int(parts[3])
+                        increment = max(0, int(value))
+                    except (ValueError, TypeError):
+                        continue
+                    if (
+                        parts[2] not in {"2xx", "3xx", "4xx", "5xx"}
+                        or not 0 <= bucket < len(LATENCY_BUCKETS_MS)
+                    ):
+                        continue
+                    route_counts.setdefault(
+                        route, [0] * len(LATENCY_BUCKETS_MS)
+                    )[bucket] += increment
+            cursor += timedelta(days=1)
+
+        for counts in route_counts.values():
+            for index, count in enumerate(counts):
+                overall_counts[index] += count
+
+        routes = []
+        for route, counts in route_counts.items():
+            routes.append({"route": route, **summarize_buckets(counts)})
+        routes.sort(
+            key=lambda item: (
+                item["p95Ms"] is not None,
+                item["p95Ms"] or 0,
+                item["sampleCount"],
+            ),
+            reverse=True,
+        )
+        return {
+            "fromDate": from_date,
+            "toDate": to_date,
+            "collectionEnabled": self._redis is not None,
+            **summarize_buckets(overall_counts),
+            "routes": routes[:10],
+        }
 
     def _flush_snapshot(self, snapshot_key: str, date: str) -> bool:
         if self._redis is None:
@@ -186,6 +325,11 @@ class RedisAnalyticsAggregator:
             current_keys = list(
                 self._redis.scan_iter(match=f"{self._prefix}:20??-??-??")
             )
+            current_keys.extend(
+                self._redis.scan_iter(
+                    match=f"{self._latency_prefix}:20??-??-??"
+                )
+            )
             for current_key in current_keys:
                 date = current_key.rsplit(":", 1)[-1]
                 snapshot_key = f"{current_key}:processing:{uuid.uuid4()}"
@@ -194,10 +338,18 @@ class RedisAnalyticsAggregator:
                     flushed += 1
 
             # Retry snapshots left behind by a process crash or a failed S3 put.
-            for snapshot_key in list(
-                self._redis.scan_iter(match=f"{self._prefix}:20??-??-??:processing:*")
-            ):
-                date = snapshot_key.split(":")[2]
+            processing_keys = list(
+                self._redis.scan_iter(
+                    match=f"{self._prefix}:20??-??-??:processing:*"
+                )
+            )
+            processing_keys.extend(
+                self._redis.scan_iter(
+                    match=f"{self._latency_prefix}:20??-??-??:processing:*"
+                )
+            )
+            for snapshot_key in processing_keys:
+                date = snapshot_key.rsplit(":processing:", 1)[0].rsplit(":", 1)[-1]
                 if self._flush_snapshot(snapshot_key, date):
                     flushed += 1
             return flushed
