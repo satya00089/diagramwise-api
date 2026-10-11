@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
-from typing import Annotated, Any, Dict, List
+from typing import Annotated, Any, Dict, List, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from starlette.concurrency import run_in_threadpool
@@ -68,9 +68,16 @@ def _feedback_item(
 async def get_admin_overview(
     _admin_user=Depends(require_super_admin),
     days: int = Query(30, ge=7, le=90),
+    period: Literal["today", "yesterday"] | None = Query(None),
 ) -> AdminOverviewResponse:
     to_date = date.today()
-    from_date = to_date - timedelta(days=days - 1)
+    if period == "yesterday":
+        to_date -= timedelta(days=1)
+    from_date = (
+        to_date
+        if period is not None
+        else to_date - timedelta(days=days - 1)
+    )
     feedback = dynamodb_service.list_feedback(limit=250)
     feedback_summary = dynamodb_service.summarize_feedback(feedback)
     user_cache: Dict[str, Any] = {}
@@ -92,8 +99,11 @@ async def get_admin_overview(
 async def get_admin_google_analytics(
     _admin_user=Depends(require_super_admin),
     days: int = Query(30, ge=7, le=90),
+    period: Literal["today", "yesterday"] | None = Query(None),
 ) -> AdminGoogleAnalyticsReport:
-    report = await run_in_threadpool(get_google_analytics_report, days)
+    report = await run_in_threadpool(
+        get_google_analytics_report, days, period=period
+    )
     return AdminGoogleAnalyticsReport.model_validate(report)
 
 

@@ -6,6 +6,21 @@ import google.auth
 from app.services import google_analytics_service as service
 
 
+def test_date_range_targets_today_and_yesterday() -> None:
+    assert service._date_range(30, "today") == {
+        "startDate": "today",
+        "endDate": "today",
+    }
+    assert service._date_range(30, "yesterday") == {
+        "startDate": "yesterday",
+        "endDate": "yesterday",
+    }
+    assert service._date_range(7, None) == {
+        "startDate": "6daysAgo",
+        "endDate": "today",
+    }
+
+
 def test_report_returns_setup_state_when_property_is_missing() -> None:
     report = service.get_google_analytics_report(
         30, SimpleNamespace(google_analytics_property_id=None)
