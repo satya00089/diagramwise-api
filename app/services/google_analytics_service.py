@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Literal
 
 import google.auth
 import google_auth_httplib2
@@ -126,6 +126,14 @@ def _error_report(
     }
 
 
+def _date_range(
+    days: int, period: Literal["today", "yesterday"] | None
+) -> Dict[str, str]:
+    if period is not None:
+        return {"startDate": period, "endDate": period}
+    return {"startDate": f"{days - 1}daysAgo", "endDate": "today"}
+
+
 def _credentials_for_settings(settings: Settings) -> Any:
     service_account_json = (
         getattr(settings, "google_service_account_json", None) or ""
@@ -147,7 +155,9 @@ def _credentials_for_settings(settings: Settings) -> Any:
 
 
 def get_google_analytics_report(
-    days: int, settings: Settings | None = None
+    days: int,
+    settings: Settings | None = None,
+    period: Literal["today", "yesterday"] | None = None,
 ) -> Dict[str, Any]:
     """Return aggregate GA4 metrics without exposing user-level data."""
     resolved_settings = settings or get_settings()
@@ -198,10 +208,7 @@ def get_google_analytics_report(
 
     try:
         http = _authorized_http(credentials)
-        date_range = {
-            "startDate": f"{days - 1}daysAgo",
-            "endDate": "today",
-        }
+        date_range = _date_range(days, period)
         reports = _run_reports(
             http,
             property_id,
