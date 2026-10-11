@@ -82,6 +82,25 @@ class AdminGoogleAnalyticsReport(BaseModel):
     message: Optional[str] = None
 
 
+class AdminApiLatencyRoute(BaseModel):
+    route: str
+    sampleCount: int = 0
+    p50Ms: Optional[int] = None
+    p95Ms: Optional[int] = None
+    p99Ms: Optional[int] = None
+
+
+class AdminApiLatencyReport(BaseModel):
+    fromDate: str
+    toDate: str
+    collectionEnabled: bool = True
+    sampleCount: int = 0
+    p50Ms: Optional[int] = None
+    p95Ms: Optional[int] = None
+    p99Ms: Optional[int] = None
+    routes: List[AdminApiLatencyRoute] = Field(default_factory=list)
+
+
 class AdminAccessUser(BaseModel):
     id: str
     email: str

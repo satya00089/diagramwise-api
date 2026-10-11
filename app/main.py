@@ -36,6 +36,7 @@ from app.routers import (
     mcp_integration,
 )
 from app.middleware.rate_limiter import RateLimitMiddleware
+from app.middleware.api_latency import ApiLatencyMiddleware
 from app.services.dynamodb_service import dynamodb_service
 from app.services.s3_analytics_aggregator import redis_analytics_aggregator
 from app.services.llm_client import flush_langfuse
@@ -142,6 +143,8 @@ app.add_middleware(
     requests_per_minute=settings.rate_limit_per_minute,
     trusted_proxy_ips=settings.trusted_proxy_ips,
 )
+
+app.add_middleware(ApiLatencyMiddleware)
 
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.trusted_hosts)
 

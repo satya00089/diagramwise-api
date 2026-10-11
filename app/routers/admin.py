@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Annotated, Any, Dict, List, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -10,6 +10,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.models.admin_models import (
     AdminAccessUser,
+    AdminApiLatencyReport,
     AdminGoogleAnalyticsReport,
     AdminFeedbackItem,
     AdminOverviewResponse,
@@ -105,6 +106,24 @@ async def get_admin_google_analytics(
         get_google_analytics_report, days, period=period
     )
     return AdminGoogleAnalyticsReport.model_validate(report)
+
+
+@router.get("/admin/api-latency", response_model=AdminApiLatencyReport)
+async def get_admin_api_latency(
+    _admin_user=Depends(require_super_admin),
+    days: int = Query(30, ge=7, le=90),
+    period: Literal["today", "yesterday"] | None = Query(None),
+) -> AdminApiLatencyReport:
+    to_date = datetime.now(timezone.utc).date()
+    if period == "yesterday":
+        to_date -= timedelta(days=1)
+    from_date = to_date if period is not None else to_date - timedelta(days=days - 1)
+    report = await run_in_threadpool(
+        s3_analytics_aggregator.summarize_api_latency,
+        from_date.isoformat(),
+        to_date.isoformat(),
+    )
+    return AdminApiLatencyReport.model_validate(report)
 
 
 @router.get("/admin/access", response_model=List[AdminAccessUser])
