@@ -21,11 +21,17 @@ from app.models.problem_models import RequirementSpec
 settings = get_settings()
 
 DDB_ZERO_VALUE = ":zero"
+# Canvas items share the diagrams table; this marks them so diagram lists skip them.
+CANVAS_RECORD_TYPE = "canvas"
 DDB_UPDATED_VALUE = ":updated"
 DDB_COLLABORATORS_VALUE = ":collaborators"
 DDB_COLLABORATORS_UPDATE = (
     "SET collaborators = :collaborators, updatedAt = :updated"
 )
+
+def _is_canvas_record(item: Dict[str, Any]) -> bool:
+    return item.get("recordType") == CANVAS_RECORD_TYPE
+
 
 DIAGRAM_SUMMARY_ATTRIBUTES = (
     "userId",
@@ -585,6 +591,7 @@ class DynamoDBService:
                 items.extend(response_items)
 
             # Convert Decimal back to float for JSON serialization
+            items = [item for item in items if not _is_canvas_record(item)]
             items_float = [convert_decimal_to_float(item) for item in items]
             return [Diagram(**item) for item in items_float]
         except ClientError as e:
@@ -610,6 +617,7 @@ class DynamoDBService:
                 )
                 items.extend(response.get("Items", []))
 
+            items = [item for item in items if not _is_canvas_record(item)]
             items_float = [convert_decimal_to_float(item) for item in items]
             return [Diagram(**item) for item in items_float]
         except ClientError as e:
@@ -629,8 +637,11 @@ class DynamoDBService:
                 "ProjectionExpression": DIAGRAM_SUMMARY_PROJECTION,
                 "ExpressionAttributeNames": DIAGRAM_SUMMARY_NAMES,
                 "Limit": limit,
-                "FilterExpression": Attr("recordType").not_exists()
-                | Attr("recordType").ne("public_snapshot"),
+                "FilterExpression": (
+                    Attr("recordType").not_exists()
+                    | Attr("recordType").ne("public_snapshot")
+                )
+                & (Attr("recordType").not_exists() | Attr("recordType").ne(CANVAS_RECORD_TYPE)),
             }
             if exclusive_start_key:
                 query_kwargs["ExclusiveStartKey"] = exclusive_start_key
@@ -738,9 +749,31 @@ class DynamoDBService:
                 self.diagrams_table.delete_item(
                     Key={"userId": user_id, "id": diagram.publicSnapshotId}
                 )
+            self._delete_canvas_records(user_id, diagram_id)
             return True
         except ClientError:
             return False
+
+    def _delete_canvas_records(self, owner_id: str, diagram_id: str) -> None:
+        """Remove a design's canvas items, which live under the owner's partition."""
+        query: Dict[str, Any] = {
+            "KeyConditionExpression": Key("userId").eq(owner_id)
+            & Key("id").begins_with(f"{diagram_id}#canvas#"),
+            "ProjectionExpression": "#u, #i",
+            "ExpressionAttributeNames": {"#u": "userId", "#i": "id"},
+        }
+        keys: List[Dict[str, Any]] = []
+        while True:
+            response = self.diagrams_table.query(**query)
+            keys.extend({"userId": item["userId"], "id": item["id"]} for item in response.get("Items", []))
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            query["ExclusiveStartKey"] = last_key
+        if keys:
+            with self.diagrams_table.batch_writer() as batch:
+                for key in keys:
+                    batch.delete_item(Key=key)
 
     # Sharing operations
     def share_diagram(
