@@ -95,7 +95,8 @@ def test_build_canvas_appends_with_next_order_and_unique_name():
     assert created.order == 4
     assert created.name == "flow (2)"
     assert created.version == 1
-    assert created.nodes == [] and created.edges == []
+    assert created.nodes == []
+    assert created.edges == []
 
 
 def test_primary_canvas_is_lowest_active_order():
@@ -113,8 +114,9 @@ def test_primary_canvas_none_when_empty_or_all_deleted():
 
 
 def test_cannot_remove_last_active_canvas():
+    only_canvas = _canvas("only", "Only", 0)
     with pytest.raises(CanvasValidationError, match="at least one"):
-        ensure_not_last_canvas([_canvas("only", "Only", 0)])
+        ensure_not_last_canvas([only_canvas])
     ensure_not_last_canvas([_canvas("a", "A", 0), _canvas("b", "B", 1)])
 
 
@@ -143,5 +145,6 @@ def test_canvas_summary_omits_payload_and_counts_items():
     summary = canvas_summary(canvas)
     assert summary["nodeCount"] == 2
     assert summary["edgeCount"] == 1
-    assert "nodes" not in summary and "edges" not in summary
+    assert "nodes" not in summary
+    assert "edges" not in summary
     assert summary["kind"] == "other"

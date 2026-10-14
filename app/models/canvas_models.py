@@ -97,8 +97,7 @@ def dedupe_canvas_name(name: str, existing_names: Sequence[str]) -> str:
         counter += 1
 
 
-def validate_canvas_graph(nodes: List[Any], edges: List[Any]) -> None:
-    """Node IDs must be unique and every edge must point at a node on the same canvas."""
+def _collect_canvas_node_ids(nodes: List[Any]) -> set:
     node_ids: set = set()
     for node in nodes:
         node_id = node.get("id") if isinstance(node, dict) else None
@@ -107,16 +106,26 @@ def validate_canvas_graph(nodes: List[Any], edges: List[Any]) -> None:
         if node_id in node_ids:
             raise CanvasValidationError(f"Duplicate node id: {node_id}")
         node_ids.add(node_id)
+    return node_ids
 
+
+def _validate_canvas_edge(edge: Any, node_ids: set) -> None:
+    if not isinstance(edge, dict):
+        raise CanvasValidationError("Every edge must be an object")
+    for endpoint in ("source", "target"):
+        ref = edge.get(endpoint)
+        if ref not in node_ids:
+            raise CanvasValidationError(
+                "Edge "
+                f"{edge.get('id', '?')} references a node that is not on this canvas: {ref}"
+            )
+
+
+def validate_canvas_graph(nodes: List[Any], edges: List[Any]) -> None:
+    """Ensure IDs are unique and every edge targets nodes on this canvas."""
+    node_ids = _collect_canvas_node_ids(nodes)
     for edge in edges:
-        if not isinstance(edge, dict):
-            raise CanvasValidationError("Every edge must be an object")
-        for endpoint in ("source", "target"):
-            ref = edge.get(endpoint)
-            if ref not in node_ids:
-                raise CanvasValidationError(
-                    f"Edge {edge.get('id', '?')} references a node that is not on this canvas: {ref}"
-                )
+        _validate_canvas_edge(edge, node_ids)
 
 
 def ensure_canvas_capacity(active_canvases: Sequence[CanvasRecord]) -> None:

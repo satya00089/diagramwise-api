@@ -222,7 +222,8 @@ def test_duplicate_of_legacy_canvas_materializes_it(service):
     legacy = _legacy([{"id": "n1"}])
     copy = service.duplicate_canvas(WS, WS, legacy)
     names = [c.name for c in service.list_canvases(WS, None)]
-    assert "Main" in names and copy.name == "Main copy"
+    assert "Main" in names
+    assert copy.name == "Main copy"
 
 
 # --- repository mapping and conditional-write errors --------------------------------
@@ -263,8 +264,9 @@ def test_repository_stale_save_raises_conflict_with_current_version():
             "createdAt": NOW, "updatedAt": NOW,
         }
     }
+    repository = CanvasRepository(table, "owner-1")
     with pytest.raises(CanvasVersionConflict) as conflict:
-        CanvasRepository(table, "owner-1").save_content(WS, "c1", [], [], 4)
+        repository.save_content(WS, "c1", [], [], 4)
     assert conflict.value.current_version == 5
 
 
@@ -291,8 +293,10 @@ def test_repository_put_new_returns_false_when_taken():
 def test_repository_other_client_errors_propagate():
     table = MagicMock()
     table.put_item.side_effect = _client_error("ProvisionedThroughputExceededException")
+    repository = CanvasRepository(table, "owner-1")
+    canvas = _legacy()
     with pytest.raises(ClientError):
-        CanvasRepository(table, "owner-1").put_new_canvas(_legacy())
+        repository.put_new_canvas(canvas)
 
 
 def test_repository_list_follows_pagination_and_hides_deleted():

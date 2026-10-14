@@ -82,8 +82,10 @@ class CanvasService:
         """
         try:
             validate_canvas_graph(nodes, edges)
-        except CanvasValidationError as error:
-            logger.warning("Skipping primary canvas sync for %s: %s", workspace_id, error)
+        except CanvasValidationError:
+            logger.warning(
+                "Skipping primary canvas sync because the legacy graph is invalid."
+            )
             return False
         for _ in range(SYNC_RETRY_ATTEMPTS):
             primary = primary_canvas(self.repository.list_canvases(workspace_id))

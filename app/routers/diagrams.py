@@ -368,7 +368,7 @@ async def update_diagram(
                 diagram_id, updated_diagram.nodes, updated_diagram.edges
             )
         except CanvasVersionConflict:
-            logger.warning("Primary canvas sync gave up after repeated conflicts for %s", diagram_id)
+            logger.warning("Primary canvas sync gave up after repeated conflicts.")
 
     return enrich_diagram_response(updated_diagram, user_id)
 

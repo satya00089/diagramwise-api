@@ -84,7 +84,8 @@ def test_stale_save_returns_409_with_current_version(client):
         f"{_base()}/{created['id']}",
         json={"nodes": [{"id": "a"}], "edges": [], "version": 1},
     )
-    assert ok.status_code == 200 and ok.json()["version"] == 2
+    assert ok.status_code == 200
+    assert ok.json()["version"] == 2
 
     stale = api.put(
         f"{_base()}/{created['id']}",

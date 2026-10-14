@@ -23,6 +23,8 @@ from app.services.dynamodb_service import (
     convert_floats_to_decimal,
 )
 
+UPDATED_AT_PLACEHOLDER = "#updatedAt"
+
 
 class CanvasVersionConflict(Exception):
     """The canvas changed since the caller last read it."""
@@ -127,9 +129,9 @@ class CanvasRepository:
         if not updates:
             return self.get_canvas(workspace_id, canvas_id)
 
-        names = {"#updatedAt": "updatedAt"}
+        names = {UPDATED_AT_PLACEHOLDER: "updatedAt"}
         values: Dict[str, Any] = {":updatedAt": _utc_now()}
-        set_parts = ["#updatedAt = :updatedAt"]
+        set_parts = [f"{UPDATED_AT_PLACEHOLDER} = :updatedAt"]
         # Placeholder prefixes avoid boto3's own generated #n0/:v0 names used by the condition.
         for index, (field, value) in enumerate(updates.items()):
             names[f"#fld{index}"] = field
@@ -165,13 +167,13 @@ class CanvasRepository:
                 Key=self._key(workspace_id, canvas_id),
                 UpdateExpression=(
                     "SET #nodes = :nodes, #edges = :edges, #version = :next, "
-                    "#updatedAt = :updatedAt"
+                    f"{UPDATED_AT_PLACEHOLDER} = :updatedAt"
                 ),
                 ExpressionAttributeNames={
                     "#nodes": "nodes",
                     "#edges": "edges",
                     "#version": "version",
-                    "#updatedAt": "updatedAt",
+                    UPDATED_AT_PLACEHOLDER: "updatedAt",
                 },
                 ExpressionAttributeValues={
                     ":nodes": convert_floats_to_decimal(nodes),
@@ -197,10 +199,12 @@ class CanvasRepository:
         try:
             self.table.update_item(
                 Key=self._key(workspace_id, canvas_id),
-                UpdateExpression="SET #deletedAt = :now, #updatedAt = :now",
+                UpdateExpression=(
+                    f"SET #deletedAt = :now, {UPDATED_AT_PLACEHOLDER} = :now"
+                ),
                 ExpressionAttributeNames={
                     "#deletedAt": "deletedAt",
-                    "#updatedAt": "updatedAt",
+                    UPDATED_AT_PLACEHOLDER: "updatedAt",
                 },
                 ExpressionAttributeValues={":now": _utc_now()},
                 ConditionExpression=Attr("id").exists() & Attr("deletedAt").not_exists(),

@@ -39,7 +39,7 @@ class CanvasReorderRequest(BaseModel):
 
 class CanvasListResponse(BaseModel):
     workspaceId: str
-    primaryCanvasId: Optional[str]
+    primaryCanvasId: Optional[str] = None
     maxCanvases: int = MAX_CANVASES_PER_WORKSPACE
     canvases: List[Dict[str, Any]]
 
