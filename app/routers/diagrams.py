@@ -1,6 +1,7 @@
 """Diagrams router for CRUD operations on diagrams."""
 
 import base64
+import logging
 import binascii
 import json
 from datetime import datetime, timezone
@@ -20,11 +21,14 @@ from app.models.diagram_models import (
     Collaborator,
     Permission,
 )
+from app.services.canvas_repository import CanvasRepository, CanvasVersionConflict
+from app.services.canvas_service import CanvasService
 from app.services.dynamodb_service import dynamodb_service
 from app.services.validation import validate_diagram_access, validate_collaborator_limit
 from app.routers.auth import get_current_user
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # Constants
 DIAGRAM_NOT_FOUND = "Diagram not found"
@@ -354,6 +358,17 @@ async def update_diagram(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to update diagram",
         )
+
+    if request.nodes is not None or request.edges is not None:
+        # Pre-multi-canvas clients write the whole diagram; keep the primary canvas in step.
+        try:
+            CanvasService(
+                CanvasRepository(dynamodb_service.diagrams_table, updated_diagram.userId)
+            ).sync_primary_from_legacy(
+                diagram_id, updated_diagram.nodes, updated_diagram.edges
+            )
+        except CanvasVersionConflict:
+            logger.warning("Primary canvas sync gave up after repeated conflicts.")
 
     return enrich_diagram_response(updated_diagram, user_id)
 

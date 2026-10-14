@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from app.utils.config import get_settings
 from app.routers import (
     auth,
+    canvases,
     diagrams,
     assessment,
     interview,
@@ -165,6 +166,7 @@ app.include_router(interview.router, prefix=API_V1_PREFIX, tags=["interview"])
 app.include_router(problems.router, prefix=API_V1_PREFIX, tags=["problems"])
 app.include_router(auth.router, prefix=API_V1_PREFIX, tags=["auth"])
 app.include_router(diagrams.router, prefix=API_V1_PREFIX, tags=["diagrams"])
+app.include_router(canvases.router, prefix=API_V1_PREFIX, tags=["canvases"])
 app.include_router(collaboration.router, prefix=API_V1_PREFIX, tags=["collaboration"])
 app.include_router(attempts.router, prefix=API_V1_PREFIX, tags=["attempts"])
 app.include_router(recommendations.router, prefix=API_V1_PREFIX, tags=["recommendations"])
