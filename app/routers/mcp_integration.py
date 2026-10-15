@@ -11,6 +11,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, model_validator
 
 from app.models.architecture_models import ArchitectureDocument
+from app.services.canvas_repository import CanvasRepository
 from app.services.dynamodb_service import dynamodb_service
 from app.utils.config import get_settings
 
@@ -189,12 +190,26 @@ async def create_mcp_architecture(
         return links
 
     if existing:
+        existing_nodes = existing.nodes
+        existing_edges = existing.edges
+        diagrams_table = getattr(dynamodb_service, "diagrams_table", None)
+        owner_id = getattr(existing, "userId", None)
+        if diagrams_table is not None and owner_id:
+            repository = CanvasRepository(
+                diagrams_table, owner_id, getattr(existing, "title", "Untitled Design")
+            )
+            canvas_summaries = repository.list_canvas_summaries(existing.id)
+            if canvas_summaries:
+                primary = repository.get_canvas(existing.id, canvas_summaries[0]["id"])
+                if primary is not None:
+                    existing_nodes = primary.nodes
+                    existing_edges = primary.edges
         existing_document = getattr(existing, "canonicalDocument", None)
         if (
             existing.title != request.title
             or existing.description != request.description
-            or existing.nodes != request.nodes
-            or existing.edges != request.edges
+            or existing_nodes != request.nodes
+            or existing_edges != request.edges
             or (
                 existing_document is not None
                 and request.document is not None

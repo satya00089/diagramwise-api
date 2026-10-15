@@ -21,11 +21,16 @@ from app.models.problem_models import RequirementSpec
 settings = get_settings()
 
 DDB_ZERO_VALUE = ":zero"
+CANVAS_RECORD_TYPE = "canvas"
 DDB_UPDATED_VALUE = ":updated"
 DDB_COLLABORATORS_VALUE = ":collaborators"
 DDB_COLLABORATORS_UPDATE = (
     "SET collaborators = :collaborators, updatedAt = :updated"
 )
+
+
+def _is_canvas_record(item: Dict[str, Any]) -> bool:
+    return item.get("recordType") == CANVAS_RECORD_TYPE
 
 DIAGRAM_SUMMARY_ATTRIBUTES = (
     "userId",
@@ -585,6 +590,7 @@ class DynamoDBService:
                 items.extend(response_items)
 
             # Convert Decimal back to float for JSON serialization
+            items = [item for item in items if not _is_canvas_record(item)]
             items_float = [convert_decimal_to_float(item) for item in items]
             return [Diagram(**item) for item in items_float]
         except ClientError as e:
@@ -610,6 +616,7 @@ class DynamoDBService:
                 )
                 items.extend(response.get("Items", []))
 
+            items = [item for item in items if not _is_canvas_record(item)]
             items_float = [convert_decimal_to_float(item) for item in items]
             return [Diagram(**item) for item in items_float]
         except ClientError as e:
@@ -629,8 +636,16 @@ class DynamoDBService:
                 "ProjectionExpression": DIAGRAM_SUMMARY_PROJECTION,
                 "ExpressionAttributeNames": DIAGRAM_SUMMARY_NAMES,
                 "Limit": limit,
-                "FilterExpression": Attr("recordType").not_exists()
-                | Attr("recordType").ne("public_snapshot"),
+                "FilterExpression": (
+                    (
+                        Attr("recordType").not_exists()
+                        | Attr("recordType").ne("public_snapshot")
+                    )
+                    & (
+                        Attr("recordType").not_exists()
+                        | Attr("recordType").ne(CANVAS_RECORD_TYPE)
+                    )
+                ),
             }
             if exclusive_start_key:
                 query_kwargs["ExclusiveStartKey"] = exclusive_start_key
@@ -729,6 +744,29 @@ class DynamoDBService:
         except ClientError:
             return None
 
+    def clear_diagram_graph(
+        self, user_id: str, diagram_id: str, node_count: int, edge_count: int
+    ) -> bool:
+        """Keep legacy counts current while removing the now-canonical canvas graph."""
+        try:
+            self.diagrams_table.update_item(
+                Key={"userId": user_id, "id": diagram_id},
+                UpdateExpression=(
+                    "SET nodeCount = :node_count, edgeCount = :edge_count, "
+                    "updatedAt = :updated REMOVE #nodes, #edges"
+                ),
+                ExpressionAttributeNames={"#nodes": "nodes", "#edges": "edges"},
+                ExpressionAttributeValues={
+                    ":node_count": node_count,
+                    ":edge_count": edge_count,
+                    ":updated": datetime.now(timezone.utc).isoformat(),
+                },
+                ConditionExpression=Attr("id").exists(),
+            )
+            return True
+        except ClientError:
+            return False
+
     def delete_diagram(self, user_id: str, diagram_id: str) -> bool:
         """Delete a diagram."""
         try:
@@ -738,9 +776,28 @@ class DynamoDBService:
                 self.diagrams_table.delete_item(
                     Key={"userId": user_id, "id": diagram.publicSnapshotId}
                 )
+            self._delete_canvas_records(user_id, diagram_id)
             return True
         except ClientError:
             return False
+
+    def _delete_canvas_records(self, owner_id: str, diagram_id: str) -> None:
+        """Remove child canvas records stored in the owner's diagrams-table partition."""
+        query: Dict[str, Any] = {
+            "KeyConditionExpression": Key("userId").eq(owner_id)
+            & Key("id").begins_with(f"{diagram_id}#canvas#"),
+            "ProjectionExpression": "#u, #i",
+            "ExpressionAttributeNames": {"#u": "userId", "#i": "id"},
+        }
+        while True:
+            response = self.diagrams_table.query(**query)
+            with self.diagrams_table.batch_writer() as batch:
+                for item in response.get("Items", []):
+                    batch.delete_item(Key={"userId": item["userId"], "id": item["id"]})
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            query["ExclusiveStartKey"] = last_key
 
     # Sharing operations
     def share_diagram(
@@ -1819,6 +1876,40 @@ class DynamoDBService:
             diagram = self.get_diagram(user_id, diagram_id)
             if not diagram:
                 return None
+
+            # Multi-canvas graph data is canonical on canvas records. Publishing
+            # continues to expose the primary canvas through the legacy snapshot.
+            canvas_query: Dict[str, Any] = {
+                "KeyConditionExpression": Key("userId").eq(user_id)
+                & Key("id").begins_with(f"{diagram_id}#canvas#")
+            }
+            canvas_items: List[Dict[str, Any]] = []
+            while True:
+                canvas_response = self.diagrams_table.query(**canvas_query)
+                canvas_items.extend(canvas_response.get("Items", []))
+                last_key = canvas_response.get("LastEvaluatedKey")
+                if not last_key:
+                    break
+                canvas_query["ExclusiveStartKey"] = last_key
+            active_canvases = [
+                item
+                for item in canvas_items
+                if item.get("recordType") == CANVAS_RECORD_TYPE
+                and not item.get("deletedAt")
+            ]
+            if active_canvases:
+                primary_item = min(
+                    active_canvases, key=lambda item: int(item.get("order", 0))
+                )
+                primary_graph = convert_decimal_to_float(primary_item)
+                diagram = diagram.model_copy(
+                    update={
+                        "nodes": primary_graph.get("nodes", []),
+                        "edges": primary_graph.get("edges", []),
+                        "nodeCount": len(primary_graph.get("nodes", [])),
+                        "edgeCount": len(primary_graph.get("edges", [])),
+                    }
+                )
 
             now = datetime.now(timezone.utc).isoformat()
             snapshot_id = diagram.publicSnapshotId or str(uuid4())
