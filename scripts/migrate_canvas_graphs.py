@@ -25,14 +25,17 @@ from app.services.canvas_repository import (
 )
 from app.utils.config import get_settings
 
+NODES_ATTRIBUTE_PLACEHOLDER = "#nodes"
+EDGES_ATTRIBUTE_PLACEHOLDER = "#edges"
+
 
 def scan_designs(table: Any) -> list[dict[str, Any]]:
     names = {
         "#user": "userId",
         "#id": "id",
         "#record_type": "recordType",
-        "#nodes": "nodes",
-        "#edges": "edges",
+        NODES_ATTRIBUTE_PLACEHOLDER: "nodes",
+        EDGES_ATTRIBUTE_PLACEHOLDER: "edges",
         "#updated": "updatedAt",
         "#node_count": "nodeCount",
         "#edge_count": "edgeCount",
@@ -57,14 +60,17 @@ def canvas_primary_counts(table: Any, owner_id: str, design_id: str):
     query = {
         "KeyConditionExpression": Key("userId").eq(owner_id)
         & Key("id").begins_with(canvas_item_prefix(design_id)),
-        "ProjectionExpression": "#id, #type, #order, #deleted, #nodes, #edges",
+        "ProjectionExpression": (
+            f"#id, #type, #order, #deleted, {NODES_ATTRIBUTE_PLACEHOLDER}, "
+            f"{EDGES_ATTRIBUTE_PLACEHOLDER}"
+        ),
         "ExpressionAttributeNames": {
             "#id": "id",
             "#type": "recordType",
             "#order": "order",
             "#deleted": "deletedAt",
-            "#nodes": "nodeCount",
-            "#edges": "edgeCount",
+            NODES_ATTRIBUTE_PLACEHOLDER: "nodeCount",
+            EDGES_ATTRIBUTE_PLACEHOLDER: "edgeCount",
         },
     }
     items: list[dict[str, Any]] = []
@@ -130,7 +136,10 @@ def apply_plan(table: Any, plan: list[dict[str, Any]]) -> tuple[int, int]:
     applied = 0
     conflicts = 0
     for item in plan:
-        names = {"#nodes": "nodes", "#edges": "edges"}
+        names = {
+            NODES_ATTRIBUTE_PLACEHOLDER: "nodes",
+            EDGES_ATTRIBUTE_PLACEHOLDER: "edges",
+        }
         values: dict[str, Any] = {
             ":node_count": item["nodeCount"],
             ":edge_count": item["edgeCount"],
@@ -144,7 +153,8 @@ def apply_plan(table: Any, plan: list[dict[str, Any]]) -> tuple[int, int]:
                 Key={"userId": item["userId"], "id": item["id"]},
                 UpdateExpression=(
                     "SET nodeCount = :node_count, edgeCount = :edge_count "
-                    "REMOVE #nodes, #edges"
+                    f"REMOVE {NODES_ATTRIBUTE_PLACEHOLDER}, "
+                    f"{EDGES_ATTRIBUTE_PLACEHOLDER}"
                 ),
                 ExpressionAttributeNames=names,
                 ExpressionAttributeValues=values,

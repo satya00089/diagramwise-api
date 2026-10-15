@@ -26,7 +26,7 @@ CANVAS_RECORD_TYPE = "canvas"
 DDB_UPDATED_VALUE = ":updated"
 DDB_COLLABORATORS_VALUE = ":collaborators"
 DDB_COLLABORATORS_UPDATE = (
-    "SET collaborators = :collaborators, updatedAt = :updated"
+    f"SET collaborators = {DDB_COLLABORATORS_VALUE}, updatedAt = {DDB_UPDATED_VALUE}"
 )
 
 def _is_canvas_record(item: Dict[str, Any]) -> bool:
@@ -689,7 +689,7 @@ class DynamoDBService:
         try:
             now = datetime.now(timezone.utc).isoformat()
 
-            update_expression = "SET updatedAt = :updated"
+            update_expression = f"SET updatedAt = {DDB_UPDATED_VALUE}"
             expression_values: Dict[str, Any] = {DDB_UPDATED_VALUE: now}
             expression_names: Dict[str, str] = {}
 
@@ -753,7 +753,7 @@ class DynamoDBService:
                 Key={"userId": user_id, "id": diagram_id},
                 UpdateExpression=(
                     "SET nodeCount = :node_count, edgeCount = :edge_count, "
-                    "updatedAt = :updated REMOVE #nodes, #edges"
+                    f"updatedAt = {DDB_UPDATED_VALUE} REMOVE #nodes, #edges"
                 ),
                 ExpressionAttributeNames={"#nodes": "nodes", "#edges": "edges"},
                 ExpressionAttributeValues={

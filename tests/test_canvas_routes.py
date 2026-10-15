@@ -262,5 +262,6 @@ def test_legacy_diagram_put_saves_primary_canvas_without_mirroring_graph(client,
         response = completed.value
 
     assert response.nodes == [{"id": "legacy-save"}]
-    assert "nodes" not in updates[0] and "edges" not in updates[0]
+    assert "nodes" not in updates[0]
+    assert "edges" not in updates[0]
     assert cleared == [(OWNER, DIAGRAM_ID, 1, 0)]

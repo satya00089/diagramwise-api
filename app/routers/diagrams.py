@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.models.canvas_models import (
+    CanvasRecord,
     CanvasValidationError,
     legacy_canvas_from_diagram,
 )
@@ -337,6 +338,76 @@ async def get_diagram(
     return enrich_diagram_response(_with_primary_canvas_content(diagram), user_id)
 
 
+def _get_diagram_for_update(user_id: str, diagram_id: str) -> Diagram:
+    """Load an owned or shared diagram after checking edit permission."""
+    has_access, error_msg = validate_diagram_access(user_id, diagram_id, "update")
+    if not has_access:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=error_msg)
+
+    diagram = dynamodb_service.get_diagram(user_id, diagram_id)
+    if diagram:
+        return diagram
+
+    shared_diagrams = dynamodb_service.get_shared_diagrams_for_user(user_id)
+    diagram = next((item for item in shared_diagrams if item.id == diagram_id), None)
+    if not diagram:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=DIAGRAM_NOT_FOUND
+        )
+    return diagram
+
+
+def _save_primary_canvas_from_legacy_request(
+    diagram_id: str, diagram: Diagram, request: DiagramUpdate
+) -> CanvasRecord:
+    """Route legacy graph updates into the design's canonical primary canvas."""
+    repository = CanvasRepository(
+        dynamodb_service.diagrams_table, diagram.userId, diagram.title
+    )
+    service = CanvasService(repository)
+    legacy = legacy_canvas_from_diagram(
+        diagram.id,
+        diagram.nodes,
+        diagram.edges,
+        diagram.createdAt,
+        diagram.updatedAt,
+        diagram.title,
+    )
+    service.materialize_legacy(diagram_id, legacy)
+    summaries = repository.list_canvas_summaries(diagram_id)
+    primary = (
+        repository.get_canvas(diagram_id, summaries[0]["id"])
+        if summaries
+        else None
+    )
+    if primary is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="The design's primary canvas could not be loaded.",
+        )
+
+    nodes = request.nodes if request.nodes is not None else primary.nodes
+    edges = request.edges if request.edges is not None else primary.edges
+    try:
+        return service.save_content(
+            diagram_id,
+            primary.id,
+            nodes,
+            edges,
+            primary.version,
+            legacy,
+        )
+    except CanvasValidationError as error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)
+        ) from error
+    except CanvasVersionConflict as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The primary canvas changed. Reload before saving again.",
+        ) from error
+
+
 @router.put("/diagrams/{diagram_id}", response_model=DiagramResponse)
 async def update_diagram(
     diagram_id: str,
@@ -346,72 +417,15 @@ async def update_diagram(
     """Update an existing diagram (requires authentication and edit permission)."""
     user_id = current_user["user_id"]
 
-    # Check if user has edit permission
-    has_access, error_msg = validate_diagram_access(user_id, diagram_id, "update")
-    if not has_access:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=error_msg)
-
-    # Get the diagram (could be owned or shared)
-    diagram = dynamodb_service.get_diagram(user_id, diagram_id)
-    if not diagram:
-        # Find in shared diagrams
-        shared_diagrams = dynamodb_service.get_shared_diagrams_for_user(user_id)
-        diagram = next((d for d in shared_diagrams if d.id == diagram_id), None)
-
-        if not diagram:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail=DIAGRAM_NOT_FOUND
-            )
+    diagram = _get_diagram_for_update(user_id, diagram_id)
 
     # Legacy clients still submit nodes/edges to the diagram endpoint. Route those
     # changes into the primary canvas, then keep only design metadata on the parent.
-    has_graph_update = request.nodes is not None or request.edges is not None
     primary = None
-    if has_graph_update:
-        repository = CanvasRepository(
-            dynamodb_service.diagrams_table, diagram.userId, diagram.title
+    if request.nodes is not None or request.edges is not None:
+        primary = _save_primary_canvas_from_legacy_request(
+            diagram_id, diagram, request
         )
-        service = CanvasService(repository)
-        legacy = legacy_canvas_from_diagram(
-            diagram.id,
-            diagram.nodes,
-            diagram.edges,
-            diagram.createdAt,
-            diagram.updatedAt,
-            diagram.title,
-        )
-        service.materialize_legacy(diagram_id, legacy)
-        summaries = repository.list_canvas_summaries(diagram_id)
-        primary = (
-            repository.get_canvas(diagram_id, summaries[0]["id"])
-            if summaries
-            else None
-        )
-        if primary is None:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="The design's primary canvas could not be loaded.",
-            )
-        nodes = request.nodes if request.nodes is not None else primary.nodes
-        edges = request.edges if request.edges is not None else primary.edges
-        try:
-            primary = service.save_content(
-                diagram_id,
-                primary.id,
-                nodes,
-                edges,
-                primary.version,
-                legacy,
-            )
-        except CanvasValidationError as error:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)
-            ) from error
-        except CanvasVersionConflict as error:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="The primary canvas changed. Reload before saving again.",
-            ) from error
 
     # Update design metadata only; canvas JSON has one canonical home.
     updated_diagram = dynamodb_service.update_diagram(

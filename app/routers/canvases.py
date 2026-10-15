@@ -267,9 +267,7 @@ async def save_canvas_content(
                 len(primary.edges),
             ):
                 logger.warning(
-                    "Canvas %s was saved, but legacy graph cleanup failed for %s",
-                    canvas_id,
-                    diagram_id,
+                    "Canvas was saved, but legacy graph cleanup failed"
                 )
         return saved
     except CanvasValidationError as error:

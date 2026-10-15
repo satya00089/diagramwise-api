@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 MAX_CANVASES_PER_WORKSPACE = 10
 MAX_CANVAS_NAME_LENGTH = 60
+DEFAULT_DESIGN_TITLE = "Untitled Design"
 LEGACY_CANVAS_NAME = "Main"
 
 
@@ -32,7 +33,7 @@ class CanvasRecord(BaseModel):
 
     id: str
     workspaceId: str
-    title: str = Field(default="Untitled Design", min_length=1, max_length=200)
+    title: str = Field(default=DEFAULT_DESIGN_TITLE, min_length=1, max_length=200)
     name: str = Field(..., min_length=1, max_length=MAX_CANVAS_NAME_LENGTH)
     kind: CanvasKind = CanvasKind.OTHER
     order: int = Field(..., ge=0)
@@ -156,7 +157,7 @@ def build_canvas(
     existing: Sequence[CanvasRecord],
     now: str,
     canvas_id: Optional[str] = None,
-    title: str = "Untitled Design",
+    title: str = DEFAULT_DESIGN_TITLE,
 ) -> CanvasRecord:
     """Create a canvas at the end of the tab order with a unique, normalized name."""
     ensure_canvas_capacity(existing)
@@ -192,7 +193,7 @@ def legacy_canvas_from_diagram(
     edges: List[Any],
     created_at: str,
     updated_at: str,
-    title: str = "Untitled Design",
+    title: str = DEFAULT_DESIGN_TITLE,
 ) -> CanvasRecord:
     """Present a pre-multi-canvas diagram as one canvas.
 
