@@ -190,7 +190,8 @@ class DynamoDBService:
                 UpdateExpression=(
                     "SET verificationTokenHash = :token, verificationExpiresAt = :expires, "
                     "verificationSentAt = :sent, verificationVersion = "
-                    "if_not_exists(verificationVersion, :zero) + :one, updatedAt = :updated"
+                    f"if_not_exists(verificationVersion, :zero) + :one, "
+                    f"updatedAt = {DDB_UPDATED_VALUE}"
                 ),
                 ExpressionAttributeValues={
                     ":token": token_hash,
@@ -217,7 +218,7 @@ class DynamoDBService:
             update_kwargs: Dict[str, Any] = {
                 "Key": {"id": user_id},
                 "UpdateExpression": (
-                    "SET emailVerified = :verified, updatedAt = :updated "
+                    f"SET emailVerified = :verified, updatedAt = {DDB_UPDATED_VALUE} "
                     "REMOVE verificationTokenHash, verificationExpiresAt, verificationSentAt"
                 ),
                 "ExpressionAttributeValues": {":verified": True, DDB_UPDATED_VALUE: now},
@@ -248,7 +249,8 @@ class DynamoDBService:
             if user.verificationTokenHash and user.verificationExpiresAt and user.verificationSentAt:
                 update_expression = (
                     "SET verificationTokenHash = :token, verificationExpiresAt = :expires, "
-                    "verificationSentAt = :sent, verificationVersion = :version, updatedAt = :updated"
+                    f"verificationSentAt = :sent, verificationVersion = :version, "
+                    f"updatedAt = {DDB_UPDATED_VALUE}"
                 )
                 values.update({
                     ":token": user.verificationTokenHash,
@@ -257,7 +259,7 @@ class DynamoDBService:
                 })
             else:
                 update_expression = (
-                    "SET verificationVersion = :version, updatedAt = :updated "
+                    f"SET verificationVersion = :version, updatedAt = {DDB_UPDATED_VALUE} "
                     "REMOVE verificationTokenHash, verificationExpiresAt, verificationSentAt"
                 )
             self.users_table.update_item(
@@ -319,7 +321,9 @@ class DynamoDBService:
 
             response = self.users_table.update_item(
                 Key={"id": user_id},
-                UpdateExpression="SET preferences = :prefs, updatedAt = :updated",
+                UpdateExpression=(
+                    f"SET preferences = :prefs, updatedAt = {DDB_UPDATED_VALUE}"
+                ),
                 ExpressionAttributeValues={
                     ":prefs": prefs_safe,
                     DDB_UPDATED_VALUE: now,
@@ -339,7 +343,9 @@ class DynamoDBService:
         try:
             response = self.users_table.update_item(
                 Key={"id": user_id},
-                UpdateExpression="SET #roles = :roles, updatedAt = :updated",
+                UpdateExpression=(
+                    f"SET #roles = :roles, updatedAt = {DDB_UPDATED_VALUE}"
+                ),
                 ExpressionAttributeNames={"#roles": "roles"},
                 ExpressionAttributeValues={
                     ":roles": roles,
@@ -456,12 +462,14 @@ class DynamoDBService:
         try:
             response = self.feedback_table.update_item(
                 Key={"id": feedback_id},
-                UpdateExpression="SET #status = :status, updatedAt = :updated",
+                UpdateExpression=(
+                    f"SET #status = :status, updatedAt = {DDB_UPDATED_VALUE}"
+                ),
                 ConditionExpression="attribute_exists(id)",
                 ExpressionAttributeNames={"#status": "status"},
                 ExpressionAttributeValues={
                     ":status": feedback_status,
-                    ":updated": datetime.now(timezone.utc).isoformat(),
+                    DDB_UPDATED_VALUE: datetime.now(timezone.utc).isoformat(),
                 },
                 ReturnValues="ALL_NEW",
             )
@@ -477,7 +485,9 @@ class DynamoDBService:
         try:
             now = datetime.now(timezone.utc).isoformat()
 
-            update_expression = "SET googleId = :google_id, updatedAt = :updated"
+            update_expression = (
+                f"SET googleId = :google_id, updatedAt = {DDB_UPDATED_VALUE}"
+            )
             expression_values: Dict[str, Any] = {
                 ":google_id": google_id,
                 DDB_UPDATED_VALUE: now,
@@ -759,7 +769,7 @@ class DynamoDBService:
                 ExpressionAttributeValues={
                     ":node_count": node_count,
                     ":edge_count": edge_count,
-                    ":updated": datetime.now(timezone.utc).isoformat(),
+                    DDB_UPDATED_VALUE: datetime.now(timezone.utc).isoformat(),
                 },
                 ConditionExpression=Attr("id").exists(),
             )
