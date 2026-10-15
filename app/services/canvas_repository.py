@@ -54,15 +54,22 @@ def canvas_item_prefix(workspace_id: str) -> str:
 class CanvasRepository:
     """Canvas access for one design owner. No business rules live here."""
 
-    def __init__(self, table: Any, owner_id: str):
+    def __init__(
+        self, table: Any, owner_id: str, design_title: str = "Untitled Design"
+    ):
         self.table = table
         self.owner_id = owner_id
+        self.design_title = design_title
 
     def _key(self, workspace_id: str, canvas_id: str) -> Dict[str, str]:
         return {"userId": self.owner_id, "id": canvas_item_key(workspace_id, canvas_id)}
 
     def _from_item(self, item: Dict[str, Any]) -> CanvasRecord:
         data = convert_decimal_to_float(dict(item))
+        data.setdefault("nodeCount", len(data.get("nodes", [])))
+        data.setdefault("edgeCount", len(data.get("edges", [])))
+        # The parent design is authoritative; older canvas rows may not have a title.
+        data["title"] = self.design_title
         # The model calls the canvas ID `id`; the stored sort key is a composite.
         data["id"] = data.pop("canvasId")
         data.pop("userId", None)
@@ -72,6 +79,8 @@ class CanvasRepository:
     def _to_item(self, canvas: CanvasRecord) -> Dict[str, Any]:
         # mode="json" keeps enums (canvas kind) as plain strings that DynamoDB can store.
         data = canvas.model_dump(mode="json")
+        data["nodeCount"] = len(canvas.nodes)
+        data["edgeCount"] = len(canvas.edges)
         canvas_id = data.pop("id")
         data["canvasId"] = canvas_id
         data["userId"] = self.owner_id
@@ -97,6 +106,64 @@ class CanvasRepository:
         canvases = [self._from_item(item) for item in items]
         active = [c for c in canvases if c.deletedAt is None]
         return sorted(active, key=lambda c: c.order)
+
+    def list_canvas_summaries(self, workspace_id: str) -> List[Dict[str, Any]]:
+        """Query canvas metadata without loading graph payloads when counts exist."""
+        names = {
+            "#user": "userId",
+            "#sort": "id",
+            "#canvas": "canvasId",
+            "#name": "name",
+            "#kind": "kind",
+            "#order": "order",
+            "#version": "version",
+            "#updated": "updatedAt",
+            "#deleted": "deletedAt",
+            "#nodes": "nodeCount",
+            "#edges": "edgeCount",
+        }
+        query: Dict[str, Any] = {
+            "KeyConditionExpression": Key("userId").eq(self.owner_id)
+            & Key("id").begins_with(canvas_item_prefix(workspace_id)),
+            "ProjectionExpression": ", ".join(names),
+            "ExpressionAttributeNames": names,
+        }
+        items: List[Dict[str, Any]] = []
+        while True:
+            response = self.table.query(**query)
+            items.extend(response.get("Items", []))
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            query["ExclusiveStartKey"] = last_key
+
+        summaries: List[Dict[str, Any]] = []
+        for item in items:
+            if item.get("deletedAt") is not None:
+                continue
+            node_count = item.get("nodeCount")
+            edge_count = item.get("edgeCount")
+            if node_count is None or edge_count is None:
+                # Legacy rows lack counts; fetch only those rows until their next save.
+                canvas = self.get_canvas(workspace_id, item["canvasId"])
+                if canvas is None:
+                    continue
+                node_count = len(canvas.nodes)
+                edge_count = len(canvas.edges)
+            summaries.append(
+                {
+                    "id": item["canvasId"],
+                    "title": self.design_title,
+                    "name": item["name"],
+                    "kind": item["kind"],
+                    "order": item["order"],
+                    "nodeCount": int(node_count),
+                    "edgeCount": int(edge_count),
+                    "version": item["version"],
+                    "updatedAt": item["updatedAt"],
+                }
+            )
+        return sorted(summaries, key=lambda canvas: canvas["order"])
 
     def get_canvas(self, workspace_id: str, canvas_id: str) -> Optional[CanvasRecord]:
         response = self.table.get_item(Key=self._key(workspace_id, canvas_id))
@@ -166,18 +233,23 @@ class CanvasRepository:
             response = self.table.update_item(
                 Key=self._key(workspace_id, canvas_id),
                 UpdateExpression=(
-                    "SET #nodes = :nodes, #edges = :edges, #version = :next, "
+                    "SET #nodes = :nodes, #edges = :edges, #nodeCount = :nodeCount, "
+                    "#edgeCount = :edgeCount, #version = :next, "
                     f"{UPDATED_AT_PLACEHOLDER} = :updatedAt"
                 ),
                 ExpressionAttributeNames={
                     "#nodes": "nodes",
                     "#edges": "edges",
+                    "#nodeCount": "nodeCount",
+                    "#edgeCount": "edgeCount",
                     "#version": "version",
                     UPDATED_AT_PLACEHOLDER: "updatedAt",
                 },
                 ExpressionAttributeValues={
                     ":nodes": convert_floats_to_decimal(nodes),
                     ":edges": convert_floats_to_decimal(edges),
+                    ":nodeCount": len(nodes),
+                    ":edgeCount": len(edges),
                     ":next": expected_version + 1,
                     ":updatedAt": _utc_now(),
                 },

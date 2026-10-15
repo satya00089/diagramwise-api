@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 MAX_CANVASES_PER_WORKSPACE = 10
 MAX_CANVAS_NAME_LENGTH = 60
+DEFAULT_DESIGN_TITLE = "Untitled Design"
 LEGACY_CANVAS_NAME = "Main"
 
 
@@ -28,15 +29,18 @@ class CanvasKind(str, Enum):
 
 
 class CanvasRecord(BaseModel):
-    """One tab of a workspace."""
+    """One named tab of a workspace, carrying its parent design title."""
 
     id: str
     workspaceId: str
+    title: str = Field(default=DEFAULT_DESIGN_TITLE, min_length=1, max_length=200)
     name: str = Field(..., min_length=1, max_length=MAX_CANVAS_NAME_LENGTH)
     kind: CanvasKind = CanvasKind.OTHER
     order: int = Field(..., ge=0)
     nodes: List[Any] = Field(default_factory=list)
     edges: List[Any] = Field(default_factory=list)
+    nodeCount: int = Field(default=0, ge=0)
+    edgeCount: int = Field(default=0, ge=0)
     version: int = Field(default=1, ge=1)
     createdAt: str
     updatedAt: str
@@ -153,6 +157,7 @@ def build_canvas(
     existing: Sequence[CanvasRecord],
     now: str,
     canvas_id: Optional[str] = None,
+    title: str = DEFAULT_DESIGN_TITLE,
 ) -> CanvasRecord:
     """Create a canvas at the end of the tab order with a unique, normalized name."""
     ensure_canvas_capacity(existing)
@@ -162,6 +167,7 @@ def build_canvas(
     return CanvasRecord(
         id=canvas_id or new_canvas_id(),
         workspaceId=workspace_id,
+        title=title,
         name=unique_name,
         kind=kind,
         order=next_order,
@@ -187,6 +193,7 @@ def legacy_canvas_from_diagram(
     edges: List[Any],
     created_at: str,
     updated_at: str,
+    title: str = DEFAULT_DESIGN_TITLE,
 ) -> CanvasRecord:
     """Present a pre-multi-canvas diagram as one canvas.
 
@@ -197,11 +204,14 @@ def legacy_canvas_from_diagram(
     return CanvasRecord(
         id=diagram_id,
         workspaceId=diagram_id,
+        title=title,
         name=LEGACY_CANVAS_NAME,
         kind=CanvasKind.OTHER,
         order=0,
         nodes=nodes,
         edges=edges,
+        nodeCount=len(nodes),
+        edgeCount=len(edges),
         version=1,
         createdAt=created_at,
         updatedAt=updated_at,
@@ -212,11 +222,12 @@ def canvas_summary(canvas: CanvasRecord) -> Dict[str, Any]:
     """Metadata-only view used in workspace responses (no node or edge payload)."""
     return {
         "id": canvas.id,
+        "title": canvas.title,
         "name": canvas.name,
         "kind": canvas.kind.value,
         "order": canvas.order,
-        "nodeCount": len(canvas.nodes),
-        "edgeCount": len(canvas.edges),
+        "nodeCount": canvas.nodeCount or len(canvas.nodes),
+        "edgeCount": canvas.edgeCount or len(canvas.edges),
         "version": canvas.version,
         "updatedAt": canvas.updatedAt,
     }

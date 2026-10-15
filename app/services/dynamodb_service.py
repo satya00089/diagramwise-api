@@ -26,12 +26,11 @@ CANVAS_RECORD_TYPE = "canvas"
 DDB_UPDATED_VALUE = ":updated"
 DDB_COLLABORATORS_VALUE = ":collaborators"
 DDB_COLLABORATORS_UPDATE = (
-    "SET collaborators = :collaborators, updatedAt = :updated"
+    f"SET collaborators = {DDB_COLLABORATORS_VALUE}, updatedAt = {DDB_UPDATED_VALUE}"
 )
 
 def _is_canvas_record(item: Dict[str, Any]) -> bool:
     return item.get("recordType") == CANVAS_RECORD_TYPE
-
 
 DIAGRAM_SUMMARY_ATTRIBUTES = (
     "userId",
@@ -191,7 +190,8 @@ class DynamoDBService:
                 UpdateExpression=(
                     "SET verificationTokenHash = :token, verificationExpiresAt = :expires, "
                     "verificationSentAt = :sent, verificationVersion = "
-                    "if_not_exists(verificationVersion, :zero) + :one, updatedAt = :updated"
+                    f"if_not_exists(verificationVersion, :zero) + :one, "
+                    f"updatedAt = {DDB_UPDATED_VALUE}"
                 ),
                 ExpressionAttributeValues={
                     ":token": token_hash,
@@ -218,7 +218,7 @@ class DynamoDBService:
             update_kwargs: Dict[str, Any] = {
                 "Key": {"id": user_id},
                 "UpdateExpression": (
-                    "SET emailVerified = :verified, updatedAt = :updated "
+                    f"SET emailVerified = :verified, updatedAt = {DDB_UPDATED_VALUE} "
                     "REMOVE verificationTokenHash, verificationExpiresAt, verificationSentAt"
                 ),
                 "ExpressionAttributeValues": {":verified": True, DDB_UPDATED_VALUE: now},
@@ -249,7 +249,8 @@ class DynamoDBService:
             if user.verificationTokenHash and user.verificationExpiresAt and user.verificationSentAt:
                 update_expression = (
                     "SET verificationTokenHash = :token, verificationExpiresAt = :expires, "
-                    "verificationSentAt = :sent, verificationVersion = :version, updatedAt = :updated"
+                    f"verificationSentAt = :sent, verificationVersion = :version, "
+                    f"updatedAt = {DDB_UPDATED_VALUE}"
                 )
                 values.update({
                     ":token": user.verificationTokenHash,
@@ -258,7 +259,7 @@ class DynamoDBService:
                 })
             else:
                 update_expression = (
-                    "SET verificationVersion = :version, updatedAt = :updated "
+                    f"SET verificationVersion = :version, updatedAt = {DDB_UPDATED_VALUE} "
                     "REMOVE verificationTokenHash, verificationExpiresAt, verificationSentAt"
                 )
             self.users_table.update_item(
@@ -320,7 +321,9 @@ class DynamoDBService:
 
             response = self.users_table.update_item(
                 Key={"id": user_id},
-                UpdateExpression="SET preferences = :prefs, updatedAt = :updated",
+                UpdateExpression=(
+                    f"SET preferences = :prefs, updatedAt = {DDB_UPDATED_VALUE}"
+                ),
                 ExpressionAttributeValues={
                     ":prefs": prefs_safe,
                     DDB_UPDATED_VALUE: now,
@@ -340,7 +343,9 @@ class DynamoDBService:
         try:
             response = self.users_table.update_item(
                 Key={"id": user_id},
-                UpdateExpression="SET #roles = :roles, updatedAt = :updated",
+                UpdateExpression=(
+                    f"SET #roles = :roles, updatedAt = {DDB_UPDATED_VALUE}"
+                ),
                 ExpressionAttributeNames={"#roles": "roles"},
                 ExpressionAttributeValues={
                     ":roles": roles,
@@ -457,12 +462,14 @@ class DynamoDBService:
         try:
             response = self.feedback_table.update_item(
                 Key={"id": feedback_id},
-                UpdateExpression="SET #status = :status, updatedAt = :updated",
+                UpdateExpression=(
+                    f"SET #status = :status, updatedAt = {DDB_UPDATED_VALUE}"
+                ),
                 ConditionExpression="attribute_exists(id)",
                 ExpressionAttributeNames={"#status": "status"},
                 ExpressionAttributeValues={
                     ":status": feedback_status,
-                    ":updated": datetime.now(timezone.utc).isoformat(),
+                    DDB_UPDATED_VALUE: datetime.now(timezone.utc).isoformat(),
                 },
                 ReturnValues="ALL_NEW",
             )
@@ -478,7 +485,9 @@ class DynamoDBService:
         try:
             now = datetime.now(timezone.utc).isoformat()
 
-            update_expression = "SET googleId = :google_id, updatedAt = :updated"
+            update_expression = (
+                f"SET googleId = :google_id, updatedAt = {DDB_UPDATED_VALUE}"
+            )
             expression_values: Dict[str, Any] = {
                 ":google_id": google_id,
                 DDB_UPDATED_VALUE: now,
@@ -638,10 +647,15 @@ class DynamoDBService:
                 "ExpressionAttributeNames": DIAGRAM_SUMMARY_NAMES,
                 "Limit": limit,
                 "FilterExpression": (
-                    Attr("recordType").not_exists()
-                    | Attr("recordType").ne("public_snapshot")
-                )
-                & (Attr("recordType").not_exists() | Attr("recordType").ne(CANVAS_RECORD_TYPE)),
+                    (
+                        Attr("recordType").not_exists()
+                        | Attr("recordType").ne("public_snapshot")
+                    )
+                    & (
+                        Attr("recordType").not_exists()
+                        | Attr("recordType").ne(CANVAS_RECORD_TYPE)
+                    )
+                ),
             }
             if exclusive_start_key:
                 query_kwargs["ExclusiveStartKey"] = exclusive_start_key
@@ -685,7 +699,7 @@ class DynamoDBService:
         try:
             now = datetime.now(timezone.utc).isoformat()
 
-            update_expression = "SET updatedAt = :updated"
+            update_expression = f"SET updatedAt = {DDB_UPDATED_VALUE}"
             expression_values: Dict[str, Any] = {DDB_UPDATED_VALUE: now}
             expression_names: Dict[str, str] = {}
 
@@ -740,6 +754,29 @@ class DynamoDBService:
         except ClientError:
             return None
 
+    def clear_diagram_graph(
+        self, user_id: str, diagram_id: str, node_count: int, edge_count: int
+    ) -> bool:
+        """Keep legacy counts current while removing the now-canonical canvas graph."""
+        try:
+            self.diagrams_table.update_item(
+                Key={"userId": user_id, "id": diagram_id},
+                UpdateExpression=(
+                    "SET nodeCount = :node_count, edgeCount = :edge_count, "
+                    f"updatedAt = {DDB_UPDATED_VALUE} REMOVE #nodes, #edges"
+                ),
+                ExpressionAttributeNames={"#nodes": "nodes", "#edges": "edges"},
+                ExpressionAttributeValues={
+                    ":node_count": node_count,
+                    ":edge_count": edge_count,
+                    DDB_UPDATED_VALUE: datetime.now(timezone.utc).isoformat(),
+                },
+                ConditionExpression=Attr("id").exists(),
+            )
+            return True
+        except ClientError:
+            return False
+
     def delete_diagram(self, user_id: str, diagram_id: str) -> bool:
         """Delete a diagram."""
         try:
@@ -755,25 +792,22 @@ class DynamoDBService:
             return False
 
     def _delete_canvas_records(self, owner_id: str, diagram_id: str) -> None:
-        """Remove a design's canvas items, which live under the owner's partition."""
+        """Remove child canvas records stored in the owner's diagrams-table partition."""
         query: Dict[str, Any] = {
             "KeyConditionExpression": Key("userId").eq(owner_id)
             & Key("id").begins_with(f"{diagram_id}#canvas#"),
             "ProjectionExpression": "#u, #i",
             "ExpressionAttributeNames": {"#u": "userId", "#i": "id"},
         }
-        keys: List[Dict[str, Any]] = []
         while True:
             response = self.diagrams_table.query(**query)
-            keys.extend({"userId": item["userId"], "id": item["id"]} for item in response.get("Items", []))
+            with self.diagrams_table.batch_writer() as batch:
+                for item in response.get("Items", []):
+                    batch.delete_item(Key={"userId": item["userId"], "id": item["id"]})
             last_key = response.get("LastEvaluatedKey")
             if not last_key:
                 break
             query["ExclusiveStartKey"] = last_key
-        if keys:
-            with self.diagrams_table.batch_writer() as batch:
-                for key in keys:
-                    batch.delete_item(Key=key)
 
     # Sharing operations
     def share_diagram(
@@ -1852,6 +1886,40 @@ class DynamoDBService:
             diagram = self.get_diagram(user_id, diagram_id)
             if not diagram:
                 return None
+
+            # Multi-canvas graph data is canonical on canvas records. Publishing
+            # continues to expose the primary canvas through the legacy snapshot.
+            canvas_query: Dict[str, Any] = {
+                "KeyConditionExpression": Key("userId").eq(user_id)
+                & Key("id").begins_with(f"{diagram_id}#canvas#")
+            }
+            canvas_items: List[Dict[str, Any]] = []
+            while True:
+                canvas_response = self.diagrams_table.query(**canvas_query)
+                canvas_items.extend(canvas_response.get("Items", []))
+                last_key = canvas_response.get("LastEvaluatedKey")
+                if not last_key:
+                    break
+                canvas_query["ExclusiveStartKey"] = last_key
+            active_canvases = [
+                item
+                for item in canvas_items
+                if item.get("recordType") == CANVAS_RECORD_TYPE
+                and not item.get("deletedAt")
+            ]
+            if active_canvases:
+                primary_item = min(
+                    active_canvases, key=lambda item: int(item.get("order", 0))
+                )
+                primary_graph = convert_decimal_to_float(primary_item)
+                diagram = diagram.model_copy(
+                    update={
+                        "nodes": primary_graph.get("nodes", []),
+                        "edges": primary_graph.get("edges", []),
+                        "nodeCount": len(primary_graph.get("nodes", [])),
+                        "edgeCount": len(primary_graph.get("edges", [])),
+                    }
+                )
 
             now = datetime.now(timezone.utc).isoformat()
             snapshot_id = diagram.publicSnapshotId or str(uuid4())
