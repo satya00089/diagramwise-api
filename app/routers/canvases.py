@@ -1,4 +1,9 @@
-"""Canvas (tab) endpoints for saved designs and problem attempts."""
+"""Canvas (tab) endpoints for multi-canvas workspaces.
+
+A workspace is a diagram. Its canvases are served under
+/diagrams/{diagram_id}/canvases. Pre-multi-canvas diagrams appear as one
+canvas whose ID equals the diagram ID.
+"""
 
 from datetime import datetime, timezone
 import logging
@@ -58,14 +63,14 @@ def _canvas_service(
 ) -> CanvasService:
     """Built per request. Canvases live under the design owner's partition of the diagrams table."""
     return CanvasService(
-        CanvasRepository(dynamodb_service.diagrams_table, owner_id, design_title)
+        CanvasRepository(dynamodb_service.diagrams_table, owner_id, design_title),
+        design_title,
     )
 
 
 def _load_workspace(user_id: str, diagram_id: str, action: str):
     """Return (diagram, legacy_fallback) after checking the caller's permission."""
-    # Owner reads are already authorized by the owner-scoped lookup. Avoid a
-    # second full diagram read through validate_diagram_access on the hot path.
+    # Owner reads are authorized by the owner-scoped lookup. Validate only shared access.
     diagram = dynamodb_service.get_diagram(user_id, diagram_id)
     if not diagram:
         has_access, error_msg = validate_diagram_access(user_id, diagram_id, action)
@@ -254,7 +259,7 @@ async def save_canvas_content(
         )
         primary = primary_canvas(service.repository.list_canvases(diagram_id))
         if primary is not None:
-            # The canvas is canonical. Keep only primary-canvas counts on the parent.
+            # Canvas content is canonical; keep only summary counts on the parent.
             if not dynamodb_service.clear_diagram_graph(
                 diagram.userId,
                 diagram_id,
@@ -423,7 +428,9 @@ async def get_attempt_canvas(
     user_id = current_user["user_id"]
     workspace_id, legacy = _load_attempt_workspace(user_id, problem_id)
     try:
-        return _canvas_service(user_id, legacy.title).get_canvas(workspace_id, canvas_id, legacy)
+        return _canvas_service(user_id, legacy.title).get_canvas(
+            workspace_id, canvas_id, legacy
+        )
     except CanvasNotFound as error:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=CANVAS_NOT_FOUND
@@ -557,11 +564,12 @@ async def delete_attempt_canvas(
     user_id = current_user["user_id"]
     workspace_id, legacy = _load_attempt_workspace(user_id, problem_id)
     try:
-        _canvas_service(user_id, legacy.title).delete_canvas(workspace_id, canvas_id, legacy)
+        _canvas_service(user_id, legacy.title).delete_canvas(
+            workspace_id, canvas_id, legacy
+        )
     except CanvasNotFound as error:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=CANVAS_NOT_FOUND
         ) from error
     except CanvasValidationError as error:
         raise _map_validation(error) from error
-

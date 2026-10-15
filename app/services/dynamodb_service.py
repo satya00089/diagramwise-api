@@ -21,13 +21,13 @@ from app.models.problem_models import RequirementSpec
 settings = get_settings()
 
 DDB_ZERO_VALUE = ":zero"
+# Canvas items share the diagrams table; this marks them so diagram lists skip them.
 CANVAS_RECORD_TYPE = "canvas"
 DDB_UPDATED_VALUE = ":updated"
 DDB_COLLABORATORS_VALUE = ":collaborators"
 DDB_COLLABORATORS_UPDATE = (
     "SET collaborators = :collaborators, updatedAt = :updated"
 )
-
 
 def _is_canvas_record(item: Dict[str, Any]) -> bool:
     return item.get("recordType") == CANVAS_RECORD_TYPE

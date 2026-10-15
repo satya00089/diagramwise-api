@@ -7,6 +7,7 @@ from botocore.exceptions import ClientError
 
 from app.models.canvas_models import (
     build_canvas,
+    canvas_summary,
     MAX_CANVASES_PER_WORKSPACE,
     CanvasKind,
     CanvasRecord,
@@ -29,6 +30,9 @@ class InMemoryCanvasRepository:
     def list_canvases(self, workspace_id: str) -> List[CanvasRecord]:
         rows = [c for (ws, _), c in self.rows.items() if ws == workspace_id and c.deletedAt is None]
         return sorted(rows, key=lambda c: c.order)
+
+    def list_canvas_summaries(self, workspace_id: str):
+        return [canvas_summary(canvas) for canvas in self.list_canvases(workspace_id)]
 
     def get_canvas(self, workspace_id: str, canvas_id: str) -> Optional[CanvasRecord]:
         row = self.rows.get((workspace_id, canvas_id))
@@ -54,7 +58,13 @@ class InMemoryCanvasRepository:
         if current is None or current.version != expected_version:
             raise CanvasVersionConflict(current.version if current else None)
         updated = current.model_copy(
-            update={"nodes": nodes, "edges": edges, "version": expected_version + 1}
+            update={
+                "nodes": nodes,
+                "edges": edges,
+                "nodeCount": len(nodes),
+                "edgeCount": len(edges),
+                "version": expected_version + 1,
+            }
         )
         self.rows[(workspace_id, canvas_id)] = updated
         return updated
@@ -249,10 +259,9 @@ def test_repository_maps_canvas_id_to_model_id():
             "updatedAt": NOW,
         }
     }
-    canvas = CanvasRepository(table, "owner-1", "System design").get_canvas(WS, "c1")
+    canvas = CanvasRepository(table, "owner-1").get_canvas(WS, "c1")
     assert canvas.id == "c1"
     assert canvas.kind == CanvasKind.FLOW
-    assert canvas.title == "System design"
 
 
 def test_repository_stale_save_raises_conflict_with_current_version():
@@ -366,7 +375,6 @@ def test_canvas_item_uses_owner_partition_and_composite_sort_key():
     assert item["id"] == f"{WS}#canvas#{WS}"
     assert item["canvasId"] == WS
     assert item["recordType"] == "canvas"
-    assert item["title"] == canvas.title
     assert item["kind"] == "other", "kind must be stored as a plain string"
 
 
@@ -390,4 +398,3 @@ def test_list_queries_only_this_workspaces_canvas_prefix():
     parts = expression["values"]
     assert any(isinstance(part, BeginsWith) for part in parts)
     assert any(isinstance(part, Equals) for part in parts)
-

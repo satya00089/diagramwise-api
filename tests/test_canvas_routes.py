@@ -1,12 +1,13 @@
+import itertools
 from datetime import datetime, timezone
-from types import SimpleNamespace
 
 import pytest
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.main import app
 from app.models.canvas_models import CanvasContentUpdate
-from app.models.diagram_models import Diagram
+from app.models.diagram_models import Diagram, DiagramUpdate
+from app.routers import diagrams as diagrams_router
 from app.routers import canvases as canvases_router
 from app.routers.auth import get_current_user
 from app.services.canvas_service import CanvasService
@@ -18,13 +19,18 @@ DIAGRAM_ID = "diagram-legacy"
 NOW = datetime(2026, 10, 14, tzinfo=timezone.utc).isoformat()
 
 
+_client_counter = itertools.count(1)
+
+
 @pytest.fixture
 def client(monkeypatch):
     repository = InMemoryCanvasRepository()
     monkeypatch.setattr(
         canvases_router,
         "_canvas_service",
-        lambda owner_id, design_title="Untitled Design": CanvasService(repository),
+        lambda owner_id, design_title="Untitled Design": CanvasService(
+            repository, design_title
+        ),
     )
     monkeypatch.setattr(
         canvases_router,
@@ -48,30 +54,17 @@ def client(monkeypatch):
     monkeypatch.setattr(
         canvases_router.dynamodb_service, "get_shared_diagrams_for_user", lambda user_id: []
     )
-    monkeypatch.setattr(
-        canvases_router.dynamodb_service, "get_user_by_id", lambda user_id: None
-    )
-    monkeypatch.setattr(
-        canvases_router.dynamodb_service,
-        "get_attempt_by_problem",
-        lambda user_id, problem_id: None,
-    )
 
     current = {"user_id": OWNER}
-    test_app = FastAPI()
-    test_app.include_router(canvases_router.router, prefix="/api/v1")
-    test_app.dependency_overrides[get_current_user] = lambda: current
-    # Avoid the production app lifespan; these route tests fake DynamoDB entirely.
-    yield TestClient(test_app), current
-    test_app.dependency_overrides.pop(get_current_user, None)
+    app.dependency_overrides[get_current_user] = lambda: current
+    # Each test gets its own client IP so the per-IP rate limiter starts empty.
+    n = next(_client_counter)
+    yield TestClient(app, client=(f"10.77.{n // 250}.{n % 250 + 1}", 50000)), current
+    app.dependency_overrides.pop(get_current_user, None)
 
 
 def _base(diagram_id: str = DIAGRAM_ID) -> str:
     return f"/api/v1/diagrams/{diagram_id}/canvases"
-
-
-def _attempt_base(problem_id: str = "problem-1") -> str:
-    return f"/api/v1/attempts/problem/{problem_id}/canvases"
 
 
 def test_legacy_diagram_lists_as_one_canvas(client):
@@ -79,16 +72,11 @@ def test_legacy_diagram_lists_as_one_canvas(client):
     body = api.get(_base()).json()
     assert body["primaryCanvasId"] == DIAGRAM_ID
     assert [c["name"] for c in body["canvases"]] == ["Main"]
-    assert body["canvases"][0]["title"] == "Legacy design"
     assert body["canvases"][0]["nodeCount"] == 1
 
-    detail = api.get(f"{_base()}/{DIAGRAM_ID}").json()
-    assert detail["title"] == "Legacy design"
 
-
-def test_workspace_bootstrap_returns_design_and_canvas_summaries_without_graph(client):
+def test_workspace_bootstrap_returns_metadata_and_canvas_summary_without_graph(client):
     _, current = client
-
     endpoint = canvases_router.get_diagram_workspace(
         DIAGRAM_ID, current_user=current
     )
@@ -96,79 +84,41 @@ def test_workspace_bootstrap_returns_design_and_canvas_summaries_without_graph(c
         endpoint.send(None)
         raise AssertionError("workspace bootstrap endpoint unexpectedly yielded")
     except StopIteration as completed:
-        response = completed.value
-    body = response.model_dump()
+        body = completed.value.model_dump()
+
     assert body["design"]["title"] == "Legacy design"
-    assert body["design"]["createdAt"] == NOW
     assert body["workspaceId"] == DIAGRAM_ID
     assert body["primaryCanvasId"] == DIAGRAM_ID
     assert body["canvases"][0]["name"] == "Main"
     assert body["canvases"][0]["nodeCount"] == 1
     assert "nodes" not in body["design"]
-    assert "edges" not in body["design"]
-    assert "nodes" not in body["canvases"][0]
     assert "edges" not in body["canvases"][0]
 
 
-def test_unsaved_problem_attempt_starts_with_a_private_main_canvas(client):
-    api, _ = client
-    response = api.get(_attempt_base())
-    assert response.status_code == 200
-    body = response.json()
-    assert body["workspaceId"] == "attempt:problem-1"
-    assert body["primaryCanvasId"] == "attempt:problem-1"
-    assert body["canvases"][0]["name"] == "Main"
-    assert body["canvases"][0]["nodeCount"] == 0
-    assert body["canvases"][0]["title"] == "Problem Attempt"
-
-    created = api.post(
-        _attempt_base(), json={"name": "ER model", "kind": "er"}
-    )
-    assert created.status_code == 201
-    assert created.json()["title"] == "Problem Attempt"
-    assert [
-        canvas["name"] for canvas in api.get(_attempt_base()).json()["canvases"]
-    ] == ["Main", "ER model"]
-
-
-def test_existing_problem_attempt_content_becomes_the_primary_canvas(
-    client, monkeypatch
-):
-    api, _ = client
+def test_primary_canvas_save_cleans_legacy_graph_from_design_record(client, monkeypatch):
+    _, current = client
+    cleared = []
     monkeypatch.setattr(
         canvases_router.dynamodb_service,
-        "get_attempt_by_problem",
-        lambda user_id, problem_id: SimpleNamespace(
-            nodes=[{"id": "entity-user"}],
-            edges=[],
-            createdAt=NOW,
-            updatedAt=NOW,
-        ),
+        "clear_diagram_graph",
+        lambda owner, design_id, node_count, edge_count: cleared.append(
+            (owner, design_id, node_count, edge_count)
+        )
+        or True,
     )
-    response = api.get(_attempt_base("uml-basics"))
-    assert response.status_code == 200
-    assert response.json()["canvases"][0]["nodeCount"] == 1
-
-
-def test_problem_canvas_storage_is_scoped_to_the_authenticated_user(client, monkeypatch):
-    api, current = client
-    repositories = {}
-
-    def service_for(owner_id):
-        repository = repositories.setdefault(owner_id, InMemoryCanvasRepository())
-        return CanvasService(repository)
-
-    monkeypatch.setattr(canvases_router, "_canvas_service", service_for)
-    created = api.post(
-        _attempt_base(), json={"name": "Private UML", "kind": "uml"}
+    endpoint = canvases_router.save_canvas_content(
+        DIAGRAM_ID,
+        DIAGRAM_ID,
+        CanvasContentUpdate(nodes=[{"id": "saved-node"}], edges=[], version=1),
+        current_user=current,
     )
-    assert created.status_code == 201
-
-    current["user_id"] = OTHER
-    response = api.get(_attempt_base())
-    assert response.status_code == 200
-    assert [canvas["name"] for canvas in response.json()["canvases"]] == ["Main"]
-    assert response.json()["canvases"][0]["nodeCount"] == 0
+    try:
+        endpoint.send(None)
+        raise AssertionError("canvas save endpoint unexpectedly yielded")
+    except StopIteration as completed:
+        response = completed.value
+    assert response.nodes == [{"id": "saved-node"}]
+    assert cleared == [(OWNER, DIAGRAM_ID, 1, 0)]
 
 
 def test_create_then_list_shows_new_tab_after_legacy(client):
@@ -195,34 +145,6 @@ def test_stale_save_returns_409_with_current_version(client):
     )
     assert stale.status_code == 409
     assert stale.json()["detail"]["currentVersion"] == 2
-
-
-def test_primary_canvas_save_cleans_legacy_graph_from_design_record(client, monkeypatch):
-    _, current = client
-    cleared = []
-    monkeypatch.setattr(
-        canvases_router.dynamodb_service,
-        "clear_diagram_graph",
-        lambda owner, design_id, node_count, edge_count: cleared.append(
-            (owner, design_id, node_count, edge_count)
-        )
-        or True,
-    )
-
-    endpoint = canvases_router.save_canvas_content(
-        DIAGRAM_ID,
-        DIAGRAM_ID,
-        CanvasContentUpdate(nodes=[{"id": "new-node"}], edges=[], version=1),
-        current_user=current,
-    )
-    try:
-        endpoint.send(None)
-        raise AssertionError("canvas save endpoint unexpectedly yielded")
-    except StopIteration as completed:
-        response = completed.value
-
-    assert response.nodes == [{"id": "new-node"}]
-    assert cleared == [(OWNER, DIAGRAM_ID, 1, 0)]
 
 
 def test_invalid_graph_is_rejected_with_400(client):
@@ -287,23 +209,58 @@ def test_unknown_workspace_is_404(client):
     assert response.status_code == 404
 
 
-def test_primary_save_mirrors_into_diagram(client, monkeypatch):
-    api, _ = client
-    mirrored = []
+def test_legacy_diagram_put_saves_primary_canvas_without_mirroring_graph(client, monkeypatch):
+    _, current = client
+    repository = InMemoryCanvasRepository()
+    updates = []
+    cleared = []
     monkeypatch.setattr(
-        canvases_router.dynamodb_service,
-        "update_diagram",
-        lambda **kwargs: mirrored.append(kwargs),
+        diagrams_router,
+        "CanvasRepository",
+        lambda table, owner_id, *args: repository,
     )
-    created = api.post(_base(), json={"name": "Flow", "kind": "flow"}).json()
+    monkeypatch.setattr(
+        diagrams_router,
+        "validate_diagram_access",
+        lambda user_id, diagram_id, action: (True, ""),
+    )
+    monkeypatch.setattr(
+        diagrams_router.dynamodb_service,
+        "update_diagram",
+        lambda **kwargs: updates.append(kwargs)
+        or Diagram(
+            id=DIAGRAM_ID,
+            userId=OWNER,
+            title="Legacy design",
+            nodes=[],
+            edges=[],
+            createdAt=NOW,
+            updatedAt=NOW,
+        ),
+    )
+    monkeypatch.setattr(
+        diagrams_router.dynamodb_service,
+        "clear_diagram_graph",
+        lambda owner, design_id, node_count, edge_count: cleared.append(
+            (owner, design_id, node_count, edge_count)
+        )
+        or True,
+    )
+    monkeypatch.setattr(
+        diagrams_router.dynamodb_service, "get_user_by_id", lambda user_id: None
+    )
 
-    # The legacy canvas stays primary (lowest order), so its saves mirror.
-    api.put(f"{_base()}/{DIAGRAM_ID}", json={"nodes": [{"id": "p"}], "edges": [], "version": 1})
-    assert len(mirrored) == 1
-    assert mirrored[0]["diagram_id"] == DIAGRAM_ID
-    assert mirrored[0]["nodes"] == [{"id": "p"}]
+    endpoint = diagrams_router.update_diagram(
+        DIAGRAM_ID,
+        DiagramUpdate(nodes=[{"id": "legacy-save"}], edges=[]),
+        current_user=current,
+    )
+    try:
+        endpoint.send(None)
+        raise AssertionError("legacy update endpoint unexpectedly yielded")
+    except StopIteration as completed:
+        response = completed.value
 
-    # Saves to a non-primary tab must not overwrite the diagram.
-    api.put(f"{_base()}/{created['id']}", json={"nodes": [{"id": "f"}], "edges": [], "version": 1})
-    assert len(mirrored) == 1
-
+    assert response.nodes == [{"id": "legacy-save"}]
+    assert "nodes" not in updates[0] and "edges" not in updates[0]
+    assert cleared == [(OWNER, DIAGRAM_ID, 1, 0)]

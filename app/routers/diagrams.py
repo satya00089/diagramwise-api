@@ -1,6 +1,7 @@
 """Diagrams router for CRUD operations on diagrams."""
 
 import base64
+import logging
 import binascii
 import json
 from datetime import datetime, timezone
@@ -31,6 +32,7 @@ from app.services.validation import validate_diagram_access, validate_collaborat
 from app.routers.auth import get_current_user
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # Constants
 DIAGRAM_NOT_FOUND = "Diagram not found"

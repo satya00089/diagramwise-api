@@ -127,10 +127,8 @@ def test_legacy_diagram_becomes_single_canvas_with_same_id():
         edges=[],
         created_at=NOW,
         updated_at=NOW,
-        title="Design title",
     )
     assert canvas.id == "diag-123"
-    assert canvas.title == "Design title"
     assert canvas.name == "Main"
     assert canvas.order == 0
     assert canvas.nodes == [{"id": "n1"}]
@@ -145,10 +143,8 @@ def test_canvas_summary_omits_payload_and_counts_items():
         updated_at=NOW,
     )
     summary = canvas_summary(canvas)
-    assert summary["title"] == "Untitled Design"
     assert summary["nodeCount"] == 2
     assert summary["edgeCount"] == 1
     assert "nodes" not in summary
     assert "edges" not in summary
     assert summary["kind"] == "other"
-

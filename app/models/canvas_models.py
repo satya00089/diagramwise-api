@@ -230,4 +230,3 @@ def canvas_summary(canvas: CanvasRecord) -> Dict[str, Any]:
         "version": canvas.version,
         "updatedAt": canvas.updatedAt,
     }
-

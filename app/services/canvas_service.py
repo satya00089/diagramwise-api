@@ -6,7 +6,7 @@ It is shown when a workspace has no canvas records yet, and it is persisted
 """
 
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import logging
 
@@ -15,12 +15,12 @@ from app.models.canvas_models import (
     CanvasRecord,
     CanvasValidationError,
     build_canvas,
-    canvas_summary,
     dedupe_canvas_name,
     ensure_not_last_canvas,
     new_canvas_id,
     normalize_canvas_name,
     primary_canvas,
+    canvas_summary,
     validate_canvas_graph,
 )
 from app.services.canvas_repository import CanvasRepository, CanvasVersionConflict
@@ -38,8 +38,11 @@ def _now() -> str:
 
 
 class CanvasService:
-    def __init__(self, repository: CanvasRepository):
+    def __init__(
+        self, repository: CanvasRepository, design_title: str = "Untitled Design"
+    ):
         self.repository = repository
+        self.design_title = design_title
 
     def list_canvases(
         self, workspace_id: str, legacy_fallback: Optional[CanvasRecord]
@@ -51,16 +54,8 @@ class CanvasService:
 
     def list_canvas_summaries(
         self, workspace_id: str, legacy_fallback: Optional[CanvasRecord]
-    ) -> List[dict]:
-        list_summaries = getattr(self.repository, "list_canvas_summaries", None)
-        summaries = (
-            list_summaries(workspace_id)
-            if callable(list_summaries)
-            else [
-                canvas_summary(canvas)
-                for canvas in self.repository.list_canvases(workspace_id)
-            ]
-        )
+    ) -> List[Dict[str, Any]]:
+        summaries = self.repository.list_canvas_summaries(workspace_id)
         if summaries:
             return summaries
         return [canvas_summary(legacy_fallback)] if legacy_fallback else []
@@ -133,7 +128,7 @@ class CanvasService:
             existing,
             _now(),
             canvas_id=new_canvas_id(),
-            title=legacy_fallback.title if legacy_fallback else "Untitled Design",
+            title=self.design_title,
         )
         if not self.repository.put_new_canvas(canvas):
             raise CanvasValidationError("Canvas could not be created, please retry")
@@ -231,13 +226,19 @@ class CanvasService:
             existing,
             _now(),
             canvas_id=new_canvas_id(),
-            title=source.title,
+            title=self.design_title,
         )
-        canvas = canvas.model_copy(update={"nodes": list(source.nodes), "edges": list(source.edges)})
+        canvas = canvas.model_copy(
+            update={
+                "nodes": list(source.nodes),
+                "edges": list(source.edges),
+                "nodeCount": len(source.nodes),
+                "edgeCount": len(source.edges),
+            }
+        )
         if not self.repository.put_new_canvas(canvas):
             raise CanvasValidationError("Canvas could not be duplicated, please retry")
         return canvas
 
 
 __all__ = ["CanvasService", "CanvasNotFound", "CanvasVersionConflict"]
-

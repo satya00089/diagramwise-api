@@ -68,7 +68,7 @@ class CanvasRepository:
         data = convert_decimal_to_float(dict(item))
         data.setdefault("nodeCount", len(data.get("nodes", [])))
         data.setdefault("edgeCount", len(data.get("edges", [])))
-        # The parent design is authoritative; older canvas rows may not have title yet.
+        # The parent design is authoritative; older canvas rows may not have a title.
         data["title"] = self.design_title
         # The model calls the canvas ID `id`; the stored sort key is a composite.
         data["id"] = data.pop("canvasId")
@@ -137,15 +137,14 @@ class CanvasRepository:
                 break
             query["ExclusiveStartKey"] = last_key
 
-        summaries = []
+        summaries: List[Dict[str, Any]] = []
         for item in items:
             if item.get("deletedAt") is not None:
                 continue
             node_count = item.get("nodeCount")
             edge_count = item.get("edgeCount")
             if node_count is None or edge_count is None:
-                # Older canvas items predate persisted counts. Read just those
-                # legacy rows fully; subsequent saves add counts for future lists.
+                # Legacy rows lack counts; fetch only those rows until their next save.
                 canvas = self.get_canvas(workspace_id, item["canvasId"])
                 if canvas is None:
                     continue
@@ -155,16 +154,16 @@ class CanvasRepository:
                 {
                     "id": item["canvasId"],
                     "title": self.design_title,
-                    "name": item.get("name", "Main"),
-                    "kind": item.get("kind", "other"),
-                    "order": int(item.get("order", 0)),
+                    "name": item["name"],
+                    "kind": item["kind"],
+                    "order": item["order"],
                     "nodeCount": int(node_count),
                     "edgeCount": int(edge_count),
-                    "version": int(item.get("version", 1)),
-                    "updatedAt": item.get("updatedAt", ""),
+                    "version": item["version"],
+                    "updatedAt": item["updatedAt"],
                 }
             )
-        return sorted(summaries, key=lambda summary: summary["order"])
+        return sorted(summaries, key=lambda canvas: canvas["order"])
 
     def get_canvas(self, workspace_id: str, canvas_id: str) -> Optional[CanvasRecord]:
         response = self.table.get_item(Key=self._key(workspace_id, canvas_id))
@@ -197,7 +196,6 @@ class CanvasRepository:
         if not updates:
             return self.get_canvas(workspace_id, canvas_id)
 
-        updates = {**updates, "title": self.design_title}
         names = {UPDATED_AT_PLACEHOLDER: "updatedAt"}
         values: Dict[str, Any] = {":updatedAt": _utc_now()}
         set_parts = [f"{UPDATED_AT_PLACEHOLDER} = :updatedAt"]
@@ -235,9 +233,9 @@ class CanvasRepository:
             response = self.table.update_item(
                 Key=self._key(workspace_id, canvas_id),
                 UpdateExpression=(
-                    "SET #nodes = :nodes, #edges = :edges, "
-                    "#nodeCount = :nodeCount, #edgeCount = :edgeCount, #version = :next, "
-                    f"{UPDATED_AT_PLACEHOLDER} = :updatedAt, #title = :title"
+                    "SET #nodes = :nodes, #edges = :edges, #nodeCount = :nodeCount, "
+                    "#edgeCount = :edgeCount, #version = :next, "
+                    f"{UPDATED_AT_PLACEHOLDER} = :updatedAt"
                 ),
                 ExpressionAttributeNames={
                     "#nodes": "nodes",
@@ -245,7 +243,6 @@ class CanvasRepository:
                     "#nodeCount": "nodeCount",
                     "#edgeCount": "edgeCount",
                     "#version": "version",
-                    "#title": "title",
                     UPDATED_AT_PLACEHOLDER: "updatedAt",
                 },
                 ExpressionAttributeValues={
@@ -255,7 +252,6 @@ class CanvasRepository:
                     ":edgeCount": len(edges),
                     ":next": expected_version + 1,
                     ":updatedAt": _utc_now(),
-                    ":title": self.design_title,
                 },
                 ConditionExpression=Attr("version").eq(expected_version)
                 & Attr("deletedAt").not_exists(),
@@ -290,4 +286,3 @@ class CanvasRepository:
                 return False
             raise
         return True
-
