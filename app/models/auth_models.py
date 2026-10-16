@@ -1,6 +1,6 @@
 """Authentication related Pydantic models."""
 
-from typing import Any, Dict, List, Literal, Optional, cast
+from typing import Any, Dict, List, Optional, cast
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 
@@ -117,20 +117,12 @@ class UserProfileUpdate(BaseModel):
 
 
 class UserAvatarUpdate(BaseModel):
-    """Select a curated Blobatar or clear the selection to use the photo fallback."""
+    """Select a Blobatar option or clear it to use the photo fallback."""
 
-    avatarKey: Optional[
-        Literal[
-            "blobatar-v2-01",
-            "blobatar-v2-02",
-            "blobatar-v2-03",
-            "blobatar-v2-04",
-            "blobatar-v2-05",
-            "blobatar-v2-06",
-            "blobatar-v2-07",
-            "blobatar-v2-08",
-        ]
-    ] = None
+    avatarKey: Optional[str] = Field(
+        default=None,
+        pattern=r"^blobatar-v2-(?:0[1-9]|[1-9]\d{0,8})$",
+    )
 
 
 class UserPreferences(BaseModel):
