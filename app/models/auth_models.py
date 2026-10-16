@@ -51,6 +51,8 @@ class UserResponse(BaseModel):
     id: str
     email: str
     name: Optional[str] = None
+    firstName: Optional[str] = None
+    lastName: Optional[str] = None
     picture: Optional[str] = None
     preferences: Optional[Dict[str, Any]] = None
     roles: List[str] = Field(default_factory=list)
@@ -85,6 +87,8 @@ class User(BaseModel):
     email: str
     passwordHash: Optional[str] = None  # Optional for Google users
     name: Optional[str] = None
+    firstName: Optional[str] = None
+    lastName: Optional[str] = None
     picture: Optional[str] = None
     googleId: Optional[str] = None
     preferences: Optional[Dict[str, Any]] = None
@@ -96,6 +100,18 @@ class User(BaseModel):
     verificationVersion: int = 0
     createdAt: str
     updatedAt: str
+
+
+class UserProfileUpdate(BaseModel):
+    """Editable name fields for the authenticated user's profile."""
+
+    firstName: str = Field(..., min_length=1, max_length=80)
+    lastName: str = Field(default="", max_length=80)
+
+    @field_validator("firstName", "lastName", mode="before")
+    @classmethod
+    def _trim_names(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
 
 
 class UserPreferences(BaseModel):
