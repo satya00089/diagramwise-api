@@ -227,6 +227,7 @@ def _user_summary(user: Any) -> Dict[str, Any]:
         "name": user.name or "Anonymous",
         "email": user.email,
         "pictureUrl": user.picture or None,
+        "avatarKey": user.avatarKey,
     }
 
 

@@ -329,6 +329,29 @@ class DynamoDBService:
             print(f"Error updating user profile: {e}")
             return None
 
+    def update_user_avatar(self, user_id: str, avatar_key: Optional[str]) -> Optional[User]:
+        """Save or clear a user's curated avatar key."""
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            response = self.users_table.update_item(
+                Key={"id": user_id},
+                UpdateExpression=(
+                    f"SET avatarKey = :avatar_key, updatedAt = {DDB_UPDATED_VALUE}"
+                ),
+                ExpressionAttributeValues={
+                    ":avatar_key": avatar_key,
+                    DDB_UPDATED_VALUE: now,
+                },
+                ReturnValues="ALL_NEW",
+            )
+            item = response.get("Attributes")
+            if item:
+                return User.model_validate(cast(Dict[str, Any], item))
+            return None
+        except ClientError as e:
+            print(f"Error updating user avatar: {e}")
+            return None
+
     def get_user_preferences(self, user_id: str) -> Optional[Dict[str, Any]]:
         """Return the preferences blob for a user, if present."""
         try:
