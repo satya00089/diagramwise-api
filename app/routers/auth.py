@@ -52,7 +52,10 @@ def _user_name_fields(user: Any) -> tuple[str, str]:
     last_name = getattr(user, "lastName", None)
     if first_name is None and last_name is None:
         parts = (getattr(user, "name", None) or "").strip().split(None, 1)
-        return (parts[0], parts[1] if len(parts) > 1 else "") if parts else ("", "")
+        if not parts:
+            return "", ""
+        fallback_last_name = parts[1] if len(parts) > 1 else ""
+        return parts[0], fallback_last_name
     return (first_name or "", last_name or "")
 
 
@@ -548,7 +551,7 @@ async def get_me(
     return _user_response(user, include_preferences=True)
 
 
-@router.patch("/auth/me/profile", response_model=UserResponse)
+@router.patch("/auth/me/profile")
 async def update_my_profile(
     profile: UserProfileUpdate,
     current_user: Annotated[Dict[str, Any], Depends(get_current_user)],
