@@ -74,6 +74,14 @@ def _user_response(user: Any, *, include_preferences: bool = False) -> UserRespo
     )
 
 
+def _authenticated_user_response(user: Any) -> AuthResponse:
+    """Create the standard authenticated session response for a user."""
+    token = auth_service.create_access_token(
+        data={"user_id": user.id, "email": user.email}
+    )
+    return AuthResponse(user=_user_response(user), token=token)
+
+
 def _hash_verification_token(token: str) -> str:
     secret = settings.email_verification_secret or settings.jwt_secret_key
     return hmac.new(secret.encode("utf-8"), token.encode("utf-8"), hashlib.sha256).hexdigest()
@@ -302,14 +310,7 @@ async def login(request: LoginRequest):
             detail="Please activate your account using the link sent to your email.",
         )
 
-    # Create JWT token
-    token = auth_service.create_access_token(
-        data={"user_id": user.id, "email": user.email}
-    )
-    return AuthResponse(
-        user=_user_response(user),
-        token=token,
-    )
+    return _authenticated_user_response(user)
 
 
 def _authenticate_google_credential(credential: str) -> AuthResponse:
@@ -356,14 +357,7 @@ def _authenticate_google_credential(credential: str) -> AuthResponse:
         # A valid Google identity token proves control of the Google mailbox.
         user = dynamodb_service.mark_email_verified(user.id) or user
 
-    # Create JWT token
-    token = auth_service.create_access_token(
-        data={"user_id": user.id, "email": user.email}
-    )
-    return AuthResponse(
-        user=_user_response(user),
-        token=token,
-    )
+    return _authenticated_user_response(user)
 
 
 @router.post("/auth/google", response_model=AuthResponse)
