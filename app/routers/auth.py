@@ -56,6 +56,24 @@ def _user_name_fields(user: Any) -> tuple[str, str]:
     return (first_name or "", last_name or "")
 
 
+def _user_response(user: Any, *, include_preferences: bool = False) -> UserResponse:
+    """Build a user response while retaining the legacy full-name field."""
+    first_name, last_name = _user_name_fields(user)
+    return UserResponse(
+        id=user.id,
+        email=user.email,
+        name=user.name,
+        firstName=first_name,
+        lastName=last_name,
+        picture=user.picture,
+        preferences=getattr(user, "preferences", None) if include_preferences else None,
+        roles=user.roles,
+        isSuperAdmin=is_super_admin_user(user),
+        emailVerified=_is_email_verified(user),
+        createdAt=user.createdAt,
+    )
+
+
 def _hash_verification_token(token: str) -> str:
     secret = settings.email_verification_secret or settings.jwt_secret_key
     return hmac.new(secret.encode("utf-8"), token.encode("utf-8"), hashlib.sha256).hexdigest()
@@ -288,21 +306,8 @@ async def login(request: LoginRequest):
     token = auth_service.create_access_token(
         data={"user_id": user.id, "email": user.email}
     )
-    first_name, last_name = _user_name_fields(user)
-
     return AuthResponse(
-        user=UserResponse(
-            id=user.id,
-            email=user.email,
-            name=user.name,
-            firstName=first_name,
-            lastName=last_name,
-            picture=user.picture,
-            roles=user.roles,
-            isSuperAdmin=is_super_admin_user(user),
-            emailVerified=_is_email_verified(user),
-            createdAt=user.createdAt,
-        ),
+        user=_user_response(user),
         token=token,
     )
 
@@ -355,21 +360,8 @@ def _authenticate_google_credential(credential: str) -> AuthResponse:
     token = auth_service.create_access_token(
         data={"user_id": user.id, "email": user.email}
     )
-    first_name, last_name = _user_name_fields(user)
-
     return AuthResponse(
-        user=UserResponse(
-            id=user.id,
-            email=user.email,
-            name=user.name,
-            firstName=first_name,
-            lastName=last_name,
-            picture=user.picture,
-            roles=user.roles,
-            isSuperAdmin=is_super_admin_user(user),
-            emailVerified=_is_email_verified(user),
-            createdAt=user.createdAt,
-        ),
+        user=_user_response(user),
         token=token,
     )
 
@@ -559,20 +551,7 @@ async def get_me(
             status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
         )
 
-    first_name, last_name = _user_name_fields(user)
-    return UserResponse(
-        id=user.id,
-        email=user.email,
-        name=user.name,
-        firstName=first_name,
-        lastName=last_name,
-        picture=user.picture,
-        emailVerified=_is_email_verified(user),
-        preferences=getattr(user, "preferences", None),
-        roles=user.roles,
-        isSuperAdmin=is_super_admin_user(user),
-        createdAt=user.createdAt,
-    )
+    return _user_response(user, include_preferences=True)
 
 
 @router.patch("/auth/me/profile", response_model=UserResponse)
@@ -590,19 +569,7 @@ async def update_my_profile(
             detail="Failed to update profile",
         )
 
-    return UserResponse(
-        id=updated.id,
-        email=updated.email,
-        name=updated.name,
-        firstName=updated.firstName,
-        lastName=updated.lastName,
-        picture=updated.picture,
-        preferences=updated.preferences,
-        roles=updated.roles,
-        isSuperAdmin=is_super_admin_user(updated),
-        emailVerified=_is_email_verified(updated),
-        createdAt=updated.createdAt,
-    )
+    return _user_response(updated, include_preferences=True)
 
 
 @router.get("/auth/me/preferences")
