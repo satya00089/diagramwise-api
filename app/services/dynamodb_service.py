@@ -299,6 +299,36 @@ class DynamoDBService:
         except ClientError:
             return None
 
+    def update_user_profile(
+        self, user_id: str, first_name: str, last_name: str
+    ) -> Optional[User]:
+        """Update a user's editable name fields without changing preferences."""
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            display_name = " ".join(part for part in (first_name, last_name) if part)
+            response = self.users_table.update_item(
+                Key={"id": user_id},
+                UpdateExpression=(
+                    f"SET firstName = :first_name, lastName = :last_name, "
+                    f"#name = :display_name, updatedAt = {DDB_UPDATED_VALUE}"
+                ),
+                ExpressionAttributeNames={"#name": "name"},
+                ExpressionAttributeValues={
+                    ":first_name": first_name,
+                    ":last_name": last_name,
+                    ":display_name": display_name,
+                    DDB_UPDATED_VALUE: now,
+                },
+                ReturnValues="ALL_NEW",
+            )
+            item = response.get("Attributes")
+            if item:
+                return User.model_validate(cast(Dict[str, Any], item))
+            return None
+        except ClientError as e:
+            print(f"Error updating user profile: {e}")
+            return None
+
     def get_user_preferences(self, user_id: str) -> Optional[Dict[str, Any]]:
         """Return the preferences blob for a user, if present."""
         try:

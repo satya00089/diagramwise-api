@@ -25,6 +25,7 @@ from app.models.auth_models import (
     VerifyEmailRequest,
     ResendVerificationRequest,
     UserResponse,
+    UserProfileUpdate,
     UserPreferences,
 )
 from app.services.auth_service import auth_service
@@ -43,6 +44,45 @@ logger = logging.getLogger(__name__)
 def _is_email_verified(user: Any) -> bool:
     """Google identity tokens assert a verified mailbox, including legacy users."""
     return bool(getattr(user, "emailVerified", False) or getattr(user, "googleId", None))
+
+
+def _user_name_fields(user: Any) -> tuple[str, str]:
+    """Return stored first/last names, falling back to a legacy full name."""
+    first_name = getattr(user, "firstName", None)
+    last_name = getattr(user, "lastName", None)
+    if first_name is None and last_name is None:
+        parts = (getattr(user, "name", None) or "").strip().split(None, 1)
+        if not parts:
+            return "", ""
+        fallback_last_name = parts[1] if len(parts) > 1 else ""
+        return parts[0], fallback_last_name
+    return (first_name or "", last_name or "")
+
+
+def _user_response(user: Any, *, include_preferences: bool = False) -> UserResponse:
+    """Build a user response while retaining the legacy full-name field."""
+    first_name, last_name = _user_name_fields(user)
+    return UserResponse(
+        id=user.id,
+        email=user.email,
+        name=user.name,
+        firstName=first_name,
+        lastName=last_name,
+        picture=user.picture,
+        preferences=getattr(user, "preferences", None) if include_preferences else None,
+        roles=user.roles,
+        isSuperAdmin=is_super_admin_user(user),
+        emailVerified=_is_email_verified(user),
+        createdAt=user.createdAt,
+    )
+
+
+def _authenticated_user_response(user: Any) -> AuthResponse:
+    """Create the standard authenticated session response for a user."""
+    token = auth_service.create_access_token(
+        data={"user_id": user.id, "email": user.email}
+    )
+    return AuthResponse(user=_user_response(user), token=token)
 
 
 def _hash_verification_token(token: str) -> str:
@@ -273,24 +313,7 @@ async def login(request: LoginRequest):
             detail="Please activate your account using the link sent to your email.",
         )
 
-    # Create JWT token
-    token = auth_service.create_access_token(
-        data={"user_id": user.id, "email": user.email}
-    )
-
-    return AuthResponse(
-        user=UserResponse(
-            id=user.id,
-            email=user.email,
-            name=user.name,
-            picture=user.picture,
-            roles=user.roles,
-            isSuperAdmin=is_super_admin_user(user),
-            emailVerified=_is_email_verified(user),
-            createdAt=user.createdAt,
-        ),
-        token=token,
-    )
+    return _authenticated_user_response(user)
 
 
 def _authenticate_google_credential(credential: str) -> AuthResponse:
@@ -337,24 +360,7 @@ def _authenticate_google_credential(credential: str) -> AuthResponse:
         # A valid Google identity token proves control of the Google mailbox.
         user = dynamodb_service.mark_email_verified(user.id) or user
 
-    # Create JWT token
-    token = auth_service.create_access_token(
-        data={"user_id": user.id, "email": user.email}
-    )
-
-    return AuthResponse(
-        user=UserResponse(
-            id=user.id,
-            email=user.email,
-            name=user.name,
-            picture=user.picture,
-            roles=user.roles,
-            isSuperAdmin=is_super_admin_user(user),
-            emailVerified=_is_email_verified(user),
-            createdAt=user.createdAt,
-        ),
-        token=token,
-    )
+    return _authenticated_user_response(user)
 
 
 @router.post("/auth/google", response_model=AuthResponse)
@@ -542,17 +548,25 @@ async def get_me(
             status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
         )
 
-    return UserResponse(
-        id=user.id,
-        email=user.email,
-        name=user.name,
-        picture=user.picture,
-        emailVerified=_is_email_verified(user),
-        preferences=getattr(user, "preferences", None),
-        roles=user.roles,
-        isSuperAdmin=is_super_admin_user(user),
-        createdAt=user.createdAt,
+    return _user_response(user, include_preferences=True)
+
+
+@router.patch("/auth/me/profile")
+async def update_my_profile(
+    profile: UserProfileUpdate,
+    current_user: Annotated[Dict[str, Any], Depends(get_current_user)],
+) -> UserResponse:
+    """Update the authenticated user's first and last name."""
+    updated = dynamodb_service.update_user_profile(
+        current_user["user_id"], profile.firstName, profile.lastName
     )
+    if not updated:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update profile",
+        )
+
+    return _user_response(updated, include_preferences=True)
 
 
 @router.get("/auth/me/preferences")
