@@ -1,6 +1,6 @@
 """Authentication related Pydantic models."""
 
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, List, Literal, Optional, cast
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 
@@ -54,6 +54,7 @@ class UserResponse(BaseModel):
     firstName: Optional[str] = None
     lastName: Optional[str] = None
     picture: Optional[str] = None
+    avatarKey: Optional[str] = None
     preferences: Optional[Dict[str, Any]] = None
     roles: List[str] = Field(default_factory=list)
     isSuperAdmin: bool = False
@@ -90,6 +91,7 @@ class User(BaseModel):
     firstName: Optional[str] = None
     lastName: Optional[str] = None
     picture: Optional[str] = None
+    avatarKey: Optional[str] = None
     googleId: Optional[str] = None
     preferences: Optional[Dict[str, Any]] = None
     roles: List[str] = Field(default_factory=list)
@@ -112,6 +114,23 @@ class UserProfileUpdate(BaseModel):
     @classmethod
     def _trim_names(cls, value: Any) -> Any:
         return value.strip() if isinstance(value, str) else value
+
+
+class UserAvatarUpdate(BaseModel):
+    """Select a curated Blobatar or clear the selection to use the photo fallback."""
+
+    avatarKey: Optional[
+        Literal[
+            "blobatar-v2-01",
+            "blobatar-v2-02",
+            "blobatar-v2-03",
+            "blobatar-v2-04",
+            "blobatar-v2-05",
+            "blobatar-v2-06",
+            "blobatar-v2-07",
+            "blobatar-v2-08",
+        ]
+    ] = None
 
 
 class UserPreferences(BaseModel):

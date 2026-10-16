@@ -101,6 +101,7 @@ def enrich_diagram_response(diagram: Diagram, current_user_id: str) -> DiagramRe
                 "name": owner.name or "Anonymous",
                 "email": owner.email,
                 "pictureUrl": owner.picture or None,
+                "avatarKey": owner.avatarKey,
             }
 
     return DiagramResponse(
@@ -142,6 +143,7 @@ def _owner_info(
                 "name": owner.name or "Anonymous",
                 "email": owner.email,
                 "pictureUrl": owner.picture or None,
+                "avatarKey": owner.avatarKey,
             }
             if owner
             else None

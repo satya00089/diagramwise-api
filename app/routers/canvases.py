@@ -117,6 +117,7 @@ def _design_summary(diagram: Diagram, user_id: str) -> DiagramSummaryResponse:
             "name": owner.name or "Anonymous",
             "email": owner.email,
             "pictureUrl": owner.picture or None,
+            "avatarKey": owner.avatarKey,
         }
         if owner
         else None

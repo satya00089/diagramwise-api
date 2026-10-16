@@ -26,6 +26,7 @@ from app.models.auth_models import (
     ResendVerificationRequest,
     UserResponse,
     UserProfileUpdate,
+    UserAvatarUpdate,
     UserPreferences,
 )
 from app.services.auth_service import auth_service
@@ -69,6 +70,7 @@ def _user_response(user: Any, *, include_preferences: bool = False) -> UserRespo
         firstName=first_name,
         lastName=last_name,
         picture=user.picture,
+        avatarKey=getattr(user, "avatarKey", None),
         preferences=getattr(user, "preferences", None) if include_preferences else None,
         roles=user.roles,
         isSuperAdmin=is_super_admin_user(user),
@@ -564,6 +566,24 @@ async def update_my_profile(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to update profile",
+        )
+
+    return _user_response(updated, include_preferences=True)
+
+
+@router.patch("/auth/me/avatar")
+async def update_my_avatar(
+    avatar: UserAvatarUpdate,
+    current_user: Annotated[Dict[str, Any], Depends(get_current_user)],
+) -> UserResponse:
+    """Save or clear the authenticated user's selected Blobatar."""
+    updated = dynamodb_service.update_user_avatar(
+        current_user["user_id"], avatar.avatarKey
+    )
+    if not updated:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update avatar",
         )
 
     return _user_response(updated, include_preferences=True)
