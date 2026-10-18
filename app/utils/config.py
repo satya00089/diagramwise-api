@@ -171,6 +171,10 @@ class Settings(BaseSettings):
     dynamodb_feedback_table: str = Field(
         "diagrammatic_feedback", validation_alias="DYNAMODB_FEEDBACK_TABLE"
     )
+    dynamodb_auth_sessions_table: str = Field(
+        "diagrammatic_auth_sessions",
+        validation_alias="DYNAMODB_AUTH_SESSIONS_TABLE",
+    )
     # Frontend URL (used to build public solution links)
     frontend_url: str = Field(
         "https://diagramwise.com",
