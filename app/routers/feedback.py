@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.models.feedback_models import FeedbackCreate, FeedbackResponse
-from app.services.auth_service import auth_service
+from app.services.auth_sessions import auth_session_service
 from app.services.dynamodb_service import dynamodb_service
 from app.services.llm_client import record_langfuse_feedback
 
@@ -30,7 +30,7 @@ def get_optional_user(
         return None
 
     try:
-        payload = auth_service.decode_token(credentials.credentials)
+        payload = auth_session_service.validate(credentials.credentials)
     except Exception:
         # Feedback should remain available when an expired local token is
         # still present in the browser.

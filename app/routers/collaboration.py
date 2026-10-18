@@ -7,11 +7,11 @@ import time
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, status
 
 from app.services.dynamodb_service import dynamodb_service
 from app.services.validation import validate_diagram_access
-from app.services.auth_service import auth_service
+from app.services.auth_sessions import auth_session_service
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -188,9 +188,11 @@ async def notify_collaborators(
             active_connections[diagram_id].remove((websocket, user_id))
 
 
-async def _reject_collaboration(websocket: WebSocket, message: str, code: str) -> None:
+async def _reject_collaboration(
+    websocket: WebSocket, message: str, code: str, close_code: int = 1008
+) -> None:
     await websocket.send_json({"type": "error", "message": message, "code": code})
-    await websocket.close(code=1008)
+    await websocket.close(code=close_code)
 
 
 async def _authenticate_collaborator(
@@ -201,10 +203,18 @@ async def _authenticate_collaborator(
         return None
 
     try:
-        payload = auth_service.decode_token(token)
+        payload = auth_session_service.validate(token)
         user_id = payload.get("user_id")
         if not user_id:
             raise ValueError("Invalid token payload")
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_503_SERVICE_UNAVAILABLE:
+            await _reject_collaboration(
+                websocket, "Authentication is temporarily unavailable", "AUTH_UNAVAILABLE", 1013
+            )
+            return None
+        await _reject_collaboration(websocket, "Invalid or expired token", "INVALID_TOKEN")
+        return None
     except (ValueError, TypeError):
         await _reject_collaboration(websocket, "Invalid or expired token", "INVALID_TOKEN")
         return None
@@ -402,13 +412,28 @@ async def _receive_collaboration_messages(
     diagram_id: str,
     user_id: str,
     user_info: Dict[str, Any],
+    token: str,
 ) -> None:
+    last_session_check = time.monotonic()
     while True:
         try:
-            data = await websocket.receive_json()
+            try:
+                data = await asyncio.wait_for(websocket.receive_json(), timeout=5)
+            except asyncio.TimeoutError:
+                data = None
+            if time.monotonic() - last_session_check >= 5:
+                auth_session_service.validate(token)
+                last_session_check = time.monotonic()
+            if data is None:
+                continue
             await _process_collaboration_message(
                 websocket, diagram_id, user_id, user_info, data
             )
+        except HTTPException as exc:
+            code = "AUTH_UNAVAILABLE" if exc.status_code == status.HTTP_503_SERVICE_UNAVAILABLE else "INVALID_TOKEN"
+            message = "Authentication is temporarily unavailable" if code == "AUTH_UNAVAILABLE" else "Session is invalid or revoked"
+            await _reject_collaboration(websocket, message, code, 1013 if code == "AUTH_UNAVAILABLE" else 1008)
+            return
         except json.JSONDecodeError:
             await websocket.send_json(
                 {
@@ -472,7 +497,7 @@ async def collaborate_on_diagram(
         await websocket.send_json(
             _welcome_message(user_info, collaborators, diagram_data)
         )
-        await _receive_collaboration_messages(websocket, diagram_id, user_id, user_info)
+        await _receive_collaboration_messages(websocket, diagram_id, user_id, user_info, token or "")
     except WebSocketDisconnect:
         pass
     finally:

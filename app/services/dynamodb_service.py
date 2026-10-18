@@ -108,6 +108,7 @@ class DynamoDBService:
         self.attempts_table: Table = dynamodb.Table(settings.dynamodb_attempts_table)
         self.feedback_table: Table = dynamodb.Table(settings.dynamodb_feedback_table)
         self.walkthroughs_table: Table = dynamodb.Table(settings.dynamodb_walkthroughs_table)
+        self.auth_sessions_table: Table = dynamodb.Table(settings.dynamodb_auth_sessions_table)
 
     # User operations
     def _resolve_existing_user(

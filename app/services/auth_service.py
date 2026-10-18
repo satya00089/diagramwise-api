@@ -2,6 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
+from uuid import uuid4
 
 from jose import JWTError, jwt
 from passlib.context import CryptContext  # pyright: ignore[reportMissingTypeStubs]
@@ -47,6 +48,7 @@ class AuthService:
                 hours=self.access_token_expire_hours
             )
         to_encode.update({"exp": expire})
+        to_encode["jti"] = str(uuid4())
         encoded_jwt = jwt.encode(to_encode, self.secret_key, algorithm=self.algorithm)
         return encoded_jwt
 

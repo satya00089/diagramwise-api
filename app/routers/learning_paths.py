@@ -5,9 +5,9 @@ import logging
 from pathlib import Path
 from typing import Annotated, Any, Dict, List, cast
 
-from fastapi import APIRouter, Header, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.services.auth_service import auth_service
+from app.routers.auth import get_current_user
 from app.services.dynamodb_service import dynamodb_service
 
 logger = logging.getLogger(__name__)
@@ -19,7 +19,6 @@ router = APIRouter()
 BASE_DIR = Path(__file__).resolve().parents[3]
 DATA_DIR = BASE_DIR / "diagrammatic-data" / "learning-paths"
 SAMPLE_FILE = DATA_DIR / "learning-paths.json"
-INVALID_AUTH_TOKEN_DETAIL = "Invalid authentication token"
 
 
 def _read_sample() -> Dict[str, Any] | None:
@@ -73,7 +72,7 @@ async def get_learning_path(slug: str) -> Dict[str, Any]:
 @router.get("/learning-paths/{path_id}/progress", summary="Get user progress for a path")
 async def get_progress(
     path_id: str,
-    authorization: Annotated[str | None, Header()] = None,
+    current_user: Annotated[Dict[str, Any], Depends(get_current_user)],
 ):
     """Return the authenticated user's progress for the given learning path.
 
@@ -81,25 +80,7 @@ async def get_progress(
     with `completed` as an array of lesson IDs. If the user has no saved
     progress, an empty array is returned.
     """
-    if not authorization:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
-
-    token = authorization.split(" ")[1] if " " in authorization else authorization
-    try:
-        payload = auth_service.decode_token(token)
-        user_id = payload.get("user_id")
-    except Exception:
-        logger.exception("Invalid token when fetching progress")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=INVALID_AUTH_TOKEN_DETAIL,
-        )
-
-    if not isinstance(user_id, str) or not user_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=INVALID_AUTH_TOKEN_DETAIL,
-        )
+    user_id = current_user["user_id"]
 
     prefs: Dict[str, Any] = dynamodb_service.get_user_preferences(user_id) or {}
     learning_progress = cast(
@@ -113,7 +94,7 @@ async def get_progress(
 async def post_progress(
     path_id: str,
     payload: Dict[str, Any],
-    authorization: Annotated[str | None, Header()] = None,
+    current_user: Annotated[Dict[str, Any], Depends(get_current_user)],
 ) -> Dict[str, Any]:
     """Persist the authenticated user's progress for the given learning path.
 
@@ -121,25 +102,7 @@ async def post_progress(
     array of lesson IDs. The progress is stored in the user's `preferences`
     under the `learningProgress` key using DynamoDB.
     """
-    if not authorization:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
-
-    token = authorization.split(" ")[1] if " " in authorization else authorization
-    try:
-        payload_token = auth_service.decode_token(token)
-        user_id = payload_token.get("user_id")
-    except Exception:
-        logger.exception("Invalid token when saving progress")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=INVALID_AUTH_TOKEN_DETAIL,
-        )
-
-    if not isinstance(user_id, str) or not user_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=INVALID_AUTH_TOKEN_DETAIL,
-        )
+    user_id = current_user["user_id"]
 
     raw_completed_value = payload.get("completed")
     if not isinstance(raw_completed_value, list):
