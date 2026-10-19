@@ -11,7 +11,7 @@ from typing import Annotated, Any, Dict
 from urllib.parse import quote, urlencode, urlparse
 
 import httpx
-from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.responses import RedirectResponse
 
@@ -30,6 +30,7 @@ from app.models.auth_models import (
     UserPreferences,
 )
 from app.services.auth_service import auth_service
+from app.services.auth_sessions import auth_session_service
 from app.services.admin_access import is_super_admin_user
 from app.services.dynamodb_service import dynamodb_service
 from app.services.email_service import email_service, EmailDeliveryError
@@ -84,6 +85,7 @@ def _authenticated_user_response(user: Any) -> AuthResponse:
     token = auth_service.create_access_token(
         data={"user_id": user.id, "email": user.email}
     )
+    auth_session_service.register(auth_service.decode_token(token))
     return AuthResponse(user=_user_response(user), token=token)
 
 
@@ -185,7 +187,7 @@ def get_current_user(
 ) -> Dict[str, Any]:
     """Dependency to get current authenticated user from JWT token."""
     token = credentials.credentials
-    payload = auth_service.decode_token(token)
+    payload = auth_session_service.validate(token)
     user_id = payload.get("user_id")
     if not user_id:
         raise HTTPException(
@@ -199,6 +201,22 @@ def get_current_user(
             detail="Please verify your email address before continuing",
         )
     return payload
+
+
+@router.post("/auth/logout", status_code=status.HTTP_204_NO_CONTENT)
+async def logout(
+    credentials: Annotated[HTTPAuthorizationCredentials, Depends(security)],
+) -> Response:
+    """Revoke the current access-token session."""
+    token = credentials.credentials
+    try:
+        auth_session_service.revoke(token)
+    except HTTPException as exc:
+        # An expired or malformed token is already unusable; make logout
+        # idempotent while still surfacing session-store outages.
+        if exc.status_code != status.HTTP_401_UNAUTHORIZED:
+            raise
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/auth/signup", response_model=SignupPendingResponse)
