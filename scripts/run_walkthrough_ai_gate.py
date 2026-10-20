@@ -147,6 +147,54 @@ def submit(url: str, body: bytes, timeout: float) -> tuple[int, dict]:
         return 0, {"transport_error": str(error)[:2000]}
 
 
+def required_anchor_ids(problem: dict) -> set[str]:
+    """Return the exact required coverage IDs for a typed or legacy brief."""
+    spec = problem.get("requirementSpec")
+    if spec is not None:
+        if not isinstance(spec, dict):
+            raise ValueError("requirementSpec must be an object")
+
+        required_ids: set[str] = set()
+        for field in ("functional", "nonFunctional"):
+            entries = spec.get(field, [])
+            if not isinstance(entries, list):
+                raise ValueError(f"requirementSpec.{field} must be a list")
+            for index, entry in enumerate(entries):
+                if not isinstance(entry, dict):
+                    raise ValueError(f"requirementSpec.{field}[{index}] must be an object")
+                scope = entry.get("scope")
+                if scope not in {"core", "extension"}:
+                    raise ValueError(
+                        f"requirementSpec.{field}[{index}] must declare core or extension scope"
+                    )
+                if scope == "extension":
+                    continue
+                anchor_id = entry.get("id")
+                if not isinstance(anchor_id, str) or not anchor_id.strip():
+                    raise ValueError(
+                        f"requirementSpec.{field}[{index}] core entry must have a non-empty id"
+                    )
+                if anchor_id in required_ids:
+                    raise ValueError(f"Duplicate core requirement anchor: {anchor_id}")
+                required_ids.add(anchor_id)
+
+        if not required_ids:
+            raise ValueError("requirementSpec must contain at least one core requirement anchor")
+        return required_ids
+
+    requirements = problem.get("requirements", []) or []
+    constraints = problem.get("constraints", []) or []
+    if not isinstance(requirements, list) or not isinstance(constraints, list):
+        raise ValueError("Legacy requirements and constraints must be lists")
+    required_ids = {
+        *[f"legacy-requirement:{index}" for index in range(1, len(requirements) + 1)],
+        *[f"legacy-constraint:{index}" for index in range(1, len(constraints) + 1)],
+    }
+    if not required_ids:
+        raise ValueError("Problem brief contains no gate-eligible requirement anchors")
+    return required_ids
+
+
 def gate_result(status: int, response: dict, required_ids: set[str]) -> dict:
     coverage = {
         row.get("requirement_id"): row.get("status")
@@ -166,7 +214,7 @@ def gate_result(status: int, response: dict, required_ids: set[str]) -> dict:
         "score_at_least_95": isinstance(response.get("overall_score"), int)
         and response["overall_score"] >= 95,
         "strong_alignment": response.get("verdict") == "strong_alignment",
-        "all_legacy_anchors_supported": not unsupported,
+        "all_required_anchors_supported": not unsupported,
     }
     return {
         "passed": all(checks.values()),
@@ -207,12 +255,12 @@ def main() -> int:
         guide = read_json(guide_path)
         if guide.get("problem_id") != problem_id:
             parser.error(f"Guide ID mismatch in {guide_path.name}")
+        try:
+            required_ids = required_anchor_ids(problems[problem_id])
+        except ValueError as error:
+            parser.error(f"Invalid assessment anchors for {problem_id}: {error}")
         request = prepare_request(problems[problem_id], guide)
         body = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        required_ids = {
-            *[f"legacy-requirement:{i}" for i in range(1, len(problems[problem_id].get("requirements", [])) + 1)],
-            *[f"legacy-constraint:{i}" for i in range(1, len(problems[problem_id].get("constraints", [])) + 1)],
-        }
         candidates[problem_id] = {
             "request": request,
             "body": body,
