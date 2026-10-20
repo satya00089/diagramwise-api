@@ -1,0 +1,234 @@
+{
+  "problem_id": "6901ef1b9420d83630aca863",
+  "version": "1.1-review",
+  "totalSteps": 39,
+  "requirementRevision": null,
+  "phases": [
+    {"name": "Define share events and query windows", "stepRange": [1, 8], "description": "Set the event identity, counting semantics, and an explicit freshness assumption before choosing the ingestion path."},
+    {"name": "Build exact distributed window counts", "stepRange": [9, 20], "description": "Use partitioned streaming state, durable history, an exact top-K merge, and a low-latency ranking cache."},
+    {"name": "Scale hot articles and bound state", "stepRange": [21, 29], "description": "Preserve exact counts under duplicate delivery, viral-key skew, event lateness, sliding expiry, and memory pressure."},
+    {"name": "Serve current and historical rankings", "stepRange": [30, 39], "description": "Specify query semantics, explicit provisional freshness and retention defaults, rebuild/replay behavior, and correctness/performance acceptance for all requested windows."}
+  ],
+  "steps": [
+    {
+      "id": "topk_01", "stepNumber": 1, "phase": "Define share events and query windows", "title": "Separate the stated workload from assumptions", "type": "explanation",
+      "content": "The live brief requires real-time share tracking, exact top-K articles over 5-minute, 1-hour, and 24-hour windows, millions of share events per day, near-real-time ranking updates, historical queries, and a universe of billions of articles. It specifies the workload figures and ranking windows, but not a numeric freshness threshold, event-lateness or correction policy, historical-retention horizon, or history resolution. Keep these as open product decisions: agree how freshness is measured, which late events may correct results, and how much history is retained before setting operating targets or promising query coverage. Until then, expose freshness/completeness and the available historical range; do not present a chosen numeric value as a requirement or production SLA.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "topk_02", "stepNumber": 2, "phase": "Define share events and query windows", "title": "Define what counts as one share", "type": "decision_point",
+      "content": "Use a stable producer-generated share-event ID and an event timestamp. A retry of the same accepted event must not increment the count twice; a distinct user share event can count separately according to the product's abuse and bot policy.",
+      "decision": {"question": "How can distributed ingestion count each accepted share exactly once in effect?", "chosen": "Treat the queue as at-least-once, deduplicate by stable shareEventId at the article's owning partition, and apply the count update idempotently before advancing its checkpoint.", "chosenReason": "Transport retries are expected; correctness comes from durable event identity and idempotent state transitions, not an exactly-once transport claim.", "alternatives": [{"option": "Increment for every delivered message", "tradeoff": "Retries and replay inflate article scores."}, {"option": "Trust an exactly-once broker setting", "tradeoff": "Does not by itself make external state updates and replay idempotent."}]},
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "topk_03", "stepNumber": 3, "phase": "Define share events and query windows", "title": "Add article and publisher clients", "type": "add_component",
+      "content": "Represent applications and publisher integrations that report accepted share events and request current or historical leaderboards. A client retries with the same event ID and uses a cursor or as-of marker for reproducible historical reads.",
+      "component": {"nodeId": "topk_clients", "componentType": "web-app", "label": "Publisher + Reader Clients", "description": "Emit share events and request top-K rankings", "position": {"x": 0, "y": 240}, "properties": {"componentName": "Publisher + Reader Clients", "purpose": "Submit authenticated share events with a stable event ID and event time; query top-K rankings by window and as-of time; retry safely without creating a second logical share."}, "highlightReason": "The existing Web App component represents users and publisher integrations without adding a new client node type."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5"]
+    },
+    {
+      "id": "topk_04", "stepNumber": 4, "phase": "Define share events and query windows", "title": "Add the share and ranking API", "type": "add_component",
+      "content": "Use one API boundary for accepted share submissions and leaderboard queries, with separate rate limits and response contracts for write and read paths.",
+      "component": {"nodeId": "topk_api", "componentType": "api-gateway", "label": "Share + Top-K API", "description": "Validated event ingestion and ranking queries", "position": {"x": 340, "y": 240}, "properties": {"componentName": "Share + Top-K API", "purpose": "Authenticate producers, validate article and event identifiers, apply per-client quotas, accept events durably before acknowledgement, and serve current or historical top-K queries with a window and freshness/as-of marker."}, "highlightReason": "API Gateway is the existing catalog component for the system's request and response boundary."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "topk_05", "stepNumber": 5, "phase": "Define share events and query windows", "title": "Send share and ranking requests through the API", "type": "add_connection",
+      "content": "Validate window names, K bounds, event IDs, article IDs, authorization, and query rate before accepting work. An event acknowledgement means it is durably queued, not that it is already reflected in the ranking.",
+      "connection": {"edgeId": "topk_clients_api", "sourceNodeId": "topk_clients", "targetNodeId": "topk_api", "connectionType": "http", "label": "Share events + leaderboard queries", "description": "Authenticated clients submit idempotent events and request a named ranking window"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "topk_06", "stepNumber": 6, "phase": "Define share events and query windows", "title": "Add the durable event queue", "type": "add_component",
+      "content": "Buffer bursts between API acceptance and stream processing. Retain accepted events long enough for consumer recovery and use partition keys that preserve article ownership and ordering where required.",
+      "component": {"nodeId": "topk_queue", "componentType": "queue", "label": "Durable Share Event Queue", "description": "Backpressure, replay, and consumer decoupling", "position": {"x": 680, "y": 240}, "properties": {"componentName": "Durable Share Event Queue", "purpose": "Persist accepted share events, absorb viral bursts, expose lag and retry state, and support deterministic replay. Partition events by stable article ownership while retaining shareEventId and event-time metadata."}, "highlightReason": "The existing Queue component matches the asynchronous ingestion and backpressure boundary."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "topk_07", "stepNumber": 7, "phase": "Define share events and query windows", "title": "Acknowledge only after durable enqueue", "type": "add_connection",
+      "content": "The API publishes a validated event with its idempotency key, article owner, producer timestamp, and event time. If the queue cannot accept it, return retryable backpressure using the same event ID; do not acknowledge and drop it.",
+      "connection": {"edgeId": "topk_api_queue", "sourceNodeId": "topk_api", "targetNodeId": "topk_queue", "connectionType": "message-queue", "label": "Idempotent share event", "description": "The producer retries the same stable event ID when enqueue is not confirmed"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "topk_08", "stepNumber": 8, "phase": "Define share events and query windows", "title": "Add event-time window processing", "type": "add_component",
+      "content": "Use the existing Stream Processor catalog component for per-article deduplication, event-time windows, expiry, and exact count updates. Keep event identity and checkpoint advancement in the same idempotent state transition.",
+      "component": {"nodeId": "topk_stream", "componentType": "stream-processor", "label": "Windowed Share Counter", "description": "Exact, partitioned rolling counters", "position": {"x": 1020, "y": 240}, "properties": {"componentName": "Windowed Share Counter", "purpose": "Deduplicate accepted shareEventIds; assign each article to one logical owner; maintain exact event-time counts for the 5-minute, 1-hour, and 24-hour sliding windows; expire events as they leave each window; and checkpoint state only after an idempotent update."}, "highlightReason": "Stream Processor is an existing catalog type expressly suited to ordered event processing and rolling state."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "topk_09", "stepNumber": 9, "phase": "Build exact distributed window counts", "title": "Consume and replay events from the queue", "type": "add_connection",
+      "content": "The processor commits its state transition and checkpoint before acknowledging the queue message. On restart it replays safely; duplicates are discarded by the event ID, while a genuine late event follows the explicit allowed-lateness rule.",
+      "connection": {"edgeId": "topk_queue_stream", "sourceNodeId": "topk_queue", "targetNodeId": "topk_stream", "connectionType": "event-stream", "label": "Replayable event-time stream", "description": "Partition checkpoints and stable event IDs make consumer retries idempotent"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "topk_10", "stepNumber": 10, "phase": "Build exact distributed window counts", "title": "Add durable share history", "type": "add_component",
+      "content": "Use the existing Database component for dedupe/checkpoint metadata and retained event or compacted history needed by historical queries and state rebuilds. Select storage and retention from the promised history period, which the brief leaves open.",
+      "component": {"nodeId": "topk_history", "componentType": "database", "label": "Share Event + Historical Rollups", "description": "Durable event identity and queryable historical aggregates", "position": {"x": 1380, "y": 500}, "properties": {"componentName": "Share Event + Historical Rollups", "purpose": "Retain idempotency/checkpoint state plus raw or compacted event-time aggregates for the agreed historical-query period. Keep rebuild inputs durable and distinguish event-time from ingestion-time corrections."}, "highlightReason": "Database is an existing persistence component and preserves history beyond the in-memory rolling-state horizon."},
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "topk_11", "stepNumber": 11, "phase": "Build exact distributed window counts", "title": "Persist accepted events and compactable history", "type": "add_connection",
+      "content": "Persist stable event identity and the history representation required by the retention contract. Compact old raw events into exact time-bucket aggregates only when historical query semantics and replay recovery remain satisfied.",
+      "connection": {"edgeId": "topk_stream_history", "sourceNodeId": "topk_stream", "targetNodeId": "topk_history", "connectionType": "database-connection", "label": "Dedup state + historical aggregates", "description": "The durable history supports historical reads and deterministic state reconstruction"},
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "topk_12", "stepNumber": 12, "phase": "Build exact distributed window counts", "title": "Add exact top-K aggregation", "type": "add_component",
+      "content": "Use the existing Analytics component to produce local and global rankings from complete per-article counts. The response score is the exact deduplicated share count for the requested window, not a count-min estimate.",
+      "component": {"nodeId": "topk_aggregate", "componentType": "analytics", "label": "Exact Top-K Merge", "description": "Partition-local ranking and deterministic global merge", "position": {"x": 1380, "y": 220}, "properties": {"componentName": "Exact Top-K Merge", "purpose": "Read complete per-article rolling counts from each logical partition, maintain a bounded local top-K per window, and merge partition candidates into a globally exact ranking with a deterministic tie-break. Verify hot-key subcounts are combined before a partition publishes its candidates."}, "highlightReason": "Analytics is the existing component type for ranking aggregation and distributed result merging."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "topk_13", "stepNumber": 13, "phase": "Build exact distributed window counts", "title": "Provide current exact counts to the merger", "type": "add_connection",
+      "content": "Each owner partition computes its exact article totals and exposes complete candidates for the requested window. Article ownership prevents the same article's count from being split across unrelated local top-K lists.",
+      "connection": {"edgeId": "topk_stream_aggregate", "sourceNodeId": "topk_stream", "targetNodeId": "topk_aggregate", "connectionType": "event-stream", "label": "Exact local counts + candidates", "description": "Complete article counts are merged before bounded partition top-K output"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "topk_14", "stepNumber": 14, "phase": "Build exact distributed window counts", "title": "Support reproducible historical queries", "type": "add_connection",
+      "content": "For an as-of query, reconstruct or read the retained exact counts at the requested event-time boundary, including late-event corrections recorded after the original window closed. Reject or clearly mark queries older than the agreed retention horizon.",
+      "connection": {"edgeId": "topk_history_aggregate", "sourceNodeId": "topk_history", "targetNodeId": "topk_aggregate", "connectionType": "database-connection", "label": "As-of counts + correction history", "description": "Historical rankings use retained event-time data and an explicit as-of boundary"},
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "topk_15", "stepNumber": 15, "phase": "Build exact distributed window counts", "title": "Add a low-latency ranking cache", "type": "add_component",
+      "content": "Cache bounded top-K responses by window, requested K, and ranking generation. The cache reduces read latency but is not the source of truth; cache eviction or rebuild must not change exact underlying counts.",
+      "component": {"nodeId": "topk_cache", "componentType": "cache", "label": "Windowed Top-K Cache", "description": "Versioned leaderboard responses", "position": {"x": 1740, "y": 220}, "properties": {"componentName": "Windowed Top-K Cache", "purpose": "Cache exact merged top-K IDs and scores keyed by window, K, and ranking generation; refresh or invalidate when stream watermarks advance, and never treat cached rankings as durable event history."}, "highlightReason": "Cache is an existing catalog component suited to serving frequently requested bounded rankings quickly."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "topk_16", "stepNumber": 16, "phase": "Build exact distributed window counts", "title": "Publish merged rankings to the cache", "type": "add_connection",
+      "content": "Publish a ranking only with its window boundary and generation/watermark metadata. A late-event correction or processor rebuild advances the generation so stale results can be invalidated deterministically.",
+      "connection": {"edgeId": "topk_aggregate_cache", "sourceNodeId": "topk_aggregate", "targetNodeId": "topk_cache", "connectionType": "data-flow", "label": "Exact Top-K + watermark", "description": "The cache stores ranking results with an explicit freshness generation"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "topk_17", "stepNumber": 17, "phase": "Build exact distributed window counts", "title": "Serve leaderboard reads from the cache", "type": "add_connection",
+      "content": "The API returns the cached exact ranking when its freshness contract is met; otherwise it waits only within a bounded read budget or returns a clearly marked last-complete generation. Never label an old ranking as current.",
+      "connection": {"edgeId": "topk_cache_api", "sourceNodeId": "topk_cache", "targetNodeId": "topk_api", "connectionType": "api-call", "label": "Windowed Top-K + freshness", "description": "The API exposes the ranking's actual generation and event-time boundary"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "topk_18", "stepNumber": 18, "phase": "Build exact distributed window counts", "title": "Add stream and query observability", "type": "add_component",
+      "content": "Measure event-to-ranking freshness, dedupe hits, partition skew, hot-key stripe merge lag, queue age, state size, and historical query completeness. Alert on stale rankings and dropped or rejected events.",
+      "component": {"nodeId": "topk_monitor", "componentType": "monitoring", "label": "Ranking Pipeline Monitoring", "description": "Freshness, correctness, and capacity signals", "position": {"x": 1380, "y": 760}, "properties": {"componentName": "Ranking Pipeline Monitoring", "purpose": "Track queue age, accepted/rejected events, duplicate rate, event-to-ranking lag, watermark, partition skew, state size, top-K merge latency, cache generation, and historical-read completeness; page on stale or incorrect rankings."}, "highlightReason": "Monitoring is an existing catalog component and covers the requirement to observe ranking behavior and system health."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "topk_19", "stepNumber": 19, "phase": "Build exact distributed window counts", "title": "Observe queue and window-state health", "type": "add_connection",
+      "content": "Export lag, replay, watermark stalls, state-store pressure, and late-event corrections to the monitoring layer so the operations team can distinguish ingestion delay from ranking merge delay.",
+      "connection": {"edgeId": "topk_stream_monitor", "sourceNodeId": "topk_stream", "targetNodeId": "topk_monitor", "connectionType": "data-flow", "label": "Lag + state + exactness signals", "description": "The stream processor exposes event-time progress and state health"},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "topk_20", "stepNumber": 20, "phase": "Build exact distributed window counts", "title": "Observe merge and query freshness", "type": "add_connection",
+      "content": "Measure partition response skew, merge duration, cache publication time, and ranking generation age. The API should expose the same freshness marker used by alerts.",
+      "connection": {"edgeId": "topk_aggregate_monitor", "sourceNodeId": "topk_aggregate", "targetNodeId": "topk_monitor", "connectionType": "data-flow", "label": "Merge latency + generation age", "description": "Global result completeness and freshness are measurable"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "topk_21", "stepNumber": 21, "phase": "Scale hot articles and bound state", "title": "Observe rejected events and API latency", "type": "add_connection",
+      "content": "Record event acceptance, backpressure responses, leaderboard latency, and stale-generation reads. This closes the user-visible loop from ingestion quality to ranking freshness.",
+      "connection": {"edgeId": "topk_api_monitor", "sourceNodeId": "topk_api", "targetNodeId": "topk_monitor", "connectionType": "data-flow", "label": "Acceptance + read latency", "description": "Client-facing errors and ranking response freshness are observable"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "topk_22", "stepNumber": 22, "phase": "Scale hot articles and bound state", "title": "Keep one logical owner for each article", "type": "explanation",
+      "content": "Partition article IDs to logical owners so all non-striped counts for one article converge before its local ranking is published. On rebalancing, use ownership epochs and checkpoint transfer so the old and new owner cannot both count the same event.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "topk_23", "stepNumber": 23, "phase": "Scale hot articles and bound state", "title": "Handle viral article hot keys without losing exactness", "type": "decision_point",
+      "content": "A single viral article can overload its owner. Stripe its counter updates across bounded subkeys, then merge every stripe into the article's complete total inside the logical owner before top-K candidate selection. A Count-Min Sketch may prioritize likely candidates, but its estimates cannot be final scores and it may not prune candidates unless the exact path proves top-K completeness.",
+      "decision": {"question": "How can one viral article be scaled while rankings remain exact?", "chosen": "Use deterministic counter stripes for the hot article, preserve event-ID dedupe at the stripe, and combine all stripe totals in the owner before emitting its local top-K.", "chosenReason": "Striping spreads write pressure while the owner still exposes one exact article score to the global merge.", "alternatives": [{"option": "Keep one unsalted counter for every article", "tradeoff": "A viral item can create a single hot partition and delay all windows."}, {"option": "Return Count-Min Sketch estimates as final scores", "tradeoff": "Violates the accurate distributed-count constraint and can misorder close candidates."}]},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "topk_24", "stepNumber": 24, "phase": "Scale hot articles and bound state", "title": "Maintain sliding-window totals with expiry", "type": "explanation",
+      "content": "Keep event-time ordered expiry state per logical article owner. On each accepted event, update the 5-minute, 1-hour, and 24-hour exact counters; as events cross each cutoff, subtract them once and update local ranking state. Use compact sparse time buckets plus a bounded precise boundary index, and define the allowed boundary precision explicitly before replacing exact event-time expiry with coarser buckets.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "topk_25", "stepNumber": 25, "phase": "Scale hot articles and bound state", "title": "Keep state proportional to active activity", "type": "explanation",
+      "content": "Store counters only for active articles and non-empty time buckets; expire rolling-window state after the 24-hour boundary and dedupe records after the maximum retry/replay horizon. Persist compact historical rollups separately for the product's agreed retention period. This avoids allocating a full window array for every article in a universe of billions.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "topk_26", "stepNumber": 26, "phase": "Scale hot articles and bound state", "title": "Define how near-real-time will be measured", "type": "decision_point",
+      "content": "The brief says ranking updates should be near-real-time but supplies no threshold. Measure from durable event acceptance to a ranking generation visible to a reader; agree the measurement statistic, workload, freshness/completeness semantics, and pass threshold with product owners before treating it as an SLO.",
+      "decision": {"question": "How should the team turn the qualitative freshness requirement into a verifiable objective?", "chosen": "Define accepted-to-visible ranking latency and freshness/completeness signals; leave the threshold unset until product owners approve it.", "chosenReason": "This creates an observable criterion without turning an absent number into an assumed commitment.", "alternatives": [{"option": "Leave near-real-time unmeasured", "tradeoff": "The requirement cannot be validated or monitored."}, {"option": "Present a guessed threshold as user-provided", "tradeoff": "Misstates the brief and creates an unsupported product promise."}]},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "topk_27", "stepNumber": 27, "phase": "Scale hot articles and bound state", "title": "Handle duplicate and reordered delivery", "type": "explanation",
+      "content": "The stream uses stable event IDs to discard retries before counting, and event timestamps to place accepted shares into the correct window. Keep dedupe/checkpoint retention longer than the queue replay horizon; otherwise a delayed redelivery could be counted again after its dedupe key expires.",
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "topk_28", "stepNumber": 28, "phase": "Scale hot articles and bound state", "title": "Correct late events without hiding stale rankings", "type": "explanation",
+      "content": "Define an allowed-lateness watermark from observed producer and queue delay. A late event inside the accepted correction horizon updates the proper event-time buckets and advances the ranking generation; an event outside retained state is routed to historical correction or explicitly rejected, never silently inserted into the wrong current window.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "topk_29", "stepNumber": 29, "phase": "Scale hot articles and bound state", "title": "Bound viral bursts with durable backpressure", "type": "explanation",
+      "content": "Queue depth absorbs short spikes; sustained lag triggers admission control, partition expansion, or producer backpressure before accepted events are lost. Prioritize accepted-event durability over ranking refreshes, and report ranking age when the processor cannot meet its freshness target.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "topk_30", "stepNumber": 30, "phase": "Serve current and historical rankings", "title": "Merge a globally exact top-K", "type": "explanation",
+      "content": "First update each owner's exact ranking state for both increments and event-expiry decrements so a departing winner is replaced by the true next candidate. Ask each logical owner for its exact local top K after all hot-key stripes have been merged. Because every article's complete count belongs to one owner, the union of local top-K lists contains every possible global top-K article; merge those lists with a size-K min-heap and a deterministic article-ID tie-break. If ownership or aggregation is split differently, prove candidate completeness before using bounded local lists.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "topk_31", "stepNumber": 31, "phase": "Serve current and historical rankings", "title": "Make historical ranking boundaries explicit", "type": "explanation",
+      "content": "A historical response identifies the requested window, event-time end, data watermark, and whether late corrections were applied. Define how ties and queries beyond retention behave; do not silently substitute the current leaderboard for an unavailable historical result.",
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "topk_32", "stepNumber": 32, "phase": "Serve current and historical rankings", "title": "Rebuild counts after state loss", "type": "explanation",
+      "content": "Reconstruct a partition from durable events or exact compacted rollups and its last committed checkpoint. Keep the affected window marked stale until the rebuild watermark catches up, then publish a new generation and invalidate older cache keys.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "topk_33", "stepNumber": 33, "phase": "Serve current and historical rankings", "title": "Check counting correctness under replay and skew", "type": "explanation",
+      "content": "Test duplicate event IDs, out-of-order timestamps, late corrections, ownership rebalance, stripe merge, queue replay, and events exactly at each sliding-window boundary. Compare distributed results with a small exact offline oracle and verify the top-K order, counts, and tie-break for all three windows.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "topk_34", "stepNumber": 34, "phase": "Serve current and historical rankings", "title": "Load-test memory and burst behavior", "type": "explanation",
+      "content": "Drive the stated millions-per-day workload and a separately agreed viral peak profile. Measure per-article hot-key skew, active-article cardinality and state bytes (including how estimates scale toward the stated billions-of-articles universe), expiry throughput, queue age, merge fan-out, historical-query load, and accepted-share-to-visible-ranking latency. The brief does not define a numeric freshness threshold, watermark lag, peak multiplier, K, or history horizon; agree those pass criteria and load inputs with product owners instead of treating draft values as guarantees.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "topk_35", "stepNumber": 35, "phase": "Serve current and historical rankings", "title": "Accept only exact, fresh, and traceable rankings", "type": "explanation",
+      "content": "Accept when each share is counted once in its event-time window, the result is a globally exact top K, and the 5-minute/1-hour/24-hour windows use the agreed event-time boundary semantics. Validate near-real-time updates against a freshness objective approved for the stated workload, and verify historical queries against the retention period and resolution the product has chosen. The brief supplies none of those numeric policies, nor K or late-event limits; expose freshness, completeness, and historical coverage so unsupported thresholds or unavailable history are never presented as guaranteed.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "topk_36", "stepNumber": 36, "phase": "Serve current and historical rankings", "title": "Review provisional operating assumptions", "type": "explanation",
+      "content": "Freshness, allowed lateness, and history retention/resolution remain open because the brief supplies no values for them. Review and approve these operating choices with the product owner, then update the affected components and test criteria. Do not present draft defaults as values supplied by the problem brief.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "topk_37", "stepNumber": 37, "phase": "Serve current and historical rankings", "title": "Record the provisional freshness contract", "type": "explanation",
+      "content": "Measure ranking freshness from durable API acceptance to the cache generation visible to readers. Track event-time watermark, late corrections, and incomplete-shard state so a fast but provisional ranking is not mislabeled complete. The brief gives no numeric freshness target or watermark-lag limit; expose measured values and obtain product approval before setting either threshold.",
+      "componentUpdate": {"nodeId": "topk_monitor", "properties": {"purpose": "Track accepted-share-to-visible-ranking latency, late-event corrections, cache generation, watermark, and per-shard completeness. Expose freshness state and distinguish provisional from complete rankings. The brief provides no numeric latency target or watermark-lag limit; report measured values and require product approval before defining SLO thresholds."}},
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "topk_38", "stepNumber": 38, "phase": "Serve current and historical rankings", "title": "Apply an explicit historical retention boundary", "type": "explanation",
+      "content": "Historical queries need explicit retention and resolution. Choose raw-event, rollup, and replay retention with product owners based on required query semantics, privacy, and cost. Until those choices are approved, expose the range and resolution supported by stored data and return an explicit unavailable/retention-expired result rather than silently substituting the current leaderboard. The prompt does not specify a retention horizon or time-bucket resolution.",
+      "componentUpdate": {"nodeId": "topk_history", "properties": {"purpose": "Retain raw accepted events or exact compacted aggregates for the product-approved historical-query period. Disclose the supported event-time range and resolution, and explicitly reject unavailable or expired queries instead of substituting current results. Confirm retention, privacy, replay, and cost policy with product before production."}},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:2"]
+    },
+    {
+      "id": "topk_39", "stepNumber": 39, "phase": "Serve current and historical rankings", "title": "Expose freshness and history semantics to readers", "type": "explanation",
+      "content": "Readers need to distinguish ranking freshness from event-time completeness and current rankings from retained historical results. Keep freshness/as-of metadata in each cache generation, preserve the historical query's requested window and boundary resolution, and never silently serve an expired or incomplete result as current.",
+      "componentUpdate": {"nodeId": "topk_cache", "properties": {"purpose": "Serve versioned exact rankings with generatedAt, event-time watermark, freshness, and completeness state. Expose measured freshness without claiming a numeric target until product approval; incorporate late corrections and keep historical query responses distinct from current cache entries. Do not serve expired or incomplete generations as current."}},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:5"]
+    }
+  ]
+}

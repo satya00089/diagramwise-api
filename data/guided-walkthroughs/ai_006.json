@@ -1,0 +1,910 @@
+{
+  "problem_id": "ai_006",
+  "version": "1.0",
+  "totalSteps": 48,
+  "phases": [
+    {
+      "name": "Frame the generation workload",
+      "stepRange": [1, 3],
+      "description": "Separate user-visible job submission from generation completion, and treat the stated limits as acceptance targets to measure."
+    },
+    {
+      "name": "Build the request and job control plane",
+      "stepRange": [4, 10],
+      "description": "Create the web/API entry, durable job state, artifact references, queue, and generation worker."
+    },
+    {
+      "name": "Add GPU inference, training, safety, and delivery",
+      "stepRange": [11, 16],
+      "description": "Use catalog components for custom-data fine-tuning, GPU-backed diffusion, output screening, delivery, and operational signals."
+    },
+    {
+      "name": "Connect the end-to-end job lifecycle",
+      "stepRange": [17, 42],
+      "description": "Connect submission through queued execution, safety approval, durable artifacts, delivery, and observability."
+    },
+    {
+      "name": "Validate latency, capacity, and safety targets",
+      "stepRange": [43, 48],
+      "description": "Make queueing, GPU memory, completion SLOs, and content-safety measurement explicit before claiming targets are met."
+    }
+  ],
+  "steps": [
+    {
+      "id": "ai006_scope",
+      "stepNumber": 1,
+      "phase": "Frame the generation workload",
+      "title": "Treat each generation request as a durable job",
+      "type": "explanation",
+      "content": "The brief covers text-to-image, image transformation, inpainting and outpainting, short video generation, custom-data fine-tuning, output safety, GPU queues, and both API and web access. It does not specify image or video quality, request-size limits, latency percentiles, job arrival distribution, retention, or model choices. Keep those as product decisions rather than silently assuming values.",
+      "requirementIds": []
+    },
+    {
+      "id": "ai006_latency_contract",
+      "stepNumber": 2,
+      "phase": "Frame the generation workload",
+      "title": "Define what the image and video time limits measure",
+      "type": "decision_point",
+      "content": "The brief sets image generation under 10 seconds and a five-second video clip under 60 seconds. Confirm whether these are end-to-end completion limits or inference-only budgets, and specify percentile, resolution, model, safety-screening, and load conditions. Keep the targets visible in the design; do not present the diagram as proof they are achieved.",
+      "decision": {
+        "question": "What should the generation API promise while GPU work is running?",
+        "chosen": "Return a durable job identifier and status immediately, then measure completion against the stated image and video limits under an agreed workload and percentile.",
+        "chosenReason": "A durable asynchronous contract protects the API from long-running work while still making completion time an explicit, testable product objective.",
+        "alternatives": [
+          {
+            "option": "Hold the request open until every image or clip is complete",
+            "tradeoff": "It is simple for clients but ties up connections and makes retries ambiguous when generation exceeds client or gateway timeouts."
+          },
+          {
+            "option": "Return a job identifier without a completion objective",
+            "tradeoff": "It scales submissions but would discard the brief's explicit image and video time limits."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-constraint:1", "legacy-constraint:2", "legacy-requirement:8"]
+    },
+    {
+      "id": "ai006_capacity_contract",
+      "stepNumber": 3,
+      "phase": "Frame the generation workload",
+      "title": "Distinguish concurrent submissions from active GPU jobs",
+      "type": "decision_point",
+      "content": "The target is 10k+ concurrent generation requests, but it does not say that all 10k requests must execute on GPUs simultaneously. Clarify accepted-job concurrency, active inference concurrency, per-tenant quotas, burst duration, and fairness between image, video, and fine-tuning work. The queue absorbs bursts; admission control and measured GPU capacity determine safe execution concurrency.",
+      "decision": {
+        "question": "How should the platform handle demand above immediate GPU capacity?",
+        "chosen": "Accept only within service limits, persist job state, queue eligible work with fair class-aware scheduling, and expose queued, running, and terminal states.",
+        "chosenReason": "This supports high submission concurrency without pretending that queue depth equals GPU execution capacity or sacrificing job visibility.",
+        "alternatives": [
+          {
+            "option": "Start a GPU task for every accepted request immediately",
+            "tradeoff": "This can oversubscribe accelerator memory, amplify retries, and worsen completion latency during bursts."
+          },
+          {
+            "option": "Reject every request whenever the GPU fleet is busy",
+            "tradeoff": "This protects the fleet but does not use the requested queueing model to absorb bounded bursts."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-constraint:3", "legacy-constraint:4", "legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "ai006_web",
+      "stepNumber": 4,
+      "phase": "Build the request and job control plane",
+      "title": "Provide a web workspace for generation jobs",
+      "type": "add_component",
+      "content": "Let a creator submit a prompt, select an image or editing mode, follow job state, inspect safety status, and retrieve approved media. Route uploaded images and datasets through authorized object references rather than placing large binary bodies in generation messages.",
+      "component": {
+        "nodeId": "ai006_web",
+        "componentType": "web-app",
+        "label": "Creator Web Workspace",
+        "description": "Prompt, editing, fine-tuning, and job-status interface.",
+        "position": {"x": 0, "y": 300},
+        "properties": {
+          "componentName": "Creator Web Workspace",
+          "purpose": "Provide the requested web interface for text-to-image and video jobs, image-to-image editing, inpainting and outpainting, custom-dataset fine-tuning, and job status."
+        },
+        "highlightReason": "Web App is an existing catalog component and directly covers the brief's web-interface requirement."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "ai006_api",
+      "stepNumber": 5,
+      "phase": "Build the request and job control plane",
+      "title": "Expose authenticated generation and job APIs",
+      "type": "add_component",
+      "content": "Validate request mode, prompt and media references, caller authorization, idempotency key, and declared output settings. Return a job ID for generation and fine-tuning submissions; provide separate status and result retrieval operations.",
+      "component": {
+        "nodeId": "ai006_api",
+        "componentType": "api-gateway",
+        "label": "Generation and Job API",
+        "description": "Authenticated entry point for media requests and job status.",
+        "position": {"x": 340, "y": 300},
+        "properties": {
+          "componentName": "Generation and Job API",
+          "purpose": "Expose authenticated, rate-limited APIs for generation and fine-tuning job submission, idempotent retries, status checks, and approved result references."
+        },
+        "highlightReason": "API Gateway is already in the component catalog; no browser- or client-specific node is needed."
+      },
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "ai006_orchestrator",
+      "stepNumber": 6,
+      "phase": "Build the request and job control plane",
+      "title": "Validate requests and coordinate job state",
+      "type": "add_component",
+      "content": "Resolve the requested operation, validate references and policy, create a durable job record, and enqueue only bounded metadata and object references. Make retries idempotent and expose queued, running, safety-review, succeeded, failed, and cancelled states.",
+      "component": {
+        "nodeId": "ai006_orchestrator",
+        "componentType": "backend-server",
+        "label": "Generation Job Orchestrator",
+        "description": "Validates submissions and coordinates durable job transitions.",
+        "position": {"x": 700, "y": 300},
+        "properties": {
+          "componentName": "Generation Job Orchestrator",
+          "purpose": "Validate authorized image, video, editing, and fine-tuning requests; persist idempotent job state; enqueue references; and expose explicit terminal and safety-review states."
+        },
+        "highlightReason": "Backend Server is an existing catalog component for request validation and job orchestration."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "ai006_job_db",
+      "stepNumber": 7,
+      "phase": "Build the request and job control plane",
+      "title": "Persist job metadata separately from media bytes",
+      "type": "add_component",
+      "content": "Store job ownership, idempotency keys, requested operation, status transitions, model and adapter versions, safety outcome, timestamps, and artifact references. Keep prompts and metadata access-controlled; store large input and output media in object storage.",
+      "component": {
+        "nodeId": "ai006_job_db",
+        "componentType": "database",
+        "label": "Job and Model Metadata Database",
+        "description": "Durable job state, ownership, versions, and artifact references.",
+        "position": {"x": 1080, "y": 100},
+        "properties": {
+          "componentName": "Job and Model Metadata Database",
+          "purpose": "Persist idempotent job state, ownership, model and adapter versions, safety decisions, and media-object references; do not store generated media blobs here."
+        },
+        "highlightReason": "Database is an existing catalog component for transactional job and model metadata."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "ai006_media_storage",
+      "stepNumber": 8,
+      "phase": "Build the request and job control plane",
+      "title": "Keep source media, datasets, and approved artifacts in object storage",
+      "type": "add_component",
+      "content": "Store uploaded images, custom fine-tuning datasets, generated media, and versioned LoRA artifacts under access-controlled object references. Use separate staging and approved-output prefixes so the delivery path cannot expose media before safety approval.",
+      "component": {
+        "nodeId": "ai006_media_storage",
+        "componentType": "object-storage",
+        "label": "Private Media and Model Artifact Store",
+        "description": "Source uploads, datasets, generated media, and versioned adapters.",
+        "position": {"x": 1080, "y": 500},
+        "properties": {
+          "componentName": "Private Media and Model Artifact Store",
+          "purpose": "Store input images, custom datasets, generated outputs, and versioned LoRA adapters as private objects; expose only approved output references to delivery."
+        },
+        "highlightReason": "Object Storage is the existing catalog component for large media and model artifacts."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "ai006_job_queue",
+      "stepNumber": 9,
+      "phase": "Build the request and job control plane",
+      "title": "Buffer generation and fine-tuning work with fair scheduling",
+      "type": "add_component",
+      "content": "Queue compact, idempotent job envelopes that reference stored inputs. Apply admission limits, retry bounds, dead-letter handling, and class-aware fairness across image, video, and fine-tuning work. Measure queue age separately from GPU execution time.",
+      "component": {
+        "nodeId": "ai006_job_queue",
+        "componentType": "queue",
+        "label": "Generation and Training Job Queue",
+        "description": "Durable job references with bounded retries and fair dispatch.",
+        "position": {"x": 1080, "y": 300},
+        "properties": {
+          "componentName": "Generation and Training Job Queue",
+          "purpose": "Buffer idempotent image, video, and fine-tuning references for 10k+ concurrent generation submissions, with admission limits and fair class-aware dispatch. Track queue-inclusive image generation under 10 seconds and five-second video generation under 60 seconds as measured targets; bound retries and route exhausted jobs for review."
+        },
+        "highlightReason": "Queue is the catalog component for asynchronous generation work and GPU queue management."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ai006_generation_worker",
+      "stepNumber": 10,
+      "phase": "Build the request and job control plane",
+      "title": "Run generation jobs outside the request path",
+      "type": "add_component",
+      "content": "Claim jobs with leases and deduplication, fetch referenced inputs, choose the requested image or video workflow, call the serving endpoint, screen results, and write only approved artifact references. Retry transient failures without creating duplicate visible results.",
+      "component": {
+        "nodeId": "ai006_generation_worker",
+        "componentType": "processing-worker",
+        "label": "Generation Job Worker",
+        "description": "Executes queued image, editing, and video workflows.",
+        "position": {"x": 1450, "y": 220},
+        "properties": {
+          "componentName": "Generation Job Worker",
+          "purpose": "Consume idempotent generation jobs, retrieve image references, invoke the correct diffusion workflow, require content-safety approval, and persist approved result references."
+        },
+        "highlightReason": "Processing Worker is an existing catalog component for asynchronous generation jobs."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "ai006_training_worker",
+      "stepNumber": 11,
+      "phase": "Add GPU inference, training, safety, and delivery",
+      "title": "Isolate custom-data fine-tuning from interactive generation",
+      "type": "add_component",
+      "content": "Validate dataset ownership and format, create a versioned training job, and run LoRA fine-tuning as a separately scheduled workload. Publish an adapter only after training checks pass; never let an unvalidated training artifact replace a serving version automatically.",
+      "component": {
+        "nodeId": "ai006_training_worker",
+        "componentType": "processing-worker",
+        "label": "Custom Dataset Fine-Tuning Worker",
+        "description": "Validates datasets and produces versioned LoRA adapters.",
+        "position": {"x": 1450, "y": 540},
+        "properties": {
+          "componentName": "Custom Dataset Fine-Tuning Worker",
+          "purpose": "Validate authorized custom datasets, run queued LoRA fine-tuning outside the interactive generation path, and stage versioned adapters for evaluation before serving."
+        },
+        "highlightReason": "The catalog Processing Worker can represent fine-tuning without inventing a new component type."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ai006_gpu_cluster",
+      "stepNumber": 12,
+      "phase": "Add GPU inference, training, safety, and delivery",
+      "title": "Schedule diffusion and fine-tuning on memory-aware GPU capacity",
+      "type": "add_component",
+      "content": "Run image and video inference plus LoRA training on GPU capacity. Use model-aware placement, bounded dynamic batches, memory admission, and separate workload quotas; tune precision and batch size against quality and measured GPU memory. Scale from observed queue age and saturation, not request count alone.",
+      "component": {
+        "nodeId": "ai006_gpu_cluster",
+        "componentType": "gpu-cluster",
+        "label": "Diffusion Inference and Fine-Tuning GPU Fleet",
+        "description": "GPU capacity for queued generation and custom-data adaptation.",
+        "position": {"x": 2180, "y": 340},
+        "properties": {
+          "componentName": "Diffusion Inference and Fine-Tuning GPU Fleet",
+          "purpose": "Schedule image and video diffusion plus LoRA jobs for a 10k+ concurrent-submission target without equating submissions to active GPU work. Benchmark image generation under 10 seconds and five-second video generation under 60 seconds; use GPU-memory-efficient batch processing, memory-aware placement, workload isolation, and autoscaling driven by queue age and accelerator saturation."
+        },
+        "highlightReason": "GPU Cluster is an existing catalog component and directly represents the brief's accelerator fleet."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ai006_diffusion_serving",
+      "stepNumber": 13,
+      "phase": "Add GPU inference, training, safety, and delivery",
+      "title": "Serve versioned diffusion workflows behind one inference boundary",
+      "type": "add_component",
+      "content": "Select a versioned diffusion model and workflow for text-to-image, image-to-image, inpainting, outpainting, or short video generation. Load only approved base models and adapters; return outputs to the worker for screening rather than exposing them directly to callers.",
+      "component": {
+        "nodeId": "ai006_diffusion_serving",
+        "componentType": "model-serving",
+        "label": "Versioned Diffusion Model Serving",
+        "description": "GPU-backed image editing and short-video inference API.",
+        "position": {"x": 1810, "y": 220},
+        "properties": {
+          "componentName": "Versioned Diffusion Model Serving",
+          "purpose": "Run versioned diffusion workflows for text-to-image, image-to-image, inpainting, outpainting, and short video; measure image generation under 10 seconds and five-second video generation under 60 seconds under an agreed workload. Load evaluated LoRA adapters and return generated artifacts to the worker for safety screening."
+        },
+        "highlightReason": "Model Serving is an existing catalog component for diffusion inference; the workflow distinctions stay in editable properties."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "ai006_safety_serving",
+      "stepNumber": 14,
+      "phase": "Add GPU inference, training, safety, and delivery",
+      "title": "Screen prompts and generated media before release",
+      "type": "add_component",
+      "content": "Use a dedicated content-safety inference endpoint to evaluate prompts and generated images or sampled video frames. Record policy version and outcome; hold uncertain or failed checks for review and prevent unapproved artifacts from entering the public delivery path.",
+      "component": {
+        "nodeId": "ai006_safety_serving",
+        "componentType": "model-serving",
+        "label": "Prompt and Media Safety Classifier",
+        "description": "Dedicated classifier for prompt and generated-output screening.",
+        "position": {"x": 1810, "y": 600},
+        "properties": {
+          "componentName": "Prompt and Media Safety Classifier",
+          "purpose": "Classify prompts, generated images, and sampled video frames before release; evaluate the 99.9% unsafe-generated-content filtering target against a labeled set, record policy version and decision, and hold uncertain or failed results for review."
+        },
+        "highlightReason": "Model Serving already represents an inference endpoint; its safety-classifier role is explicit in the node properties, so no custom component is needed."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "ai006_cdn",
+      "stepNumber": 15,
+      "phase": "Add GPU inference, training, safety, and delivery",
+      "title": "Deliver only approved media through the CDN",
+      "type": "add_component",
+      "content": "Serve approved image and video artifacts with authorization-aware, unguessable references and cache policy consistent with privacy and revocation requirements. Keep private uploads and unreviewed outputs outside public cache paths.",
+      "component": {
+        "nodeId": "ai006_cdn",
+        "componentType": "cdn",
+        "label": "Approved Media Delivery CDN",
+        "description": "Low-latency delivery for approved generated media.",
+        "position": {"x": 2540, "y": 120},
+        "properties": {
+          "componentName": "Approved Media Delivery CDN",
+          "purpose": "Deliver only approved image and video artifacts through authorization-aware references; keep private inputs and unreviewed outputs out of public cache paths."
+        },
+        "highlightReason": "CDN is an existing catalog component for the brief's media-serving path."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "ai006_monitoring",
+      "stepNumber": 16,
+      "phase": "Add GPU inference, training, safety, and delivery",
+      "title": "Observe job completion, GPU pressure, and safety quality",
+      "type": "add_component",
+      "content": "Track submission-to-completion percentiles by operation, queue age and retries, GPU utilization and memory pressure, model/version outcomes, safety-classifier quality, and approved-artifact delivery. Alert on target breaches and safety-path failures.",
+      "component": {
+        "nodeId": "ai006_monitoring",
+        "componentType": "monitoring",
+        "label": "Generation, GPU, and Safety Observability",
+        "description": "Operational SLO, queue, accelerator, and moderation signals.",
+        "position": {"x": 2540, "y": 740},
+        "properties": {
+          "componentName": "Generation, GPU, and Safety Observability",
+          "purpose": "Measure end-to-end image and video completion percentiles, queue age, retries, GPU utilization and memory, model quality signals, safety-classifier performance, and approved delivery."
+        },
+        "highlightReason": "Monitoring is an existing catalog component for validating every stated service and safety target."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "ai006_web_to_api",
+      "stepNumber": 17,
+      "phase": "Connect the end-to-end job lifecycle",
+      "title": "Submit jobs from the web workspace",
+      "type": "add_connection",
+      "content": "The web interface sends authenticated generation and fine-tuning requests and polls or subscribes to durable job status.",
+      "connection": {
+        "edgeId": "ai006_web_to_api",
+        "sourceNodeId": "ai006_web",
+        "targetNodeId": "ai006_api",
+        "connectionType": "api-call",
+        "label": "Submit and follow jobs",
+        "description": "Send prompt, operation, authorized object references, and idempotency key; retrieve job status and approved result references."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7"]
+    },
+    {
+      "id": "ai006_api_to_orchestrator",
+      "stepNumber": 18,
+      "phase": "Connect the end-to-end job lifecycle",
+      "title": "Validate and normalize each API request",
+      "type": "add_connection",
+      "content": "The API boundary forwards authenticated, bounded requests to the orchestrator with trace and idempotency context.",
+      "connection": {
+        "edgeId": "ai006_api_to_orchestrator",
+        "sourceNodeId": "ai006_api",
+        "targetNodeId": "ai006_orchestrator",
+        "connectionType": "api-call",
+        "label": "Validated generation request",
+        "description": "Pass the selected image, image-edit, video, or fine-tuning operation and authorized input references for validation."
+      },
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "ai006_orchestrator_to_db",
+      "stepNumber": 19,
+      "phase": "Connect the end-to-end job lifecycle",
+      "title": "Commit job state before acknowledging acceptance",
+      "type": "add_connection",
+      "content": "Persist ownership, idempotency, operation, and queued status before returning an accepted job ID, so a retry or worker restart can recover the same job.",
+      "connection": {
+        "edgeId": "ai006_orchestrator_to_db",
+        "sourceNodeId": "ai006_orchestrator",
+        "targetNodeId": "ai006_job_db",
+        "connectionType": "database-connection",
+        "label": "Create and update job state",
+        "description": "Persist idempotency key, owner, status, model version, safety decision, and artifact references transactionally."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "ai006_orchestrator_to_storage",
+      "stepNumber": 20,
+      "phase": "Connect the end-to-end job lifecycle",
+      "title": "Upload source images and custom datasets by reference",
+      "type": "add_connection",
+      "content": "Use authorized direct uploads or controlled upload endpoints and persist object references in the job record; the job queue carries references rather than large media bodies.",
+      "connection": {
+        "edgeId": "ai006_orchestrator_to_storage",
+        "sourceNodeId": "ai006_orchestrator",
+        "targetNodeId": "ai006_media_storage",
+        "connectionType": "data-flow",
+        "label": "Private input media and datasets",
+        "description": "Store image-to-image and inpainting/outpainting sources plus custom fine-tuning datasets under authorized object references."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "ai006_orchestrator_to_queue",
+      "stepNumber": 21,
+      "phase": "Connect the end-to-end job lifecycle",
+      "title": "Enqueue bounded generation or training work",
+      "type": "add_connection",
+      "content": "After durable job creation, enqueue an idempotent reference with the operation class and deadline budget. Admission controls prevent a burst from turning into unbounded GPU work.",
+      "connection": {
+        "edgeId": "ai006_orchestrator_to_queue",
+        "sourceNodeId": "ai006_orchestrator",
+        "targetNodeId": "ai006_job_queue",
+        "connectionType": "message-queue",
+        "label": "Durable job envelope",
+        "description": "Enqueue image, video, or fine-tuning references with idempotency, class, and deadline metadata."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ai006_queue_to_generation_worker",
+      "stepNumber": 22,
+      "phase": "Connect the end-to-end job lifecycle",
+      "title": "Dispatch image and video jobs to generation workers",
+      "type": "add_connection",
+      "content": "Generation workers claim work with bounded concurrency and a lease; expired leases return safely to the queue without duplicating committed outputs.",
+      "connection": {
+        "edgeId": "ai006_queue_to_generation_worker",
+        "sourceNodeId": "ai006_job_queue",
+        "targetNodeId": "ai006_generation_worker",
+        "connectionType": "message-queue",
+        "label": "Image and video jobs",
+        "description": "Dispatch idempotent text-to-image, image editing, inpainting/outpainting, and five-second video requests under measured completion budgets."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "ai006_queue_to_training_worker",
+      "stepNumber": 23,
+      "phase": "Connect the end-to-end job lifecycle",
+      "title": "Dispatch custom-dataset fine-tuning as a separate job class",
+      "type": "add_connection",
+      "content": "Keep training jobs independently visible and fairly scheduled so a large fine-tune cannot starve image or video requests.",
+      "connection": {
+        "edgeId": "ai006_queue_to_training_worker",
+        "sourceNodeId": "ai006_job_queue",
+        "targetNodeId": "ai006_training_worker",
+        "connectionType": "message-queue",
+        "label": "Fine-tuning jobs",
+        "description": "Dispatch validated custom-dataset jobs under a separate workload class and GPU-memory budget."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ai006_storage_to_generation_worker",
+      "stepNumber": 24,
+      "phase": "Connect the end-to-end job lifecycle",
+      "title": "Resolve image-editing inputs from private storage",
+      "type": "add_connection",
+      "content": "Workers fetch source image references only after authorization and validation; the original asset remains separate from generated versions.",
+      "connection": {
+        "edgeId": "ai006_storage_to_generation_worker",
+        "sourceNodeId": "ai006_media_storage",
+        "targetNodeId": "ai006_generation_worker",
+        "connectionType": "data-flow",
+        "label": "Authorized image references",
+        "description": "Supply source images for image-to-image transformation, inpainting, and outpainting without embedding bytes in queue messages."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "ai006_storage_to_training_worker",
+      "stepNumber": 25,
+      "phase": "Connect the end-to-end job lifecycle",
+      "title": "Read authorized custom training datasets",
+      "type": "add_connection",
+      "content": "The training worker reads the validated dataset manifest and object versions, preserving dataset identity for reproducible adapter builds.",
+      "connection": {
+        "edgeId": "ai006_storage_to_training_worker",
+        "sourceNodeId": "ai006_media_storage",
+        "targetNodeId": "ai006_training_worker",
+        "connectionType": "data-flow",
+        "label": "Versioned custom dataset",
+        "description": "Provide authorized dataset objects and manifest versions for custom-data LoRA fine-tuning."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "ai006_generation_worker_to_serving",
+      "stepNumber": 26,
+      "phase": "Connect the end-to-end job lifecycle",
+      "title": "Invoke the selected diffusion workflow",
+      "type": "add_connection",
+      "content": "The worker selects text-to-image, image editing, inpainting/outpainting, or short-video generation and passes bounded inputs, model version, and job deadline to serving.",
+      "connection": {
+        "edgeId": "ai006_generation_worker_to_serving",
+        "sourceNodeId": "ai006_generation_worker",
+        "targetNodeId": "ai006_diffusion_serving",
+        "connectionType": "api-call",
+        "label": "Versioned diffusion invocation",
+        "description": "Call the selected generation workflow with authorized media references and measure image generation under 10 seconds or five-second video generation under 60 seconds against the agreed completion budget."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "ai006_serving_to_gpu",
+      "stepNumber": 27,
+      "phase": "Connect the end-to-end job lifecycle",
+      "title": "Run inference on explicitly scheduled GPU capacity",
+      "type": "add_connection",
+      "content": "Serving dispatches model execution to capacity managed by the GPU fleet; model loading and placement must be included in the measured completion budget where the product SLA requires it.",
+      "connection": {
+        "edgeId": "ai006_serving_to_gpu",
+        "sourceNodeId": "ai006_diffusion_serving",
+        "targetNodeId": "ai006_gpu_cluster",
+        "connectionType": "data-flow",
+        "label": "GPU-backed diffusion execution",
+        "description": "Schedule image, editing, and video model execution on memory-admitted accelerator capacity."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ai006_gpu_to_serving",
+      "stepNumber": 28,
+      "phase": "Connect the end-to-end job lifecycle",
+      "title": "Return generated image or clip results to serving",
+      "type": "add_connection",
+      "content": "The GPU execution result returns through the serving boundary with model version and completion metadata; serving does not publish media directly.",
+      "connection": {
+        "edgeId": "ai006_gpu_to_serving",
+        "sourceNodeId": "ai006_gpu_cluster",
+        "targetNodeId": "ai006_diffusion_serving",
+        "connectionType": "data-flow",
+        "label": "Generated media result",
+        "description": "Return image or short-video generation output and execution metadata to the serving API."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "ai006_serving_to_generation_worker",
+      "stepNumber": 29,
+      "phase": "Connect the end-to-end job lifecycle",
+      "title": "Return output references for screening and job completion",
+      "type": "add_connection",
+      "content": "Return generated content to the worker for safety evaluation and durable persistence before marking a job complete.",
+      "connection": {
+        "edgeId": "ai006_serving_to_generation_worker",
+        "sourceNodeId": "ai006_diffusion_serving",
+        "targetNodeId": "ai006_generation_worker",
+        "connectionType": "api-call",
+        "label": "Generated output and model metadata",
+        "description": "Return media output, model and adapter versions, and measured execution duration for safety screening."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "ai006_training_worker_to_gpu",
+      "stepNumber": 30,
+      "phase": "Connect the end-to-end job lifecycle",
+      "title": "Run LoRA fine-tuning with bounded GPU-memory use",
+      "type": "add_connection",
+      "content": "Training jobs use model-aware batch limits and isolated capacity. Validate memory use and training quality before an adapter is eligible for serving.",
+      "connection": {
+        "edgeId": "ai006_training_worker_to_gpu",
+        "sourceNodeId": "ai006_training_worker",
+        "targetNodeId": "ai006_gpu_cluster",
+        "connectionType": "data-flow",
+        "label": "Memory-bounded LoRA training",
+        "description": "Execute custom-dataset fine-tuning with bounded batches, explicit memory admission, and workload isolation."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ai006_gpu_to_training_worker",
+      "stepNumber": 31,
+      "phase": "Connect the end-to-end job lifecycle",
+      "title": "Return versioned checkpoints for evaluation",
+      "type": "add_connection",
+      "content": "Return training status and checkpoint references; evaluate each adapter against its declared dataset and safety policy before publication to the model-serving registry.",
+      "connection": {
+        "edgeId": "ai006_gpu_to_training_worker",
+        "sourceNodeId": "ai006_gpu_cluster",
+        "targetNodeId": "ai006_training_worker",
+        "connectionType": "data-flow",
+        "label": "Training progress and checkpoints",
+        "description": "Return memory and utilization metrics plus checkpoint references for evaluation and versioned artifact storage."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "ai006_generation_worker_to_safety",
+      "stepNumber": 32,
+      "phase": "Connect the end-to-end job lifecycle",
+      "title": "Require a safety decision before an output is released",
+      "type": "add_connection",
+      "content": "Screen prompt and generated media, including a defined sampling strategy for video frames. Store the classifier and policy version with each decision.",
+      "connection": {
+        "edgeId": "ai006_generation_worker_to_safety",
+        "sourceNodeId": "ai006_generation_worker",
+        "targetNodeId": "ai006_safety_serving",
+        "connectionType": "api-call",
+        "label": "Prompt and generated-media screening",
+        "description": "Evaluate prompt and output content against the 99.9% unsafe-content filtering target before any public delivery."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "ai006_safety_to_generation_worker",
+      "stepNumber": 33,
+      "phase": "Connect the end-to-end job lifecycle",
+      "title": "Return pass, block, or review-required safety outcomes",
+      "type": "add_connection",
+      "content": "Only a passing decision permits approved-output persistence. A blocked, uncertain, or unavailable classifier keeps the artifact private and leaves the job in a reviewable state.",
+      "connection": {
+        "edgeId": "ai006_safety_to_generation_worker",
+        "sourceNodeId": "ai006_safety_serving",
+        "targetNodeId": "ai006_generation_worker",
+        "connectionType": "api-call",
+        "label": "Versioned safety decision",
+        "description": "Return a policy-versioned pass, block, or review-required result; fail closed for public delivery when screening is unavailable."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "ai006_generation_worker_to_storage",
+      "stepNumber": 34,
+      "phase": "Connect the end-to-end job lifecycle",
+      "title": "Persist generated media only after safety approval",
+      "type": "add_connection",
+      "content": "Write approved media and its model, adapter, and safety-decision references to a private approved prefix; update the job record only after the object is durable.",
+      "connection": {
+        "edgeId": "ai006_generation_worker_to_storage",
+        "sourceNodeId": "ai006_generation_worker",
+        "targetNodeId": "ai006_media_storage",
+        "connectionType": "data-flow",
+        "label": "Safety-approved image or video",
+        "description": "Persist approved image and video artifacts with immutable job, model-version, and classifier-decision references."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "ai006_training_worker_to_storage",
+      "stepNumber": 35,
+      "phase": "Connect the end-to-end job lifecycle",
+      "title": "Store versioned fine-tuning artifacts",
+      "type": "add_connection",
+      "content": "Keep adapter checkpoints and their dataset/model lineage in private storage. Mark an adapter serving-eligible only after evaluation and safety checks.",
+      "connection": {
+        "edgeId": "ai006_training_worker_to_storage",
+        "sourceNodeId": "ai006_training_worker",
+        "targetNodeId": "ai006_media_storage",
+        "connectionType": "data-flow",
+        "label": "Versioned LoRA adapter artifacts",
+        "description": "Store evaluated adapter versions with dataset identity, base-model version, and validation metadata."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "ai006_storage_to_serving",
+      "stepNumber": 36,
+      "phase": "Connect the end-to-end job lifecycle",
+      "title": "Load only evaluated adapter versions",
+      "type": "add_connection",
+      "content": "Serving resolves immutable adapter versions from the artifact store; promotion and rollback update an explicit version pointer rather than mutating an artifact in place.",
+      "connection": {
+        "edgeId": "ai006_storage_to_serving",
+        "sourceNodeId": "ai006_media_storage",
+        "targetNodeId": "ai006_diffusion_serving",
+        "connectionType": "data-flow",
+        "label": "Approved model and adapter versions",
+        "description": "Load immutable base-model and evaluated LoRA artifact references into the versioned diffusion-serving path."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "ai006_storage_to_cdn",
+      "stepNumber": 37,
+      "phase": "Connect the end-to-end job lifecycle",
+      "title": "Make only approved artifact references deliverable",
+      "type": "add_connection",
+      "content": "Expose a delivery origin or authorized object reference only after the safety decision and durable write have succeeded.",
+      "connection": {
+        "edgeId": "ai006_storage_to_cdn",
+        "sourceNodeId": "ai006_media_storage",
+        "targetNodeId": "ai006_cdn",
+        "connectionType": "data-flow",
+        "label": "Approved media origin",
+        "description": "Deliver safety-approved generated images and video clips while keeping private inputs and held outputs inaccessible."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "ai006_cdn_to_web",
+      "stepNumber": 38,
+      "phase": "Connect the end-to-end job lifecycle",
+      "title": "Return authorized media to the creator",
+      "type": "add_connection",
+      "content": "The client receives an authorized result reference after job completion; access and cache behavior follow privacy and revocation policy.",
+      "connection": {
+        "edgeId": "ai006_cdn_to_web",
+        "sourceNodeId": "ai006_cdn",
+        "targetNodeId": "ai006_web",
+        "connectionType": "data-flow",
+        "label": "Approved image and clip delivery",
+        "description": "Serve the completed, approved image or short video to its authorized creator."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "ai006_orchestrator_to_monitoring",
+      "stepNumber": 39,
+      "phase": "Connect the end-to-end job lifecycle",
+      "title": "Measure submission and completion as separate API signals",
+      "type": "add_connection",
+      "content": "Emit job lifecycle timestamps and operation labels without putting sensitive prompts or media in metric dimensions.",
+      "connection": {
+        "edgeId": "ai006_orchestrator_to_monitoring",
+        "sourceNodeId": "ai006_orchestrator",
+        "targetNodeId": "ai006_monitoring",
+        "connectionType": "event-stream",
+        "label": "Job lifecycle and completion latency",
+        "description": "Measure accepted-to-started and accepted-to-completed durations by image, editing, video, and training operation."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "ai006_queue_to_monitoring",
+      "stepNumber": 40,
+      "phase": "Connect the end-to-end job lifecycle",
+      "title": "Make queue pressure visible before completion targets slip",
+      "type": "add_connection",
+      "content": "Track queue depth, oldest-job age, admission rejections, retries, and dead-letter counts by workload class.",
+      "connection": {
+        "edgeId": "ai006_queue_to_monitoring",
+        "sourceNodeId": "ai006_job_queue",
+        "targetNodeId": "ai006_monitoring",
+        "connectionType": "event-stream",
+        "label": "Queue age, depth, and retries",
+        "description": "Alert on backlog and deadline risk separately for image, video, and fine-tuning work."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ai006_gpu_to_monitoring",
+      "stepNumber": 41,
+      "phase": "Connect the end-to-end job lifecycle",
+      "title": "Measure accelerator utilization and memory pressure",
+      "type": "add_connection",
+      "content": "Attribute utilization, memory, batch shape, model load, and OOM/retry signals to workload class and model version.",
+      "connection": {
+        "edgeId": "ai006_gpu_to_monitoring",
+        "sourceNodeId": "ai006_gpu_cluster",
+        "targetNodeId": "ai006_monitoring",
+        "connectionType": "event-stream",
+        "label": "GPU capacity and memory signals",
+        "description": "Observe saturation, memory headroom, batch efficiency, and scaling response for generation and training."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ai006_safety_to_monitoring",
+      "stepNumber": 42,
+      "phase": "Connect the end-to-end job lifecycle",
+      "title": "Evaluate safety filtering against a labeled test set",
+      "type": "add_connection",
+      "content": "Track false negatives, false positives, review rate, and policy version using a representative labeled evaluation set; measure the 99.9% target with an agreed definition of unsafe content.",
+      "connection": {
+        "edgeId": "ai006_safety_to_monitoring",
+        "sourceNodeId": "ai006_safety_serving",
+        "targetNodeId": "ai006_monitoring",
+        "connectionType": "event-stream",
+        "label": "Safety evaluation and decision metrics",
+        "description": "Measure unsafe-content filtering performance and classifier availability without logging raw media into telemetry."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "ai006_result_state",
+      "stepNumber": 43,
+      "phase": "Validate latency, capacity, and safety targets",
+      "title": "Keep accepted, running, held, and completed states distinct",
+      "type": "decision_point",
+      "content": "The API can acknowledge a durable job quickly while image or video generation continues asynchronously. Completion SLOs still include queue wait, model loading, inference, safety evaluation, and durable output write if the product defines them end to end.",
+      "decision": {
+        "question": "When is a generation job complete?",
+        "chosen": "Only after generation, safety approval, and durable persistence succeed; expose a separate held/review state when screening does not pass cleanly.",
+        "chosenReason": "This prevents an accepted request or unreviewed artifact from being mistaken for a safely deliverable result.",
+        "alternatives": [
+          {
+            "option": "Mark complete when the model returns bytes",
+            "tradeoff": "The client may see success before safety screening and durable storage have completed."
+          },
+          {
+            "option": "Treat every safety uncertainty as successful output",
+            "tradeoff": "This can release content that has not met the filtering policy."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "ai006_fair_gpu_scheduling",
+      "stepNumber": 44,
+      "phase": "Validate latency, capacity, and safety targets",
+      "title": "Protect interactive work from long training jobs",
+      "type": "decision_point",
+      "content": "Apply class-aware fairness and GPU-memory admission across image, video, and fine-tuning jobs. A training batch must not reserve memory needed for latency-sensitive inference; validate the policy under mixed workloads and bursty arrivals.",
+      "decision": {
+        "question": "How should the GPU fleet balance generation and custom fine-tuning?",
+        "chosen": "Use separately observable workload classes and memory-aware scheduling with bounded per-class concurrency; tune allocation from measured service objectives.",
+        "chosenReason": "The brief requires both interactive generation targets and memory-efficient batch processing, which compete for the same accelerator resource.",
+        "alternatives": [
+          {
+            "option": "Allow one unbounded shared FIFO for every job",
+            "tradeoff": "Large training jobs can create head-of-line blocking and make image/video completion unpredictable."
+          },
+          {
+            "option": "Reserve all accelerators for interactive inference",
+            "tradeoff": "This protects latency but can prevent the required custom-data fine-tuning workflow from making progress."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ai006_scale_trigger",
+      "stepNumber": 45,
+      "phase": "Validate latency, capacity, and safety targets",
+      "title": "Scale on queue age and accelerator saturation",
+      "type": "scale_trigger",
+      "content": "Avoid scaling only on CPU or request count; image/video GPU work is constrained by accelerator availability and memory.",
+      "scaleTrigger": {
+        "metric": "Oldest queued job age, deadline-risk rate, GPU utilization, and free accelerator memory by workload class",
+        "action": "Add eligible GPU capacity or reduce admission and batch concurrency before memory pressure causes repeated failures",
+        "impact": "Improves the chance of meeting the image-under-10-seconds and five-second-video-under-60-seconds targets while containing 10k+ concurrent submissions."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ai006_safety_gate",
+      "stepNumber": 46,
+      "phase": "Validate latency, capacity, and safety targets",
+      "title": "Fail closed when output safety cannot be established",
+      "type": "decision_point",
+      "content": "The 99.9% unsafe-content filtering target needs a defined unsafe-content taxonomy, representative labeled data, threshold, and measurement window. Treat it as an evaluated target, not a guarantee from adding a classifier node. Keep uncertain decisions private for review.",
+      "decision": {
+        "question": "What happens when the safety classifier is unavailable or uncertain?",
+        "chosen": "Do not publish the output; retain a reviewable job state and release only after an explicit passing decision under the active policy.",
+        "chosenReason": "Safety availability failures must not silently bypass the required output filter.",
+        "alternatives": [
+          {
+            "option": "Release the output and screen it later",
+            "tradeoff": "This violates the pre-release safety boundary and may expose unsafe content."
+          },
+          {
+            "option": "Discard the job without a visible state",
+            "tradeoff": "This hides operational failures and leaves users unable to understand or retry their request safely."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "ai006_acceptance",
+      "stepNumber": 47,
+      "phase": "Validate latency, capacity, and safety targets",
+      "title": "Benchmark the stated targets under representative load",
+      "type": "explanation",
+      "content": "Measure end-to-end image completion under 10 seconds, five-second video completion under 60 seconds, 10k+ concurrent request handling, GPU memory efficiency under mixed batch workloads, and 99.9% unsafe-content filtering against a labeled set. Report workload, percentile, quality, error rate, queue wait, and safety false negatives with each result.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "ai006_conclusion",
+      "stepNumber": 48,
+      "phase": "Validate latency, capacity, and safety targets",
+      "title": "Review the complete generation platform",
+      "type": "conclusion",
+      "content": "The connected design accepts API and web requests, persists job state and media references, queues image, editing, video, and fine-tuning work, schedules memory-aware GPU execution, screens outputs before release, stores approved artifacts, and delivers them through a CDN. Confirm the latency percentile and quality bar, concurrency definition, fairness policy, dataset controls, safety evaluation set, retention, and rollback process before treating the stated targets as achieved.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

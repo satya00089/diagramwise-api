@@ -1,0 +1,966 @@
+{
+  "problem_id": "aiops_002",
+  "version": "1.0.0-review-draft",
+  "totalSteps": 51,
+  "phases": [
+    {
+      "name": "Observe and prepare demand signals",
+      "stepRange": [1, 10],
+      "description": "Define the decision boundary, capture multi-dimensional demand, and build trustworthy history and features."
+    },
+    {
+      "name": "Train and serve demand forecasts",
+      "stepRange": [11, 22],
+      "description": "Compare time-series approaches and deliver versioned forecasts without assuming an unstated forecast horizon."
+    },
+    {
+      "name": "Apply guarded scaling across dependent services",
+      "stepRange": [23, 41],
+      "description": "Resolve service dependencies, validate policy, and dispatch bounded, observable changes through cloud APIs."
+    },
+    {
+      "name": "Measure outcomes and prove safe operation",
+      "stepRange": [42, 51],
+      "description": "Measure forecast quality, SLA outcomes, and cost against agreed baselines, then test rollout and failure behavior."
+    }
+  ],
+  "steps": [
+    {
+      "id": "pas_01",
+      "stepNumber": 1,
+      "phase": "Observe and prepare demand signals",
+      "title": "Separate supplied targets from open design inputs",
+      "type": "explanation",
+      "content": "The brief requires forecast error within 15% of actual demand, scaling before a spike, 30% less over-provisioning cost, zero SLAs missed because scaling was late, and coverage for 50+ services. It does not define forecast horizons, service topology, per-service scaling limits, the SLA population or measurement window, or the exact forecast-accuracy statistic. Treat those as interview questions; this walkthrough does not claim that a design alone proves the targets."
+    },
+    {
+      "id": "pas_02",
+      "stepNumber": 2,
+      "phase": "Observe and prepare demand signals",
+      "title": "Collect demand and service-health telemetry",
+      "type": "add_component",
+      "content": "Collect timestamped CPU, memory, and network utilization alongside workload demand, capacity, scaling actions, and service-level signals. Keep service and resource identity attached so one aggregate cannot hide a hot dimension or a single service that is approaching an SLA risk.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:4", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "pas_metrics",
+        "componentType": "monitoring",
+        "label": "Demand & Service Telemetry",
+        "description": "Timestamped CPU, memory, network, capacity, scaling, and service-health signals.",
+        "position": {"x": 0, "y": 0},
+        "properties": {
+          "componentName": "Demand & Service Telemetry",
+          "purpose": "Collect timestamped CPU, memory, and network utilization, workload demand, capacity, scaling actions, and service-health signals with service and resource identity.",
+          "metrics": true,
+          "alerts": true
+        },
+        "highlightReason": "A forecast needs trustworthy per-service, per-dimension observations and actual outcomes."
+      }
+    },
+    {
+      "id": "pas_03",
+      "stepNumber": 3,
+      "phase": "Observe and prepare demand signals",
+      "title": "Normalize signals without hiding gaps",
+      "type": "add_component",
+      "content": "Normalize provider-specific telemetry into a common service/resource/time-series envelope. Preserve event time, units, source, and missing-data markers; late, duplicated, or sparse samples must not be silently treated as low demand.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:3"],
+      "component": {
+        "nodeId": "pas_stream",
+        "componentType": "stream-processor",
+        "label": "Demand Signal Normalizer",
+        "description": "Aligns event-time telemetry and preserves quality and freshness metadata.",
+        "position": {"x": 280, "y": 0},
+        "properties": {
+          "componentName": "Demand Signal Normalizer",
+          "purpose": "Normalize provider-specific telemetry into a service, resource-dimension, event-time, unit, and source envelope; identify duplicate, late, sparse, and missing samples instead of treating them as low demand."
+        },
+        "highlightReason": "Forecast accuracy is meaningless when the underlying observations are misaligned or stale."
+      }
+    },
+    {
+      "id": "pas_04",
+      "stepNumber": 4,
+      "phase": "Observe and prepare demand signals",
+      "title": "Stream normalized demand observations",
+      "type": "add_connection",
+      "content": "Send normalized observations with event timestamps and quality flags into the processing path. Partition or route by service and resource dimension using a strategy validated against the actual fleet cardinality and ordering needs.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4"],
+      "connection": {
+        "edgeId": "pas_metrics_stream",
+        "sourceNodeId": "pas_metrics",
+        "targetNodeId": "pas_stream",
+        "connectionType": "event-stream",
+        "label": "Timestamped demand and outcomes",
+        "description": "Service-scoped CPU, memory, network, capacity, scaling, and health observations with freshness metadata."
+      }
+    },
+    {
+      "id": "pas_05",
+      "stepNumber": 5,
+      "phase": "Observe and prepare demand signals",
+      "title": "Retain queryable time-series history",
+      "type": "add_component",
+      "content": "Keep the history needed for training, backtesting, and post-scale evaluation. Retain raw or appropriately downsampled observations with their resource dimension, service, event time, and quality state; choose retention and resolution from the eventual horizons and model-evaluation needs rather than inventing them here.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4"],
+      "component": {
+        "nodeId": "pas_history",
+        "componentType": "database",
+        "label": "Demand Time-Series History",
+        "description": "Historical demand, capacity, scale actions, and data-quality metadata for replay and evaluation.",
+        "position": {"x": 560, "y": -210},
+        "properties": {
+          "componentName": "Demand Time-Series History",
+          "purpose": "Retain time-indexed per-service and per-resource demand, capacity, scaling actions, and quality metadata for reproducible training, backtesting, and outcome evaluation.",
+          "type": "Time-Series"
+        },
+        "highlightReason": "Historical patterns and comparable actual demand are needed both to forecast and to prove the stated accuracy target."
+      }
+    },
+    {
+      "id": "pas_06",
+      "stepNumber": 6,
+      "phase": "Observe and prepare demand signals",
+      "title": "Persist observations for reproducible replay",
+      "type": "add_connection",
+      "content": "Persist normalized samples and corrections with enough lineage to reconstruct what data was available at forecast time. Keep ingestion time separate from event time so historical backtests do not gain information that was unavailable in production.",
+      "requirementIds": ["legacy-requirement:1"],
+      "connection": {
+        "edgeId": "pas_stream_history",
+        "sourceNodeId": "pas_stream",
+        "targetNodeId": "pas_history",
+        "connectionType": "database-connection",
+        "label": "Quality-tagged demand history",
+        "description": "Event-time observations and correction lineage for training and leakage-safe backtests."
+      }
+    },
+    {
+      "id": "pas_07",
+      "stepNumber": 7,
+      "phase": "Observe and prepare demand signals",
+      "title": "Build calendar-aware forecast features",
+      "type": "add_component",
+      "content": "Create temporally aligned features by service and resource dimension. Include calendar, seasonal, and approved special-event signals with their source and version; represent an unknown or changed event calendar explicitly rather than assuming ordinary demand.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4"],
+      "component": {
+        "nodeId": "pas_features",
+        "componentType": "feature-store",
+        "label": "Calendar-Aware Demand Features",
+        "description": "Versioned historical, seasonal, calendar, and event features aligned to service demand.",
+        "position": {"x": 560, "y": 20},
+        "properties": {
+          "componentName": "Calendar-Aware Demand Features",
+          "purpose": "Materialize point-in-time-consistent demand histories and calendar, seasonal, and approved special-event features per service and resource dimension, retaining source and version metadata."
+        },
+        "highlightReason": "Seasonality and special events are useful only when training and serving use consistent, point-in-time features."
+      }
+    },
+    {
+      "id": "pas_08",
+      "stepNumber": 8,
+      "phase": "Observe and prepare demand signals",
+      "title": "Materialize current and historical features",
+      "type": "add_connection",
+      "content": "Feed the normalized stream into feature materialization. Join event calendars through an approved, versioned source, and track feature freshness so the forecasting path can abstain when important inputs are absent.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4"],
+      "connection": {
+        "edgeId": "pas_stream_features",
+        "sourceNodeId": "pas_stream",
+        "targetNodeId": "pas_features",
+        "connectionType": "data-flow",
+        "label": "Aligned demand and calendar features",
+        "description": "Point-in-time features with source, event, and freshness metadata."
+      }
+    },
+    {
+      "id": "pas_09",
+      "stepNumber": 9,
+      "phase": "Observe and prepare demand signals",
+      "title": "Keep scaling dimensions independently observable",
+      "type": "decision_point",
+      "content": "Model CPU, memory, and network as distinct demand dimensions, while allowing a service policy to consider them together when the workload requires it. Define unit conversion, aggregation windows, and handling of a missing dimension with service owners; do not let a healthy CPU series mask a memory or network bottleneck.",
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:1"],
+      "decision": {
+        "question": "Should multi-resource demand be collapsed into one fleet-wide signal?",
+        "chosen": "Preserve service- and dimension-level series, then combine only through an explicit workload policy",
+        "chosenReason": "CPU, memory, and network can saturate independently; an opaque aggregate conceals both forecast error and bottlenecks.",
+        "alternatives": [
+          {"option": "Forecast one global utilization score", "tradeoff": "Simpler, but can hide a critical service or resource dimension."},
+          {"option": "Create an unrelated model for every signal without shared controls", "tradeoff": "Makes consistent feature lineage, evaluation, and policy harder to operate."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "pas_stream",
+        "properties": {"purpose": "Normalize provider-specific telemetry into service, CPU, memory, network, event-time, unit, and source series; identify duplicate, late, sparse, and missing samples rather than collapsing them or treating them as low demand."}
+      }
+    },
+    {
+      "id": "pas_10",
+      "stepNumber": 10,
+      "phase": "Observe and prepare demand signals",
+      "title": "Join history without temporal leakage",
+      "type": "add_connection",
+      "content": "Expose historical observations to feature materialization with event-time semantics. Build each training or serving row only from information available at its prediction timestamp, including the event-calendar version then known.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4"],
+      "connection": {
+        "edgeId": "pas_history_features",
+        "sourceNodeId": "pas_history",
+        "targetNodeId": "pas_features",
+        "connectionType": "data-flow",
+        "label": "Point-in-time history",
+        "description": "Leakage-safe historical demand and outcome features."
+      }
+    },
+    {
+      "id": "pas_11",
+      "stepNumber": 11,
+      "phase": "Train and serve demand forecasts",
+      "title": "Train candidate time-series forecasters",
+      "type": "add_component",
+      "content": "Train and compare a suitable baseline with time-series candidates such as Prophet or DeepAR from the supplied hint. Use temporal holdouts and evaluate independently by service, resource dimension, and requested forecast horizon; preserve model and feature versions for reproducibility.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:1"],
+      "component": {
+        "nodeId": "pas_training",
+        "componentType": "model-training",
+        "label": "Demand Forecast Training",
+        "description": "Leakage-safe time-series training, temporal validation, and versioned candidate evaluation.",
+        "position": {"x": 850, "y": -220},
+        "properties": {
+          "componentName": "Demand Forecast Training",
+          "purpose": "Train and compare time-series baselines and candidate forecasters using point-in-time features and temporal holdouts; evaluate per service, resource dimension, and agreed forecast horizon, and preserve reproducible model and feature versions."
+        },
+        "highlightReason": "The accuracy goal is an evaluation criterion, not a property guaranteed by selecting an ML model."
+      }
+    },
+    {
+      "id": "pas_12",
+      "stepNumber": 12,
+      "phase": "Train and serve demand forecasts",
+      "title": "Train from versioned point-in-time features",
+      "type": "add_connection",
+      "content": "Consume historical examples and event features with their as-of timestamps. Split evaluation by time and include ordinary seasonal periods and known special events where representative data exists.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4"],
+      "connection": {
+        "edgeId": "pas_features_training",
+        "sourceNodeId": "pas_features",
+        "targetNodeId": "pas_training",
+        "connectionType": "data-flow",
+        "label": "Versioned training examples",
+        "description": "Point-in-time demand, calendar, seasonality, and event features."
+      }
+    },
+    {
+      "id": "pas_13",
+      "stepNumber": 13,
+      "phase": "Train and serve demand forecasts",
+      "title": "Choose models using horizon-specific evidence",
+      "type": "decision_point",
+      "content": "Compare simple seasonal baselines with Prophet or DeepAR candidates on rolling temporal holdouts. Evaluate the brief's within-15%-of-actual target using the metric and aggregation agreed with stakeholders, and report the error distribution by service, dimension, and horizon. Reinforcement learning may be explored offline for policy optimization, but it is not a substitute for a validated forecaster or a safe action boundary.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:1"],
+      "decision": {
+        "question": "What evidence should select the forecast model?",
+        "chosen": "Temporal backtests against a seasonal baseline, segmented by service, resource dimension, and agreed horizon",
+        "chosenReason": "A single aggregate score can conceal late or inaccurate forecasts for an SLA-critical service.",
+        "alternatives": [
+          {"option": "Choose the most complex model by default", "tradeoff": "Complexity alone does not establish accuracy, calibration, or reliable event behavior."},
+          {"option": "Select using a random train/test split", "tradeoff": "Temporal leakage can make future-demand forecasts appear better than production reality."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "pas_training",
+        "properties": {"purpose": "Train and compare seasonal baselines, Prophet or DeepAR candidates, and optional offline policy experiments using point-in-time features and temporal holdouts; evaluate the agreed accuracy metric per service, resource dimension, and forecast horizon, preserving reproducible versions."}
+      }
+    },
+    {
+      "id": "pas_14",
+      "stepNumber": 14,
+      "phase": "Train and serve demand forecasts",
+      "title": "Serve versioned multi-step forecasts",
+      "type": "add_component",
+      "content": "Serve forecasts keyed by service, resource dimension, model version, feature version, and forecast issue time. Return multiple future points when requested, with uncertainty and freshness, instead of presenting one unexplained scalar as an action command.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2"],
+      "component": {
+        "nodeId": "pas_serving",
+        "componentType": "model-serving",
+        "label": "Versioned Demand Forecast API",
+        "description": "Multi-step per-service forecasts with model, feature, freshness, and uncertainty metadata.",
+        "position": {"x": 1120, "y": 0},
+        "properties": {
+          "componentName": "Versioned Demand Forecast API",
+          "purpose": "Serve multi-step forecasts keyed by service and CPU, memory, or network dimension, including issue time, model and feature versions, freshness, and uncertainty for policy evaluation.",
+          "platform": "Custom API",
+          "autoscaling": true
+        },
+        "highlightReason": "The control plane needs attributable forecasts and enough lead-time context to decide whether an action is still useful."
+      }
+    },
+    {
+      "id": "pas_15",
+      "stepNumber": 15,
+      "phase": "Train and serve demand forecasts",
+      "title": "Release only evaluated model versions",
+      "type": "add_connection",
+      "content": "Publish a candidate to serving only after the agreed temporal evaluation and review. Keep the prior approved version available so a degraded candidate can be withdrawn without losing forecast service.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2"],
+      "connection": {
+        "edgeId": "pas_training_serving",
+        "sourceNodeId": "pas_training",
+        "targetNodeId": "pas_serving",
+        "connectionType": "model-release",
+        "label": "Reviewed forecast model version",
+        "description": "Candidate model and evaluation lineage for controlled serving promotion and rollback."
+      }
+    },
+    {
+      "id": "pas_16",
+      "stepNumber": 16,
+      "phase": "Train and serve demand forecasts",
+      "title": "Fetch current features for inference",
+      "type": "add_connection",
+      "content": "Resolve only features compatible with the serving model version and requested service/dimension. Missing calendar data, stale telemetry, or a schema mismatch should produce an explicit unavailable or degraded forecast state.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4"],
+      "connection": {
+        "edgeId": "pas_features_serving",
+        "sourceNodeId": "pas_features",
+        "targetNodeId": "pas_serving",
+        "connectionType": "data-flow",
+        "label": "Fresh, version-compatible features",
+        "description": "Current service and resource observations plus approved calendar and seasonal signals."
+      }
+    },
+    {
+      "id": "pas_17",
+      "stepNumber": 17,
+      "phase": "Train and serve demand forecasts",
+      "title": "Ask stakeholders to define forecast horizons",
+      "type": "decision_point",
+      "content": "The brief calls for multi-step prediction but supplies no forecast horizons, sampling interval, or per-service actuation lead time. Ask how far ahead each class of service must be forecast and how much time its scale operation needs; configure horizon and cadence only after those inputs are agreed.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:1", "legacy-constraint:2"],
+      "decision": {
+        "question": "Which future points should the forecasting API return?",
+        "chosen": "Make horizons and cadence explicit configuration derived from service and scaling-operation requirements",
+        "chosenReason": "An arbitrary fixed horizon can either react too late or amplify forecast uncertainty and unnecessary capacity.",
+        "alternatives": [
+          {"option": "Assume one universal forecast horizon", "tradeoff": "Different services and cloud operations may need different lead times."},
+          {"option": "Return an unbounded forecast series", "tradeoff": "Adds cost and uncertainty without clarifying which point drives policy."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "pas_serving",
+        "properties": {"purpose": "Serve configured multi-step forecasts keyed by service and CPU, memory, or network dimension, including issue time, model and feature versions, freshness, uncertainty, and stakeholder-approved horizons for policy evaluation."}
+      }
+    },
+    {
+      "id": "pas_18",
+      "stepNumber": 18,
+      "phase": "Train and serve demand forecasts",
+      "title": "Gate forecasts against the stated accuracy target",
+      "type": "scale_trigger",
+      "content": "The brief's within-15%-of-actual requirement is an acceptance target, not evidence that a model has achieved it; the brief leaves the error statistic and aggregation undefined. Evaluate model versions on leakage-safe holdouts and, once available, production outcomes by service, resource dimension, and agreed horizon. Treat each issued forecast as a time-stamped signal with freshness and uncertainty, never as an authorized scaling command. If the model lacks evidence or misses the agreed target, mark that version unqualified for predictive control and retain the reactive path.",
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:1"],
+      "scaleTrigger": {
+        "metric": "Agreed forecast-error statistic measured against realized demand by service, resource dimension, and configured horizon; the supplied target is within 15%.",
+        "action": "Qualify a model version only on reviewed evaluation evidence; reject stale or incompatible forecast signals and route eligible signals to policy evaluation, never directly to a scale API.",
+        "impact": "Prevents an unvalidated model or an individual prediction from being mistaken for scaling authorization."
+      }
+    },
+    {
+      "id": "pas_19",
+      "stepNumber": 19,
+      "phase": "Train and serve demand forecasts",
+      "title": "Evaluate forecasts in a scaling policy controller",
+      "type": "add_component",
+      "content": "Keep prediction separate from scaling control and authorization. A forecast is one advisory input alongside fresh observed utilization and health, service policy, dependency context, and target-specific actuation evidence. This controller alone evaluates those signals and may create an auditable desired-state proposal; a model response cannot authorize or call a provider API. Queue a proposal only after the independent guardrail, ownership, freshness, and coordination checks pass.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "pas_policy",
+        "componentType": "backend-server",
+        "label": "Predictive Scaling Policy Controller",
+        "description": "Combines forecasts, live signals, service dependencies, and approved scaling guardrails.",
+        "position": {"x": 1400, "y": 0},
+        "properties": {
+          "componentName": "Predictive Scaling Policy Controller",
+          "purpose": "Treat versioned forecasts as advisory inputs; compare with fresh observed health and demand, then emit a desired-state proposal only through approved policy, guardrails, lead-time, dependency, and coordination checks. Forecast services have no authority to mutate infrastructure.",
+          "architecture": "Microservices"
+        },
+        "highlightReason": "A predictive output is a signal to evaluate, not an authorization to scale."
+      }
+    },
+    {
+      "id": "pas_20",
+      "stepNumber": 20,
+      "phase": "Train and serve demand forecasts",
+      "title": "Send forecasts with provenance to policy",
+      "type": "add_connection",
+      "content": "Pass the forecast only as an advisory signal, with uncertainty, feature freshness, model version, issue time, target service/dimension, and configured horizon. Reject a stale, unqualified, or incompatible result before policy evaluation; this connection carries no desired-state command or provider authority.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5"],
+      "connection": {
+        "edgeId": "pas_serving_policy",
+        "sourceNodeId": "pas_serving",
+        "targetNodeId": "pas_policy",
+        "connectionType": "api-call",
+        "label": "Versioned forecast and uncertainty",
+        "description": "Fresh per-service forecasts with provenance and configured lead-time context."
+      }
+    },
+    {
+      "id": "pas_21",
+      "stepNumber": 21,
+      "phase": "Train and serve demand forecasts",
+      "title": "Retain a reactive safety path",
+      "type": "add_connection",
+      "content": "Provide fresh observed utilization and service-health signals to the policy controller independently of forecasting. If the forecast is unavailable, stale, too uncertain under the reviewed policy, or its model version is unqualified, disable predictive adjustments and continue only the approved reactive path using current observations and the same per-service limits, quota checks, dependency rules, coordination, and action audit. Never reuse a stale prediction or bypass guardrails. If telemetry, policy, or observed target state is unavailable, make no predictive write or automatic scale-down; retain the last confirmed desired state within the approved safety policy, alert the owner, and follow the service's pre-approved incident procedure.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "pas_metrics_policy",
+        "sourceNodeId": "pas_metrics",
+        "targetNodeId": "pas_policy",
+        "connectionType": "data-flow",
+        "label": "Live demand and SLA-risk signals",
+        "description": "Independent reactive signals and health context for fallback and policy evaluation."
+      }
+    },
+    {
+      "id": "pas_22",
+      "stepNumber": 22,
+      "phase": "Train and serve demand forecasts",
+      "title": "Combine predictive and reactive decisions",
+      "type": "explanation",
+      "content": "Predictive scaling may propose earlier capacity changes only from a fresh, eligible forecast with sufficient target-specific lead time. Reactive scaling responds to observed demand and remains available when forecasting is degraded; it must not wait for a prediction. Route both paths through the same policy and serialized target-action boundary, with the same owner-approved limits, quotas, dependency rules, cooldowns, and audit trail. If observations or policy are unsafe or unavailable, use the fail-safe behavior in the preceding step rather than creating a second writer or scaling down on stale evidence."
+    },
+    {
+      "id": "pas_23",
+      "stepNumber": 23,
+      "phase": "Apply guarded scaling across dependent services",
+      "title": "Represent service dependencies explicitly",
+      "type": "add_component",
+      "content": "Maintain an owned, versioned dependency graph for services and their scaling relationships. Include dependency direction, criticality, and the policy needed to coordinate scale order; verify that the inventory is complete for the intended 50+ services rather than treating graph connectivity as proof of coverage.",
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "pas_topology",
+        "componentType": "database",
+        "label": "Service Dependency Topology",
+        "description": "Versioned graph of service dependencies and scaling coordination metadata.",
+        "position": {"x": 1120, "y": 300},
+        "properties": {
+          "componentName": "Service Dependency Topology",
+          "purpose": "Store an owner-maintained, versioned graph of service dependencies, criticality, and scaling coordination metadata for policy evaluation across the intended fleet.",
+          "type": "Graph"
+        },
+        "highlightReason": "The policy needs to coordinate dependent services rather than scaling every node independently."
+      }
+    },
+    {
+      "id": "pas_24",
+      "stepNumber": 24,
+      "phase": "Apply guarded scaling across dependent services",
+      "title": "Resolve dependency-aware scale order",
+      "type": "add_connection",
+      "content": "Resolve the affected dependency neighborhood and calculate an explicit safe order or coordinated wave. Ask service owners how to handle cycles, shared dependencies, and partial failures; the brief does not supply this topology or its semantics.",
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "pas_topology_policy",
+        "sourceNodeId": "pas_topology",
+        "targetNodeId": "pas_policy",
+        "connectionType": "database-connection",
+        "label": "Versioned service dependencies",
+        "description": "Affected services, dependency ordering, ownership, and coordination policy."
+      }
+    },
+    {
+      "id": "pas_25",
+      "stepNumber": 25,
+      "phase": "Apply guarded scaling across dependent services",
+      "title": "Store reviewed scaling guardrails",
+      "type": "add_component",
+      "content": "Keep reviewed policy for allowed targets, minimum and maximum capacity, permitted step size, protected periods, and approval requirements in a versioned configuration source. The actual values and owners are not present in the brief and must be established with the service and platform teams.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:5", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "pas_guardrails",
+        "componentType": "configuration-management",
+        "label": "Scaling Policy & Guardrails",
+        "description": "Versioned allowlists, capacity boundaries, approvals, and per-service scaling policy.",
+        "position": {"x": 1120, "y": 560},
+        "properties": {
+          "componentName": "Scaling Policy & Guardrails",
+          "purpose": "Version and review per-service scaling allowlists, capacity boundaries, permitted changes, protected periods, owners, and approval requirements; values come from authorized service and platform owners.",
+          "tool": "Custom",
+          "versionControl": true
+        },
+        "highlightReason": "Explicit owner-approved limits prevent a forecast from creating an unbounded capacity change."
+      }
+    },
+    {
+      "id": "pas_26",
+      "stepNumber": 26,
+      "phase": "Apply guarded scaling across dependent services",
+      "title": "Load the current approved policy",
+      "type": "add_connection",
+      "content": "Fetch a versioned policy and verify that its service owner, scope, and revision are current before evaluating a proposal. Missing, expired, or conflicting policy must fail closed for predictive writes and surface the reason for review.",
+      "requirementIds": ["legacy-requirement:6"],
+      "connection": {
+        "edgeId": "pas_guardrails_policy",
+        "sourceNodeId": "pas_guardrails",
+        "targetNodeId": "pas_policy",
+        "connectionType": "api-call",
+        "label": "Approved service policy",
+        "description": "Current versioned limits, permissions, ownership, and escalation rules."
+      }
+    },
+    {
+      "id": "pas_27",
+      "stepNumber": 27,
+      "phase": "Apply guarded scaling across dependent services",
+      "title": "Reject actions outside explicit guardrails",
+      "type": "decision_point",
+      "content": "Bound every predictive and reactive proposal by the approved service limits, cloud quotas, resource dimension, allowed target, and dependency policy. Ask owners to supply the actual numeric limits and approval rules. Reject a predictive proposal that exceeds policy or lacks current policy evidence; use the reactive path only when fresh observations and its approved policy are available and it passes those same safeguards. Otherwise do not create an automated scale-down or bypass action: retain the last confirmed desired state, alert, and escalate through the approved incident procedure.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:2", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"],
+      "decision": {
+        "question": "Can the forecast directly choose any requested capacity?",
+        "chosen": "Clamp only to current reviewed per-service policy, and reject when policy or quota evidence is missing",
+        "chosenReason": "Model output and predicted demand do not override service ownership, cloud limits, or workload safety rules.",
+        "alternatives": [
+          {"option": "Allow the model to set arbitrary capacity", "tradeoff": "An inaccurate forecast or compromised model can create an outage or uncontrolled spend."},
+          {"option": "Use one global limit for all services", "tradeoff": "Different service dependencies and capacity semantics require owner-specific policy."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "pas_policy",
+        "properties": {"purpose": "Evaluate predictive and reactive proposals against fresh observations, current owner-approved per-service limits, quota, dependency rules, hysteresis, and approved policy; reject missing or out-of-policy changes and emit auditable proposals for serialized execution."}
+      }
+    },
+    {
+      "id": "pas_28",
+      "stepNumber": 28,
+      "phase": "Apply guarded scaling across dependent services",
+      "title": "Coordinate concurrent changes per target",
+      "type": "add_component",
+      "content": "Use a fenced lease or equivalent compare-and-set coordination for a target service and resource dimension. This prevents simultaneous predictive and reactive loops from applying stale, contradictory desired states; choose lease semantics with the platform implementation.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8"],
+      "component": {
+        "nodeId": "pas_lock",
+        "componentType": "distributed-lock",
+        "label": "Per-Service Scaling Lease",
+        "description": "Fenced coordination for concurrent policy and scaling actions.",
+        "position": {"x": 1680, "y": -240},
+        "properties": {
+          "componentName": "Per-Service Scaling Lease",
+          "purpose": "Coordinate concurrent predictive and reactive changes by service and resource dimension using fenced ownership and stale-writer protection."
+        },
+        "highlightReason": "Two valid control loops can still produce an invalid result if they race on the same target."
+      }
+    },
+    {
+      "id": "pas_29",
+      "stepNumber": 29,
+      "phase": "Apply guarded scaling across dependent services",
+      "title": "Acquire target-scoped action ownership",
+      "type": "add_connection",
+      "content": "Acquire a lease using a stable action key and verify its fencing token again before applying the change. If ownership is lost, expire the proposal and recompute from current telemetry and policy.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8"],
+      "connection": {
+        "edgeId": "pas_policy_lock",
+        "sourceNodeId": "pas_policy",
+        "targetNodeId": "pas_lock",
+        "connectionType": "api-call",
+        "label": "Fenced service/dimension lease",
+        "description": "Serializes conflicting actions and prevents a stale policy writer from scaling."
+      }
+    },
+    {
+      "id": "pas_30",
+      "stepNumber": 30,
+      "phase": "Apply guarded scaling across dependent services",
+      "title": "Queue approved desired-state changes",
+      "type": "add_component",
+      "content": "Persist permitted actions before dispatch so transient worker or provider failures can be retried and audited. Include policy and forecast versions, target, dependency wave, idempotency key, and expiry so old proposals cannot execute after their assumptions change.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:8"],
+      "component": {
+        "nodeId": "pas_queue",
+        "componentType": "queue",
+        "label": "Approved Scaling Action Queue",
+        "description": "Durable, idempotent dispatch of policy-approved desired-state changes.",
+        "position": {"x": 1680, "y": 0},
+        "properties": {
+          "componentName": "Approved Scaling Action Queue",
+          "purpose": "Persist policy-approved, expiring, idempotent scaling actions with forecast and policy versions, target identity, dependency wave, and audit context before dispatch.",
+          "durable": true,
+          "backoff": "exponential"
+        },
+        "highlightReason": "A durable action boundary lets the controller retry safely without losing why a change was proposed."
+      }
+    },
+    {
+      "id": "pas_31",
+      "stepNumber": 31,
+      "phase": "Apply guarded scaling across dependent services",
+      "title": "Enqueue only policy-approved proposals",
+      "type": "add_connection",
+      "content": "Dispatch an action only after guardrails, dependency order, lease ownership, and proposal expiry are checked. Idempotent replay should return the prior operation state rather than issue an extra scale command.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:8"],
+      "connection": {
+        "edgeId": "pas_policy_queue",
+        "sourceNodeId": "pas_policy",
+        "targetNodeId": "pas_queue",
+        "connectionType": "message-queue",
+        "label": "Approved, expiring action proposal",
+        "description": "A policy decision and idempotent desired state ready for bounded execution."
+      }
+    },
+    {
+      "id": "pas_32",
+      "stepNumber": 32,
+      "phase": "Apply guarded scaling across dependent services",
+      "title": "Execute bounded scaling work asynchronously",
+      "type": "add_component",
+      "content": "Workers apply approved changes outside the forecasting request path. Enforce provider rate limits, retry only idempotently, record operation identifiers, and stop or escalate when a dependency wave fails rather than blindly continuing.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5"],
+      "component": {
+        "nodeId": "pas_workers",
+        "componentType": "processing-worker",
+        "label": "Scaling Action Workers",
+        "description": "Rate-limited asynchronous workers for approved, auditable scaling operations.",
+        "position": {"x": 1960, "y": 0},
+        "properties": {
+          "componentName": "Scaling Action Workers",
+          "purpose": "Apply approved changes asynchronously with provider rate limiting, idempotent retries, operation tracking, dependency-wave control, and explicit failure escalation.",
+          "tasks": "Data Processing",
+          "autoscale": true
+        },
+        "highlightReason": "Provider API latency and retries should not block forecasting or bypass control-plane checks."
+      }
+    },
+    {
+      "id": "pas_33",
+      "stepNumber": 33,
+      "phase": "Apply guarded scaling across dependent services",
+      "title": "Consume actions with bounded retries",
+      "type": "add_connection",
+      "content": "Claim each action with a stable idempotency key, recheck its expiry and fencing token, and record the provider operation result. Send exhausted or ambiguous outcomes to review instead of reporting success from a command acknowledgement alone.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5"],
+      "connection": {
+        "edgeId": "pas_queue_workers",
+        "sourceNodeId": "pas_queue",
+        "targetNodeId": "pas_workers",
+        "connectionType": "message-queue",
+        "label": "Idempotent scaling job",
+        "description": "Expiring, policy-approved desired-state action with operation and audit identifiers."
+      }
+    },
+    {
+      "id": "pas_34",
+      "stepNumber": 34,
+      "phase": "Apply guarded scaling across dependent services",
+      "title": "Isolate cloud auto-scaling API integration",
+      "type": "add_component",
+      "content": "Use a provider adapter that translates the policy's desired state into the selected cloud or orchestrator API. Apply least-privilege credentials, provider quotas, idempotency where available, and read-after-write verification; the brief does not select AWS, Azure, GCP, Kubernetes, or a target service type.",
+      "requirementIds": ["legacy-requirement:5"],
+      "component": {
+        "nodeId": "pas_adapter",
+        "componentType": "backend-server",
+        "label": "Cloud Auto-Scaling API Adapter",
+        "description": "Provider-neutral translation and verification for cloud or orchestrator scaling APIs.",
+        "position": {"x": 2240, "y": 0},
+        "properties": {
+          "componentName": "Cloud Auto-Scaling API Adapter",
+          "purpose": "Translate authorized desired states into the selected cloud or orchestrator scaling API, enforce least privilege and provider quotas, preserve idempotency and operation IDs, and verify observed state without assuming a provider."
+        },
+        "highlightReason": "A replaceable adapter keeps provider-specific API semantics out of forecast and policy logic."
+      }
+    },
+    {
+      "id": "pas_35",
+      "stepNumber": 35,
+      "phase": "Apply guarded scaling across dependent services",
+      "title": "Call provider APIs with scoped authority",
+      "type": "add_connection",
+      "content": "Pass the validated target, desired state, policy revision, lease token, and idempotency key to the adapter. Do not pass model credentials or broad account-level authority through the forecasting service.",
+      "requirementIds": ["legacy-requirement:5"],
+      "connection": {
+        "edgeId": "pas_workers_adapter",
+        "sourceNodeId": "pas_workers",
+        "targetNodeId": "pas_adapter",
+        "connectionType": "api-call",
+        "label": "Scoped, idempotent scale operation",
+        "description": "Authorized desired-state request with policy, lease, and audit provenance."
+      }
+    },
+    {
+      "id": "pas_36",
+      "stepNumber": 36,
+      "phase": "Apply guarded scaling across dependent services",
+      "title": "Identify the scalable service fleet",
+      "type": "add_component",
+      "content": "Represent the service fleet as the adapter's target boundary, not as a hard-coded provider choice. Confirm whether targets are container workloads, virtual machines, or managed services and map each target to its native scaling API and observable desired state.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "pas_targets",
+        "componentType": "container-orchestrator",
+        "label": "Scalable Service Fleet",
+        "description": "Illustrative workload target boundary; concrete service and provider topology is an interview input.",
+        "position": {"x": 2520, "y": 0},
+        "properties": {
+          "componentName": "Scalable Service Fleet",
+          "purpose": "Represent the service fleet addressed through replaceable cloud or orchestrator adapters; confirm whether each target is a container workload, virtual machine, or managed service and inventory the intended 50+ services before claiming coverage."
+        },
+        "highlightReason": "The brief requires broad service coverage but does not define the actual workload or provider topology."
+      }
+    },
+    {
+      "id": "pas_37",
+      "stepNumber": 37,
+      "phase": "Apply guarded scaling across dependent services",
+      "title": "Apply and verify target desired state",
+      "type": "add_connection",
+      "content": "The adapter issues a scale operation through the selected target API and reads back observed capacity and operation status. Distinguish accepted, in-progress, completed, rejected, and unknown outcomes so the policy can react to partial provider failure.",
+      "requirementIds": ["legacy-requirement:5"],
+      "connection": {
+        "edgeId": "pas_adapter_targets",
+        "sourceNodeId": "pas_adapter",
+        "targetNodeId": "pas_targets",
+        "connectionType": "api-call",
+        "label": "Provider scale command and observed state",
+        "description": "Target-specific scaling API operation with read-after-write status."
+      }
+    },
+    {
+      "id": "pas_38",
+      "stepNumber": 38,
+      "phase": "Apply guarded scaling across dependent services",
+      "title": "Act only while the forecast still provides lead time",
+      "type": "scale_trigger",
+      "content": "The supplied constraint requires scale-up to complete before the demand spike arrives, but gives no numeric latency target. Compare the forecast arrival window and its uncertainty with measured end-to-end actuation time for this target. If timely predictive action cannot be established, do not claim the objective was met: leave scaling to the guarded reactive path, raise an SLA-risk signal, and record the observed completion time and outcome.",
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"],
+      "scaleTrigger": {
+        "metric": "Forecast arrival window and uncertainty compared with observed target-specific scale-up completion time; the supplied objective is completion before the spike, with no numeric latency SLO stated.",
+        "action": "Dispatch an approved predictive proposal only when freshness, model eligibility, guardrails, dependencies, and lead-time checks pass; otherwise leave control to the guarded reactive path and raise an SLA-risk signal.",
+        "impact": "Measures observed pre-spike completion without inventing a latency target or treating a forecast as a command."
+      }
+    },
+    {
+      "id": "pas_39",
+      "stepNumber": 39,
+      "phase": "Apply guarded scaling across dependent services",
+      "title": "Control oscillation with cooldown and reconciliation",
+      "type": "decision_point",
+      "content": "Use per-service hysteresis with separately reviewed scale-up and lower scale-down thresholds. A scale-up may be proposed from an eligible forecast; independently, fresh observed demand crossing the reactive threshold must not wait for a forecast. Permit scale-down only after observed demand remains below the lower threshold for the owner-approved dwell/cooldown, the forecast is healthy and shows no relevant near-term risk, dependencies are safe, and prior operations have settled. Reconcile desired and observed capacity before each action; never reverse an in-flight change. Keep numeric thresholds and dwell times as service-owner decisions because the brief supplies none. A stale forecast may disable predictive changes, but must not disable a healthy guarded reactive scale-up.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:4"],
+      "decision": {
+        "question": "How should the controller avoid repeated scale-up/scale-down oscillation?",
+        "chosen": "Use separate reviewed scale-up and scale-down thresholds, a per-service dwell/cooldown, and observed in-flight state; require stronger sustained evidence before scale-down",
+        "chosenReason": "A forecast crossing a threshold repeatedly should not trigger conflicting infrastructure changes.",
+        "alternatives": [
+          {"option": "Apply every forecast change immediately", "tradeoff": "Noise and model variance can cause expensive oscillation or API throttling."},
+          {"option": "Use one global hard-coded cooldown", "tradeoff": "A single value may be wrong for different service start-up and actuation times."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "pas_policy",
+        "properties": {"purpose": "Evaluate advisory forecasts and fresh reactive observations with owner-approved limits, quota, separate scale-up/scale-down thresholds, per-service dwell, dependencies, and in-flight state; serialize auditable proposals and retain a guarded reactive fallback."}
+      }
+    },
+    {
+      "id": "pas_40",
+      "stepNumber": 40,
+      "phase": "Apply guarded scaling across dependent services",
+      "title": "Feed observed capacity back into control",
+      "type": "add_connection",
+      "content": "Return observed capacity, completion time, errors, and subsequent service demand to telemetry. This closes the control loop and supplies actuals for forecast evaluation; do not treat an API acceptance response as evidence that scale-up completed.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "pas_targets_metrics",
+        "sourceNodeId": "pas_targets",
+        "targetNodeId": "pas_metrics",
+        "connectionType": "data-flow",
+        "label": "Observed capacity and post-scale outcomes",
+        "description": "Actual resource use, scale completion, service health, cost inputs, and SLA outcomes."
+      }
+    },
+    {
+      "id": "pas_41",
+      "stepNumber": 41,
+      "phase": "Apply guarded scaling across dependent services",
+      "title": "Make failures visible and keep the fallback honest",
+      "type": "explanation",
+      "content": "Stale features, an unqualified or unavailable model, missing observations or policy, provider throttling, dependency failure, expired actions, and partial scale completion are distinct states. Degrade or disable predictive control when its evidence is unsafe; keep only the fresh, approved reactive path active under the same guardrails. If the reactive inputs or policy are also unavailable, prevent automated scale-down, retain the last confirmed desired state within the approved safety policy, alert and escalate. Do not report a successful pre-spike scale unless the target's observed state confirms completion before the spike."
+    },
+    {
+      "id": "pas_42",
+      "stepNumber": 42,
+      "phase": "Measure outcomes and prove safe operation",
+      "title": "Measure cost and SLA outcomes",
+      "type": "add_component",
+      "content": "Join actual capacity, demand, billing or cost-allocation data, scale operations, and SLA outcomes. Compare predictive operation with an agreed baseline or counterfactual under comparable demand and service conditions; identify how the 30% over-provisioning-cost reduction is defined before reporting it.",
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "pas_analytics",
+        "componentType": "analytics",
+        "label": "Predictive Scaling Outcomes",
+        "description": "Forecast quality, capacity efficiency, scale timing, cost, and SLA outcome measurement.",
+        "position": {"x": 2240, "y": 340},
+        "properties": {
+          "componentName": "Predictive Scaling Outcomes",
+          "purpose": "Measure forecast errors by service, resource dimension, and horizon; compare actual spend and over-provisioning with an agreed demand-matched baseline; and attribute scale completion and SLA outcomes without claiming a target from design alone."
+        },
+        "highlightReason": "A 30% cost goal needs an explicit baseline and must be evaluated alongside service outcomes."
+      }
+    },
+    {
+      "id": "pas_43",
+      "stepNumber": 43,
+      "phase": "Measure outcomes and prove safe operation",
+      "title": "Attribute actual fleet cost and SLA results",
+      "type": "add_connection",
+      "content": "Join observed resource use, purchased capacity, scale operation timing, and service outcomes with consistent service identity. Compare like-for-like demand and event periods so savings are not attributed to reduced workload or a missed SLA.",
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "pas_targets_analytics",
+        "sourceNodeId": "pas_targets",
+        "targetNodeId": "pas_analytics",
+        "connectionType": "data-flow",
+        "label": "Actual capacity, cost, and service outcomes",
+        "description": "Service-attributed resource usage, spend inputs, operation completion, and SLA evidence."
+      }
+    },
+    {
+      "id": "pas_44",
+      "stepNumber": 44,
+      "phase": "Measure outcomes and prove safe operation",
+      "title": "Compare forecasts with realized demand",
+      "type": "add_connection",
+      "content": "Join each issued prediction to subsequently observed demand using its original issue time, model version, and configured horizon. Publish accuracy and coverage only for completed, comparable observations and show missing actuals separately.",
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:1"],
+      "connection": {
+        "edgeId": "pas_serving_analytics",
+        "sourceNodeId": "pas_serving",
+        "targetNodeId": "pas_analytics",
+        "connectionType": "data-flow",
+        "label": "Forecast provenance and evaluation",
+        "description": "Issued predictions linked to realized per-service, per-dimension demand."
+      }
+    },
+    {
+      "id": "pas_45",
+      "stepNumber": 45,
+      "phase": "Measure outcomes and prove safe operation",
+      "title": "Notify owners about risk and degraded control",
+      "type": "add_component",
+      "content": "Notify the responsible owner when forecast quality degrades, a forecast is stale, a dependency action fails, a policy blocks scale-up, a cloud API remains unresolved, or an SLA is at risk. Include the evidence and affected service rather than sending an unqualified generic prediction.",
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "pas_notifications",
+        "componentType": "notification-service",
+        "label": "Scaling Risk & Operations Alerts",
+        "description": "Evidence-linked alerts for SLA risk, stale forecasts, blocked actions, and provider failures.",
+        "position": {"x": 1680, "y": 360},
+        "properties": {
+          "componentName": "Scaling Risk & Operations Alerts",
+          "purpose": "Route owner-scoped alerts with affected service, forecast and policy provenance, blocked or failed operation state, and SLA-risk evidence; distinguish degraded forecasting from healthy no-action outcomes."
+        },
+        "highlightReason": "An unsafe or late action must be visible to the team responsible for the service."
+      }
+    },
+    {
+      "id": "pas_46",
+      "stepNumber": 46,
+      "phase": "Measure outcomes and prove safe operation",
+      "title": "Route policy and actuation failures",
+      "type": "add_connection",
+      "content": "Emit a deduplicated event for stale or inaccurate forecasts, rejected guardrails, insufficient lead time, dependency failures, and ambiguous provider outcomes. Preserve enough context for an operator to decide whether to use the reactive path or repair the integration.",
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "pas_policy_notifications",
+        "sourceNodeId": "pas_policy",
+        "targetNodeId": "pas_notifications",
+        "connectionType": "event-stream",
+        "label": "Scaling decision and risk events",
+        "description": "Deduplicated policy, forecast freshness, dependency, lead-time, and SLA-risk evidence."
+      }
+    },
+    {
+      "id": "pas_47",
+      "stepNumber": 47,
+      "phase": "Measure outcomes and prove safe operation",
+      "title": "Test forecast and control behavior before rollout",
+      "type": "add_component",
+      "content": "Build replayable tests for seasonal and event-driven demand, CPU/memory/network divergence, missing and stale data, forecast misses, dependency ordering, cooldown, provider throttling, and partial execution. Include fleet inventory evidence for the 50+ service coverage goal.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "pas_tests",
+        "componentType": "automated-testing",
+        "label": "Forecast & Scaling Policy Validation",
+        "description": "Temporal model evaluation, dependency, guardrail, API, and failure-path regression tests.",
+        "position": {"x": 1400, "y": 650},
+        "properties": {
+          "componentName": "Forecast & Scaling Policy Validation",
+          "purpose": "Replay seasonal and event-driven demand; test per-dimension forecast accuracy, service inventory coverage, dependency order, guardrails, lead time, cooldown, provider errors, stale data, and recovery before rollout."
+        },
+        "highlightReason": "The stated reliability and cost targets need repeatable evidence across forecast and actuation failures."
+      }
+    },
+    {
+      "id": "pas_48",
+      "stepNumber": 48,
+      "phase": "Measure outcomes and prove safe operation",
+      "title": "Backtest candidates on temporal holdouts",
+      "type": "add_connection",
+      "content": "Run training and evaluation against historical periods not used to fit the candidate. Compare each configured horizon and resource dimension with the agreed within-15% error metric, including seasonal and special-event slices when available.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:1"],
+      "connection": {
+        "edgeId": "pas_tests_training",
+        "sourceNodeId": "pas_tests",
+        "targetNodeId": "pas_training",
+        "connectionType": "data-flow",
+        "label": "Temporal holdout evaluation",
+        "description": "Leakage checks, forecast metrics, and seasonal/event-specific validation evidence."
+      }
+    },
+    {
+      "id": "pas_49",
+      "stepNumber": 49,
+      "phase": "Measure outcomes and prove safe operation",
+      "title": "Exercise provider adapters without unsafe writes",
+      "type": "add_connection",
+      "content": "Validate provider request mapping, authorization scope, idempotency, quota handling, and read-after-write status using dry-run or controlled test targets. Test ambiguous timeouts and partial dependency waves before enabling production actions.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "pas_tests_adapter",
+        "sourceNodeId": "pas_tests",
+        "targetNodeId": "pas_adapter",
+        "connectionType": "api-call",
+        "label": "Dry-run and failure-path validation",
+        "description": "Provider contract tests for scoped authority, idempotency, throttling, and observed-state verification."
+      }
+    },
+    {
+      "id": "pas_50",
+      "stepNumber": 50,
+      "phase": "Measure outcomes and prove safe operation",
+      "title": "Promote changes through measured rollout",
+      "type": "decision_point",
+      "content": "Introduce a reviewed candidate in shadow mode, then a controlled rollout with rollback criteria owned by stakeholders. Compare forecast errors, pre-spike completion, SLA outcomes, and demand-matched cost against the approved baseline. Keep automation disabled or revert when evidence is missing or a guardrail fails.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"],
+      "decision": {
+        "question": "When should a forecast or policy candidate control production scaling?",
+        "chosen": "After offline temporal validation, shadow comparison, owner review, controlled rollout, and a tested rollback path",
+        "chosenReason": "A model can meet an aggregate accuracy score yet still be late or unsafe for one service or resource dimension.",
+        "alternatives": [
+          {"option": "Enable automated writes immediately after training", "tradeoff": "No production evidence confirms timing, policy interaction, or provider behavior."},
+          {"option": "Keep every candidate in shadow indefinitely", "tradeoff": "Avoids risk but never tests whether the policy achieves the supplied operational goals."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "pas_serving",
+        "properties": {"purpose": "Serve only reviewed, versioned multi-step forecasts with freshness and uncertainty; support shadow comparison, controlled policy rollout, and rollback while the policy controller independently enforces guardrails."}
+      }
+    },
+    {
+      "id": "pas_51",
+      "stepNumber": 51,
+      "phase": "Measure outcomes and prove safe operation",
+      "title": "Review the design against every supplied target",
+      "type": "explanation",
+      "content": "The architecture now covers historical and calendar-aware forecasting, multi-step predictions, CPU/memory/network signals, cloud scaling APIs, guarded and dependency-aware actions, cost attribution, and fleet-level evaluation. A review must still establish: forecast error within 15% using an agreed metric; scale completion before each relevant spike; 30% lower over-provisioning cost against an agreed baseline; zero SLA misses caused by late scaling; and verified coverage for 50+ services. Ask stakeholders for forecast horizons, service and dependency topology, per-service limits, target provider/workload types, SLA definitions, and measurement windows. This local draft and structural test do not prove those outcomes, browser persistence, AI assessment quality, or publication readiness.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

@@ -1,0 +1,524 @@
+{
+  "problem_id": "68d7013f6f42e23bb16a2235",
+  "version": "1.0.0-review-draft",
+  "requirementRevision": null,
+  "totalSteps": 23,
+  "phases": [
+    {
+      "name": "Frame the cache contract",
+      "stepRange": [1, 6],
+      "description": "Separate the stated brief from choices needed to build a cache service."
+    },
+    {
+      "name": "Place and route keys",
+      "stepRange": [7, 14],
+      "description": "Build the client-side request path, shard ring, replica path, and health signals."
+    },
+    {
+      "name": "Protect acknowledged data",
+      "stepRange": [15, 17],
+      "description": "Choose failure and consistency behavior, then define typed values."
+    },
+    {
+      "name": "Control memory and skew",
+      "stepRange": [18, 20],
+      "description": "Make eviction, TTL, and hot-key behavior explicit."
+    },
+    {
+      "name": "Scale from evidence",
+      "stepRange": [21, 23],
+      "description": "Scale the ring and validate latency, throughput, recovery, and alerting against measured workloads."
+    }
+  ],
+  "steps": [
+    {
+      "id": "cache_01_scope",
+      "stepNumber": 1,
+      "phase": "Frame the cache contract",
+      "title": "Read the frozen problem brief",
+      "type": "explanation",
+      "content": "Distributed Cache System: Design a distributed caching system like Redis or Memcached that provides fast data access. Requirements: Store and retrieve key-value pairs; Distribute data across multiple nodes; Handle node failures gracefully; Support different eviction policies (LRU, LFU, TTL); Provide high availability and consistency; Support different data types; Handle millions of requests per second. Constraints: Sub-millisecond response times; Memory-efficient storage; Handle hot keys and uneven load; Minimize data loss during failures; Support both read and write operations. Hints: Consistent hashing for data distribution; Replication for fault tolerance; Memory management and eviction policies; Client-side load balancing; Monitoring and alerting systems. The brief names no consistency model, request mix, value-size distribution, or topology. This walkthrough chooses three copies per shard across the intended failure domains and acknowledges a protected write only after the primary and at least one replica confirm the same commit sequence. If quorum is unavailable, protected writes fail rather than claim success; cache reads may continue where their consistency contract allows. Protected quorum writes are the default. A separate best-effort API is permitted only for server-classified, reconstructible cache namespaces with an enforced TTL; the server rejects that class for user-owned or otherwise non-rebuildable state, and callers are told that an acknowledged update can be lost before replication. This is not a zero-loss guarantee: the single-node failure scope, persistence policy, and replica placement must be validated. Measure reads and protected writes separately against the sub-millisecond objective using a declared workload."
+    },
+    {
+      "id": "cache_02_clients",
+      "stepNumber": 2,
+      "phase": "Frame the cache contract",
+      "title": "Add applications using the cache client",
+      "type": "add_component",
+      "content": "Represent application workloads that issue key-value reads and writes through a cache SDK. Keep the public cache contract small: key, typed value, expiration metadata, and explicit success or failure semantics. The client library owns a versioned membership view so it can route directly to the key owner.",
+      "component": {
+        "nodeId": "dc_clients",
+        "componentType": "backend-server",
+        "label": "Applications and Cache SDK",
+        "description": "Workloads calling the cache through a client library",
+        "position": { "x": 80, "y": 300 },
+        "properties": {
+          "componentName": "Applications and Cache SDK",
+          "purpose": "Expose GET, SET, and DELETE for strings/bytes, counters, hashes, and collections with type-checked serialization, per-key TTL, and explicit consistency semantics. Protected two-of-three quorum writes are the default. A distinct best-effort asynchronous API is accepted only for server-classified reconstructible namespaces with an enforced TTL; reject user-owned or non-rebuildable data on that API and disclose that an acknowledged update can be lost before replication. Give retries stable operation IDs so a timeout cannot apply a non-idempotent mutation twice. Authenticate each workload with a rotated service identity, authorize tenant namespaces and read/write/delete separately, use TLS, and route through the versioned membership view.",
+          "retry": true,
+          "bulkOps": true
+        },
+        "highlightReason": "Both reads and writes need one explicit client contract, and data-type behavior starts at serialization."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "cache_03_router",
+      "stepNumber": 3,
+      "phase": "Frame the cache contract",
+      "title": "Add the client-side ring router",
+      "type": "add_component",
+      "content": "This catalog load-balancer represents routing embedded in the SDK, not a central proxy. The SDK maps keys with consistent hashing and a versioned membership epoch. Default reads go to the fenced primary; a read-your-writes request carries its minimum commit sequence, while an explicitly stale-tolerant request may use a replica only when its observed position satisfies the declared freshness bound. On an epoch mismatch, refresh membership and retry once only when the operation ID makes the retry safe. A ring balances distinct keys, not one popular key.",
+      "component": {
+        "nodeId": "dc_router",
+        "componentType": "loadbalancer",
+        "label": "Client-Side Ring Router",
+        "description": "SDK routing and cache-node membership view",
+        "position": { "x": 390, "y": 300 },
+        "properties": {
+          "componentName": "Client-Side Ring Router",
+          "purpose": "Use a versioned consistent-hash ring and membership epoch to send each key directly to one fenced primary. Default reads and ordered writes use that primary; a read-your-writes request carries a minimum commit sequence, and replica reads require an explicit freshness requirement, staleness bound, and sufficiently current replica position. On a stale epoch, refresh and retry once only for an operation with a stable idempotency ID. For hot keys, coalesce identical idempotent SETs and safe cache misses, stripe only mergeable commutative counters with deduplicated operation IDs, and keep ordered non-mergeable writes on one owner with fair admission and backpressure."
+        },
+        "highlightReason": "The client-side load-balancing hint avoids a central hop while consistent hashing limits remapping when membership changes."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "cache_04_primaries",
+      "stepNumber": 4,
+      "phase": "Frame the cache contract",
+      "title": "Add the primary shard ring",
+      "type": "add_component",
+      "content": "Model Redis primaries as a ring of disjoint key ranges with one fenced write-ordering owner per key. Assign each mutation a monotonic commit sequence. Protected writes acknowledge only after the primary and at least one of two replicas confirm that sequence; the third copy permits a two-copy majority after one node fails. Use p99 below one millisecond as the acceptance target for primary reads and protected quorum writes under a declared healthy workload, including its read/write mix, value sizes, and hot-key skew, while each shard remains within its measured safe capacity. Define safe per-shard capacity as the maximum sustained rate that still meets the p99 target in that workload. Keep admission queues bounded by the request deadline; if admission or quorum confirmation cannot complete in time, return retryable unavailable, never an asynchronous success. Report successful latency and overload/unavailable rate separately so fast rejections cannot masquerade as meeting the service objective. Replica placement and quorum RTT must pass the same benchmark; otherwise the design fails the latency constraint.",
+      "component": {
+        "nodeId": "dc_primaries",
+        "componentType": "cache",
+        "label": "Primary Cache Shard Ring",
+        "description": "In-memory key owners partitioned by a client-visible hash ring",
+        "position": { "x": 740, "y": 220 },
+        "properties": {
+          "componentName": "Primary Cache Shard Ring",
+          "purpose": "Own disjoint key ranges in the Redis cluster and serialize mutations per key with monotonic commit sequences. For protected writes, return success only after the primary and one replica confirm the same sequence (a majority of three copies); fail the protected write if quorum is unavailable. Enforce any best-effort asynchronous operation through a separate API restricted to server-classified reconstructible namespaces with a TTL; reject non-rebuildable state and expose the acknowledged-write loss risk. Hold typed values and TTL metadata, apply per-namespace LRU/LFU capacity policy, and account for persistence and replica memory.",
+          "engine": "redis",
+          "inMemory": true,
+          "eviction": "lru",
+          "replication": true,
+          "clusterMode": true,
+          "persistence": true,
+          "encryption": true
+        },
+        "highlightReason": "This is the low-latency data path; memory policy, partitioning, and write semantics must be explicit."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "cache_05_replicas",
+      "stepNumber": 5,
+      "phase": "Frame the cache contract",
+      "title": "Add replica and promotion targets",
+      "type": "add_component",
+      "content": "Represent two replicas for each primary shard, with copies placed across the failure domains the service intends to survive. Replicas confirm commit sequences for protected writes; three copies allow a two-copy majority after one node failure. A replica is not automatically current: promote only a quorum-supported copy after fencing the old owner and publishing a new membership epoch. The exact zone/failure-domain placement remains an explicit deployment assumption.",
+      "component": {
+        "nodeId": "dc_replicas",
+        "componentType": "cache",
+        "label": "Replica and Failover Nodes",
+        "description": "Replicated key state and eligible read targets",
+        "position": { "x": 1080, "y": 220 },
+        "properties": {
+          "componentName": "Replica and Failover Nodes",
+          "purpose": "Maintain two replica copies per shard, track each primary commit sequence, and confirm protected writes before success. Require a majority of the three-copy shard to elect/promote an owner; fence the previous owner before publishing a new membership epoch. Serve a replica read only when its position meets the caller's explicit freshness bound. Persistence settings and failure-domain placement define which failures the copies actually survive.",
+          "engine": "redis",
+          "inMemory": true,
+          "eviction": "lru",
+          "replication": true,
+          "clusterMode": true,
+          "persistence": true,
+          "encryption": true
+        },
+        "highlightReason": "Failure handling needs a concrete replica path and a safe ownership change."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "cache_06_monitoring",
+      "stepNumber": 6,
+      "phase": "Frame the cache contract",
+      "title": "Add cache health and alerting",
+      "type": "add_component",
+      "content": "Observe service behavior by shard and request class. Keep key names and values out of metric labels; otherwise high-cardinality traffic can create a monitoring failure of its own.",
+      "component": {
+        "nodeId": "dc_monitoring",
+        "componentType": "monitoring",
+        "label": "Cache Monitoring and Alerts",
+        "description": "Request, memory, replication, membership, and failover signals",
+        "position": { "x": 1080, "y": 540 },
+        "properties": {
+          "componentName": "Cache Monitoring and Alerts",
+          "purpose": "Track read/write latency distributions by operation and value-size class, request rate, hit/miss behavior, per-shard and hot-key skew, memory pressure, evictions, expiration, replica lag, failover, and membership churn. Use workload tests to compare the sub-millisecond objective and millions-of-requests target independently; agree on percentiles and traffic mix before claiming either passes. Never log raw keys, values, or credentials.",
+          "metrics": true,
+          "alerts": true
+        },
+        "highlightReason": "The millions-of-requests requirement and failure behavior need operational evidence, not assumed capacity."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "cache_07_client_sdk",
+      "stepNumber": 7,
+      "phase": "Place and route keys",
+      "title": "Connect applications to the SDK router",
+      "type": "add_connection",
+      "content": "The client SDK exposes get, set, and delete semantics plus typed serialization and per-key expiration. Define timeout and retry behavior so a timed-out write is not blindly replayed when the caller cannot tell whether the first attempt committed.",
+      "connection": {
+        "edgeId": "dc_edge_client_router",
+        "sourceNodeId": "dc_clients",
+        "targetNodeId": "dc_router",
+        "connectionType": "api-call",
+        "label": "Typed key-value operations",
+        "description": "Carries reads, writes, deletes, value type, and expiration options into the client-side SDK."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "cache_08_primary_route",
+      "stepNumber": 8,
+      "phase": "Place and route keys",
+      "title": "Route each key to its primary owner",
+      "type": "add_connection",
+      "content": "The client hashes the canonical key and sends the operation directly to its current primary. Consistent hashing reduces the number of keys reassigned when membership changes; it does not guarantee balanced request rate or memory use.",
+      "connection": {
+        "edgeId": "dc_edge_router_primaries",
+        "sourceNodeId": "dc_router",
+        "targetNodeId": "dc_primaries",
+        "connectionType": "tcp",
+        "label": "Direct reads and writes to key owner",
+        "description": "Client-side consistent hashing routes each operation to the primary responsible for that key."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "cache_09_replication_path",
+      "stepNumber": 9,
+      "phase": "Place and route keys",
+      "title": "Replicate writes and recovery state",
+      "type": "add_connection",
+      "content": "Replicate each ordered mutation with its commit sequence and ownership epoch. For the protected-write class, return success only after a primary and one replica confirm the same sequence; maintain a third copy so a majority remains after one node failure. Persist recovery metadata and test the configured process/node failure boundary. Snapshots or logs supplement replication but do not turn an unacknowledged or non-quorum write into a successful commit.",
+      "connection": {
+        "edgeId": "dc_edge_primary_replica",
+        "sourceNodeId": "dc_primaries",
+        "targetNodeId": "dc_replicas",
+        "connectionType": "data-flow",
+        "label": "Ordered mutations and recovery state",
+        "description": "Carries sequenced mutations and recovery state; replica confirmation participates in the protected-write quorum."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "cache_10_replica_reads",
+      "stepNumber": 10,
+      "phase": "Place and route keys",
+      "title": "Allow only consistency-qualified replica reads",
+      "type": "add_connection",
+      "content": "Default reads and read-your-writes go to the fenced primary. A client may opt into a bounded-staleness replica read only if the replica's commit sequence satisfies the requested freshness bound. If it does not, route to the primary or wait for that sequence; never silently weaken consistency during failover. A stale membership epoch triggers one safe refresh before routing again.",
+      "connection": {
+        "edgeId": "dc_edge_router_replica_reads",
+        "sourceNodeId": "dc_router",
+        "targetNodeId": "dc_replicas",
+        "connectionType": "tcp",
+        "label": "Freshness-qualified replica reads",
+        "description": "Uses replica capacity only for callers that accept the observed replication position."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "cache_11_primary_signals",
+      "stepNumber": 11,
+      "phase": "Place and route keys",
+      "title": "Export primary shard signals",
+      "type": "add_connection",
+      "content": "Publish low-cardinality measurements for request latency, throughput, memory, eviction, and shard skew. Alert thresholds must be set from an agreed service objective and observed baseline; the brief supplies no numeric alert thresholds.",
+      "connection": {
+        "edgeId": "dc_edge_primary_monitoring",
+        "sourceNodeId": "dc_primaries",
+        "targetNodeId": "dc_monitoring",
+        "connectionType": "data-flow",
+        "label": "Primary request and memory metrics",
+        "description": "Reports latency, traffic, occupancy, eviction, and per-shard load."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "cache_12_router_signals",
+      "stepNumber": 12,
+      "phase": "Place and route keys",
+      "title": "Export client routing signals",
+      "type": "add_connection",
+      "content": "Track client-visible timeouts, owner redirects, stale membership views, retries, and routing concentration. A low average latency can conceal overloaded keys or a subset of unhealthy clients, so preserve distributions and shard context.",
+      "connection": {
+        "edgeId": "dc_edge_router_monitoring",
+        "sourceNodeId": "dc_router",
+        "targetNodeId": "dc_monitoring",
+        "connectionType": "data-flow",
+        "label": "Routing, timeout, and hot-key signals",
+        "description": "Makes membership staleness and request concentration visible."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "cache_13_replica_signals",
+      "stepNumber": 13,
+      "phase": "Place and route keys",
+      "title": "Export replication and failover signals",
+      "type": "add_connection",
+      "content": "Measure replication position and lag, promotion attempts, fencing outcomes, and persistence recovery. Report recovery as complete only after ownership and acknowledged data are validated.",
+      "connection": {
+        "edgeId": "dc_edge_replica_monitoring",
+        "sourceNodeId": "dc_replicas",
+        "targetNodeId": "dc_monitoring",
+        "connectionType": "data-flow",
+        "label": "Replication and recovery signals",
+        "description": "Surfaces lag, promotion, fencing, and recovery validation."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "cache_14_ring_membership",
+      "stepNumber": 14,
+      "phase": "Place and route keys",
+      "title": "Choose a versioned consistent-hash ring",
+      "type": "decision_point",
+      "content": "Choose client-side consistent hashing with a versioned membership map. A membership change remaps affected keys and clients converge on one epoch; virtual nodes can reduce key-count skew, but monitoring is still needed because key popularity is not uniform.",
+      "decision": {
+        "question": "How should clients locate the node responsible for a key as the cluster changes?",
+        "chosen": "Use a versioned consistent-hash ring in the client SDK, with health-aware routing and coordinated membership updates.",
+        "chosenReason": "It avoids a central hop and limits key remapping compared with recomputing a simple modulo assignment after membership changes.",
+        "alternatives": [
+          {
+            "option": "Route all operations through a central proxy",
+            "tradeoff": "Simplifies client configuration but adds a shared network hop and proxy capacity bottleneck."
+          },
+          {
+            "option": "Use key modulo node count",
+            "tradeoff": "A node-count change can remap many unrelated keys and cause a broad warm-up or miss surge."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "dc_router",
+        "properties": {
+          "purpose": "Client SDK routing uses a versioned consistent-hash ring, virtual nodes for key-count balance, health-aware direct requests, and coordinated membership epochs. Observe hot-key request skew separately because hashing cannot split one popular key."
+        }
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "cache_15_failover_policy",
+      "stepNumber": 15,
+      "phase": "Protect acknowledged data",
+      "title": "Define replica acknowledgment and safe promotion",
+      "type": "decision_point",
+      "content": "Choose the quorum rule that addresses the brief's data-loss constraint. This walkthrough assumes three copies per shard and acknowledges a protected write only after the primary plus one replica confirm the same commit sequence. In the healthy normal-load envelope, protected writes share the p99 sub-millisecond target. If quorum confirmation cannot complete by the caller's deadline, return a retryable unavailable/unknown outcome with the stable operation ID; never report success or downgrade to asynchronous replication. This tolerates one copy failure, not simultaneous loss of a majority. Quorum acknowledgment adds write latency and can reduce write availability during a partition, so evaluate availability and latency separately; only explicitly opted-in rebuildable entries may use the asynchronous fast class.",
+      "decision": {
+        "question": "What should happen when a primary fails or cannot reach its replica?",
+        "chosen": "For protected writes, require confirmation of one monotonic commit sequence by the primary and at least one of two replicas (two of three copies). If quorum is unavailable, do not claim success. On failure, require a quorum-supported promotion, fence the former owner, and publish a new ring epoch.",
+        "chosenReason": "The three-copy/two-copy-commit assumption limits acknowledged-write loss for a single-copy failure without promising zero loss. Quorum trades write availability during a partition for lower loss; evaluate that availability and latency separately. A lower-latency asynchronous class remains opt-in for rebuildable data and explicitly accepts a larger loss window.",
+        "alternatives": [
+          {
+            "option": "Acknowledge immediately and replicate asynchronously",
+            "tradeoff": "Keeps writes available with lower acknowledgment delay but can lose acknowledged writes on primary failure."
+          },
+          {
+            "option": "Promote any reachable replica without fencing",
+            "tradeoff": "A partition can leave two owners accepting conflicting writes for the same key."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "dc_primaries",
+        "properties": {
+          "replication": true,
+          "persistence": true,
+          "clusterMode": true,
+          "purpose": "Use three copies per shard. For protected writes, acknowledge only after the primary and one replica confirm the same monotonic commit sequence; fail closed when quorum is unavailable. Retain recovery state and fence the old owner before a quorum-supported promotion. An asynchronous write class is explicit opt-in and may lose acknowledged updates."
+        }
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "cache_16_read_write_consistency",
+      "stepNumber": 16,
+      "phase": "Protect acknowledged data",
+      "title": "Make per-key consistency behavior explicit",
+      "type": "decision_point",
+      "content": "The brief names no model, so make this service's default per-key contract concrete: serialize writes at the fenced primary, acknowledge protected writes at the two-of-three commit quorum, and serve default reads/read-your-writes from the primary. Replica reads are opt-in for an explicitly bounded-staleness request and only when the replica's commit sequence meets that bound; otherwise route to the primary or wait. During a partition, the minority cannot accept protected writes or strict reads, although eligible cache hits may remain available. Test this contract during promotion instead of equating replication with consistency.",
+      "decision": {
+        "question": "How can the service expose consistency without hiding replica lag?",
+        "chosen": "Use per-key primary ordering with read-your-writes as the default; protected writes require two-of-three commit confirmation. Replica reads are opt-in and bounded by an explicit minimum commit position or staleness limit.",
+        "chosenReason": "The read and write rules now specify exactly when primary or replica paths are valid; quorum loss reduces write availability rather than silently returning stale or uncommitted state.",
+        "alternatives": [
+          {
+            "option": "Serve every read from any replica",
+            "tradeoff": "Improves read distribution but can return stale values after a successful write."
+          },
+          {
+            "option": "Require every operation to wait for all replicas",
+            "tradeoff": "Can make a slow or unavailable replica block the whole keyspace and adds replica delay to the request path."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "dc_router",
+        "properties": {
+          "purpose": "Route each key to one current fenced primary; default reads and read-your-writes stay on that owner, with the caller's minimum commit sequence enforced. Protected writes require the primary plus one replica to confirm the same sequence. Permit replica reads only for explicit bounded-staleness requests whose replica position qualifies; on stale membership refresh once and reject an old owner's writes."
+        }
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "cache_17_typed_values",
+      "stepNumber": 17,
+      "phase": "Protect acknowledged data",
+      "title": "Preserve value type and serialization version",
+      "type": "update_component",
+      "content": "Represent strings, counters, collections, and opaque byte values with an explicit type tag and serialization version. Validate type-specific operations and size before storage, and preserve the type/version during replication and recovery. Redis can expose native data structures; a Memcached deployment would generally keep richer types in the client serialization layer.",
+      "componentUpdate": {
+        "nodeId": "dc_primaries",
+        "properties": {
+          "engine": "redis",
+          "purpose": "Store and retrieve typed key-value records: strings/bytes, counters, hashes, and collections carry a type tag and serialization version. Validate each type's supported operations and value size; preserve type, version, and per-key expiration through replication and recovery."
+        }
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6"]
+    },
+    {
+      "id": "cache_18_eviction_policy",
+      "stepNumber": 18,
+      "phase": "Control memory and skew",
+      "title": "Choose eviction per cache namespace",
+      "type": "decision_point",
+      "content": "Support LRU and LFU as selectable capacity policies for namespaces with different access patterns. Apply TTL as per-key expiration metadata; TTL-based eviction is also an available catalog policy, but expiration and choosing a capacity victim are distinct semantics. Validate LRU/LFU victim selection separately from TTL deadline behavior. The brief specifies no cache hit-ratio target, and the representative primary pool's LRU setting is an example rather than a measured result.",
+      "decision": {
+        "question": "Should one eviction policy govern every key and namespace?",
+        "chosen": "Select LRU or LFU per namespace from the workload; use TTL to expire keys at their declared deadline, independently of capacity pressure.",
+        "chosenReason": "Recency, frequency, and expiration encode different product semantics; separating them avoids treating a TTL deadline as an interchangeable replacement ranking.",
+        "alternatives": [
+          {
+            "option": "Use one global LRU policy and ignore per-key expiration",
+            "tradeoff": "A frequently accessed expired key can remain visible, and frequency-heavy workloads may evict useful entries."
+          },
+          {
+            "option": "Use LFU for every namespace",
+            "tradeoff": "A once-popular key can retain memory after demand changes unless aging and expiration semantics are also defined."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "dc_primaries",
+        "properties": {
+          "eviction": "lru",
+          "purpose": "Select LRU or LFU capacity eviction per namespace; enforce per-key TTL as a separate expiration deadline rather than treating TTL as a replacement ranking. Keep compact encodings for small values, bound value and metadata overhead, reserve memory for replication buffers, and measure policy behavior under representative workloads."
+        }
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:2"]
+    },
+    {
+      "id": "cache_19_hot_key_policy",
+      "stepNumber": 19,
+      "phase": "Control memory and skew",
+      "title": "Mitigate hot keys without breaking write order",
+      "type": "decision_point",
+      "content": "A hash ring distributes keys, not requests for one hot key. Fairness is distinct from aggregate throughput: measure whether a hot key or tenant starves unrelated traffic. Apply mitigations according to operation semantics: use request coalescing for safe cache misses and coalesce identical idempotent SETs by keeping the highest operation sequence; combine commutative counter increments in striped counters with unique operation IDs and a deterministic merge; keep non-mergeable ordered writes on one primary with per-tenant fair admission, bounded queues, and backpressure. Read fanout is allowed only to replicas meeting the caller's freshness bound. State the remaining single-key write ceiling and measure it separately from aggregate shard throughput.",
+      "decision": {
+        "question": "What should the system do when a single key dominates one shard?",
+        "chosen": "Coalesce duplicate idempotent SETs by operation sequence; stripe only commutative counters with deduplicated operation IDs and deterministic merge; keep other ordered writes on one primary with fair admission, bounded queues, and backpressure. Measure and disclose the remaining single-key ceiling.",
+        "chosenReason": "Each mitigation preserves the operation's correctness contract: only mergeable updates are split, while non-mergeable writes retain one ordering point and cannot starve unrelated tenants without bound.",
+        "alternatives": [
+          {
+            "option": "Add more shards without changing key routing",
+            "tradeoff": "The hot key still maps to one owner, so aggregate capacity may rise while that shard remains saturated."
+          },
+          {
+            "option": "Split each hot key across independent write owners",
+            "tradeoff": "Reads and writes require a merge protocol and can lose per-key ordering."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "dc_router",
+        "properties": {
+          "purpose": "Use a versioned consistent-hash ring and membership epoch to route each key to its fenced primary. Default reads/read-your-writes use that owner and protected writes require primary-plus-replica quorum. Coalesce identical idempotent SETs by operation sequence; stripe only commutative counters with deduplicated IDs and deterministic merge; keep non-mergeable ordered writes on one primary with per-tenant fair admission, bounded queues, and backpressure. Allow replica reads only when the caller's explicit freshness requirement is met. Keep the healthy normal-load request path within the sub-millisecond p99 target; at the caller deadline, backpressure or return retryable unavailable rather than weaken durability or freshness. Measure the remaining hot key single-owner ceiling separately from aggregate capacity."
+        }
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "cache_20_memory_pressure",
+      "stepNumber": 20,
+      "phase": "Control memory and skew",
+      "title": "Respond to memory pressure deliberately",
+      "type": "scale_trigger",
+      "content": "When memory pressure or eviction behavior degrades the intended hit and correctness behavior, first identify the contributing namespace, value sizes, TTL distribution, and replica overhead. Apply the configured policy, admission controls, or capacity change based on measurements; do not silently evict state whose durability contract says it must survive.",
+      "scaleTrigger": {
+        "metric": "Memory pressure, eviction rate, expiration volume, value-size distribution, replica overhead, and hit/miss behavior by namespace",
+        "action": "Tune namespace policy or admission, adjust capacity from measured occupancy, and verify that expiration and persistence semantics remain intact.",
+        "impact": "Memory efficiency improves through workload-aware placement and eviction, while persistence and replication reserve capacity and affect the amount of usable memory."
+      },
+      "componentUpdate": {
+        "nodeId": "dc_primaries",
+        "properties": {
+          "purpose": "Budget memory per shard and namespace; use compact encodings for small values, bound value size, and account for type tags, TTL metadata, persistence, and replica buffers. Apply the selected LRU/LFU capacity policy separately from TTL expiration and reject or shed writes before uncontrolled memory exhaustion. Never silently capacity-evict data whose contract requires retention."
+        }
+      },
+    "requirementIds": ["legacy-requirement:4", "legacy-constraint:2"]
+    },
+    {
+      "id": "cache_21_throughput_scale",
+      "stepNumber": 21,
+      "phase": "Scale from evidence",
+      "title": "Scale the ring against the request workload",
+      "type": "scale_trigger",
+      "content": "The brief's sub-millisecond response objective and millions-of-requests-per-second capacity target are independent acceptance concerns: test request latency and sustained throughput separately. Choose p99 as the latency acceptance percentile; declare the read/write mix, value sizes, key skew, and burst shape, then test primary reads and protected quorum writes against the sub-millisecond target while each shard remains within its measured safe capacity. The exact millions-level target is not specified, so obtain that target before sizing. Calculate the initial shard count as ceil(target sustained requests/second divided by 0.70 times measured safe requests/second per shard); the 30% headroom is an explicit starting assumption to validate, not measured product capacity. Use 70% of tested safe per-shard throughput as the initial scale-out threshold and revise it using observed scaling lead time. Measure mergeable and ordered hot keys separately: coalesce identical idempotent sets and safe cache misses, stripe only commutative counters with deduplicated operation IDs, and keep ordered values on one owner with a bounded queue and fair admission. Reject work that cannot meet its caller deadline rather than queueing without bound or weakening write durability. During quorum loss, protected writes return retryable unavailable; report successful p99 and overload/unavailable rate separately. Rebalance gradually and include remapping and warm-up in capacity tests.",
+      "scaleTrigger": {
+        "metric": "p99 latency below one millisecond for primary reads and protected quorum writes at or below measured safe per-shard capacity under the declared healthy workload; separately track success rate, overload/unavailable rate, quorum RTT, target versus measured aggregate/per-shard requests per second, shard utilization against the 70% initial scale-out threshold, mergeable-counter hot-key rate, ordered single-key queue depth, CPU/network saturation, memory occupancy, and async loss exposure for reconstructible namespaces",
+        "action": "Run primary reads and protected quorum writes against the declared read/write mix, value-size and skew distributions; accept only if both p99 targets pass and report the overload/unavailable rate alongside them. Determine safe per-shard throughput from that same test, size initial shards using target/(0.70 x safe per-shard throughput), and scale out before a shard crosses the initial 70% threshold. Inject quorum loss to verify protected writes return retryable unavailable by the caller deadline without asynchronous acknowledgment. Validate counter deduplication, bounded fair admission for ordered hot keys, the async API's server-side namespace/TTL rejection rules, and ring remapping/warm-up costs.",
+        "impact": "The exact million-level request target and per-shard safe capacity must be measured before an honest shard count can be stated. A 30% initial headroom is an operational assumption to validate. More nodes raise aggregate capacity but add replication and membership cost. Replica placement must keep healthy quorum RTT inside the sub-millisecond p99 budget; otherwise the latency constraint is unmet. Quorum writes trade write availability during partition for lower acknowledged-write loss; mergeable hot-key writes can scale, while ordered non-mergeable writes retain a measured single-owner ceiling and must be admission-controlled."
+      },
+      "componentUpdate": {
+        "nodeId": "dc_primaries",
+        "properties": {
+          "clusterMode": true,
+          "purpose": "Each Redis primary owns a disjoint key range and serializes per-key mutations with a monotonic commit sequence. Protected writes return success only after the primary and one replica confirm the same sequence (two of three copies); if quorum or bounded admission cannot finish by the caller deadline, return retryable unavailable, never an asynchronous success. Validate p99 below one millisecond for primary reads and protected writes on the declared workload while per-shard traffic is at or below measured safe capacity; report overload/unavailable rate separately. Determine safe per-shard throughput by that same latency test, size shards as ceil(target RPS/(0.70 x safe per-shard RPS)), and treat the 30% headroom and 70% scale-out threshold as initial assumptions to validate against millions of requests per second. Any best-effort asynchronous API must be distinct and server-restricted to reconstructible TTL-bound namespaces; unreplicated writes may be lost, and this API is never a fallback for protected writes. Coalesce only safe identical operations, stripe only commutative counters with deduplication, preserve one owner and fair bounded admission for ordered values. Preserve typed values, per-namespace LRU or LFU and independent TTL behavior, compact encodings, persistence/replica reserve, and encrypted inter-node traffic."
+        }
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "cache_22_failure_exercise",
+      "stepNumber": 22,
+      "phase": "Scale from evidence",
+      "title": "Exercise node loss and recovery",
+      "type": "scale_trigger",
+      "content": "Inject primary loss, one-replica loss, quorum loss, partition, stale membership, and process restart. Every protected write acknowledged at the two-of-three quorum must remain readable after a single-copy failure; with no quorum, protected writes return retryable unavailable by the caller deadline and never report success or fall back to asynchronous replication. Verify the old owner is fenced, clients converge on one epoch, read-your-writes positions are honored, and bounded-staleness reads never exceed their declared bound. Recheck the healthy workload's p99 and overload rate after recovery. Separately test that best-effort writes are accepted only for server-classified reconstructible namespaces with enforced TTL, and verify/rehearse their acknowledged-write loss exposure. Do not promise zero loss or unmeasured recovery time.",
+      "scaleTrigger": {
+        "metric": "Survival of two-of-three acknowledged commit sequences after any single-copy failure; p99 below one millisecond for primary reads and protected writes under the declared workload at or below measured safe shard capacity; success and overload/unavailable rates; protected-write timeout rate during quorum loss; fencing, epoch convergence, replica lag, bounded-staleness behavior, and async loss exposure only for allowed reconstructible namespaces",
+        "action": "Automate node/partition/restart exercises. Confirm quorum-acknowledged values survive one-copy loss, minority partitions return retryable unavailable by the caller deadline, and promotion selects a quorum-supported copy after fencing. Never turn a timed-out protected write into an asynchronous success. Verify the read contract, remeasure healthy-path p99 after recovery, and report asynchronous-mode loss separately.",
+        "impact": "A two-of-three commit majority reduces acknowledged-write loss for a single-copy failure but trades write availability during quorum loss and adds replication latency. It does not guarantee survival of majority or correlated failure, and the degraded path does not promise sub-millisecond successful writes."
+      },
+      "componentUpdate": {
+        "nodeId": "dc_replicas",
+        "properties": {
+        "purpose": "Keep two encrypted replica copies aligned to monotonic primary commit positions. Confirm protected writes at a two-of-three quorum; on promotion require quorum support, fence the former owner, validate recovered state, and publish a new membership epoch before writes resume. Serve replica reads only when their position meets the caller's explicit freshness contract. Test single-copy loss and quorum partitions. If the separate best-effort API is enabled, server-side policy must limit it to reconstructible TTL-bound namespaces and disclose that acknowledged-but-unreplicated writes can be lost; this is not a zero-loss guarantee under majority or correlated failure."
+        }
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "cache_23_review_boundary",
+      "stepNumber": 23,
+      "phase": "Scale from evidence",
+      "title": "Keep unresolved objectives visible",
+      "type": "explanation",
+      "content": "The graph uses existing catalog components and makes its baseline explicit: three copies per shard, two-copy commit quorum for protected writes, per-key primary ordering/read-your-writes, and opt-in bounded-staleness replica reads. Confirm failure-domain placement, persistence, operation mix, key skew, and value sizes before claiming latency or throughput. The exact millions-level throughput target and safe per-shard capacity must be agreed and measured; the 30% headroom and 70% scale-out trigger are initial operating assumptions, not benchmark results. The quorum policy limits acknowledged-write loss for a single-copy failure; it is not a zero-loss promise. Any weaker async class is a distinct, server-restricted API for reconstructible TTL-bound namespaces, never a protected-write fallback, and has a separately disclosed loss exposure."
+    }
+  ]
+}

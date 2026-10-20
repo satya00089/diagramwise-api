@@ -1,0 +1,630 @@
+{
+  "problem_id": "6901ef1b9420d83630aca880",
+  "version": "1.0.0-review-draft",
+  "requirementRevision": null,
+  "totalSteps": 33,
+  "phases": [
+    {
+      "name": "Frame the collection contract",
+      "stepRange": [1, 4],
+      "description": "Preserve the live problem brief, separate its stated scale from assumptions, and model the host-side collection and scalable ingress path."
+    },
+    {
+      "name": "Ingest, aggregate, and retain metrics",
+      "stepRange": [5, 13],
+      "description": "Add the durable ingest path, processing and time-series storage, then construct the read, dashboard, and alerting roles using catalog components."
+    },
+    {
+      "name": "Connect collection, query, and alert paths",
+      "stepRange": [14, 27],
+      "description": "Wire the host-to-storage path, real-time alert branch, and dashboard query path; make every connection endpoint explicit."
+    },
+    {
+      "name": "Review correctness, failures, and scale triggers",
+      "stepRange": [28, 33],
+      "description": "Resolve buffering and time-series tradeoffs, define measurement-driven scale signals, and verify the brief without inventing unprovided SLOs."
+    }
+  ],
+  "steps": [
+    {
+      "id": "pm_01",
+      "stepNumber": 1,
+      "phase": "Frame the collection contract",
+      "type": "explanation",
+      "title": "Read the frozen live brief before choosing a design",
+      "content": "Frozen live problem fields (verbatim):\nID: 6901ef1b9420d83630aca880\nSlug: system-to-collect-performance-metrics-from-thousands-of-servers\nTitle: System to Collect Performance Metrics from Thousands of Servers\nDescription: Design a distributed system to collect, aggregate, and monitor performance metrics from thousands of servers.\nRequirements:\n- Collect metrics from thousands of servers\n- Support CPU, memory, disk, network metrics\n- Real-time aggregation and visualization\n- Alerting on threshold violations\n- Historical data storage and analysis\n- Custom metrics support\n- Handle billions of data points per day\n- Dashboard for monitoring\nConstraints:\n- Low overhead on monitored servers\n- Handle server failures gracefully\n- Scalable data collection\n- Real-time processing for alerts\n- Efficient time-series storage\nHints:\n- Agent-based metric collection\n- Time-series database (InfluxDB, Prometheus)\n- Data aggregation pipeline\n- Message queue for reliability\n- Pre-aggregation for performance\nTreat hints as candidate approaches, not extra requirements. The brief gives no metric interval, alert latency target, retention duration, threshold values, deployment region, or availability percentage. Keep those as explicit decisions/configuration rather than fabricated promises.",
+      "requirementIds": []
+    },
+    {
+      "id": "pm_02",
+      "stepNumber": 2,
+      "phase": "Frame the collection contract",
+      "type": "decision_point",
+      "title": "Choose a host collection model",
+      "content": "Use the brief's agent-based collection hint as the starting point: a lightweight agent emits the supported host metrics and registered custom metrics to the collection endpoint. This makes host instrumentation and network cost visible. Keep polling as an alternative where agents cannot be installed; do not assume every server environment permits the same deployment model.",
+      "requirementIds": [],
+      "decision": {
+        "question": "How should the system collect host-level performance metrics?",
+        "chosen": "Lightweight host agents push batched metrics through the shared ingest endpoint, with a polling adapter available for environments that require it.",
+        "chosenReason": "The live hint explicitly suggests agent-based collection; batching and asynchronous export help bound overhead while a shared endpoint supports fleet growth.",
+        "alternatives": [
+          {
+            "option": "Central polling of every host",
+            "tradeoff": "Avoids installing an agent but makes central poller capacity, discovery, and collection scheduling the dominant scaling concerns."
+          },
+          {
+            "option": "Push-only agents with no local buffering",
+            "tradeoff": "Simpler agents, but transient network or ingest outages can lose samples unless the system explicitly accepts that behavior."
+          }
+        ]
+      }
+    },
+    {
+      "id": "pm_03",
+      "stepNumber": 3,
+      "phase": "Frame the collection contract",
+      "type": "add_component",
+      "title": "Represent the monitored server fleet and its agents",
+      "content": "Collect metrics from thousands of servers with a lightweight agent. Support CPU, memory, disk, and network metrics plus custom metrics through a versioned metric schema. Batch and compress exports, use asynchronous collection, bound local buffering and label cardinality, and expose per-agent health so collection gaps are visible without placing query or alert work on monitored hosts.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2"],
+      "component": {
+        "nodeId": "pm_hosts",
+        "componentType": "backend-server",
+        "label": "Monitored Server Fleet + Agents",
+        "description": "Host-side metric agents on monitored servers",
+        "position": {"x": 0, "y": 300},
+        "properties": {
+          "componentName": "Monitored Server Fleet + Agents",
+          "purpose": "Collect metrics from thousands of servers with lightweight asynchronous agents. Emit CPU, memory, disk, and network measurements plus custom metrics validated against a versioned schema; batch and compress exports, bound local buffering and label cardinality, and report agent health so missing samples can be distinguished from healthy zero values."
+        },
+        "highlightReason": "The catalog has no separate host-agent node; its existing Backend Server represents the monitored hosts without inventing a new component type."
+      }
+    },
+    {
+      "id": "pm_04",
+      "stepNumber": 4,
+      "phase": "Frame the collection contract",
+      "type": "add_component",
+      "title": "Distribute incoming collection traffic",
+      "content": "Place a health-aware load balancer in front of the ingest API. Spread connections across healthy gateway instances and preserve the host identity and request metadata needed for authorization and diagnosis. This supports scalable data collection; scale from measured connection rate and saturation rather than inventing a fleet size beyond the stated thousands of servers.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:3"],
+      "component": {
+        "nodeId": "pm_ingress",
+        "componentType": "loadbalancer",
+        "label": "Metrics Ingress Load Balancer",
+        "description": "Health-aware distribution for agent and dashboard traffic",
+        "position": {"x": 280, "y": 300},
+        "properties": {
+          "componentName": "Metrics Ingress Load Balancer",
+          "purpose": "Distribute agent ingest and dashboard requests across healthy API gateway instances; preserve trusted client metadata and remove unhealthy targets from rotation so data collection can scale horizontally."
+        },
+        "highlightReason": "The existing Load Balancer catalog component directly models health-aware ingress distribution."
+      }
+    },
+    {
+      "id": "pm_05",
+      "stepNumber": 5,
+      "phase": "Ingest, aggregate, and retain metrics",
+      "type": "add_component",
+      "title": "Validate and route metric requests",
+      "content": "Use the API gateway as the ingest boundary: validate metric names, schema version, timestamps, dimensions, payload size, and authenticated host identity before enqueueing. Reject malformed or unbounded-cardinality input with observable errors. Keep the same public boundary available to dashboard queries, while separating their downstream path from writes.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3"],
+      "component": {
+        "nodeId": "pm_gateway",
+        "componentType": "api-gateway",
+        "label": "Metrics Ingest and Query Gateway",
+        "description": "Validated API boundary for host writes and dashboard reads",
+        "position": {"x": 560, "y": 300},
+        "properties": {
+          "componentName": "Metrics Ingest and Query Gateway",
+          "purpose": "Validate host identity, metric schema version, timestamps, dimensions, payload shape, and cardinality at the API boundary. Route accepted writes to the durable collection queue and dashboard reads to the query service; reject malformed samples explicitly without doing aggregation on monitored servers."
+        },
+        "highlightReason": "The existing API Gateway catalog component covers the request boundary; validation rules are described in its supported purpose field."
+      }
+    },
+    {
+      "id": "pm_06",
+      "stepNumber": 6,
+      "phase": "Ingest, aggregate, and retain metrics",
+      "type": "add_component",
+      "title": "Buffer accepted samples durably",
+      "content": "Place a durable message queue between ingest and processing. It absorbs short bursts and worker or storage interruptions, applies backpressure when consumers fall behind, and supports bounded retry and replay. Acknowledge accepted writes only after the queue has durably accepted them; make downstream writes idempotent so replay does not silently double-count samples.",
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3"],
+      "component": {
+        "nodeId": "pm_queue",
+        "componentType": "queue",
+        "label": "Durable Metrics Buffer",
+        "description": "Backpressure and replay boundary for accepted metric batches",
+        "position": {"x": 840, "y": 300},
+        "properties": {
+          "componentName": "Durable Metrics Buffer",
+          "purpose": "Buffer accepted metric batches durably during worker, network, or storage failures; expose backlog for backpressure and scale decisions, and permit bounded retry/replay with downstream idempotency. Do not treat queue retention as the historical query store."
+        },
+        "highlightReason": "The existing Queue component models the hinted reliability buffer without adding a broker-specific node."
+      }
+    },
+    {
+      "id": "pm_07",
+      "stepNumber": 7,
+      "phase": "Ingest, aggregate, and retain metrics",
+      "type": "add_component",
+      "title": "Normalize and pre-aggregate batches",
+      "content": "Run horizontally scalable workers that validate and normalize samples, deduplicate replayed batches, compute real-time rollups for visualization, and branch the live stream to alert evaluation. Preserve enough source and timestamp information for diagnosis. Make aggregation windows and roll-up resolution configurable; the brief specifies no interval.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "pm_workers",
+        "componentType": "processing-worker",
+        "label": "Metric Normalization and Aggregation Workers",
+        "description": "Consumer fleet for validation, deduplication, rollups, and stream fan-out",
+        "position": {"x": 1120, "y": 300},
+        "properties": {
+          "componentName": "Metric Normalization and Aggregation Workers",
+          "purpose": "Consume queued batches with bounded retries; validate and normalize standard and custom metrics, deduplicate replayed samples, calculate configurable real-time rollups, and fan out current samples to time-series persistence and alert evaluation. Scale consumers from backlog and processing saturation, not a fabricated fixed worker count."
+        },
+        "highlightReason": "The existing Processing Worker component represents the aggregation pipeline described by the live hints."
+      }
+    },
+    {
+      "id": "pm_08",
+      "stepNumber": 8,
+      "phase": "Ingest, aggregate, and retain metrics",
+      "type": "add_component",
+      "title": "Persist the historical time series",
+      "content": "Store raw samples and derived rollups in a time-series database for the requirement to handle billions of data points per day. Partition and index by time and bounded series dimensions, compress older data, and configure retention and roll-up tiers as product decisions. Keep write idempotency and replication/recovery behavior explicit; do not invent a retention horizon or treat any hinted provider as a mandatory choice.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "pm_timeseries",
+        "componentType": "database",
+        "label": "Time-Series Metrics Store",
+        "description": "Compressed, partitioned history for metric queries and analysis",
+        "position": {"x": 1400, "y": 300},
+        "properties": {
+          "componentName": "Time-Series Metrics Store",
+          "purpose": "Persist idempotently keyed raw samples and derived rollups for historical data storage and analysis. Partition/index by time and bounded series dimensions, use compression and configurable retention/roll-up tiers, and define replication, recovery, and query-cost controls without assuming a retention duration. The catalog's Time-Series database type is used; its engine selector does not include the hinted InfluxDB or Prometheus options, so no unsupported engine value is set.",
+          "type": "Time-Series"
+        },
+        "highlightReason": "The existing Database component explicitly supports the Time-Series type, so no custom database component is necessary."
+      }
+    },
+    {
+      "id": "pm_09",
+      "stepNumber": 9,
+      "phase": "Ingest, aggregate, and retain metrics",
+      "type": "add_component",
+      "title": "Serve recent rollups efficiently",
+      "content": "Cache only recomputable recent aggregates or common dashboard query results. Use bounded freshness and invalidation rules so cached values do not become the source of historical truth or hide delayed collection. Cache misses should fall back to the query service and time-series store.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "pm_cache",
+        "componentType": "cache",
+        "label": "Recent Rollup Cache",
+        "description": "Recomputable hot aggregates for responsive dashboard reads",
+        "position": {"x": 1400, "y": 80},
+        "properties": {
+          "componentName": "Recent Rollup Cache",
+          "purpose": "Cache recomputable recent aggregates and common dashboard query results with explicit freshness and invalidation behavior; use the time-series store as the historical source of truth and fall back to it on a cache miss."
+        },
+        "highlightReason": "The existing Cache component fits hot, recomputable reads and avoids storing authoritative history in memory."
+      }
+    },
+    {
+      "id": "pm_10",
+      "stepNumber": 10,
+      "phase": "Ingest, aggregate, and retain metrics",
+      "type": "add_component",
+      "title": "Provide a query service for dashboards and analysis",
+      "content": "Keep read queries off the ingest and alert path. The query service authorizes the requested scope, validates metric names and time ranges, plans bounded time-series reads, merges cached rollups with historical results when needed, and exposes custom metrics through the same schema-aware query contract.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6"],
+      "component": {
+        "nodeId": "pm_query",
+        "componentType": "backend-server",
+        "label": "Metrics Query and Analysis Service",
+        "description": "Read API for current visualizations and historical analysis",
+        "position": {"x": 1120, "y": 80},
+        "properties": {
+          "componentName": "Metrics Query and Analysis Service",
+          "purpose": "Serve authorized dashboard and historical analysis queries without blocking ingestion. Validate metric schema and requested dimensions, use recent cached rollups when fresh, query the time-series store for history, and bound query fan-out and result size."
+        },
+        "highlightReason": "The existing Backend Server represents application query logic; the API Gateway remains the public boundary."
+      }
+    },
+    {
+      "id": "pm_11",
+      "stepNumber": 11,
+      "phase": "Ingest, aggregate, and retain metrics",
+      "type": "add_component",
+      "title": "Give operators a monitoring dashboard",
+      "content": "Use the dashboard to visualize the supported host metrics, custom metrics, current rollups, and historical comparisons. Label absent, delayed, and zero-valued samples differently; show collection freshness and alert state so an ingestion outage is not mistaken for healthy hosts.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8"],
+      "component": {
+        "nodeId": "pm_dashboard",
+        "componentType": "web-app",
+        "label": "Metrics Monitoring Dashboard",
+        "description": "Operator UI for current and historical server metrics",
+        "position": {"x": 840, "y": 80},
+        "properties": {
+          "componentName": "Metrics Monitoring Dashboard",
+          "purpose": "Visualize CPU, memory, disk, network, and custom metrics using current rollups and historical queries. Show source freshness, gaps, and alert state distinctly from a valid zero reading."
+        },
+        "highlightReason": "The catalog's Web App component represents the monitoring dashboard UI without a dashboard-specific custom node."
+      }
+    },
+    {
+      "id": "pm_12",
+      "stepNumber": 12,
+      "phase": "Ingest, aggregate, and retain metrics",
+      "type": "add_component",
+      "title": "Evaluate thresholds and observe the pipeline",
+      "content": "Evaluate configured thresholds on the live metric branch so alert processing is real-time relative to the selected collection and aggregation policy. Also monitor agent freshness, rejected samples, queue lag, worker retries, write errors, query latency, and storage health. Keep alert evaluation isolated from dashboard reads and expose alert-rule thresholds as operator configuration because the brief supplies no values.",
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "pm_monitoring",
+        "componentType": "monitoring",
+        "label": "Pipeline Monitoring and Threshold Evaluator",
+        "description": "Real-time alert rules plus service and collection health signals",
+        "position": {"x": 840, "y": -180},
+        "properties": {
+          "componentName": "Pipeline Monitoring and Threshold Evaluator",
+          "purpose": "Evaluate operator-configured thresholds on the live metric stream and track collection freshness, queue lag, processing retries, write failures, and query health. Keep alert evaluation independent of dashboard rendering; do not invent threshold values or alert-latency guarantees.",
+          "stack": "Prometheus + Grafana",
+          "metrics": true,
+          "alerts": true
+        },
+        "highlightReason": "The existing Monitoring component exposes metrics and alerts and offers Prometheus + Grafana as a supported stack option."
+      }
+    },
+    {
+      "id": "pm_13",
+      "stepNumber": 13,
+      "phase": "Ingest, aggregate, and retain metrics",
+      "type": "add_component",
+      "title": "Deliver alert notifications",
+      "content": "Route threshold violations to a notification service with a stable alert identity, severity, affected series/host, observed value, threshold, and timestamps. Support deduplication, recovery notifications, retry visibility, and configurable delivery channels; the problem does not prescribe email, SMS, or another channel.",
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:2"],
+      "component": {
+        "nodeId": "pm_notifications",
+        "componentType": "notification-service",
+        "label": "Threshold Alert Delivery",
+        "description": "Configurable delivery for threshold and recovery events",
+        "position": {"x": 1120, "y": -180},
+        "properties": {
+          "componentName": "Threshold Alert Delivery",
+          "purpose": "Deliver deduplicated threshold-violation and recovery events with host/series identity, observed value, configured threshold, and event time. Retry transient delivery failures and expose delivery state; leave channel choice configurable because the brief specifies none."
+        },
+        "highlightReason": "The existing Notification Service catalog component covers delivery and retry behavior without assuming a specific channel."
+      }
+    },
+    {
+      "id": "pm_14",
+      "stepNumber": 14,
+      "phase": "Connect collection, query, and alert paths",
+      "type": "add_connection",
+      "title": "Send host batches to the shared ingress",
+      "content": "Connect the monitored fleet to the ingress load balancer. Agents export batched host and custom metrics asynchronously; low overhead is managed at the source with bounded work and buffering, while agent health makes outages and missing data observable.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2"],
+      "connection": {
+        "edgeId": "pm_e01_hosts_ingress",
+        "sourceNodeId": "pm_hosts",
+        "targetNodeId": "pm_ingress",
+        "connectionType": "http",
+        "label": "Batched host metrics",
+        "description": "Agents send standard and versioned custom metric batches over the collection endpoint."
+      }
+    },
+    {
+      "id": "pm_15",
+      "stepNumber": 15,
+      "phase": "Connect collection, query, and alert paths",
+      "type": "add_connection",
+      "title": "Route dashboard requests through shared ingress",
+      "content": "Connect the operator dashboard to the same health-aware entry point. Reads are routed through the gateway to the query service rather than sent directly to storage, allowing authorization and query limits to be applied consistently.",
+      "requirementIds": ["legacy-requirement:8"],
+      "connection": {
+        "edgeId": "pm_e02_dashboard_ingress",
+        "sourceNodeId": "pm_dashboard",
+        "targetNodeId": "pm_ingress",
+        "connectionType": "http",
+        "label": "Dashboard requests",
+        "description": "Operator queries enter through the health-aware public endpoint."
+      }
+    },
+    {
+      "id": "pm_16",
+      "stepNumber": 16,
+      "phase": "Connect collection, query, and alert paths",
+      "type": "add_connection",
+      "title": "Forward healthy traffic to the API gateway",
+      "content": "Connect ingress to the API gateway. Health checks remove failed targets; distributing connections lets collection scale without making any one gateway instance the durable owner of metric history.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "pm_e03_ingress_gateway",
+        "sourceNodeId": "pm_ingress",
+        "targetNodeId": "pm_gateway",
+        "connectionType": "http",
+        "label": "Health-routed API traffic",
+        "description": "Distribute agent ingestion and dashboard requests to healthy gateway instances."
+      }
+    },
+    {
+      "id": "pm_17",
+      "stepNumber": 17,
+      "phase": "Connect collection, query, and alert paths",
+      "type": "add_connection",
+      "title": "Enqueue validated metric writes",
+      "content": "Connect accepted ingest requests to the durable queue. This decouples scalable data collection from downstream processing and storage availability; explicit acknowledgements and bounded retries support graceful handling of server and service failures.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "pm_e04_gateway_queue",
+        "sourceNodeId": "pm_gateway",
+        "targetNodeId": "pm_queue",
+        "connectionType": "message-queue",
+        "label": "Durably accepted batches",
+        "description": "The gateway acknowledges a batch after queue acceptance and exposes backpressure when consumers lag."
+      }
+    },
+    {
+      "id": "pm_18",
+      "stepNumber": 18,
+      "phase": "Connect collection, query, and alert paths",
+      "type": "add_connection",
+      "title": "Consume the backlog with workers",
+      "content": "Connect the queue to the aggregation worker fleet. Retry transient failures, preserve poison-batch diagnostics, and use measured backlog and processing saturation to scale consumers without dropping samples silently.",
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "pm_e05_queue_workers",
+        "sourceNodeId": "pm_queue",
+        "targetNodeId": "pm_workers",
+        "connectionType": "message-queue",
+        "label": "Ordered/replayable metric batches",
+        "description": "Workers consume queued batches with retry and replay semantics and report backlog progress."
+      }
+    },
+    {
+      "id": "pm_19",
+      "stepNumber": 19,
+      "phase": "Connect collection, query, and alert paths",
+      "type": "add_connection",
+      "title": "Persist raw samples and rollups",
+      "content": "Connect normalized worker output to the time-series store. The write path uses a stable idempotency key and time/series-aware partitioning; compression and configurable retention tiers address efficient time-series storage while preserving historical analysis.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "pm_e06_workers_tsdb",
+        "sourceNodeId": "pm_workers",
+        "targetNodeId": "pm_timeseries",
+        "connectionType": "data-flow",
+        "label": "Idempotent samples and rollups",
+        "description": "Write raw and derived time-series data with partition, compression, recovery, and retention policies."
+      }
+    },
+    {
+      "id": "pm_20",
+      "stepNumber": 20,
+      "phase": "Connect collection, query, and alert paths",
+      "type": "add_connection",
+      "title": "Refresh recent dashboard aggregates",
+      "content": "Connect worker-produced real-time rollups to the cache. The values are recomputable and carry freshness metadata; cache unavailability must fall back to durable history rather than stall metric collection.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "pm_e07_workers_cache",
+        "sourceNodeId": "pm_workers",
+        "targetNodeId": "pm_cache",
+        "connectionType": "data-flow",
+        "label": "Fresh aggregate updates",
+        "description": "Publish configurable rollups for responsive, freshness-aware dashboard reads."
+      }
+    },
+    {
+      "id": "pm_21",
+      "stepNumber": 21,
+      "phase": "Connect collection, query, and alert paths",
+      "type": "add_connection",
+      "title": "Evaluate alerts from the live metric branch",
+      "content": "Connect normalized samples to threshold evaluation as a parallel real-time branch, not as a synchronous dependency of storage writes or dashboard rendering. This supports real-time processing for alerts while keeping monitored-server work lightweight.",
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "pm_e08_workers_monitoring",
+        "sourceNodeId": "pm_workers",
+        "targetNodeId": "pm_monitoring",
+        "connectionType": "data-flow",
+        "label": "Live samples for threshold rules",
+        "description": "A non-blocking branch supplies current samples to alert evaluation independently of dashboard reads."
+      }
+    },
+    {
+      "id": "pm_22",
+      "stepNumber": 22,
+      "phase": "Connect collection, query, and alert paths",
+      "type": "add_connection",
+      "title": "Deliver threshold and recovery events",
+      "content": "Connect evaluated alerts to notification delivery. Retry transient delivery failures, deduplicate by stable alert identity, and expose undelivered events so an alert is not silently lost when one server or channel has a failure.",
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:2"],
+      "connection": {
+        "edgeId": "pm_e09_monitoring_notifications",
+        "sourceNodeId": "pm_monitoring",
+        "targetNodeId": "pm_notifications",
+        "connectionType": "message-queue",
+        "label": "Threshold and recovery events",
+        "description": "Deliver deduplicated alert events through configurable channels with retry visibility."
+      }
+    },
+    {
+      "id": "pm_23",
+      "stepNumber": 23,
+      "phase": "Connect collection, query, and alert paths",
+      "type": "add_connection",
+      "title": "Route read requests to the query service",
+      "content": "Connect the gateway's dashboard query route to the dedicated query service. Keep request authorization and bounds at the API boundary and isolate read fan-out from the high-volume ingest path.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:8"],
+      "connection": {
+        "edgeId": "pm_e10_gateway_query",
+        "sourceNodeId": "pm_gateway",
+        "targetNodeId": "pm_query",
+        "connectionType": "api-call",
+        "label": "Authorized metric queries",
+        "description": "The gateway forwards validated dashboard and analysis reads to the isolated query service."
+      }
+    },
+    {
+      "id": "pm_24",
+      "stepNumber": 24,
+      "phase": "Connect collection, query, and alert paths",
+      "type": "add_connection",
+      "title": "Read historical samples for analysis",
+      "content": "Connect the query service to the time-series store for bounded range queries and historical analysis. Use metric/time indexes and aggregation planning so a dashboard request does not scan unbounded history.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "pm_e11_query_tsdb",
+        "sourceNodeId": "pm_query",
+        "targetNodeId": "pm_timeseries",
+        "connectionType": "database-connection",
+        "label": "Bounded time-series queries",
+        "description": "Read raw or rolled-up history by metric identity and requested time range."
+      }
+    },
+    {
+      "id": "pm_25",
+      "stepNumber": 25,
+      "phase": "Connect collection, query, and alert paths",
+      "type": "add_connection",
+      "title": "Use fresh cached values where appropriate",
+      "content": "Connect the query service to the recent-rollup cache. Check freshness and query shape before reuse and fall back to the time-series database on a miss or stale value, preserving historical correctness.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "pm_e12_query_cache",
+        "sourceNodeId": "pm_query",
+        "targetNodeId": "pm_cache",
+        "connectionType": "database-connection",
+        "label": "Fresh aggregate lookup",
+        "description": "Return only suitable fresh rollups; retrieve history from the time-series source of truth."
+      }
+    },
+    {
+      "id": "pm_26",
+      "stepNumber": 26,
+      "phase": "Connect collection, query, and alert paths",
+      "type": "add_connection",
+      "title": "Render current and historical views",
+      "content": "Connect the query service response to the operator dashboard. Include current rollups, historical analysis, custom metric labels, alert state, and collection freshness so missing samples are not shown as zero.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8"],
+      "connection": {
+        "edgeId": "pm_e13_query_dashboard",
+        "sourceNodeId": "pm_query",
+        "targetNodeId": "pm_dashboard",
+        "connectionType": "api-call",
+        "label": "Metric series and alert state",
+        "description": "Serve bounded current and historical results to monitoring views."
+      }
+    },
+    {
+      "id": "pm_27",
+      "stepNumber": 27,
+      "phase": "Connect collection, query, and alert paths",
+      "type": "add_connection",
+      "title": "Use stored context without delaying live alerts",
+      "content": "Optionally connect historical time-series reads to alert evaluation for baselines and context. Keep current threshold evaluation on the worker's live branch; historical lookups must not delay real-time processing or block sample persistence.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:4", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "pm_e14_tsdb_monitoring",
+        "sourceNodeId": "pm_timeseries",
+        "targetNodeId": "pm_monitoring",
+        "connectionType": "database-connection",
+        "label": "Historical alert context",
+        "description": "Optional bounded history reads for rule context; live threshold evaluation remains on the separate stream."
+      }
+    },
+    {
+      "id": "pm_28",
+      "stepNumber": 28,
+      "phase": "Review correctness, failures, and scale triggers",
+      "type": "decision_point",
+      "title": "Choose explicit recovery semantics",
+      "content": "A durable queue makes accepted batches replayable when a processing server fails. Pair replay with idempotent writes and visible poison-batch handling; otherwise retries can either duplicate time-series points or silently discard data. Agent-side bounded spooling is a configurable choice for disconnected hosts, with explicit disk and overhead limits.",
+      "requirementIds": [],
+      "decision": {
+        "question": "How should the pipeline respond when a worker, storage target, or monitored host is unavailable?",
+        "chosen": "Durably buffer accepted batches, retry with bounded backoff, deduplicate replayed samples, and surface gaps and poison batches for operator action.",
+        "chosenReason": "This addresses server failures gracefully while keeping the queue separate from historical storage and making loss/replay behavior inspectable.",
+        "alternatives": [
+          {
+            "option": "Drop samples when a downstream target is unavailable",
+            "tradeoff": "Reduces buffering and recovery work but loses observations precisely during incidents."
+          },
+          {
+            "option": "Retry indefinitely without idempotency or bounds",
+            "tradeoff": "Can create duplicate points, poison-message stalls, unbounded backlog, and unpredictable recovery."
+          }
+        ]
+      }
+    },
+    {
+      "id": "pm_29",
+      "stepNumber": 29,
+      "phase": "Review correctness, failures, and scale triggers",
+      "type": "decision_point",
+      "title": "Keep time-series cost and queryability balanced",
+      "content": "Time-series storage must support billions of data points per day without assuming a storage size or retention period. Choose a partition key that distributes hot series while preserving efficient time-range queries; compress and roll up data according to explicit product retention policy, and test high-cardinality custom labels before accepting them.",
+      "requirementIds": [],
+      "decision": {
+        "question": "How should historical time-series storage remain queryable and efficient as the data volume grows?",
+        "chosen": "Use time- and series-aware partitioning, compression, configurable roll-up/retention tiers, and bounded dimensions; validate the chosen engine against the workload before fixing a provider.",
+        "chosenReason": "It directly covers the stated history, custom-metric, billions-per-day, and efficient-storage requirements while leaving unspecified workload and retention decisions open.",
+        "alternatives": [
+          {
+            "option": "Keep every raw sample indefinitely at full resolution",
+            "tradeoff": "Simplifies fidelity but makes storage and long-range scans grow without a bound."
+          },
+          {
+            "option": "Store only coarse aggregates",
+            "tradeoff": "Reduces cost but prevents investigations that need raw or finer-grained history."
+          }
+        ]
+      }
+    },
+    {
+      "id": "pm_30",
+      "stepNumber": 30,
+      "phase": "Review correctness, failures, and scale triggers",
+      "type": "scale_trigger",
+      "title": "Scale collection and processing from measured pressure",
+      "content": "The requirement is billions of data points per day; treat that as a workload target to validate, not a promise implied by the diagram. Partition ingest by stable host/series keys, add gateway capacity from measured connection saturation, and scale workers from queue lag, processing saturation, retry rate, and storage write pressure. Alert on growing lag before backlog threatens freshness.",
+      "requirementIds": [],
+      "scaleTrigger": {
+        "metric": "Queue age and depth, accepted versus processed sample rate, worker saturation, retry/error rate, and time-series write/partition pressure",
+        "action": "Scale healthy gateway and worker capacity horizontally, add or rebalance storage partitions, and apply explicit backpressure when downstream recovery cannot keep pace.",
+        "impact": "Maintains scalable data collection and makes freshness degradation visible without hard-coding a throughput estimate or service threshold."
+      }
+    },
+    {
+      "id": "pm_31",
+      "stepNumber": 31,
+      "phase": "Review correctness, failures, and scale triggers",
+      "type": "scale_trigger",
+      "title": "Scale query and dashboard paths independently",
+      "content": "Read traffic can grow independently from ingestion. Track query latency by range and metric cardinality, cache freshness and hit behavior, database read pressure, and dashboard error rate. Scale query workers or adjust roll-up/query plans based on those signals, without reducing alert-processing capacity to serve a dashboard spike.",
+      "requirementIds": [],
+      "scaleTrigger": {
+        "metric": "Query latency and errors by range/cardinality, cache freshness, and time-series read pressure",
+        "action": "Scale the query service independently, tune bounded query plans, and adjust configurable rollups or cache policy based on observed access patterns.",
+        "impact": "Preserves responsive real-time visualization and historical analysis while isolating read scaling from collection and alerting."
+      }
+    },
+    {
+      "id": "pm_32",
+      "stepNumber": 32,
+      "phase": "Review correctness, failures, and scale triggers",
+      "type": "explanation",
+      "title": "Review threshold, freshness, and missing-data semantics",
+      "content": "Operators configure threshold rules and their evaluation policy; the source brief provides no numeric threshold, alert-latency objective, sampling interval, or availability target. Distinguish a real zero from a delayed agent, missing batch, stale cache entry, or failed query. Track event timestamps and ingestion time so late or replayed samples do not silently masquerade as current state.",
+      "requirementIds": []
+    },
+    {
+      "id": "pm_33",
+      "stepNumber": 33,
+      "phase": "Review correctness, failures, and scale triggers",
+      "type": "explanation",
+      "title": "Check the finished design against the exact brief",
+      "content": "Before publishing a design, verify: agents collect CPU, memory, disk, network, and custom metrics from thousands of servers; workers aggregate and visualize in real time under the chosen policy; threshold violations reach configurable notification delivery; raw and rolled-up history supports analysis; the pipeline is tested against billions of points per day; and the dashboard shows freshness and alert state. Then exercise agent disconnects, queue backlog, worker restart/replay, storage write failure, high-cardinality custom input, alert delivery failure, and historical-query pressure. Record measured targets and retention choices separately because the problem does not supply them.",
+      "requirementIds": []
+    }
+  ]
+}

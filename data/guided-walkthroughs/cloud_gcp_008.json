@@ -1,0 +1,800 @@
+{
+  "problem_id": "cloud_gcp_008",
+  "version": "1.0-review",
+  "totalSteps": 48,
+  "requirementRevision": null,
+  "phases": [
+    {
+      "name": "Preserve the live brief",
+      "stepRange": [1, 5],
+      "description": "Carry the exact title, description, requirements, constraints, and hints into the draft, and keep unspecified workload details open."
+    },
+    {
+      "name": "Route and buffer events",
+      "stepRange": [6, 26],
+      "description": "Map event producers, Eventarc, Cloud Functions, Pub/Sub, Firestore, the optional scheduler hint, and Cloud Monitoring to existing catalog types where they fit."
+    },
+    {
+      "name": "Define delivery, retries, and storage",
+      "stepRange": [27, 35],
+      "description": "Make duplicate-safe processing, acknowledgement boundaries, retry handling, dead-letter recovery, and the under-one-second measurement boundary explicit."
+    },
+    {
+      "name": "Scale and observe the workload",
+      "stepRange": [36, 42],
+      "description": "Use backlog and processing evidence to handle spikes and variable load without inventing peak rates, concurrency values, or alert thresholds."
+    },
+    {
+      "name": "Make acceptance evidence explicit",
+      "stepRange": [43, 48],
+      "description": "Turn each supplied constraint and functional requirement into an observable validation question while leaving missing owner decisions unresolved."
+    }
+  ],
+  "steps": [
+    {
+      "id": "gcp_01_live_brief",
+      "stepNumber": 1,
+      "phase": "Preserve the live brief",
+      "title": "Carry the exact live problem brief into the design",
+      "type": "explanation",
+      "content": "Title: Build a Serverless Event-Driven Architecture\nDescription: Design an event-driven system that triggers functions based on events, processes messages asynchronously, and integrates with multiple cloud services.\nRequirements: Trigger functions from events; Process events asynchronously; Store event data; Handle event routing; Implement retry logic; Monitor event processing; Handle dead-letter queues; Scale based on event volume.\nConstraints: Event processing latency under 1 second; Support 1M+ events per day; Ensure at-least-once delivery; Cost-effective for variable load; Handle event spikes gracefully.\nHints: Cloud Functions for event handlers; Eventarc for event routing; Pub/Sub for messaging; Firestore for data storage; Cloud Scheduler for cron jobs; Cloud Monitoring for observability. These are the supplied inputs; they do not establish that a design meets any target.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "gcp_02_workload_shape",
+      "stepNumber": 2,
+      "phase": "Preserve the live brief",
+      "title": "Separate daily volume from peak arrival shape",
+      "type": "explanation",
+      "content": "The brief supplies a floor of 1M+ events per day and requires graceful handling of spikes. It does not give event sizes, source mix, arrival distribution, burst duration, fan-out, or a peak rate. Keep those as workload questions; do not turn the daily total into an unsupported requests-per-second or concurrency target.",
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcp_03_latency_boundary",
+      "stepNumber": 3,
+      "phase": "Preserve the live brief",
+      "title": "Clarify what the under-one-second latency measures",
+      "type": "explanation",
+      "content": "The supplied target is event-processing latency under one second, but its start and end points are unspecified. Ask whether it ends at function start, message handling, or a durable processing result, and whether queue wait and retries are included. Instrument those stages separately until the owner approves the acceptance boundary and aggregation.",
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "gcp_04_delivery_semantics",
+      "stepNumber": 4,
+      "phase": "Preserve the live brief",
+      "title": "Treat at-least-once delivery as duplicate delivery",
+      "type": "explanation",
+      "content": "At-least-once delivery permits the same event to arrive again when an acknowledgement is lost or a handler is retried. The consumer must make repeated deliveries safe. Do not describe this guarantee as exactly-once processing or assume that transport-level delivery alone prevents duplicate effects.",
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "gcp_05_optional_scheduler",
+      "stepNumber": 5,
+      "phase": "Preserve the live brief",
+      "title": "Keep scheduled events optional",
+      "type": "explanation",
+      "content": "Cloud Scheduler appears in the supplied hints for cron jobs, but the requirements do not ask for scheduled work. Model it only as an optional event producer if the product needs cron-triggered events. The catalog has no scheduler-specific component type, so the optional node will use the generic custom component and identify that gap.",
+      "requirementIds": ["legacy-constraint:4", "legacy-requirement:1"]
+    },
+    {
+      "id": "gcp_06_event_sources",
+      "stepNumber": 6,
+      "phase": "Route and buffer events",
+      "title": "Represent upstream event producers",
+      "type": "add_component",
+      "content": "Use the existing backend-server type as a generic placeholder for services that emit events. The problem does not identify those producers; replace this label with the actual integrated cloud services when they are known.",
+      "component": {
+        "nodeId": "gcp_event_sources",
+        "componentType": "backend-server",
+        "label": "Upstream Cloud Service Event Producers",
+        "description": "Generic source boundary for services that emit events.",
+        "position": {"x": 0, "y": 300},
+        "properties": {
+          "componentName": "Upstream Cloud Service Event Producers",
+          "purpose": "Represent cloud services that emit source events; the specific producers and event contracts are not named in the problem brief."
+        },
+        "highlightReason": "An explicit source boundary makes the event flow readable without inventing a specific producer."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4"]
+    },
+    {
+      "id": "gcp_07_eventarc",
+      "stepNumber": 7,
+      "phase": "Route and buffer events",
+      "title": "Route supported cloud events with Eventarc",
+      "type": "add_component",
+      "content": "Map Eventarc to the catalog's message-dispatcher type. It routes supported event sources to the appropriate function handler; confirm the actual source types and event filters with the service owners because the brief does not specify them.",
+      "component": {
+        "nodeId": "gcp_eventarc",
+        "componentType": "message-dispatcher",
+        "label": "Eventarc Event Router",
+        "description": "Routes supported cloud events to the selected event handler.",
+        "position": {"x": 300, "y": 300},
+        "properties": {
+          "componentName": "Eventarc Event Router",
+          "purpose": "Filter and route supported cloud events to the matching Cloud Functions handler; keep source filters and event contracts aligned with the actual producers."
+        },
+        "highlightReason": "The supplied hint names Eventarc for event routing, and the catalog message-dispatcher type fits that role."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4"]
+    },
+    {
+      "id": "gcp_08_sources_eventarc",
+      "stepNumber": 8,
+      "phase": "Route and buffer events",
+      "title": "Connect cloud event producers to Eventarc",
+      "type": "add_connection",
+      "content": "This edge represents supported source events entering Eventarc. Its event types and filters remain dependent on which cloud services are actually integrated.",
+      "connection": {
+        "edgeId": "gcp_sources_to_eventarc",
+        "sourceNodeId": "gcp_event_sources",
+        "targetNodeId": "gcp_eventarc",
+        "connectionType": "cloud-event",
+        "label": "Source events",
+        "description": "Cloud events from the configured producers; exact event types are not specified in the brief."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4"]
+    },
+    {
+      "id": "gcp_09_eventarc_ingest",
+      "stepNumber": 9,
+      "phase": "Route and buffer events",
+      "title": "Handle routed events with Cloud Functions",
+      "type": "add_component",
+      "content": "Use the existing serverless-function catalog type for the Cloud Functions event handler. Keep this handler focused on validating the event envelope and handing accepted work to the asynchronous message path; choose runtime and resource settings only after the workload and code are known.",
+      "component": {
+        "nodeId": "gcp_event_ingest",
+        "componentType": "serverless-function",
+        "label": "Cloud Functions Event Intake",
+        "description": "Validates routed events and publishes accepted work for asynchronous processing.",
+        "position": {"x": 600, "y": 300},
+        "properties": {
+          "componentName": "Cloud Functions Event Intake",
+          "purpose": "Validate the event envelope, preserve its stable source identity, and publish accepted work to Pub/Sub without embedding workload-specific limits that the brief does not provide."
+        },
+        "highlightReason": "The supplied hint names Cloud Functions for event handlers, and the catalog has a matching serverless-function type."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4"]
+    },
+    {
+      "id": "gcp_10_eventarc_to_ingest",
+      "stepNumber": 10,
+      "phase": "Route and buffer events",
+      "title": "Send routed events to the intake function",
+      "type": "add_connection",
+      "content": "Eventarc invokes the selected Cloud Functions handler for each matching event. Keep this trigger path distinct from the later Pub/Sub consumer path so the design shows where routing ends and asynchronous work begins.",
+      "connection": {
+        "edgeId": "gcp_eventarc_to_ingest",
+        "sourceNodeId": "gcp_eventarc",
+        "targetNodeId": "gcp_event_ingest",
+        "connectionType": "event-trigger",
+        "label": "Matching event invokes handler",
+        "description": "Eventarc routes a supported event to the configured Cloud Functions handler."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4"]
+    },
+    {
+      "id": "gcp_11_pubsub",
+      "stepNumber": 11,
+      "phase": "Route and buffer events",
+      "title": "Buffer accepted work in Pub/Sub",
+      "type": "add_component",
+      "content": "Use the existing Pub/Sub catalog type as the durable asynchronous boundary. It separates source event handling from consumer execution and absorbs temporary differences between incoming and processing rates; no queue depth or retention target is supplied.",
+      "component": {
+        "nodeId": "gcp_event_topic",
+        "componentType": "pubsub",
+        "label": "Pub/Sub Event Work Topic",
+        "description": "Asynchronous handoff for accepted event work.",
+        "position": {"x": 900, "y": 300},
+        "properties": {
+          "componentName": "Pub/Sub Event Work Topic",
+          "purpose": "Durably buffer accepted event work for asynchronous Cloud Functions consumers and expose backlog evidence for scale decisions."
+        },
+        "highlightReason": "Pub/Sub is named in the supplied hints and provides the asynchronous messaging boundary required by the brief."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcp_12_ingest_to_pubsub",
+      "stepNumber": 12,
+      "phase": "Route and buffer events",
+      "title": "Publish accepted work before acknowledging intake",
+      "type": "add_connection",
+      "content": "The intake function publishes the normalized event to Pub/Sub. Treat a failed publish as an unsuccessful handoff so the source delivery can be retried; account for duplicate publication if the publish succeeds but the source acknowledgement is lost.",
+      "connection": {
+        "edgeId": "gcp_ingest_to_pubsub",
+        "sourceNodeId": "gcp_event_ingest",
+        "targetNodeId": "gcp_event_topic",
+        "connectionType": "async-publish",
+        "label": "Accepted event work",
+        "description": "Publish the event envelope and stable source identity for asynchronous consumption."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "gcp_13_worker",
+      "stepNumber": 13,
+      "phase": "Route and buffer events",
+      "title": "Process Pub/Sub messages asynchronously",
+      "type": "add_component",
+      "content": "Use a separate Cloud Functions handler for Pub/Sub work. Keep its processing idempotent and acknowledge only after the required durable outcome succeeds. The catalog's serverless-function type fits without claiming a particular runtime, memory setting, or concurrency limit.",
+      "component": {
+        "nodeId": "gcp_event_worker",
+        "componentType": "serverless-function",
+        "label": "Cloud Functions Event Processor",
+        "description": "Asynchronous consumer that records completed event outcomes.",
+        "position": {"x": 1200, "y": 300},
+        "properties": {
+          "componentName": "Cloud Functions Event Processor",
+          "purpose": "Consume Pub/Sub work asynchronously, make repeated event deliveries safe, and commit the required event outcome before acknowledging successful processing."
+        },
+        "highlightReason": "Separating the consumer from intake allows event processing to scale with backlog and makes retries explicit."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:8"]
+    },
+    {
+      "id": "gcp_14_pubsub_to_worker",
+      "stepNumber": 14,
+      "phase": "Route and buffer events",
+      "title": "Deliver messages to the processing function",
+      "type": "add_connection",
+      "content": "Pub/Sub delivers messages to the worker under the configured subscription and acknowledgement policy. A message that is not successfully acknowledged can be delivered again, so the worker must not rely on a single invocation.",
+      "connection": {
+        "edgeId": "gcp_pubsub_to_worker",
+        "sourceNodeId": "gcp_event_topic",
+        "targetNodeId": "gcp_event_worker",
+        "connectionType": "pubsub-delivery",
+        "label": "Asynchronous message delivery",
+        "description": "Subscription delivery with acknowledgement and retry behavior configured for the workload."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "gcp_15_firestore",
+      "stepNumber": 15,
+      "phase": "Route and buffer events",
+      "title": "Persist event identity and processing outcome in Firestore",
+      "type": "add_component",
+      "content": "Represent Firestore with the catalog's generic database type and its supported NoSQL classification. The catalog has no Firestore-specific engine value, so do not select or imply a different engine. Define retention, regional placement, and the event fields with the data owner.",
+      "component": {
+        "nodeId": "gcp_firestore",
+        "componentType": "database",
+        "label": "Firestore Event Records",
+        "description": "NoSQL records for stable event identity, processing state, and durable outcomes.",
+        "position": {"x": 1500, "y": 300},
+        "properties": {
+          "componentName": "Firestore Event Records",
+          "purpose": "Persist the stable event identity and processing outcome so duplicate deliveries can be recognized and completed work can be distinguished from pending or failed work.",
+          "type": "NoSQL"
+        },
+        "highlightReason": "Firestore is the supplied storage hint; the existing database type fits, while its catalog engine list has no Firestore entry."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "gcp_16_worker_to_firestore",
+      "stepNumber": 16,
+      "phase": "Route and buffer events",
+      "title": "Commit the durable result before acknowledging the message",
+      "type": "add_connection",
+      "content": "The worker writes the event identity and processing result to Firestore. Align acknowledgement with the durable outcome so a delivery is not silently lost between successful processing and persistence.",
+      "connection": {
+        "edgeId": "gcp_worker_to_firestore",
+        "sourceNodeId": "gcp_event_worker",
+        "targetNodeId": "gcp_firestore",
+        "connectionType": "durable-state-write",
+        "label": "Event state and outcome",
+        "description": "Persist processing state and the result required to make retries and duplicate delivery safe."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "gcp_17_dead_letter_topic",
+      "stepNumber": 17,
+      "phase": "Route and buffer events",
+      "title": "Add a Pub/Sub dead-letter destination",
+      "type": "add_component",
+      "content": "Represent the logical dead-letter queue with a separate Pub/Sub topic, the GCP messaging type already present in the catalog. Configure the subscription's dead-letter policy and route repeatedly failing messages there; the attempt limit is a workload and operations decision, not a value in the brief.",
+      "component": {
+        "nodeId": "gcp_dead_letter_topic",
+        "componentType": "pubsub",
+        "label": "Pub/Sub Dead-Letter Topic",
+        "description": "Quarantine destination for messages that exhaust the configured retry policy.",
+        "position": {"x": 1200, "y": 570},
+        "properties": {
+          "componentName": "Pub/Sub Dead-Letter Topic",
+          "purpose": "Retain repeatedly failing messages for inspection and controlled replay after the cause is understood; use the subscription dead-letter policy without inventing a delivery-attempt count."
+        },
+        "highlightReason": "This is the supplied dead-letter requirement expressed with Pub/Sub's existing catalog type and a distinct recovery destination."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7"]
+    },
+    {
+      "id": "gcp_18_pubsub_to_dlq",
+      "stepNumber": 18,
+      "phase": "Route and buffer events",
+      "title": "Route exhausted deliveries to the dead-letter topic",
+      "type": "add_connection",
+      "content": "Configure the work subscription to forward messages to the dead-letter topic after its owner-approved retry policy is exhausted. Keep the replay procedure separate from automatic delivery so a poison message does not loop indefinitely.",
+      "connection": {
+        "edgeId": "gcp_pubsub_to_dlq",
+        "sourceNodeId": "gcp_event_topic",
+        "targetNodeId": "gcp_dead_letter_topic",
+        "connectionType": "dead-letter-routing",
+        "label": "Exhausted delivery to DLQ",
+        "description": "Subscription dead-letter policy forwards messages after the configured retry allowance."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7"]
+    },
+    {
+      "id": "gcp_19_cloud_scheduler",
+      "stepNumber": 19,
+      "phase": "Route and buffer events",
+      "title": "Add Cloud Scheduler only for an agreed cron source",
+      "type": "add_component",
+      "content": "This optional node is present because Cloud Scheduler is a supplied hint, not because cron jobs are a stated requirement. The catalog has no scheduler-specific type; the generic custom-component is used only for that missing catalog role.",
+      "component": {
+        "nodeId": "gcp_cloud_scheduler",
+        "componentType": "custom-component",
+        "label": "Cloud Scheduler (Optional Cron Source)",
+        "description": "Optional producer for scheduled events when cron-triggered work is in scope.",
+        "position": {"x": 600, "y": 570},
+        "properties": {
+          "componentName": "Cloud Scheduler (Optional Cron Source)",
+          "subtitle": "Optional; not a stated requirement",
+          "purpose": "Optional: publish scheduled events into the shared asynchronous event path only if cron-triggered work is part of the product; schedule frequency and time zone remain unspecified.",
+          "componentType": "Google Cloud Scheduler (catalog gap: no scheduler-specific component type)",
+          "technology": "Google Cloud Scheduler",
+          "notes": "Optional path from the supplied hint. Do not enable it or choose a schedule until a cron use case is confirmed."
+        },
+        "highlightReason": "The component catalog has no scheduler-specific type, so this optional hint uses the generic custom component with the gap identified."
+      },
+      "requirementIds": ["legacy-requirement:1"]
+    },
+    {
+      "id": "gcp_20_scheduler_to_pubsub",
+      "stepNumber": 20,
+      "phase": "Route and buffer events",
+      "title": "Publish optional scheduled work to Pub/Sub",
+      "type": "add_connection",
+      "content": "If scheduled work is confirmed, Cloud Scheduler can publish a scheduled event to the same asynchronous topic. This optional edge does not add a cron requirement or prescribe a schedule.",
+      "connection": {
+        "edgeId": "gcp_scheduler_to_pubsub",
+        "sourceNodeId": "gcp_cloud_scheduler",
+        "targetNodeId": "gcp_event_topic",
+        "connectionType": "scheduled-publish",
+        "label": "Optional scheduled event",
+        "description": "Cloud Scheduler publishes only when an agreed cron use case exists."
+      },
+      "requirementIds": ["legacy-requirement:2"]
+    },
+    {
+      "id": "gcp_21_monitoring",
+      "stepNumber": 21,
+      "phase": "Route and buffer events",
+      "title": "Observe the event path with Cloud Monitoring",
+      "type": "add_component",
+      "content": "Use the existing Monitoring component with Google Cloud Monitoring selected. Track event processing latency, volume, backlog, and cost against the brief without promising unmeasured targets.",
+      "component": {
+        "nodeId": "gcp_monitoring",
+        "componentType": "monitoring",
+        "label": "Google Cloud Monitoring",
+        "description": "Operational visibility across event routing, functions, Pub/Sub, and Firestore.",
+        "position": {"x": 1500, "y": 570},
+        "properties": {
+          "componentName": "Google Cloud Monitoring",
+          "purpose": "Collect event-flow, function, Pub/Sub, Firestore, retry, and dead-letter signals so latency, reliability, backlog, and cost can be evaluated against the supplied brief.",
+          "stack": "Google Cloud Monitoring"
+        },
+        "highlightReason": "The existing Monitoring component now exposes Google Cloud Monitoring as a selectable stack."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "gcp_22_eventarc_telemetry",
+      "stepNumber": 22,
+      "phase": "Route and buffer events",
+      "title": "Export routing and delivery signals",
+      "type": "add_connection",
+      "content": "Include Eventarc delivery and routing outcomes in the operational view so source filtering or delivery failures are distinguishable from function processing failures.",
+      "connection": {
+        "edgeId": "gcp_eventarc_to_monitoring",
+        "sourceNodeId": "gcp_eventarc",
+        "targetNodeId": "gcp_monitoring",
+        "connectionType": "telemetry",
+        "label": "Routing and delivery signals",
+        "description": "Observe routed-event delivery and trigger failures."
+      },
+      "requirementIds": ["legacy-requirement:6"]
+    },
+    {
+      "id": "gcp_23_ingest_telemetry",
+      "stepNumber": 23,
+      "phase": "Route and buffer events",
+      "title": "Export intake function signals",
+      "type": "add_connection",
+      "content": "Track intake invocation outcomes and publish errors separately from consumer failures; use a shared event identity to correlate the stages.",
+      "connection": {
+        "edgeId": "gcp_ingest_to_monitoring",
+        "sourceNodeId": "gcp_event_ingest",
+        "targetNodeId": "gcp_monitoring",
+        "connectionType": "telemetry",
+        "label": "Intake and publish signals",
+        "description": "Observe validation failures, invocation outcomes, and Pub/Sub publish errors."
+      },
+      "requirementIds": ["legacy-requirement:6"]
+    },
+    {
+      "id": "gcp_24_pubsub_telemetry",
+      "stepNumber": 24,
+      "phase": "Route and buffer events",
+      "title": "Export backlog and delivery signals",
+      "type": "add_connection",
+      "content": "Observe message age, backlog movement, redelivery, and dead-letter forwarding. Use the observed series to explain whether delays are caused by ingress bursts or consumer capacity.",
+      "connection": {
+        "edgeId": "gcp_pubsub_to_monitoring",
+        "sourceNodeId": "gcp_event_topic",
+        "targetNodeId": "gcp_monitoring",
+        "connectionType": "telemetry",
+        "label": "Backlog and delivery signals",
+        "description": "Observe message age, backlog, redelivery, and dead-letter movement."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcp_25_worker_telemetry",
+      "stepNumber": 25,
+      "phase": "Route and buffer events",
+      "title": "Export processing function signals",
+      "type": "add_connection",
+      "content": "Observe worker execution, processing outcomes, duplicate suppression, retries, and failures. Do not set an alert threshold until the latency definition and operating limits are agreed.",
+      "connection": {
+        "edgeId": "gcp_worker_to_monitoring",
+        "sourceNodeId": "gcp_event_worker",
+        "targetNodeId": "gcp_monitoring",
+        "connectionType": "telemetry",
+        "label": "Processing and retry signals",
+        "description": "Observe worker outcomes, duplicate handling, retries, and failures."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6"]
+    },
+    {
+      "id": "gcp_26_firestore_telemetry",
+      "stepNumber": 26,
+      "phase": "Route and buffer events",
+      "title": "Export durable storage signals",
+      "type": "add_connection",
+      "content": "Observe Firestore write outcomes and service-limit signals alongside worker latency. The brief does not state retention duration, regional placement, or a storage-volume target.",
+      "connection": {
+        "edgeId": "gcp_firestore_to_monitoring",
+        "sourceNodeId": "gcp_firestore",
+        "targetNodeId": "gcp_monitoring",
+        "connectionType": "telemetry",
+        "label": "Durable write signals",
+        "description": "Observe outcome-write success, errors, and relevant service-limit signals."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6"]
+    },
+    {
+      "id": "gcp_27_boundary_review",
+      "stepNumber": 27,
+      "phase": "Define delivery, retries, and storage",
+      "title": "Keep routing, asynchronous work, and durable outcomes distinct",
+      "type": "explanation",
+      "content": "The flow has three boundaries: Eventarc routes the source event to an intake function; that function publishes work to Pub/Sub; a separate function consumes the message and records the outcome in Firestore. This makes asynchronous buffering and recovery visible without claiming a particular peak throughput.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4"]
+    },
+    {
+      "id": "gcp_28_idempotent_consumer",
+      "stepNumber": 28,
+      "phase": "Define delivery, retries, and storage",
+      "title": "Make the consumer safe for repeated deliveries",
+      "type": "decision_point",
+      "content": "A Pub/Sub message can be redelivered, and an intake event can be retried after a successful publish whose acknowledgement was not observed. Preserve a stable source event identity and make the durable outcome write idempotent before acknowledging completion.",
+      "decision": {
+        "question": "How should repeated delivery of the same source event be handled?",
+        "chosen": "Use the stable source event identity as an idempotency key and atomically recognize or record the Firestore outcome before acknowledging successful processing.",
+        "chosenReason": "At-least-once delivery requires duplicate-safe effects; a successful transport acknowledgement is not an exactly-once processing guarantee.",
+        "alternatives": [
+          {
+            "option": "Assume the source and message service will never redeliver an event",
+            "tradeoff": "A lost acknowledgement or transient failure can cause duplicate processing and repeated effects."
+          },
+          {
+            "option": "Deduplicate only in process memory",
+            "tradeoff": "A function restart or another concurrent instance loses that in-memory history."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "gcp_event_worker",
+        "properties": {
+          "purpose": "Consume Pub/Sub work asynchronously; use the stable source event identity as an idempotency key, atomically recognize or record the Firestore outcome, and acknowledge only after the required durable result succeeds."
+        }
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:3", "legacy-constraint:3"]
+    },
+    {
+      "id": "gcp_29_event_identity",
+      "stepNumber": 29,
+      "phase": "Define delivery, retries, and storage",
+      "title": "Confirm the event identity and outcome contract",
+      "type": "explanation",
+      "content": "Ask each producer which event identifier remains stable across retries and whether two distinct events can share a business key. Agree which event fields and terminal outcomes Firestore must retain. If a producer supplies no stable identifier, define that contract with its owner before claiming duplicate suppression.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "gcp_30_retry_policy",
+      "stepNumber": 30,
+      "phase": "Define delivery, retries, and storage",
+      "title": "Retry transient failures and isolate exhausted work",
+      "type": "decision_point",
+      "content": "Retry transient processing failures through the subscription's configured delivery policy and route exhausted messages to the separate dead-letter topic. Classify permanent invalid input separately so the same poison message is not retried without end. The brief provides no attempt count or backoff values.",
+      "decision": {
+        "question": "How should the asynchronous path recover from a processing failure?",
+        "chosen": "Retry transient failures under an owner-approved policy, acknowledge only successful durable outcomes, and forward exhausted messages to the dead-letter topic for inspection and controlled replay.",
+        "chosenReason": "This preserves retry behavior while giving repeatedly failing messages a visible recovery path and avoiding an invented retry limit.",
+        "alternatives": [
+          {
+            "option": "Acknowledge every message even when processing fails",
+            "tradeoff": "The system can lose work without a durable outcome or recovery record."
+          },
+          {
+            "option": "Retry every failure indefinitely on the main subscription",
+            "tradeoff": "A poison message can consume processing capacity and hide healthy work behind repeated failures."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "gcp_event_topic",
+        "properties": {
+          "purpose": "Buffer asynchronous event work for Cloud Functions consumers; configure transient retries and a separate dead-letter topic under an owner-approved delivery policy, with no attempt count assumed by this draft."
+        }
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7"]
+    },
+    {
+      "id": "gcp_31_ack_boundary",
+      "stepNumber": 31,
+      "phase": "Define delivery, retries, and storage",
+      "title": "Align acknowledgement with the durable processing result",
+      "type": "explanation",
+      "content": "Return success to the subscription only after the required processing result is durably recorded. If the worker fails before that point, allow redelivery; if it succeeds and the acknowledgement is lost, the idempotency check makes the repeated message safe.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "gcp_32_dlq_recovery",
+      "stepNumber": 32,
+      "phase": "Define delivery, retries, and storage",
+      "title": "Make dead-letter inspection and replay controlled",
+      "type": "explanation",
+      "content": "Attach the original event identity and failure context to dead-letter handling without placing sensitive payload data in operational logs. Assign an owner to inspect the cause, decide whether the message is safe to replay, and monitor replay outcomes. The problem does not specify a retention period or replay service.",
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:6"]
+    },
+    {
+      "id": "gcp_33_firestore_retention",
+      "stepNumber": 33,
+      "phase": "Define delivery, retries, and storage",
+      "title": "Leave event retention and payload policy for the owner",
+      "type": "explanation",
+      "content": "Firestore must store event data, but the brief does not define retention, deletion, payload size, data residency, or which fields are required. Keep the record model limited to the agreed event identity, processing state, and outcome; set lifecycle and access policy after the data owner confirms those needs.",
+      "requirementIds": ["legacy-requirement:3"]
+    },
+    {
+      "id": "gcp_34_latency_instrumentation",
+      "stepNumber": 34,
+      "phase": "Define delivery, retries, and storage",
+      "title": "Instrument the stages behind the latency target",
+      "type": "decision_point",
+      "content": "Measure source-event time, Eventarc delivery, function start and completion, Pub/Sub publish and consumption, and the durable Firestore result. Keep stage timings separate so queue delay and execution time can be distinguished; have the owner confirm the exact under-one-second boundary before reporting compliance.",
+      "decision": {
+        "question": "What should the design record before the latency acceptance boundary is finalized?",
+        "chosen": "Record correlated stage timestamps from source event through durable outcome, then evaluate the agreed under-one-second start and end points separately.",
+        "chosenReason": "The brief supplies a latency target but not its measurement boundary, so separate timings make the eventual decision evidence-based.",
+        "alternatives": [
+          {
+            "option": "Measure only function execution time",
+            "tradeoff": "This hides Eventarc delivery and Pub/Sub queue delay."
+          },
+          {
+            "option": "Claim the target is met from an average without agreed boundaries",
+            "tradeoff": "An average can conceal slower event paths and does not resolve what the target measures."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "gcp_monitoring",
+        "properties": {
+          "metrics": "Correlate source-event time, Eventarc delivery, function start and completion, Pub/Sub publish and consumption, Firestore commit, retries, duplicates, and dead-letter movement; evaluate under-one-second latency only at the owner-approved boundary."
+        }
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "gcp_35_no_unstated_thresholds",
+      "stepNumber": 35,
+      "phase": "Define delivery, retries, and storage",
+      "title": "Keep unprovided thresholds out of the design",
+      "type": "explanation",
+      "content": "The brief does not set a latency percentile, queue-age alert value, retry count, function concurrency, regional count, event payload limit, or cost ceiling. Collect the evidence and ask the owners to approve those settings rather than presenting a guessed number as a requirement.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcp_36_scale_on_backlog",
+      "stepNumber": 36,
+      "phase": "Scale and observe the workload",
+      "title": "Scale consumers from observed backlog and service limits",
+      "type": "scale_trigger",
+      "content": "Use message age and backlog growth together with worker saturation and Firestore service limits. Increase consumer capacity when the incoming work outpaces successful processing, while respecting downstream limits; derive the control settings from representative load evidence.",
+      "scaleTrigger": {
+        "metric": "Pub/Sub oldest unprocessed message age and backlog trend, Cloud Functions processing capacity, and Firestore service-limit signals",
+        "action": "Adjust asynchronous consumer capacity from observed backlog while protecting downstream Firestore limits and validating the settings under representative load.",
+        "impact": "Helps absorb variable event volume without translating the daily event floor into an unsupported fixed concurrency target."
+      },
+      "componentUpdate": {
+        "nodeId": "gcp_event_worker",
+        "properties": {
+          "purpose": "Consume Pub/Sub work asynchronously with duplicate-safe durable outcomes; scale consumer capacity from observed message age and backlog while respecting Firestore limits, and choose concurrency only from workload evidence."
+        }
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-requirement:2", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcp_37_spike_behavior",
+      "stepNumber": 37,
+      "phase": "Scale and observe the workload",
+      "title": "Let the message backlog absorb short-lived spikes",
+      "type": "explanation",
+      "content": "Pub/Sub separates event acceptance from immediate worker availability, allowing a backlog to form during a burst and drain as consumers recover. Watch backlog age and growth, and validate that the resulting delay remains compatible with the agreed under-one-second measurement boundary; buffering alone does not prove that it does.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcp_38_variable_cost",
+      "stepNumber": 38,
+      "phase": "Scale and observe the workload",
+      "title": "Evaluate cost across quiet periods and bursts",
+      "type": "decision_point",
+      "content": "The brief requires cost-effective operation for variable load but provides no budget or cost ceiling. Use the managed messaging and demand-driven function path, then compare actual spend and backlog recovery across representative quiet and busy periods before selecting minimum instances or concurrency settings.",
+      "decision": {
+        "question": "How should consumer capacity follow variable event volume while keeping idle cost visible?",
+        "chosen": "Use managed Pub/Sub and demand-driven Cloud Functions consumers, then measure cost and recovery behavior across representative quiet and busy periods before setting capacity floors or concurrency values.",
+        "chosenReason": "The supplied constraint favors a design that can follow variable work, while the absent budget and workload shape prevent a defensible fixed capacity or cost target.",
+        "alternatives": [
+          {
+            "option": "Keep a fixed worker fleet sized for the busiest observed period",
+            "tradeoff": "It can leave capacity idle during quieter periods and its cost depends on a peak shape not supplied by the brief."
+          },
+          {
+            "option": "Set minimum instances and concurrency before measuring the workload",
+            "tradeoff": "Those settings can add cost or constrain burst handling without evidence about arrival patterns or downstream limits."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "gcp_event_worker",
+        "properties": {
+          "purpose": "Consume Pub/Sub work asynchronously with duplicate-safe durable outcomes; use demand-driven Cloud Functions capacity for variable load and set minimum instances or concurrency only after measuring cost, backlog recovery, and downstream limits."
+        }
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:4"]
+    },
+    {
+      "id": "gcp_39_downstream_quotas",
+      "stepNumber": 39,
+      "phase": "Scale and observe the workload",
+      "title": "Protect downstream services while scaling functions",
+      "type": "explanation",
+      "content": "More function capacity can increase concurrent writes and pressure Firestore or other integrated services. Measure downstream throttling and errors as consumers scale, and use backpressure or controlled concurrency when needed. Do not select a concurrency cap or Firestore throughput value without service limits and workload evidence.",
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcp_40_scheduler_boundary",
+      "stepNumber": 40,
+      "phase": "Scale and observe the workload",
+      "title": "Keep cron traffic visible as a separate optional source",
+      "type": "explanation",
+      "content": "If Cloud Scheduler is enabled after a cron use case is confirmed, tag its events with a source identity so operators can distinguish scheduled work from service-generated events. No cron frequency, time zone, or schedule volume is part of the supplied brief.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6"]
+    },
+    {
+      "id": "gcp_41_monitoring_signals",
+      "stepNumber": 41,
+      "phase": "Scale and observe the workload",
+      "title": "Review operational signals as one event lifecycle",
+      "type": "explanation",
+      "content": "Correlate accepted events, successful outcomes, processing errors, redeliveries, dead-letter movement, backlog age, and function capacity. Use these signals to distinguish a source outage from a processing slowdown and to evaluate the latency, scale, and recovery requirements together.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "gcp_42_event_correlation",
+      "stepNumber": 42,
+      "phase": "Scale and observe the workload",
+      "title": "Carry event identity through logs and metrics",
+      "type": "explanation",
+      "content": "Propagate a stable event identifier across Eventarc handling, Pub/Sub publication and consumption, Firestore writes, and dead-letter recovery. Keep high-cardinality identifiers in logs or traces rather than metric labels, and avoid logging complete payloads unless the data owner approves that policy.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7"]
+    },
+    {
+      "id": "gcp_43_latency_acceptance",
+      "stepNumber": 43,
+      "phase": "Make acceptance evidence explicit",
+      "title": "Test the under-one-second target at an agreed boundary",
+      "type": "explanation",
+      "content": "Measure the approved start and end timestamps under representative event paths, including the queue and durable-write stages if the owner includes them. Report the observed distribution and workload conditions; do not claim the target from a component setting or from function execution time alone.",
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "gcp_44_volume_acceptance",
+      "stepNumber": 44,
+      "phase": "Make acceptance evidence explicit",
+      "title": "Validate the 1M-plus daily event floor and real arrival shape",
+      "type": "explanation",
+      "content": "Exercise at least the supplied 1M+ events-per-day workload and include arrival patterns representative of observed bursts. Record event mix, processing completion, backlog, retries, and storage outcomes. The daily floor does not specify a peak rate, so obtain burst evidence instead of substituting an assumed rate.",
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcp_45_delivery_acceptance",
+      "stepNumber": 45,
+      "phase": "Make acceptance evidence explicit",
+      "title": "Verify at-least-once delivery with duplicate-safe outcomes",
+      "type": "explanation",
+      "content": "Inject redelivery and acknowledgement-loss cases, then confirm that the event can be received more than once while its required durable outcome is not applied twice. Verify that the stored event identity and outcome remain consistent after a worker retry.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "gcp_46_retry_acceptance",
+      "stepNumber": 46,
+      "phase": "Make acceptance evidence explicit",
+      "title": "Verify retry, dead-letter, and controlled replay paths",
+      "type": "explanation",
+      "content": "Cause a transient failure and a repeatedly failing message. Confirm transient work is retried, exhausted work reaches the dead-letter topic, operators can inspect it, and a repaired message can be replayed without duplicate durable effects. Set the retry policy only after the owner approves it.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7"]
+    },
+    {
+      "id": "gcp_47_cost_spike_acceptance",
+      "stepNumber": 47,
+      "phase": "Make acceptance evidence explicit",
+      "title": "Review spike recovery and variable-load cost together",
+      "type": "explanation",
+      "content": "Use observed quiet periods and event bursts to review backlog growth, drain behavior, downstream errors, function activity, Firestore operations, and cost. Confirm that the system handles spikes gracefully while the agreed latency and recovery expectations remain visible; the brief does not provide a numeric cost ceiling or backlog threshold.",
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcp_48_acceptance_review",
+      "stepNumber": 48,
+      "phase": "Make acceptance evidence explicit",
+      "title": "Review every supplied requirement against evidence",
+      "type": "explanation",
+      "content": "Confirm that events trigger functions, processing is asynchronous, event data is stored, routing and retries work, processing is monitored, exhausted messages have a dead-letter path, and consumers respond to event volume. Keep under-one-second latency, 1M+ events per day, at-least-once delivery, variable-load cost, and spike handling as explicit acceptance questions until measured evidence supports the result.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    }
+  ]
+}

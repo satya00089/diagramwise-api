@@ -1,0 +1,330 @@
+{
+  "problem_id": "cloud_gcp_012",
+  "version": "1.0-review",
+  "totalSteps": 52,
+  "requirementRevision": null,
+  "phases": [
+    {"name": "Land and preserve satellite observations", "stepRange": [1, 13], "description": "Ingest source imagery into versioned raw and curated stores with provenance, checksums, and replayable processing."},
+    {"name": "Analyze the Earth and run models", "stepRange": [14, 27], "description": "Connect geospatial analysis, time-series warehousing, numerical climate runs, and change detection."},
+    {"name": "Serve maps and collaborative research", "stepRange": [28, 42], "description": "Give authenticated researchers bounded queries, map products, model launches, and versioned projects."},
+    {"name": "Scale, recover, and measure", "stepRange": [43, 52], "description": "Instrument latency and backlog, tier the historical archive, rehearse failure recovery, and define evidence for acceptance."}
+  ],
+  "steps": [
+    {
+      "id": "climate_01", "stepNumber": 1, "phase": "Land and preserve satellite observations", "title": "Freeze the scientific and service contract", "type": "explanation",
+      "content": "The frozen brief requires satellite imagery, geospatial analysis, climate models, environmental change detection, time-series analysis, map visualization, petabyte-scale handling, and researcher collaboration. Constraints are decades of imagery, complex algorithms, query latency under 30 seconds, high-precision calculations, and research-budget efficiency. Source formats, resolution, geographic extent, ingest rate, user count, regions, model types, required numeric error bound, query shapes, and latency statistic are unspecified. Measure these before sizing; a diagram cannot itself prove throughput, accuracy, or the latency target.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "climate_02", "stepNumber": 2, "phase": "Land and preserve satellite observations", "title": "Identify satellite imagery sources", "type": "add_component",
+      "content": "The palette has no external satellite catalog or feed component. Use its existing custom component for public or partner imagery providers, without assuming one provider, licensing model, or delivery format.",
+      "component": {"nodeId": "climate_sources", "componentType": "custom-component", "label": "Satellite Data Providers", "description": "External satellite scenes and scientific observations", "position": {"x": 0, "y": 120}, "properties": {"componentName": "Satellite Data Providers", "subtitle": "External imagery catalogs", "purpose": "Supply licensed satellite scenes and acquisition metadata for the selected regions, sensors, and historical time range; record source and usage rights per asset.", "componentType": "External scientific data source", "technology": "Public and partner imagery catalogs", "notes": "Confirm source APIs, scene formats, resolution, update cadence, and licensing before implementation."}, "highlightReason": "An external imagery provider is a distinct source role with no matching catalog component."},
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:1"]
+    },
+    {
+      "id": "climate_03", "stepNumber": 3, "phase": "Land and preserve satellite observations", "title": "Store immutable raw scenes", "type": "add_component",
+      "content": "Put original scenes and acquisition metadata in Google Cloud Storage. Treat this as the petabyte-scale raw archive named in the brief. Use stable asset IDs and generation-aware writes so retries do not silently replace a scientific observation; keep raw bytes available for reprocessing.",
+      "component": {"nodeId": "climate_raw", "componentType": "object-storage", "label": "GCS Raw Imagery", "description": "Original scenes and sensor metadata", "position": {"x": 300, "y": 120}, "properties": {"componentName": "GCS Raw Imagery", "purpose": "Retain the petabyte-scale collection of original satellite scenes with source, sensor, capture time, footprint, checksum, and license metadata; use generation-aware ingest for reproducible decades-long reprocessing.", "provider": "GCS"}, "highlightReason": "Object storage is the built-in fit for large immutable raster assets."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:1"]
+    },
+    {
+      "id": "climate_04", "stepNumber": 4, "phase": "Land and preserve satellite observations", "title": "Ingest source scenes with provenance", "type": "add_connection",
+      "content": "Transfer scene bytes and source metadata over authenticated transport. Assign a stable source-scene key, reject duplicate generations, and retain the provider's license and checksum alongside the object.",
+      "connection": {"edgeId": "climate_source_raw", "sourceNodeId": "climate_sources", "targetNodeId": "climate_raw", "connectionType": "data-flow", "label": "Scenes + provenance", "description": "Authenticated ingest copies original scenes and metadata into immutable raw object versions"},
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:1"]
+    },
+    {
+      "id": "climate_05", "stepNumber": 5, "phase": "Land and preserve satellite observations", "title": "Index a scientific asset manifest", "type": "add_component",
+      "content": "Keep a searchable manifest of asset IDs, object generations, time, footprint, coordinate reference system, units, sensor, lineage, quality flags, and access policy. This is metadata, not a second copy of the petabyte raster archive.",
+      "component": {"nodeId": "climate_manifest", "componentType": "database", "label": "Scene & Lineage Manifest", "description": "Asset provenance, spatial-temporal index, and quality state", "position": {"x": 610, "y": 10}, "properties": {"componentName": "Scene & Lineage Manifest", "purpose": "Index scene IDs, capture time, footprint, CRS, units, object generation, checksum, algorithm version, lineage, license, and quarantine state. Resolve exact inputs for reproducible model runs."}, "highlightReason": "A metadata index avoids scanning raw raster objects to discover relevant scenes."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:1"]
+    },
+    {
+      "id": "climate_06", "stepNumber": 6, "phase": "Land and preserve satellite observations", "title": "Register each raw object generation", "type": "add_connection",
+      "content": "Write a manifest row only after raw object verification. Record the exact object generation and checksum, then publish a processing event; failed or partially verified assets stay quarantined.",
+      "connection": {"edgeId": "climate_raw_manifest", "sourceNodeId": "climate_raw", "targetNodeId": "climate_manifest", "connectionType": "data-flow", "label": "Verified asset metadata", "description": "Verified raw object generation and source provenance become an indexed manifest entry"},
+      "requirementIds": ["legacy-requirement:1"]
+    },
+    {
+      "id": "climate_07", "stepNumber": 7, "phase": "Land and preserve satellite observations", "title": "Buffer scene-arrival events", "type": "add_component",
+      "content": "Use Pub/Sub events to decouple irregular source arrival from processing capacity. The payload carries a manifest key and object generation, never the raster bytes.",
+      "component": {"nodeId": "climate_events", "componentType": "pubsub", "label": "Scene Arrival Events", "description": "Replayable work notifications for verified scenes", "position": {"x": 610, "y": 290}, "properties": {"componentName": "Scene Arrival Events", "purpose": "Buffer verified scene references for asynchronous preprocessing; retain retry and dead-letter handling with idempotent consumers so bursts do not overload compute."}, "highlightReason": "A message bus absorbs source bursts while workers scale independently."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "climate_08", "stepNumber": 8, "phase": "Land and preserve satellite observations", "title": "Publish verified asset references", "type": "add_connection",
+      "content": "After manifest registration, emit the scene ID and object generation. A lost or duplicate delivery can be reconciled against the manifest without losing or duplicating scientific data.",
+      "connection": {"edgeId": "climate_raw_events", "sourceNodeId": "climate_raw", "targetNodeId": "climate_events", "connectionType": "event-stream", "label": "Verified scene ID", "description": "Object-finalization workflow publishes a manifest-backed scene reference for processing"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7"]
+    },
+    {
+      "id": "climate_09", "stepNumber": 9, "phase": "Land and preserve satellite observations", "title": "Preprocess imagery in partitioned jobs", "type": "add_component",
+      "content": "Use Dataflow-style processing workers for calibration, reprojection, masking, tiling, and quality checks. Partition by sensor, region, and acquisition time; preserve native measurements and record every transform's version and numeric tolerance.",
+      "component": {"nodeId": "climate_preprocess", "componentType": "processing-worker", "label": "Dataflow Imagery Preparation", "description": "Calibrate, reproject, tile, and quality-check scenes", "position": {"x": 930, "y": 290}, "properties": {"componentName": "Dataflow Imagery Preparation", "purpose": "Run idempotent scene-partitioned calibration, reprojection, cloud masking, quality checks, and tile generation; checkpoint by source generation and algorithm version.", "tasks": "Data Processing"}, "highlightReason": "The built-in processing worker represents independently scaled preprocessing jobs."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "climate_10", "stepNumber": 10, "phase": "Land and preserve satellite observations", "title": "Dispatch verified scenes to preprocessing", "type": "add_connection",
+      "content": "Workers consume scene references, fetch exact raw generations, and acknowledge only after curated output and lineage commit. Retry transient failures and dead-letter poison scenes for review.",
+      "connection": {"edgeId": "climate_events_preprocess", "sourceNodeId": "climate_events", "targetNodeId": "climate_preprocess", "connectionType": "message-queue", "label": "Scene work items", "description": "At-least-once scene references drive idempotent preprocessing with retry and dead-letter handling"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7"]
+    },
+    {
+      "id": "climate_11", "stepNumber": 11, "phase": "Land and preserve satellite observations", "title": "Keep analysis-ready raster products", "type": "add_component",
+      "content": "Write versioned, analysis-ready imagery and gridded model outputs to a separate GCS store. Partition files for spatial and temporal pruning; do not mutate inputs behind a published research result.",
+      "component": {"nodeId": "climate_curated", "componentType": "object-storage", "label": "GCS Analysis-Ready Data", "description": "Versioned tiles, gridded features, and model outputs", "position": {"x": 1250, "y": 290}, "properties": {"componentName": "GCS Analysis-Ready Data", "purpose": "Store versioned, spatial-temporal partitioned raster tiles, quality masks, and climate-model output grids with exact source and algorithm lineage.", "provider": "GCS", "versioning": true, "checksumValidation": true}, "highlightReason": "Separating raw from curated data makes scientific reprocessing and cost-aware access explicit."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:1"]
+    },
+    {
+      "id": "climate_12", "stepNumber": 12, "phase": "Land and preserve satellite observations", "title": "Commit verified analysis-ready output", "type": "add_connection",
+      "content": "Write a new curated generation, validate checksums and quality gates, then update lineage in the manifest. A failed partition must not expose a half-published scientific layer.",
+      "connection": {"edgeId": "climate_preprocess_curated", "sourceNodeId": "climate_preprocess", "targetNodeId": "climate_curated", "connectionType": "data-flow", "label": "Validated raster partitions", "description": "Preprocessing commits verified, versioned spatial-temporal tiles and quality masks"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2"]
+    },
+    {
+      "id": "climate_13", "stepNumber": 13, "phase": "Land and preserve satellite observations", "title": "Choose reproducibility over silent overwrite", "type": "decision_point",
+      "content": "Enable raw object versioning and checksum validation. Preserve a source-scene-to-output lineage record with units and CRS; a corrected calibration creates a new output version, while bad inputs are quarantined. This choice protects decades of observations and repeatable high-precision analysis.",
+      "decision": {"question": "How should corrected or replayed imagery affect published results?", "chosen": "Retain immutable raw generations and publish versioned curated products with lineage and validation.", "chosenReason": "Researchers can reproduce a result and compare algorithm revisions without changing historical input bytes.", "alternatives": [{"option": "Overwrite existing scenes in place", "tradeoff": "Destroys the exact input behind prior results and makes corruption hard to isolate."}, {"option": "Copy every derived view forever", "tradeoff": "Simplifies reads but raises storage cost; lifecycle policies and recomputation are needed."}]},
+      "componentUpdate": {"nodeId": "climate_raw", "properties": {"versioning": true, "checksumValidation": true}},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "climate_14", "stepNumber": 14, "phase": "Analyze the Earth and run models", "title": "Add geospatial analysis", "type": "add_component",
+      "content": "Represent Earth Engine-style geospatial analysis with the existing Analytics component. Use spatial and temporal filters, compatible projections and resolutions, and documented resampling; expensive full-resolution runs remain asynchronous.",
+      "component": {"nodeId": "climate_geospatial", "componentType": "analytics", "label": "Earth Engine Geospatial Analysis", "description": "Spatial joins, raster algebra, and historical composites", "position": {"x": 1570, "y": 90}, "properties": {"componentName": "Earth Engine Geospatial Analysis", "purpose": "Analyze indexed, analysis-ready imagery by region and time; perform raster algebra, spatial joins, change-ready composites, and explicit CRS/resampling validation."}, "highlightReason": "The existing Analytics catalog type covers geospatial analytical processing without a new palette ID."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "climate_15", "stepNumber": 15, "phase": "Analyze the Earth and run models", "title": "Analyze the curated raster layers", "type": "add_connection",
+      "content": "Resolve exact curated versions and spatial windows from the manifest; import or register supported assets for Earth Engine and pass only the required raster partitions into geospatial jobs. Validate asset format and ingestion compatibility before implementation.",
+      "connection": {"edgeId": "climate_curated_geospatial", "sourceNodeId": "climate_curated", "targetNodeId": "climate_geospatial", "connectionType": "data-flow", "label": "Windowed raster layers", "description": "Versioned imagery partitions feed spatial and temporal geospatial analysis"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7"]
+    },
+    {
+      "id": "climate_16", "stepNumber": 16, "phase": "Analyze the Earth and run models", "title": "Warehouse time-series and spatial summaries", "type": "add_component",
+      "content": "Use the catalog Data Warehouse as BigQuery for bounded time-series and geospatial summary queries. Store observation time, region or tile key, model version, units, and quality flags; define numeric types and aggregation rules from each variable's units and validated error budget so summaries do not silently discard precision. Do not treat a warehouse query over raw petabyte rasters as an interactive map request.",
+      "component": {"nodeId": "climate_warehouse", "componentType": "data-warehouse", "label": "BigQuery Climate Analytics", "description": "Partitioned observations, model outputs, and regional summaries", "position": {"x": 1880, "y": 290}, "properties": {"componentName": "BigQuery Climate Analytics", "purpose": "Serve time-series and geospatial summaries partitioned by observation date and clustered by region/tile and dataset; retain numeric units, quality flags, source versions, and model versions, with numeric types and aggregation precision validated for each variable.", "platform": "BigQuery"}, "highlightReason": "BigQuery is a supported platform choice in the existing Data Warehouse component."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "climate_17", "stepNumber": 17, "phase": "Analyze the Earth and run models", "title": "Load quality-filtered observations", "type": "add_connection",
+      "content": "Materialize calibrated measurements, model-output summaries, and lineage metadata from curated partitions into date-partitioned warehouse tables. Keep the raw raster bytes and full-resolution model grids in object storage.",
+      "connection": {"edgeId": "climate_curated_warehouse", "sourceNodeId": "climate_curated", "targetNodeId": "climate_warehouse", "connectionType": "data-flow", "label": "Observation facts", "description": "Quality-filtered measurements and lineage metadata load into partitioned analytical tables"},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7"]
+    },
+    {
+      "id": "climate_18", "stepNumber": 18, "phase": "Analyze the Earth and run models", "title": "Publish geospatial aggregates", "type": "add_connection",
+      "content": "Store regional statistics, indices, and map-ready aggregate references with their algorithm and input versions. Keep precision-sensitive source values available for audit.",
+      "connection": {"edgeId": "climate_geospatial_warehouse", "sourceNodeId": "climate_geospatial", "targetNodeId": "climate_warehouse", "connectionType": "data-flow", "label": "Regional aggregates", "description": "Geospatial jobs publish versioned, queryable regional and temporal summaries"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "climate_19", "stepNumber": 19, "phase": "Analyze the Earth and run models", "title": "Queue long-running model experiments", "type": "add_component",
+      "content": "Model runs over decades of gridded data exceed an interactive request budget. Queue each run with a project, immutable input version set, code and parameter version, resource budget, and retry key.",
+      "component": {"nodeId": "climate_model_queue", "componentType": "queue", "label": "Climate Model Job Queue", "description": "Bounded, retryable scientific workloads", "position": {"x": 1560, "y": 560}, "properties": {"componentName": "Climate Model Job Queue", "purpose": "Queue versioned climate-model experiments with project ownership, input manifest, parameters, cost quota, retry key, and checkpoint reference; isolate long runs from interactive queries."}, "highlightReason": "A separate queue prevents complex algorithms from consuming the dashboard request path."},
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "climate_20", "stepNumber": 20, "phase": "Analyze the Earth and run models", "title": "Run high-precision climate compute", "type": "add_component",
+      "content": "Use processing workers for containerized numerical climate simulations and research algorithms. Select CPU/GPU and numerical precision from validated model requirements; track deterministic seeds, solver version, grid, units, convergence, checkpoints, and cost. Do not substitute reduced-precision inference for scientific calculation without error analysis.",
+      "component": {"nodeId": "climate_models", "componentType": "processing-worker", "label": "Climate Model Compute", "description": "Checkpointed numerical simulations and scientific algorithms", "position": {"x": 1880, "y": 560}, "properties": {"componentName": "Climate Model Compute", "purpose": "Run checkpointed numerical climate simulations with recorded solver, grid, units, seed, input versions, and validated error bounds; use float64 where the scientific method requires it.", "tasks": "Data Processing"}, "highlightReason": "The built-in worker fits long-running numerical jobs better than the ML training component, which would imply every climate model is trained ML."},
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "climate_21", "stepNumber": 21, "phase": "Analyze the Earth and run models", "title": "Start bounded model runs", "type": "add_connection",
+      "content": "Workers claim jobs with project quota and a stable run ID; retries resume a checkpoint rather than publishing duplicate results.",
+      "connection": {"edgeId": "climate_queue_models", "sourceNodeId": "climate_model_queue", "targetNodeId": "climate_models", "connectionType": "message-queue", "label": "Versioned run manifest", "description": "Queued run manifests launch quota-controlled, checkpointed simulations"},
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "climate_22", "stepNumber": 22, "phase": "Analyze the Earth and run models", "title": "Read exact model input versions", "type": "add_connection",
+      "content": "A model run reads only the curated partitions named by its immutable input manifest, including units, spatial grid, and time range.",
+      "connection": {"edgeId": "climate_curated_models", "sourceNodeId": "climate_curated", "targetNodeId": "climate_models", "connectionType": "data-flow", "label": "Versioned model inputs", "description": "Climate compute reads the exact gridded inputs named in the run manifest"},
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "climate_23", "stepNumber": 23, "phase": "Analyze the Earth and run models", "title": "Persist simulation outputs and checkpoints", "type": "add_connection",
+      "content": "Write result grids and checkpoints as versioned objects; validate numerical sanity and source lineage before making a run visible to other researchers.",
+      "connection": {"edgeId": "climate_models_curated", "sourceNodeId": "climate_models", "targetNodeId": "climate_curated", "connectionType": "data-flow", "label": "Model grids + checkpoints", "description": "Simulation outputs and checkpoints become validated versioned objects"},
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "climate_24", "stepNumber": 24, "phase": "Analyze the Earth and run models", "title": "Choose validated precision for each algorithm", "type": "decision_point",
+      "content": "High precision is an explicit constraint, but no numeric tolerance is specified. Keep float64 for precision-sensitive computations and run reference datasets with error, conservation, and convergence checks before adopting cheaper lower-precision acceleration. Record solver and input versions so a model result is reproducible.",
+      "decision": {"question": "When can a faster lower-precision compute path be used?", "chosen": "Only after each algorithm passes a documented domain error budget against high-precision reference data; retain float64 for sensitive calculations.", "chosenReason": "Throughput improvements are not useful if climate trends or change signals become scientifically invalid.", "alternatives": [{"option": "Use reduced precision for every job", "tradeoff": "May hide small environmental changes and violate the high-precision constraint."}, {"option": "Require the most expensive precision for every transform", "tradeoff": "Wastes research budget on operations whose validated error budget permits cheaper execution."}]},
+      "componentUpdate": {"nodeId": "climate_models", "properties": {"purpose": "Run checkpointed numerical climate simulations with recorded solver, grid, units, seed, input versions, and validated error bounds. Use float64 for precision-sensitive steps; allow cheaper precision only after domain error and convergence tests."}},
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "climate_25", "stepNumber": 25, "phase": "Analyze the Earth and run models", "title": "Detect environmental change", "type": "add_component",
+      "content": "Run versioned change-detection jobs over aligned baselines and recent imagery. Compare like-for-like sensor calibration, season, spatial resolution, and confidence thresholds; emit a reviewable change layer instead of treating every pixel difference as a real event.",
+      "component": {"nodeId": "climate_change", "componentType": "processing-worker", "label": "Environmental Change Detection", "description": "Baseline comparisons and confidence-scored change layers", "position": {"x": 1880, "y": 30}, "properties": {"componentName": "Environmental Change Detection", "purpose": "Compare spatially aligned historical baselines with new scenes, account for sensor and seasonal variation, and publish confidence-scored change events with algorithm and input versions.", "tasks": "Data Processing"}, "highlightReason": "A processing worker can host statistical or model-assisted change detection without assuming a specific AI model."},
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "climate_26", "stepNumber": 26, "phase": "Analyze the Earth and run models", "title": "Compare aligned historical layers", "type": "add_connection",
+      "content": "Pass baseline and new geospatial composites with their alignment and quality metadata to the detector; reject incompatible grids.",
+      "connection": {"edgeId": "climate_geospatial_change", "sourceNodeId": "climate_geospatial", "targetNodeId": "climate_change", "connectionType": "data-flow", "label": "Aligned baseline + scene", "description": "Geospatial analysis supplies comparable historical and current layers for change detection"},
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "climate_27", "stepNumber": 27, "phase": "Analyze the Earth and run models", "title": "Make changes queryable over time", "type": "add_connection",
+      "content": "Write change events and confidence measures to the warehouse by observation time and region. Analysts can join them to model runs and historical measurements.",
+      "connection": {"edgeId": "climate_change_warehouse", "sourceNodeId": "climate_change", "targetNodeId": "climate_warehouse", "connectionType": "data-flow", "label": "Time-stamped change events", "description": "Versioned, confidence-scored environmental changes become spatial-temporal analytical facts"},
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5"]
+    },
+    {
+      "id": "climate_28", "stepNumber": 28, "phase": "Serve maps and collaborative research", "title": "Add the researcher dashboard", "type": "add_component",
+      "content": "The browser dashboard lets researchers select time, region, dataset version, map layer, and project. It displays units, provenance, quality flags, and uncertainty alongside charts and maps.",
+      "component": {"nodeId": "climate_dashboard", "componentType": "web-app", "label": "Research Maps & Dashboard", "description": "Map layers, time-series charts, and shared project views", "position": {"x": 2750, "y": 200}, "properties": {"componentName": "Research Maps & Dashboard", "purpose": "Let authenticated researchers inspect versioned maps, time-series charts, uncertainty, units, and provenance; share saved project views and launch permitted model runs."}, "highlightReason": "One dashboard makes the visualization and researcher workflow visible to the learner."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "climate_29", "stepNumber": 29, "phase": "Serve maps and collaborative research", "title": "Authenticate research identities", "type": "add_component",
+      "content": "Use a federated identity service and project-scoped authorization. Distinguish viewers, dataset stewards, and compute submitters; enforce licensing and data access policies at the API and storage boundaries, not only in the browser.",
+      "component": {"nodeId": "climate_identity", "componentType": "auth-service", "label": "Research Identity & Access", "description": "Federated sign-in and project-scoped roles", "position": {"x": 2470, "y": 10}, "properties": {"componentName": "Research Identity & Access", "purpose": "Authenticate researchers and issue scoped project and dataset claims; enforce least privilege, source-license restrictions, and auditability for shared results and model submissions."}, "highlightReason": "Collaboration on scientific datasets requires an explicit authorization boundary."},
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "climate_30", "stepNumber": 30, "phase": "Serve maps and collaborative research", "title": "Sign in before opening project data", "type": "add_connection",
+      "content": "The browser obtains a scoped identity token through federated sign-in. Dataset and job access are checked again server-side on every request.",
+      "connection": {"edgeId": "climate_dashboard_identity", "sourceNodeId": "climate_dashboard", "targetNodeId": "climate_identity", "connectionType": "http", "label": "Federated sign-in", "description": "Researcher signs in and receives scoped project and dataset claims"},
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "climate_31", "stepNumber": 31, "phase": "Serve maps and collaborative research", "title": "Add a bounded research query API", "type": "add_component",
+      "content": "The API validates project permissions and query shape, constrains region and time windows for interactive calls, and routes full-archive analysis to asynchronous jobs. Return a query ID, input versions, units, and partial-failure status.",
+      "component": {"nodeId": "climate_api", "componentType": "backend-server", "label": "Research Query & Job API", "description": "Authorized queries, map metadata, and model submissions", "position": {"x": 2450, "y": 290}, "properties": {"componentName": "Research Query & Job API", "purpose": "Authorize project-scoped queries and job submissions; bound interactive spatial and temporal windows, return versioned map/time-series results, and send long scans to asynchronous compute."}, "highlightReason": "The API enforces both the security boundary and the distinction between interactive queries and long scientific jobs."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "climate_32", "stepNumber": 32, "phase": "Serve maps and collaborative research", "title": "Request maps, charts, and runs through the API", "type": "add_connection",
+      "content": "The dashboard sends bounded region/time queries or versioned model-run requests; the API rejects unauthorized projects and overbroad interactive scans.",
+      "connection": {"edgeId": "climate_dashboard_api", "sourceNodeId": "climate_dashboard", "targetNodeId": "climate_api", "connectionType": "api-call", "label": "Scoped research requests", "description": "Authenticated map, time-series, collaboration, and model-run requests reach the API"},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "climate_33", "stepNumber": 33, "phase": "Serve maps and collaborative research", "title": "Validate roles and dataset rights", "type": "add_connection",
+      "content": "The API validates identity claims and project membership, then checks the requested dataset's license and the caller's role before returning results or launching paid compute.",
+      "connection": {"edgeId": "climate_identity_api", "sourceNodeId": "climate_identity", "targetNodeId": "climate_api", "connectionType": "api-call", "label": "Scoped authorization", "description": "Identity claims and dataset/project rights gate query and compute access"},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "climate_34", "stepNumber": 34, "phase": "Serve maps and collaborative research", "title": "Read partition-pruned time series", "type": "add_connection",
+      "content": "Apply date and region filters to partitioned and clustered tables; prefer precomputed aggregates for common map/chart views. Track bytes scanned and elapsed time per query class.",
+      "connection": {"edgeId": "climate_api_warehouse", "sourceNodeId": "climate_api", "targetNodeId": "climate_warehouse", "connectionType": "database-connection", "label": "Bounded analytical query", "description": "API queries date-partitioned and region-pruned BigQuery summaries and time-series facts"},
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "climate_35", "stepNumber": 35, "phase": "Serve maps and collaborative research", "title": "Resolve versioned geospatial layers", "type": "add_connection",
+      "content": "The API asks the geospatial service for a bounded layer or analysis result, never an unrestricted petabyte raster scan in the synchronous dashboard path.",
+      "connection": {"edgeId": "climate_api_geospatial", "sourceNodeId": "climate_api", "targetNodeId": "climate_geospatial", "connectionType": "api-call", "label": "Bounded map analysis", "description": "Authorized region/time/window requests resolve versioned geospatial layers"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "climate_36", "stepNumber": 36, "phase": "Serve maps and collaborative research", "title": "Send complex runs to the job queue", "type": "add_connection",
+      "content": "A model launch records the authenticated project, quota, immutable input manifest, solver version, and run ID. Return job status immediately rather than holding a dashboard request open.",
+      "connection": {"edgeId": "climate_api_queue", "sourceNodeId": "climate_api", "targetNodeId": "climate_model_queue", "connectionType": "message-queue", "label": "Quota-controlled model run", "description": "Authorized complex runs enter the checkpointed asynchronous job queue"},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "climate_37", "stepNumber": 37, "phase": "Serve maps and collaborative research", "title": "Store versioned map tiles", "type": "add_component",
+      "content": "Materialize commonly requested map tiles separately from full-resolution scientific rasters. Tie each tile to dataset, algorithm, version, zoom, region, time, and permission policy; invalidation follows a new data generation.",
+      "component": {"nodeId": "climate_map_tiles", "componentType": "object-storage", "label": "GCS Versioned Map Tiles", "description": "Precomputed map layers for responsive viewing", "position": {"x": 2460, "y": 550}, "properties": {"componentName": "GCS Versioned Map Tiles", "purpose": "Store permission-scoped, version-keyed map tiles and legends by dataset, zoom, time, and region; invalidate or supersede tiles after source or algorithm updates.", "provider": "GCS", "versioning": true}, "highlightReason": "Precomputed tiles keep map visualization separate from expensive source-raster scans."},
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "climate_38", "stepNumber": 38, "phase": "Serve maps and collaborative research", "title": "Publish map-ready spatial products", "type": "add_connection",
+      "content": "Geospatial jobs create tiles with a versioned legend, coordinate system, uncertainty/quality overlay, and source lineage.",
+      "connection": {"edgeId": "climate_geospatial_tiles", "sourceNodeId": "climate_geospatial", "targetNodeId": "climate_map_tiles", "connectionType": "data-flow", "label": "Versioned map layers", "description": "Validated spatial products become precomputed, versioned map tiles"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "climate_39", "stepNumber": 39, "phase": "Serve maps and collaborative research", "title": "Deliver authorized tiles to the browser", "type": "add_connection",
+      "content": "The API authorizes a dataset and returns a short-lived tile access path; the browser reads only permitted tile versions. Do not make licensed research imagery public through an open object URL.",
+      "connection": {"edgeId": "climate_tiles_dashboard", "sourceNodeId": "climate_map_tiles", "targetNodeId": "climate_dashboard", "connectionType": "http", "label": "Authorized map tiles", "description": "Permission-scoped tile versions render on interactive research maps"},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "climate_40", "stepNumber": 40, "phase": "Serve maps and collaborative research", "title": "Track shared projects and revisions", "type": "add_component",
+      "content": "Store project membership, saved map views, annotations, experiment manifests, review status, and version pointers. Keep large data in object storage and put only collaboration metadata here.",
+      "component": {"nodeId": "climate_workspace", "componentType": "database", "label": "Research Project Workspace", "description": "Project membership, annotations, and saved reproducible views", "position": {"x": 2450, "y": 800}, "properties": {"componentName": "Research Project Workspace", "purpose": "Store project-scoped membership, saved views, annotations, review history, and immutable dataset/model version pointers; audit edits and avoid storing large raster bytes."}, "highlightReason": "Collaboration needs persistent project state and an audit trail beyond a shared dashboard URL."},
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "climate_41", "stepNumber": 41, "phase": "Serve maps and collaborative research", "title": "Save and share research work through the API", "type": "add_connection",
+      "content": "The API checks project membership before writing notes or saved views, records revision history, and references exact data/model versions so collaborators see the same result.",
+      "connection": {"edgeId": "climate_api_workspace", "sourceNodeId": "climate_api", "targetNodeId": "climate_workspace", "connectionType": "database-connection", "label": "Project-scoped revisions", "description": "Authorized save/share operations persist versioned project views and annotation history"},
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "climate_42", "stepNumber": 42, "phase": "Serve maps and collaborative research", "title": "Choose versioned collaboration with least privilege", "type": "decision_point",
+      "content": "Researchers need to collaborate without leaking licensed scenes or silently changing another researcher's result. Record immutable input and model versions in shared views, maintain edit history, and make expensive job submission a separate permission from reading results.",
+      "decision": {"question": "How should a shared project preserve trust and access control?", "chosen": "Use project-scoped roles, revisioned annotations and saved views, immutable data/model references, and audit logs.", "chosenReason": "A colleague can reproduce the same result while the platform enforces dataset rights and compute budgets.", "alternatives": [{"option": "Share public object URLs", "tradeoff": "Can expose licensed data and bypass project revocation."}, {"option": "Allow everyone to edit the latest result", "tradeoff": "Loses provenance and makes earlier conclusions irreproducible."}]},
+      "componentUpdate": {"nodeId": "climate_workspace", "properties": {"purpose": "Store project-scoped membership, role-checked saved views and annotations, revision history, audit logs, and immutable dataset/model version pointers; separate read access from paid compute submission."}},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "climate_43", "stepNumber": 43, "phase": "Scale, recover, and measure", "title": "Observe scientific and service health", "type": "add_component",
+      "content": "Record end-to-end query latency, bytes scanned, spatial/time selectivity, tile hit rate, ingestion backlog age, worker retry rate, model checkpoint progress, numerical-validation failures, and spend per project. Keep observability data access-controlled.",
+      "component": {"nodeId": "climate_monitoring", "componentType": "monitoring", "label": "Climate Platform Observability", "description": "Query, ingest, model, correctness, and budget signals", "position": {"x": 2150, "y": 980}, "properties": {"componentName": "Climate Platform Observability", "purpose": "Track end-to-end query latency, bytes scanned, tile hit rate, oldest scene-event age, retry/dead-letter counts, model checkpoint and validation status, and storage/compute spend by project."}, "highlightReason": "The 30-second latency and petabyte-scale/cost claims need measurement, not architectural assertion."},
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "climate_44", "stepNumber": 44, "phase": "Scale, recover, and measure", "title": "Measure complete research request time", "type": "add_connection",
+      "content": "Trace browser/API time through warehouse or tile lookup and response. Report the target for agreed query classes and the chosen measurement percentile; distinguish timeouts and async jobs from successful interactive requests.",
+      "connection": {"edgeId": "climate_api_monitoring", "sourceNodeId": "climate_api", "targetNodeId": "climate_monitoring", "connectionType": "data-flow", "label": "Latency + query cost", "description": "API emits end-to-end request timing, result status, bytes scanned, and project cost tags"},
+      "requirementIds": ["legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "climate_45", "stepNumber": 45, "phase": "Scale, recover, and measure", "title": "Watch ingestion age and data quality", "type": "add_connection",
+      "content": "Preprocessing reports oldest unprocessed scene, retry/dead-letter counts, checksum mismatches, quality rejection, and per-stage processing time. Alert before historical backfills consume the real-time ingest budget.",
+      "connection": {"edgeId": "climate_preprocess_monitoring", "sourceNodeId": "climate_preprocess", "targetNodeId": "climate_monitoring", "connectionType": "data-flow", "label": "Backlog + quality metrics", "description": "Imagery workers report age, errors, validation failures, and processing costs"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "climate_46", "stepNumber": 46, "phase": "Scale, recover, and measure", "title": "Observe model progress and numerical checks", "type": "add_connection",
+      "content": "Model workers report run ID, checkpoint age, convergence, reference-dataset error, failed partitions, resource use, and project cost. Mark results publishable only after the scientific validation checks pass.",
+      "connection": {"edgeId": "climate_models_monitoring", "sourceNodeId": "climate_models", "targetNodeId": "climate_monitoring", "connectionType": "data-flow", "label": "Model status + precision", "description": "Climate compute emits checkpoint, numerical-validation, failure, and cost signals"},
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "climate_47", "stepNumber": 47, "phase": "Scale, recover, and measure", "title": "Choose bounded interactive query classes", "type": "decision_point",
+      "content": "The brief says query latency under 30 seconds but does not define a percentile or query class. Define an interactive contract for bounded region/time and precomputed tile or aggregate queries, measure from request to completed response, and report misses separately. Full decades/petabytes or complex model runs are asynchronous; do not claim they meet the interactive target. Validate the target with representative datasets and concurrent users.",
+      "decision": {"question": "How can under-30-second queries coexist with petabyte history?", "chosen": "Partition and cluster BigQuery facts, precompute common map/time aggregates, prune interactive requests by region and time, and measure the agreed query classes end to end.", "chosenReason": "Scanning every raster for every dashboard request cannot provide a credible latency or research-budget guarantee.", "alternatives": [{"option": "Run arbitrary full-archive scans synchronously", "tradeoff": "Can exceed the 30-second target and produce unbounded query cost."}, {"option": "Cache every possible query", "tradeoff": "The spatial-temporal combination space is too large and invalidation is difficult."}]},
+      "componentUpdate": {"nodeId": "climate_warehouse", "properties": {"partitioning": true, "compression": true}},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "climate_48", "stepNumber": 48, "phase": "Scale, recover, and measure", "title": "Tier historical raw scenes", "type": "add_component",
+      "content": "Use the existing Cold Storage component for rarely accessed historical raw generations, with a catalog pointer and explicit retrieval time. Keep frequently queried aggregates and map tiles warm; lifecycle decisions follow measured access and restore cost.",
+      "component": {"nodeId": "climate_archive", "componentType": "cold-storage", "label": "Historical Scene Archive", "description": "Low-cost, retrievable decades-long source retention", "position": {"x": 610, "y": 600}, "properties": {"componentName": "Historical Scene Archive", "purpose": "Retain rarely accessed raw satellite generations for decades under a measured lifecycle policy; index retrieval location and expected restore delay in the manifest, and never promise cold objects in the interactive query path."}, "highlightReason": "Cold storage directly represents the cost/retention tradeoff for decades of petabyte-scale data."},
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "climate_49", "stepNumber": 49, "phase": "Scale, recover, and measure", "title": "Lifecycle raw generations into the archive", "type": "add_connection",
+      "content": "Move only verified, policy-eligible raw generations; retain manifest pointers, checksum, license, and retrieval status. Schedule restores as batch work when a historical raw scene is cold.",
+      "connection": {"edgeId": "climate_raw_archive", "sourceNodeId": "climate_raw", "targetNodeId": "climate_archive", "connectionType": "data-flow", "label": "Policy-eligible history", "description": "Verified raw generations move to lower-cost archival tiers with indexed restore location"},
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "climate_50", "stepNumber": 50, "phase": "Scale, recover, and measure", "title": "Scale from backlog age, not storage size alone", "type": "scale_trigger",
+      "content": "Increase independent preprocessing concurrency when oldest verified scene-event age exceeds an agreed freshness budget and data quality is healthy; cap worker spend and avoid scaling a poison-message loop. Backfill and new ingest should have separate quotas. The brief supplies no freshness or budget number, so calibrate both from workload tests.",
+      "scaleTrigger": {"metric": "Oldest verified scene-event age plus healthy-worker throughput", "action": "Raise Dataflow worker concurrency within a project cost cap; isolate historical backfill from new-scene priority", "impact": "Absorbs bursty or petabyte-scale ingestion without confusing a growing poison backlog with useful capacity"},
+      "componentUpdate": {"nodeId": "climate_preprocess", "properties": {"autoscale": true}},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "climate_51", "stepNumber": 51, "phase": "Scale, recover, and measure", "title": "Choose quarantine and replay after failure", "type": "decision_point",
+      "content": "If ingest or compute fails, keep immutable inputs and manifest state, retry from checkpoint with the same run key, and quarantine checksum or scientific-quality failures. Do not publish partial curated products or model outputs. Reconcile manifest entries against object generations and Pub/Sub acknowledgements after recovery; rehearse a source outage, duplicate event, corrupt scene, and interrupted model run.",
+      "decision": {"question": "What happens when a scene or model partition fails halfway through?", "chosen": "Keep the verified source generation, quarantine invalid inputs, and replay idempotent partitions from checkpoints before publishing a new version.", "chosenReason": "Recovery preserves scientific provenance and prevents half-written layers from appearing in research results.", "alternatives": [{"option": "Skip the failed partition", "tradeoff": "Creates a silent data gap that can distort environmental trends."}, {"option": "Publish partial output immediately", "tradeoff": "Researchers may treat incomplete grids or change signals as final."}]},
+      "componentUpdate": {"nodeId": "climate_manifest", "properties": {"purpose": "Index exact object generations, checksums, CRS, units, lineage, license, and publish/quarantine state; reconcile source objects and event acknowledgements, and permit idempotent replay of failed partitions."}},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "climate_52", "stepNumber": 52, "phase": "Scale, recover, and measure", "title": "Review evidence before trusting the platform", "type": "explanation",
+      "content": "For the stated brief, demonstrate scene ingest and geospatial processing across sampled sensors and historical years; compare climate-model outputs with high-precision reference results and documented error bounds; verify environmental change and time-series outputs against labeled cases; render versioned maps with units and uncertainty; replay duplicate/corrupt/outage cases; test project-role isolation and reproducible shared views; load representative petabyte-scale partitions and query classes while measuring end-to-end latency against the under-30-second target and tracking bytes scanned, storage lifecycle, compute, and restore cost. The target is unverified until those tests run. This is a local review draft, not a published or browser-validated walkthrough.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

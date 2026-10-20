@@ -1,0 +1,1580 @@
+{
+  "problem_id": "aiops_006",
+  "version": "1.0.0-review-draft",
+  "totalSteps": 60,
+  "phases": [
+    {
+      "name": "Detect and correlate infrastructure anomalies",
+      "stepRange": [
+        1,
+        12
+      ],
+      "description": "Build a versioned, deduplicated incident signal from monitored infrastructure before any automation can act."
+    },
+    {
+      "name": "Select a playbook and enforce safety",
+      "stepRange": [
+        13,
+        28
+      ],
+      "description": "Use dependency context and versioned playbooks, then require explicit policy and approval before risky work."
+    },
+    {
+      "name": "Execute a canary, verify, and rollback",
+      "stepRange": [
+        29,
+        42
+      ],
+      "description": "Carry only authorized commands through a durable queue and prove health before expanding their scope."
+    },
+    {
+      "name": "Audit outcomes and learn from operators",
+      "stepRange": [
+        43,
+        52
+      ],
+      "description": "Keep a complete action ledger, measure verified success, and train only from reviewed outcome evidence."
+    },
+    {
+      "name": "Exercise failure cases and operate against targets",
+      "stepRange": [
+        53,
+        60
+      ],
+      "description": "Test scenario breadth, canary and rollback behavior, then expose residual risks and measurable release gates."
+    }
+  ],
+  "steps": [
+    {
+      "id": "heal_01",
+      "stepNumber": 1,
+      "phase": "Detect and correlate infrastructure anomalies",
+      "title": "Freeze the operational contract",
+      "type": "explanation",
+      "content": "The live brief requires detection-to-verified-remediation within 5 minutes, a remediation success rate above 90%, zero unintended side effects, coverage of 100+ distinct failure scenarios, and an audit trail for every automated action. Treat these as acceptance targets to measure in drills and production, not outcomes guaranteed by a diagram. This draft assumes an initial Kubernetes estate; the control plane remains portable to other infrastructure adapters.",
+      "requirementIds": [
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "heal_02",
+      "stepNumber": 2,
+      "phase": "Detect and correlate infrastructure anomalies",
+      "title": "Identify remediation targets",
+      "type": "add_component",
+      "content": "Scope every action to a concrete resource and failure domain, with an observed version so stale incidents cannot mutate a changed target.",
+      "component": {
+        "nodeId": "heal_targets",
+        "componentType": "kubernetes",
+        "label": "Managed Infrastructure",
+        "description": "Representative Kubernetes workload and dependency estate; remediation targets are identified by service, cluster, failure domain, and resource version.",
+        "position": {
+          "x": 0,
+          "y": 220
+        },
+        "properties": {
+          "componentName": "Managed Infrastructure",
+          "purpose": "Representative Kubernetes workload and dependency estate; remediation targets are identified by service, cluster, failure domain, and resource version.",
+          "distribution": "EKS",
+          "managed": true
+        },
+        "highlightReason": "Scope every action to a concrete resource and failure domain, with an observed version so stale incidents cannot mutate a changed target."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:6",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "heal_03",
+      "stepNumber": 3,
+      "phase": "Detect and correlate infrastructure anomalies",
+      "title": "Add independent health monitoring",
+      "type": "add_component",
+      "content": "Detection and post-remediation verification need the same trustworthy signals, including a baseline captured before an action.",
+      "component": {
+        "nodeId": "heal_monitor",
+        "componentType": "monitoring",
+        "label": "Infrastructure Telemetry",
+        "description": "Collect service health, SLOs, resource metrics, events, logs, and post-change verification signals with timestamps and target identity.",
+        "position": {
+          "x": 300,
+          "y": 220
+        },
+        "properties": {
+          "componentName": "Infrastructure Telemetry",
+          "purpose": "Collect service health, SLOs, resource metrics, events, logs, and post-change verification signals with timestamps and target identity.",
+          "stack": "Prometheus + Grafana",
+          "metrics": true,
+          "alerts": true,
+          "retention": 30
+        },
+        "highlightReason": "Detection and post-remediation verification need the same trustworthy signals, including a baseline captured before an action."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:7",
+        "legacy-constraint:1"
+      ]
+    },
+    {
+      "id": "heal_04",
+      "stepNumber": 4,
+      "phase": "Detect and correlate infrastructure anomalies",
+      "title": "Health and failure signals",
+      "type": "add_connection",
+      "content": "A telemetry blackout is itself a fault; do not treat missing data as proof of recovery.",
+      "connection": {
+        "edgeId": "heal_targets_monitor",
+        "sourceNodeId": "heal_targets",
+        "targetNodeId": "heal_monitor",
+        "connectionType": "event-stream",
+        "label": "Health and failure signals",
+        "description": "Export timestamped metrics, events, and target identity; distinguish missing telemetry from healthy infrastructure."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-constraint:1"
+      ]
+    },
+    {
+      "id": "heal_05",
+      "stepNumber": 5,
+      "phase": "Detect and correlate infrastructure anomalies",
+      "title": "Buffer incident signals",
+      "type": "add_component",
+      "content": "Partition by failure domain and use durable delivery so bursts and retries do not lose or reorder related incidents; 24 partitions are a capacity assumption to load test.",
+      "component": {
+        "nodeId": "heal_bus",
+        "componentType": "message-broker",
+        "label": "Incident Event Bus",
+        "description": "Durable, partitioned anomaly candidate and remediation outcome transport keyed by failure domain.",
+        "position": {
+          "x": 600,
+          "y": 220
+        },
+        "properties": {
+          "componentName": "Incident Event Bus",
+          "purpose": "Durable, partitioned anomaly candidate and remediation outcome transport keyed by failure domain.",
+          "partitions": 24,
+          "replication": 3,
+          "durable": true
+        },
+        "highlightReason": "Partition by failure domain and use durable delivery so bursts and retries do not lose or reorder related incidents; 24 partitions are a capacity assumption to load test."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:6",
+        "legacy-constraint:1"
+      ]
+    },
+    {
+      "id": "heal_06",
+      "stepNumber": 6,
+      "phase": "Detect and correlate infrastructure anomalies",
+      "title": "Timestamped anomaly candidates",
+      "type": "add_connection",
+      "content": "The message is evidence, not permission to remediate.",
+      "connection": {
+        "edgeId": "heal_monitor_bus",
+        "sourceNodeId": "heal_monitor",
+        "targetNodeId": "heal_bus",
+        "connectionType": "event-stream",
+        "label": "Timestamped anomaly candidates",
+        "description": "Publish candidate alerts with target, signal, event time, source, and deduplication key."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-constraint:1"
+      ]
+    },
+    {
+      "id": "heal_07",
+      "stepNumber": 7,
+      "phase": "Detect and correlate infrastructure anomalies",
+      "title": "Correlate symptoms into incidents",
+      "type": "add_component",
+      "content": "Stateful windows deduplicate alert storms; late events and missing data remain visible to operators.",
+      "component": {
+        "nodeId": "heal_correlator",
+        "componentType": "stream-processor",
+        "label": "Incident Correlator",
+        "description": "Join related alerts in bounded windows, suppress duplicates, and group incidents by dependency and failure domain.",
+        "position": {
+          "x": 900,
+          "y": 220
+        },
+        "properties": {
+          "componentName": "Incident Correlator",
+          "purpose": "Join related alerts in bounded windows, suppress duplicates, and group incidents by dependency and failure domain.",
+          "windowing": true,
+          "stateful": true
+        },
+        "highlightReason": "Stateful windows deduplicate alert storms; late events and missing data remain visible to operators."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:6",
+        "legacy-constraint:1"
+      ]
+    },
+    {
+      "id": "heal_08",
+      "stepNumber": 8,
+      "phase": "Detect and correlate infrastructure anomalies",
+      "title": "Ordered incident candidates",
+      "type": "add_connection",
+      "content": "Backpressure must delay low-priority work before it creates conflicting remediation attempts.",
+      "connection": {
+        "edgeId": "heal_bus_correlator",
+        "sourceNodeId": "heal_bus",
+        "targetNodeId": "heal_correlator",
+        "connectionType": "event-stream",
+        "label": "Ordered incident candidates",
+        "description": "Consume with idempotent offsets and a bounded retry path; partition ownership keeps one failure domain ordered."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:6",
+        "legacy-constraint:1"
+      ]
+    },
+    {
+      "id": "heal_09",
+      "stepNumber": 9,
+      "phase": "Detect and correlate infrastructure anomalies",
+      "title": "Rank anomalies without authorizing writes",
+      "type": "add_component",
+      "content": "Keep a model version, confidence, drift signal, and feature provenance; a model prediction alone cannot approve an infrastructure mutation.",
+      "component": {
+        "nodeId": "heal_model",
+        "componentType": "ml-model",
+        "label": "Anomaly Decision Model",
+        "description": "Versioned anomaly ranking model used only as one signal alongside deterministic thresholds and topology checks.",
+        "position": {
+          "x": 900,
+          "y": -80
+        },
+        "properties": {
+          "componentName": "Anomaly Decision Model",
+          "purpose": "Versioned anomaly ranking model used only as one signal alongside deterministic thresholds and topology checks.",
+          "version": "candidate-v1"
+        },
+        "highlightReason": "Keep a model version, confidence, drift signal, and feature provenance; a model prediction alone cannot approve an infrastructure mutation."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:3",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "heal_10",
+      "stepNumber": 10,
+      "phase": "Detect and correlate infrastructure anomalies",
+      "title": "Bounded anomaly inference",
+      "type": "add_connection",
+      "content": "A model outage should reduce automation confidence, not disable incident visibility.",
+      "connection": {
+        "edgeId": "heal_correlator_model",
+        "sourceNodeId": "heal_correlator",
+        "targetNodeId": "heal_model",
+        "connectionType": "api-call",
+        "label": "Bounded anomaly inference",
+        "description": "Send normalized features and a deadline to the pinned model version; time out to deterministic detection rules."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-constraint:1"
+      ]
+    },
+    {
+      "id": "heal_11",
+      "stepNumber": 11,
+      "phase": "Detect and correlate infrastructure anomalies",
+      "title": "Score and model provenance",
+      "type": "add_connection",
+      "content": "Record uncertainty so low-confidence incidents are held for triage instead of selecting risky playbooks.",
+      "connection": {
+        "edgeId": "heal_model_correlator",
+        "sourceNodeId": "heal_model",
+        "targetNodeId": "heal_correlator",
+        "connectionType": "data-flow",
+        "label": "Score and model provenance",
+        "description": "Return score, model version, and confidence for the correlated incident."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "heal_12",
+      "stepNumber": 12,
+      "phase": "Detect and correlate infrastructure anomalies",
+      "title": "Choose deduplication before action",
+      "type": "decision_point",
+      "content": "Use bounded windows and versioned incident keys; retain separate symptoms for diagnosis even when one root incident owns remediation.",
+      "decision": {
+        "question": "Can every alert start its own remediation?",
+        "chosen": "Correlate and deduplicate per failure domain before opening one incident.",
+        "chosenReason": "An alert storm during a cascade otherwise launches competing playbooks against the same dependency.",
+        "alternatives": [
+          {
+            "option": "Run each alert independently",
+            "tradeoff": "Fast for isolated events but creates duplicate and conflicting actions."
+          },
+          {
+            "option": "Suppress all repeated alerts",
+            "tradeoff": "Can conceal a real new failure after the first alert."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "heal_correlator",
+        "properties": {
+          "purpose": "Join alerts in bounded windows, deduplicate by incident and failure domain, preserve late evidence, and emit one action candidate with confidence and source provenance."
+        }
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:6",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "heal_13",
+      "stepNumber": 13,
+      "phase": "Select a playbook and enforce safety",
+      "title": "Add dependency context",
+      "type": "add_component",
+      "content": "A cascade should be coordinated around its likely root cause; stale topology increases blast-radius risk and must lower automation confidence.",
+      "component": {
+        "nodeId": "heal_topology",
+        "componentType": "database",
+        "label": "Service Dependency Graph",
+        "description": "Versioned service-to-resource dependencies, owners, and failure-domain relationships used for blast-radius estimates.",
+        "position": {
+          "x": 1200,
+          "y": -80
+        },
+        "properties": {
+          "componentName": "Service Dependency Graph",
+          "purpose": "Versioned service-to-resource dependencies, owners, and failure-domain relationships used for blast-radius estimates.",
+          "type": "Graph",
+          "encryption": true,
+          "backups": true,
+          "rbac": true
+        },
+        "highlightReason": "A cascade should be coordinated around its likely root cause; stale topology increases blast-radius risk and must lower automation confidence."
+      },
+      "requirementIds": [
+        "legacy-requirement:6",
+        "legacy-requirement:4",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "heal_14",
+      "stepNumber": 14,
+      "phase": "Select a playbook and enforce safety",
+      "title": "Affected service lookup",
+      "type": "add_connection",
+      "content": "Do not remediate each downstream symptom independently when a shared dependency is failing.",
+      "connection": {
+        "edgeId": "heal_correlator_topology",
+        "sourceNodeId": "heal_correlator",
+        "targetNodeId": "heal_topology",
+        "connectionType": "database-connection",
+        "label": "Affected service lookup",
+        "description": "Resolve upstream and downstream dependencies for the incident's resource version and time."
+      },
+      "requirementIds": [
+        "legacy-requirement:6",
+        "legacy-requirement:4"
+      ]
+    },
+    {
+      "id": "heal_15",
+      "stepNumber": 15,
+      "phase": "Select a playbook and enforce safety",
+      "title": "Coordinate one incident lifecycle",
+      "type": "add_component",
+      "content": "Persist incident state and idempotency keys; rank known playbooks by preconditions, risk, and evidence rather than letting an ML score execute a command.",
+      "component": {
+        "nodeId": "heal_orchestrator",
+        "componentType": "ai-orchestrator",
+        "label": "Remediation Coordinator",
+        "description": "Per-incident state machine for diagnosis, playbook selection, policy checks, coordinated rollout, verification, and rollback.",
+        "position": {
+          "x": 1200,
+          "y": 220
+        },
+        "properties": {
+          "componentName": "Remediation Coordinator",
+          "purpose": "Per-incident state machine for diagnosis, playbook selection, policy checks, coordinated rollout, verification, and rollback.",
+          "steps": "correlate -> diagnose -> match -> authorize -> canary -> verify -> expand or rollback -> audit"
+        },
+        "highlightReason": "Persist incident state and idempotency keys; rank known playbooks by preconditions, risk, and evidence rather than letting an ML score execute a command."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:6",
+        "legacy-requirement:8",
+        "legacy-constraint:1"
+      ]
+    },
+    {
+      "id": "heal_16",
+      "stepNumber": 16,
+      "phase": "Select a playbook and enforce safety",
+      "title": "Correlated incident",
+      "type": "add_connection",
+      "content": "The timer for the five-minute target starts at detection, not when a worker begins.",
+      "connection": {
+        "edgeId": "heal_correlator_orchestrator",
+        "sourceNodeId": "heal_correlator",
+        "targetNodeId": "heal_orchestrator",
+        "connectionType": "event-stream",
+        "label": "Correlated incident",
+        "description": "Provide incident key, affected targets, confidence, symptom set, and first-detection timestamp."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:6",
+        "legacy-constraint:1"
+      ]
+    },
+    {
+      "id": "heal_17",
+      "stepNumber": 17,
+      "phase": "Select a playbook and enforce safety",
+      "title": "Topology and blast radius",
+      "type": "add_connection",
+      "content": "If topology is stale or incomplete, choose observation or approval rather than pretending the blast radius is known.",
+      "connection": {
+        "edgeId": "heal_orchestrator_topology",
+        "sourceNodeId": "heal_orchestrator",
+        "targetNodeId": "heal_topology",
+        "connectionType": "database-connection",
+        "label": "Topology and blast radius",
+        "description": "Read dependency version, failure-domain ownership, and estimated downstream impact before action."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:6",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "heal_18",
+      "stepNumber": 18,
+      "phase": "Select a playbook and enforce safety",
+      "title": "Register known failure playbooks",
+      "type": "add_component",
+      "content": "Catalog 100+ distinct failure scenarios by signature and affected service; version and test every playbook. A catalog target is not proof that 100 playbooks already exist.",
+      "component": {
+        "nodeId": "heal_playbooks",
+        "componentType": "configuration-management",
+        "label": "Versioned Remediation Playbooks",
+        "description": "Signed Ansible runbooks with scenario taxonomy, preconditions, bounded commands, verification, and compensating rollback.",
+        "position": {
+          "x": 1500,
+          "y": -80
+        },
+        "properties": {
+          "componentName": "Versioned Remediation Playbooks",
+          "purpose": "Signed Ansible runbooks with scenario taxonomy, preconditions, bounded commands, verification, and compensating rollback.",
+          "tool": "Ansible",
+          "secretsManagement": true,
+          "versionControl": true
+        },
+        "highlightReason": "Catalog 100+ distinct failure scenarios by signature and affected service; version and test every playbook. A catalog target is not proof that 100 playbooks already exist."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:8",
+        "legacy-constraint:4",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "heal_19",
+      "stepNumber": 19,
+      "phase": "Select a playbook and enforce safety",
+      "title": "Precondition-matched runbook",
+      "type": "add_connection",
+      "content": "Reject ambiguous matches and missing preconditions; do not synthesize new shell commands from model output.",
+      "connection": {
+        "edgeId": "heal_orchestrator_playbooks",
+        "sourceNodeId": "heal_orchestrator",
+        "targetNodeId": "heal_playbooks",
+        "connectionType": "api-call",
+        "label": "Precondition-matched runbook",
+        "description": "Fetch a pinned, signed playbook version with prerequisites, risk class, blast-radius limit, verification, and rollback."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:4",
+        "legacy-requirement:8",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "heal_20",
+      "stepNumber": 20,
+      "phase": "Select a playbook and enforce safety",
+      "title": "Add a fail-closed policy boundary",
+      "type": "add_component",
+      "content": "Recheck target version and dependency state immediately before issuing a short-lived execution permit.",
+      "component": {
+        "nodeId": "heal_safety",
+        "componentType": "backend-server",
+        "label": "Safety Policy Engine",
+        "description": "Fail-closed authorization service for preconditions, dry-run results, blast radius, change windows, approval, and action budgets.",
+        "position": {
+          "x": 1500,
+          "y": 220
+        },
+        "properties": {
+          "componentName": "Safety Policy Engine",
+          "purpose": "Fail-closed authorization service for preconditions, dry-run results, blast radius, change windows, approval, and action budgets."
+        },
+        "highlightReason": "Recheck target version and dependency state immediately before issuing a short-lived execution permit."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "heal_21",
+      "stepNumber": 21,
+      "phase": "Select a playbook and enforce safety",
+      "title": "Action proposal and evidence",
+      "type": "add_connection",
+      "content": "The coordinator proposes; the policy engine is the only route to execution.",
+      "connection": {
+        "edgeId": "heal_orchestrator_safety",
+        "sourceNodeId": "heal_orchestrator",
+        "targetNodeId": "heal_safety",
+        "connectionType": "api-call",
+        "label": "Action proposal and evidence",
+        "description": "Submit target identity, runbook digest, risk class, dry-run result, blast radius, incident key, and expiry."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "heal_22",
+      "stepNumber": 22,
+      "phase": "Select a playbook and enforce safety",
+      "title": "Fence concurrent remediation",
+      "type": "add_component",
+      "content": "A lease prevents a cascade from running competing fixes; expiry and fencing protect against paused or restarted workers.",
+      "component": {
+        "nodeId": "heal_lock",
+        "componentType": "distributed-lock",
+        "label": "Failure-Domain Action Lease",
+        "description": "Fenced lease by service and failure domain, with expiry and monotonically increasing token.",
+        "position": {
+          "x": 1800,
+          "y": -80
+        },
+        "properties": {
+          "componentName": "Failure-Domain Action Lease",
+          "purpose": "Fenced lease by service and failure domain, with expiry and monotonically increasing token."
+        },
+        "highlightReason": "A lease prevents a cascade from running competing fixes; expiry and fencing protect against paused or restarted workers."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:6",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "heal_23",
+      "stepNumber": 23,
+      "phase": "Select a playbook and enforce safety",
+      "title": "Fenced action lease",
+      "type": "add_connection",
+      "content": "A stale worker without the current token must be rejected by the target adapter.",
+      "connection": {
+        "edgeId": "heal_safety_lock",
+        "sourceNodeId": "heal_safety",
+        "targetNodeId": "heal_lock",
+        "connectionType": "api-call",
+        "label": "Fenced action lease",
+        "description": "Acquire a domain-scoped lease and attach its fencing token to every execution permit."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:6",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "heal_24",
+      "stepNumber": 24,
+      "phase": "Select a playbook and enforce safety",
+      "title": "Expose critical decisions to operators",
+      "type": "add_component",
+      "content": "Use named RBAC roles and an expiring, incident-bound approval for destructive or broad actions; preserve the human-in-the-loop hint.",
+      "component": {
+        "nodeId": "heal_console",
+        "componentType": "admin-console",
+        "label": "Operator Approval Console",
+        "description": "Authenticated view of incident evidence, runbook diff, risk, proposed scope, and signed approval or denial.",
+        "position": {
+          "x": 1500,
+          "y": 520
+        },
+        "properties": {
+          "componentName": "Operator Approval Console",
+          "purpose": "Authenticated view of incident evidence, runbook diff, risk, proposed scope, and signed approval or denial.",
+          "accessControl": "RBAC",
+          "auditLogging": true
+        },
+        "highlightReason": "Use named RBAC roles and an expiring, incident-bound approval for destructive or broad actions; preserve the human-in-the-loop hint."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-constraint:3",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "heal_25",
+      "stepNumber": 25,
+      "phase": "Select a playbook and enforce safety",
+      "title": "High-risk approval request",
+      "type": "add_connection",
+      "content": "A pending approval does not silently become permission when the five-minute timer is nearly over.",
+      "connection": {
+        "edgeId": "heal_safety_console",
+        "sourceNodeId": "heal_safety",
+        "targetNodeId": "heal_console",
+        "connectionType": "api-call",
+        "label": "High-risk approval request",
+        "description": "Present the exact target, playbook digest, blast-radius estimate, rollback plan, and expiry."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-constraint:3",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "heal_26",
+      "stepNumber": 26,
+      "phase": "Select a playbook and enforce safety",
+      "title": "Signed approval or denial",
+      "type": "add_connection",
+      "content": "The permit must fail closed on timeout, revocation, or mismatched target and runbook digest.",
+      "connection": {
+        "edgeId": "heal_console_safety",
+        "sourceNodeId": "heal_console",
+        "targetNodeId": "heal_safety",
+        "connectionType": "api-call",
+        "label": "Signed approval or denial",
+        "description": "Return authenticated approver identity, scoped decision, expiry, and immutable reason."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-constraint:3",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "heal_27",
+      "stepNumber": 27,
+      "phase": "Select a playbook and enforce safety",
+      "title": "Gate destructive and broad actions",
+      "type": "decision_point",
+      "content": "If approval cannot arrive within five minutes, report a missed timing target and leave the risky action blocked; safety takes precedence over the timing objective.",
+      "decision": {
+        "question": "Should every matched runbook execute without a person?",
+        "chosen": "Auto-execute only known, reversible runbooks preapproved for unattended execution. Require explicit operator approval before any novel or low-confidence action and before destructive or high-blast-radius actions.",
+        "chosenReason": "This reconciles the brief's automation goal with its zero-side-effects constraint and human-in-the-loop hint: only known, preapproved reversible actions run unattended; uncertainty or risk needs an accountable operator.",
+        "alternatives": [
+          {
+            "option": "Fully autonomous destructive changes",
+            "tradeoff": "May be faster but exposes unrelated infrastructure to unbounded side effects."
+          },
+          {
+            "option": "Require approval for every action",
+            "tradeoff": "Safer but can miss the five-minute recovery target for routine low-risk fixes."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "heal_safety",
+        "properties": {
+          "purpose": "Fail closed unless preconditions, target version, dry run, blast radius, fenced lease, action budget, and policy pass. Unattended execution is limited to known, reversible runbooks preapproved for that scope; novel, low-confidence, destructive, or high-blast-radius actions require scoped operator approval before a short-lived permit."
+        }
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-constraint:1",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "heal_28",
+      "stepNumber": 28,
+      "phase": "Select a playbook and enforce safety",
+      "title": "Versioned blast-radius evidence",
+      "type": "add_connection",
+      "content": "A stale dependency snapshot invalidates the permit instead of allowing a broad remediation.",
+      "connection": {
+        "edgeId": "heal_topology_safety",
+        "sourceNodeId": "heal_topology",
+        "targetNodeId": "heal_safety",
+        "connectionType": "data-flow",
+        "label": "Versioned blast-radius evidence",
+        "description": "Supply dependency and ownership snapshot used in the permit decision."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:6",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "heal_29",
+      "stepNumber": 29,
+      "phase": "Execute a canary, verify, and rollback",
+      "title": "Queue permitted actions",
+      "type": "add_component",
+      "content": "Use delayed retries and a dead-letter path for exhausted jobs; a duplicate delivery must not repeat a mutation.",
+      "component": {
+        "nodeId": "heal_queue",
+        "componentType": "queue",
+        "label": "Authorized Action Queue",
+        "description": "Durable jobs containing only a signed permit, pinned playbook digest, idempotency key, target version, and deadline.",
+        "position": {
+          "x": 1800,
+          "y": 220
+        },
+        "properties": {
+          "componentName": "Authorized Action Queue",
+          "purpose": "Durable jobs containing only a signed permit, pinned playbook digest, idempotency key, target version, and deadline.",
+          "visibilityTimeout": 60,
+          "maxRetries": 2,
+          "durable": true,
+          "backoff": "exponential"
+        },
+        "highlightReason": "Use delayed retries and a dead-letter path for exhausted jobs; a duplicate delivery must not repeat a mutation."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-constraint:1",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "heal_30",
+      "stepNumber": 30,
+      "phase": "Execute a canary, verify, and rollback",
+      "title": "Short-lived execution permit",
+      "type": "add_connection",
+      "content": "No coordinator-to-worker bypass may skip the safety gate.",
+      "connection": {
+        "edgeId": "heal_safety_queue",
+        "sourceNodeId": "heal_safety",
+        "targetNodeId": "heal_queue",
+        "connectionType": "message-queue",
+        "label": "Short-lived execution permit",
+        "description": "Enqueue only after policy and lease approval; include exact scope, expiry, and fencing token."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "heal_31",
+      "stepNumber": 31,
+      "phase": "Execute a canary, verify, and rollback",
+      "title": "Add isolated execution workers",
+      "type": "add_component",
+      "content": "Eight workers are an initial capacity assumption; per-failure-domain fencing and quotas still serialize conflicting actions.",
+      "component": {
+        "nodeId": "heal_executor",
+        "componentType": "processing-worker",
+        "label": "Remediation Executor",
+        "description": "Isolated worker that verifies permit and target version, runs a one-target canary, checks health, expands boundedly, or runs rollback.",
+        "position": {
+          "x": 2100,
+          "y": 220
+        },
+        "properties": {
+          "componentName": "Remediation Executor",
+          "purpose": "Isolated worker that verifies permit and target version, runs a one-target canary, checks health, expands boundedly, or runs rollback.",
+          "concurrency": 8,
+          "autoscale": true
+        },
+        "highlightReason": "Eight workers are an initial capacity assumption; per-failure-domain fencing and quotas still serialize conflicting actions."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "heal_32",
+      "stepNumber": 32,
+      "phase": "Execute a canary, verify, and rollback",
+      "title": "Idempotent action job",
+      "type": "add_connection",
+      "content": "Workers recheck permit expiry, lease token, and target version on every retry.",
+      "connection": {
+        "edgeId": "heal_queue_executor",
+        "sourceNodeId": "heal_queue",
+        "targetNodeId": "heal_executor",
+        "connectionType": "message-queue",
+        "label": "Idempotent action job",
+        "description": "Deliver a bounded job with permit and deadline; acknowledge only after durable outcome recording."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-constraint:1",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "heal_33",
+      "stepNumber": 33,
+      "phase": "Execute a canary, verify, and rollback",
+      "title": "Limit executor authority",
+      "type": "add_component",
+      "content": "Fetch short-lived credentials only after permit verification; no standing cluster-admin secret belongs in a playbook.",
+      "component": {
+        "nodeId": "heal_secrets",
+        "componentType": "secrets-manager",
+        "label": "Short-Lived Execution Credentials",
+        "description": "Per-target, least-privilege credentials with rotation, encryption, and access audit.",
+        "position": {
+          "x": 2100,
+          "y": -80
+        },
+        "properties": {
+          "componentName": "Short-Lived Execution Credentials",
+          "purpose": "Per-target, least-privilege credentials with rotation, encryption, and access audit.",
+          "provider": "HashiCorp Vault",
+          "rotation": true,
+          "encryption": true,
+          "audit": true
+        },
+        "highlightReason": "Fetch short-lived credentials only after permit verification; no standing cluster-admin secret belongs in a playbook."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-constraint:3",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "heal_34",
+      "stepNumber": 34,
+      "phase": "Execute a canary, verify, and rollback",
+      "title": "Scoped execution credential",
+      "type": "add_connection",
+      "content": "Revoke or expire credentials after the action; credential access is included in the audit trail.",
+      "connection": {
+        "edgeId": "heal_executor_secrets",
+        "sourceNodeId": "heal_executor",
+        "targetNodeId": "heal_secrets",
+        "connectionType": "api-call",
+        "label": "Scoped execution credential",
+        "description": "Request credentials bound to target, permitted verbs, runbook digest, and expiry."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-constraint:3",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "heal_35",
+      "stepNumber": 35,
+      "phase": "Execute a canary, verify, and rollback",
+      "title": "Pinned command and compensation",
+      "type": "add_connection",
+      "content": "Refuse execution if the fetched digest differs from the signed permit.",
+      "connection": {
+        "edgeId": "heal_executor_playbooks",
+        "sourceNodeId": "heal_executor",
+        "targetNodeId": "heal_playbooks",
+        "connectionType": "api-call",
+        "label": "Pinned command and compensation",
+        "description": "Fetch the approved immutable playbook and its inverse or restore checkpoint."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:8",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "heal_36",
+      "stepNumber": 36,
+      "phase": "Execute a canary, verify, and rollback",
+      "title": "Canary, bounded rollout, or compensation",
+      "type": "add_connection",
+      "content": "Rollback uses a separately approved compensating step or a captured checkpoint; an action without safe rollback needs stronger approval.",
+      "connection": {
+        "edgeId": "heal_executor_targets",
+        "sourceNodeId": "heal_executor",
+        "targetNodeId": "heal_targets",
+        "connectionType": "api-call",
+        "label": "Canary, bounded rollout, or compensation",
+        "description": "Apply with compare-and-swap target version and fencing token; first change one instance, then expand only after verification."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:8",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "heal_37",
+      "stepNumber": 37,
+      "phase": "Execute a canary, verify, and rollback",
+      "title": "Independent health post-check",
+      "type": "add_connection",
+      "content": "A command exiting zero is not a successful remediation; verify both the repaired symptom and unrelated service health.",
+      "connection": {
+        "edgeId": "heal_executor_monitor",
+        "sourceNodeId": "heal_executor",
+        "targetNodeId": "heal_monitor",
+        "connectionType": "api-call",
+        "label": "Independent health post-check",
+        "description": "Read service SLOs and target health against the pre-action baseline with a bounded observation window."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "heal_38",
+      "stepNumber": 38,
+      "phase": "Execute a canary, verify, and rollback",
+      "title": "Verified outcome or rollback request",
+      "type": "add_connection",
+      "content": "The coordinator decides whether to expand, roll back, or stop and escalate.",
+      "connection": {
+        "edgeId": "heal_executor_orchestrator",
+        "sourceNodeId": "heal_executor",
+        "targetNodeId": "heal_orchestrator",
+        "connectionType": "event-stream",
+        "label": "Verified outcome or rollback request",
+        "description": "Return command result, post-check evidence, scope reached, timestamps, and compensation status."
+      },
+      "requirementIds": [
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "heal_39",
+      "stepNumber": 39,
+      "phase": "Execute a canary, verify, and rollback",
+      "title": "Use a one-target canary",
+      "type": "decision_point",
+      "content": "If the canary degrades a dependency or lacks sufficient post-check evidence, stop expansion and initiate the compensation path.",
+      "decision": {
+        "question": "Should the runbook roll out to all affected targets immediately?",
+        "chosen": "Fix one instance, verify symptom and guardrail metrics, then expand in bounded batches.",
+        "chosenReason": "A successful dry run cannot reveal every production dependency; the canary limits first exposure.",
+        "alternatives": [
+          {
+            "option": "Apply to all targets immediately",
+            "tradeoff": "Faster nominal recovery but a bad playbook has a large blast radius."
+          },
+          {
+            "option": "Never expand beyond one target",
+            "tradeoff": "Limits exposure but leaves a multi-instance incident unresolved."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "heal_executor",
+        "properties": {
+          "purpose": "Verify permit, target version, and fenced lease; run one-target canary with pre/post health checks, then expand in bounded batches only while guardrails remain healthy."
+        }
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-constraint:1",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "heal_40",
+      "stepNumber": 40,
+      "phase": "Execute a canary, verify, and rollback",
+      "title": "Rollback failed or harmful changes",
+      "type": "decision_point",
+      "content": "A non-reversible action is not eligible for unattended execution; capture a restore point and a tested compensation procedure first.",
+      "decision": {
+        "question": "What happens when post-checks fail after mutation?",
+        "chosen": "Stop new jobs, run the pinned compensation or restore checkpoint, verify recovery, and escalate if rollback fails.",
+        "chosenReason": "A command success without healthy service outcomes is a failure; rollback itself can fail and must be audited.",
+        "alternatives": [
+          {
+            "option": "Keep retrying the forward action",
+            "tradeoff": "Can amplify an outage and bypass the five-minute deadline."
+          },
+          {
+            "option": "Always assume rollback succeeds",
+            "tradeoff": "Hides a second failure mode and can create unintended side effects."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "heal_executor",
+        "properties": {
+          "purpose": "Verify permit and fenced lease; canary one target, check symptom and unrelated SLOs, expand only within budget, and on failed checks stop, run pinned compensation or restore checkpoint, verify rollback, and escalate an incomplete recovery."
+        }
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "heal_41",
+      "stepNumber": 41,
+      "phase": "Execute a canary, verify, and rollback",
+      "title": "Coordinate cascading failures",
+      "type": "decision_point",
+      "content": "Use the dependency graph and fenced lease to hold downstream playbooks until the root-cause action is verified; escalate when ownership is ambiguous.",
+      "decision": {
+        "question": "Should each downstream symptom launch its own fix?",
+        "chosen": "Elect one root incident owner per dependency and failure domain, then sequence dependent actions.",
+        "chosenReason": "Concurrent fixes can cancel one another or mask the root cause during a cascade.",
+        "alternatives": [
+          {
+            "option": "Remediate every symptom in parallel",
+            "tradeoff": "Reduces queue time but risks contradictory actions."
+          },
+          {
+            "option": "Wait for every alert to clear before acting",
+            "tradeoff": "Avoids conflicts but delays the root fix without a bounded decision."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "heal_orchestrator",
+        "properties": {
+          "steps": "correlate -> choose root incident -> match pinned playbook -> authorize and fence -> canary -> verify -> sequence dependent actions -> expand or compensate -> audit"
+        }
+      },
+      "requirementIds": [
+        "legacy-requirement:6",
+        "legacy-requirement:4",
+        "legacy-constraint:1",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "heal_42",
+      "stepNumber": 42,
+      "phase": "Execute a canary, verify, and rollback",
+      "title": "Protect the five-minute action budget",
+      "type": "scale_trigger",
+      "content": "Budget detection, correlation, policy, queue, canary, post-check, and rollback; report each stage separately. A timed-out permit fails closed even if the SLO is missed.",
+      "scaleTrigger": {
+        "metric": "p95 detection-to-verified-remediation latency; oldest authorized job age and active leases",
+        "action": "Scale workers and partitions within per-domain quotas; shed or escalate low-confidence candidates before they crowd out verified incidents.",
+        "impact": "More workers improve independent incident throughput but do not bypass a safety permit or shorten human approval."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:6",
+        "legacy-constraint:1",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "heal_43",
+      "stepNumber": 43,
+      "phase": "Audit outcomes and learn from operators",
+      "title": "Store every automated action",
+      "type": "add_component",
+      "content": "Write each state transition durably with correlation and idempotency IDs; protect from mutation and verify retention policy against governance needs.",
+      "component": {
+        "nodeId": "heal_audit",
+        "componentType": "database",
+        "label": "Immutable Action Ledger",
+        "description": "Append-only record of incident, evidence, policy decision, approval, permit, command, target version, post-check, rollback, and actor.",
+        "position": {
+          "x": 1800,
+          "y": 520
+        },
+        "properties": {
+          "componentName": "Immutable Action Ledger",
+          "purpose": "Append-only record of incident, evidence, policy decision, approval, permit, command, target version, post-check, rollback, and actor.",
+          "type": "RDBMS",
+          "workload": "OLTP",
+          "encryption": true,
+          "backups": true,
+          "pitr": true,
+          "rbac": true,
+          "auditLog": true
+        },
+        "highlightReason": "Write each state transition durably with correlation and idempotency IDs; protect from mutation and verify retention policy against governance needs."
+      },
+      "requirementIds": [
+        "legacy-requirement:7",
+        "legacy-constraint:5",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "heal_44",
+      "stepNumber": 44,
+      "phase": "Audit outcomes and learn from operators",
+      "title": "Incident decision history",
+      "type": "add_connection",
+      "content": "An incident without a matching playbook must be logged as held or escalated, not counted as a successful automatic fix.",
+      "connection": {
+        "edgeId": "heal_orchestrator_audit",
+        "sourceNodeId": "heal_orchestrator",
+        "targetNodeId": "heal_audit",
+        "connectionType": "database-connection",
+        "label": "Incident decision history",
+        "description": "Append diagnosis, playbook match, state transitions, deadlines, and final disposition."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:7",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "heal_45",
+      "stepNumber": 45,
+      "phase": "Audit outcomes and learn from operators",
+      "title": "Permit and denial record",
+      "type": "add_connection",
+      "content": "Audit denials as well as permits; the reason for a blocked destructive action matters.",
+      "connection": {
+        "edgeId": "heal_safety_audit",
+        "sourceNodeId": "heal_safety",
+        "targetNodeId": "heal_audit",
+        "connectionType": "database-connection",
+        "label": "Permit and denial record",
+        "description": "Append risk inputs, policy version, blast radius, approval identity, lease, permit expiry, and denials."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:7",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "heal_46",
+      "stepNumber": 46,
+      "phase": "Audit outcomes and learn from operators",
+      "title": "Command and rollback outcome",
+      "type": "add_connection",
+      "content": "If the audit store is unavailable, hold new mutations or use a bounded durable write-ahead spool; never silently drop action evidence.",
+      "connection": {
+        "edgeId": "heal_executor_audit",
+        "sourceNodeId": "heal_executor",
+        "targetNodeId": "heal_audit",
+        "connectionType": "database-connection",
+        "label": "Command and rollback outcome",
+        "description": "Append exact command digest, target version, scope, observed health, compensation, and verification status."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:5",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "heal_47",
+      "stepNumber": 47,
+      "phase": "Audit outcomes and learn from operators",
+      "title": "Measure outcomes rather than command exits",
+      "type": "add_component",
+      "content": "Define success as verified recovery without unintended side effects; count failed rollback separately. The above-90% target needs a stated denominator and observation window.",
+      "component": {
+        "nodeId": "heal_analytics",
+        "componentType": "analytics",
+        "label": "Remediation Outcome Analytics",
+        "description": "Compute verified success, rollback, side-effect, latency, and scenario coverage by playbook and failure domain.",
+        "position": {
+          "x": 2100,
+          "y": 520
+        },
+        "properties": {
+          "componentName": "Remediation Outcome Analytics",
+          "purpose": "Compute verified success, rollback, side-effect, latency, and scenario coverage by playbook and failure domain.",
+          "retentionDays": 90,
+          "realTime": true
+        },
+        "highlightReason": "Define success as verified recovery without unintended side effects; count failed rollback separately. The above-90% target needs a stated denominator and observation window."
+      },
+      "requirementIds": [
+        "legacy-requirement:7",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "heal_48",
+      "stepNumber": 48,
+      "phase": "Audit outcomes and learn from operators",
+      "title": "Unsampled action outcomes",
+      "type": "add_connection",
+      "content": "Do not sample away rare harmful outcomes. Report numerator, denominator, and confidence before claiming above 90%.",
+      "connection": {
+        "edgeId": "heal_audit_analytics",
+        "sourceNodeId": "heal_audit",
+        "targetNodeId": "heal_analytics",
+        "connectionType": "data-flow",
+        "label": "Unsampled action outcomes",
+        "description": "Derive success and latency from complete ledger records; classify held, failed, rolled-back, and verified actions distinctly."
+      },
+      "requirementIds": [
+        "legacy-requirement:7",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "heal_49",
+      "stepNumber": 49,
+      "phase": "Audit outcomes and learn from operators",
+      "title": "Learn reviewed operator patterns",
+      "type": "add_component",
+      "content": "Treat operator feedback as evidence for reviewed training candidates, never as permission to authorize or silently promote a new executable runbook. Use actions as labeled examples only after outcome and policy review.",
+      "component": {
+        "nodeId": "heal_trainer",
+        "componentType": "model-training",
+        "label": "Operator Pattern Learner",
+        "description": "Offline training from reviewed operator interventions and verified outcomes; feedback creates candidates only, which remain shadow-only until separately reviewed and approved for promotion.",
+        "position": {
+          "x": 2400,
+          "y": 520
+        },
+        "properties": {
+          "componentName": "Operator Pattern Learner",
+          "purpose": "Offline training from reviewed operator interventions and verified outcomes; feedback creates candidates only, which remain shadow-only until separately reviewed and approved for promotion."
+        },
+        "highlightReason": "Turn operator actions into labeled examples only after outcome and policy review; do not let a model silently invent or publish executable runbooks."
+      },
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "heal_50",
+      "stepNumber": 50,
+      "phase": "Audit outcomes and learn from operators",
+      "title": "Verified outcome labels",
+      "type": "add_connection",
+      "content": "Exclude unverified or policy-denied interventions from positive training labels.",
+      "connection": {
+        "edgeId": "heal_analytics_trainer",
+        "sourceNodeId": "heal_analytics",
+        "targetNodeId": "heal_trainer",
+        "connectionType": "data-flow",
+        "label": "Verified outcome labels",
+        "description": "Provide incident features, chosen action, post-check, side effects, and rollback labels with lineage."
+      },
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:7",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "heal_51",
+      "stepNumber": 51,
+      "phase": "Audit outcomes and learn from operators",
+      "title": "Reviewed operator intervention",
+      "type": "add_connection",
+      "content": "Operator behavior alone is not proof the action was safe or effective.",
+      "connection": {
+        "edgeId": "heal_console_trainer",
+        "sourceNodeId": "heal_console",
+        "targetNodeId": "heal_trainer",
+        "connectionType": "data-flow",
+        "label": "Reviewed operator intervention",
+        "description": "Capture operator choice and rationale linked to the incident and observed outcome."
+      },
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-constraint:3",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "heal_52",
+      "stepNumber": 52,
+      "phase": "Audit outcomes and learn from operators",
+      "title": "Shadow candidate model",
+      "type": "add_connection",
+      "content": "Learning should improve ranking while the safety engine remains authoritative for execution.",
+      "connection": {
+        "edgeId": "heal_trainer_model",
+        "sourceNodeId": "heal_trainer",
+        "targetNodeId": "heal_model",
+        "connectionType": "data-flow",
+        "label": "Shadow candidate model",
+        "description": "Evaluate a versioned candidate against held-out incidents and drift checks before controlled promotion."
+      },
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:1",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "heal_53",
+      "stepNumber": 53,
+      "phase": "Exercise failure cases and operate against targets",
+      "title": "Test the whole safety envelope",
+      "type": "add_component",
+      "content": "Use replay, fault injection, and chaos drills to prove playbook preconditions, bounded blast radius, compensation, and audit under adverse conditions.",
+      "component": {
+        "nodeId": "heal_tests",
+        "componentType": "automated-testing",
+        "label": "Failure and Chaos Test Suite",
+        "description": "Scenario matrix for 100+ distinct failures, cascades, stale topology, credential loss, audit outage, bad canary, and rollback failure.",
+        "position": {
+          "x": 2400,
+          "y": -80
+        },
+        "properties": {
+          "componentName": "Failure and Chaos Test Suite",
+          "purpose": "Scenario matrix for 100+ distinct failures, cascades, stale topology, credential loss, audit outage, bad canary, and rollback failure.",
+          "parallelExecution": true
+        },
+        "highlightReason": "Use replay, fault injection, and chaos drills to prove playbook preconditions, bounded blast radius, compensation, and audit under adverse conditions."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:4",
+        "legacy-requirement:8",
+        "legacy-constraint:3",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "heal_54",
+      "stepNumber": 54,
+      "phase": "Exercise failure cases and operate against targets",
+      "title": "Scenario-to-playbook validation",
+      "type": "add_connection",
+      "content": "The 100+ requirement requires a populated taxonomy plus passing fixtures; the architecture alone does not satisfy the count.",
+      "connection": {
+        "edgeId": "heal_tests_playbooks",
+        "sourceNodeId": "heal_tests",
+        "targetNodeId": "heal_playbooks",
+        "connectionType": "data-flow",
+        "label": "Scenario-to-playbook validation",
+        "description": "Exercise every scenario signature against signed playbook versions and expected no-match behavior."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:8",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "heal_55",
+      "stepNumber": 55,
+      "phase": "Exercise failure cases and operate against targets",
+      "title": "Adversarial permit tests",
+      "type": "add_connection",
+      "content": "Require the policy to deny unsafe actions and record every denial before a playbook is eligible for production.",
+      "connection": {
+        "edgeId": "heal_tests_safety",
+        "sourceNodeId": "heal_tests",
+        "targetNodeId": "heal_safety",
+        "connectionType": "api-call",
+        "label": "Adversarial permit tests",
+        "description": "Inject stale resource versions, revoked approval, expired lease, broad scope, missing rollback, and audit-store failure."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-constraint:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "heal_56",
+      "stepNumber": 56,
+      "phase": "Exercise failure cases and operate against targets",
+      "title": "Surface unsafe or unresolved incidents",
+      "type": "add_component",
+      "content": "Automatic low-risk repair can proceed without a person, but critical decisions and failed recovery need an accountable human path.",
+      "component": {
+        "nodeId": "heal_notify",
+        "componentType": "notification-service",
+        "label": "Escalation Notifications",
+        "description": "Notify operators of approval requests, unresolved cascades, missed deadlines, failed rollback, and policy denials.",
+        "position": {
+          "x": 1200,
+          "y": 520
+        },
+        "properties": {
+          "componentName": "Escalation Notifications",
+          "purpose": "Notify operators of approval requests, unresolved cascades, missed deadlines, failed rollback, and policy denials.",
+          "fanout": true
+        },
+        "highlightReason": "Automatic low-risk repair can proceed without a person, but critical decisions and failed recovery need an accountable human path."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:6",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "heal_57",
+      "stepNumber": 57,
+      "phase": "Exercise failure cases and operate against targets",
+      "title": "Approval, timeout, and rollback escalation",
+      "type": "add_connection",
+      "content": "A notification is not approval and must not be interpreted as one.",
+      "connection": {
+        "edgeId": "heal_orchestrator_notify",
+        "sourceNodeId": "heal_orchestrator",
+        "targetNodeId": "heal_notify",
+        "connectionType": "api-call",
+        "label": "Approval, timeout, and rollback escalation",
+        "description": "Send incident ID, evidence, required action, owner, and deadline; retry notifications without retrying unsafe mutations."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:6",
+        "legacy-requirement:8",
+        "legacy-constraint:1"
+      ]
+    },
+    {
+      "id": "heal_58",
+      "stepNumber": 58,
+      "phase": "Exercise failure cases and operate against targets",
+      "title": "Promote learning only after review",
+      "type": "decision_point",
+      "content": "Track model version, data lineage, and false-positive rates; a failed candidate can be rolled back without changing the execution policy.",
+      "decision": {
+        "question": "Can a new operator action become an executable remediation automatically?",
+        "chosen": "Keep learned patterns in shadow mode; require reviewed outcomes, tests, a signed playbook version, and policy approval before promotion. Operator feedback alone never promotes a pattern.",
+        "chosenReason": "This separates adaptive diagnosis and operator feedback from the reviewed authority to mutate production infrastructure.",
+        "alternatives": [
+          {
+            "option": "Promote every observed operator action",
+            "tradeoff": "Can encode one-off mistakes and unmeasured side effects."
+          },
+          {
+            "option": "Never learn from operators",
+            "tradeoff": "Preserves static behavior but misses useful new remediation patterns."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "heal_trainer",
+        "properties": {
+          "purpose": "Train on reviewed operator interventions and verified outcomes; operator feedback alone cannot promote automation. Keep candidate patterns shadow-only until scenario tests, rollback drills, a signed playbook version, and policy approval permit controlled promotion."
+        }
+      },
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "heal_59",
+      "stepNumber": 59,
+      "phase": "Exercise failure cases and operate against targets",
+      "title": "Review capacity and release gates",
+      "type": "scale_trigger",
+      "content": "Release evidence must demonstrate under-five-minute detection-to-verified-recovery where autonomous repair applies, above-90% verified success, zero observed unintended side effects, 100+ covered scenarios, and a complete action audit trail. None is established by this draft alone.",
+      "scaleTrigger": {
+        "metric": "Verified remediation latency p95, success numerator/denominator, unintended side-effect count, and passing scenario count",
+        "action": "Increase independent incident capacity only after canary, rollback, audit, and approval gates pass under load.",
+        "impact": "More throughput can increase collision risk; retain per-domain fencing and bounded blast radius."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:7",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "heal_60",
+      "stepNumber": 60,
+      "phase": "Exercise failure cases and operate against targets",
+      "title": "State remaining policy tradeoff",
+      "type": "explanation",
+      "content": "The brief asks for remediation without human intervention while its hint calls for human-in-the-loop critical decisions. Resolve that tension by auto-executing only known, reversible runbooks preapproved for unattended execution. Require operator approval for novel, low-confidence, destructive, or high-blast-radius actions; operator feedback alone cannot promote new automation. Report a five-minute miss rather than bypassing a safety gate. Validate runbook preapproval, measured latency, rollback semantics, 100+ scenario coverage, and zero-side-effects evidence before release.",
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    }
+  ]
+}

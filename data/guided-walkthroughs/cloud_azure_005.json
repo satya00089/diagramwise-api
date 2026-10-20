@@ -1,0 +1,746 @@
+{
+  "problem_id": "cloud_azure_005",
+  "version": "1.0.0-review-draft",
+  "totalSteps": 42,
+  "phases": [
+    {
+      "name": "Frame the customer identity boundary and targets",
+      "stepRange": [1, 8],
+      "description": "Translate the supplied identity requirements into an explicit customer sign-in boundary, and keep latency, traffic shape, privacy, and availability questions visible."
+    },
+    {
+      "name": "Build the customer sign-in and policy journeys",
+      "stepRange": [9, 18],
+      "description": "Use the existing identity-service component for registration, federation, MFA, recovery, custom attributes, branding, and conditional-access policy decisions."
+    },
+    {
+      "name": "Protect application APIs and privileged user management",
+      "stepRange": [19, 30],
+      "description": "Separate customer authentication from application API authorization, and mediate privileged Microsoft Graph operations behind a server-side boundary."
+    },
+    {
+      "name": "Address privacy, failures, scale, and verification",
+      "stepRange": [31, 42],
+      "description": "Instrument the critical paths without sensitive payloads, define safe degraded behavior, and validate the supplied targets without inventing an SLA or deployment topology."
+    }
+  ],
+  "steps": [
+    {
+      "id": "identity_01",
+      "stepNumber": 1,
+      "phase": "Frame the customer identity boundary and targets",
+      "title": "Separate the supplied brief from design questions",
+      "type": "explanation",
+      "content": "The supplied brief asks for customer registration and sign-in, social identity federation, MFA, custom user attributes, password recovery, conditional access, branding, and support for millions of users. It also states authentication latency under 500ms, 100k+ daily logins, GDPR/privacy compliance, risk-based authentication, and account-takeover prevention. The hints name Azure AD B2C, custom policies, MFA, Conditional Access, Microsoft Graph, and Application Insights. This draft uses those hints as starting points, not as proof that a chosen tenant, feature set, region, or capacity meets the requirements.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "identity_02",
+      "stepNumber": 2,
+      "phase": "Frame the customer identity boundary and targets",
+      "title": "Define what the under-500ms authentication target measures",
+      "type": "decision_point",
+      "content": "An interactive sign-in can include redirects, a social provider, a user completing MFA, and network time outside the service. Ask whether under 500ms applies to a specified server-side authentication operation or to a user-observed flow, and which percentile and measurement boundary the owner intends. Record identity-provider processing, policy evaluation, token issuance, and external-provider or human wait separately; do not claim an interactive journey is under the target without a defined boundary and measurements.",
+      "decision": {
+        "question": "How should authentication latency under 500ms be measured?",
+        "chosen": "Instrument the identity service's server-side processing and report end-to-end user-flow timing separately; confirm the required percentile and included dependencies with the product owner.",
+        "chosenReason": "This preserves the stated target while distinguishing service time from social-provider, network, and user-interaction delay that the brief does not define.",
+        "alternatives": [
+          {"option": "Measure only the application API after sign-in", "tradeoff": "It would omit registration, federation, MFA, and token issuance from the authentication experience."},
+          {"option": "Treat the entire interactive journey as a fixed sub-500ms operation", "tradeoff": "External redirects and user MFA interaction are outside the service's direct control and have not been scoped by the brief."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-constraint:1"]
+    },
+    {
+      "id": "identity_03",
+      "stepNumber": 3,
+      "phase": "Frame the customer identity boundary and targets",
+      "title": "Clarify the workload behind 100k+ daily logins",
+      "type": "decision_point",
+      "content": "Daily volume and a population of millions do not reveal peak concurrency or burst rate. Ask for the time-of-day distribution, registration versus returning-login mix, social-provider mix, MFA challenge rate, geographic distribution, and expected growth. Use those inputs in a representative load test; do not convert the daily number into an invented requests-per-second or concurrency target.",
+      "decision": {
+        "question": "What workload shape should capacity and performance tests represent?",
+        "chosen": "Keep 100k+ daily logins and millions of users as the supplied scale requirements, and have the owner provide peak and journey-mix data before sizing.",
+        "chosenReason": "A daily total cannot determine peak demand, and the brief provides no burst factor or concurrent-session target.",
+        "alternatives": [
+          {"option": "Assume traffic is evenly distributed through the day", "tradeoff": "A uniform average can hide login bursts and synchronized retry behavior."},
+          {"option": "Invent a peak multiplier for sizing", "tradeoff": "It would turn an unstated assumption into a misleading acceptance target."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:2"]
+    },
+    {
+      "id": "identity_04",
+      "stepNumber": 4,
+      "phase": "Frame the customer identity boundary and targets",
+      "title": "Keep customer identity separate from workforce identity",
+      "type": "decision_point",
+      "content": "The problem is customer identity, not employee single sign-on. Confirm the identity owner, existing tenant, approved customer-identity service, supported federation protocols, and whether the supplied Azure AD B2C hint is eligible for this deployment. Also confirm the Conditional Access and custom-policy capabilities available to that service before relying on them in production.",
+      "decision": {
+        "question": "Which customer identity service and policy capabilities are approved for this product?",
+        "chosen": "Use the brief's Azure AD B2C hint as the review-draft identity boundary, while keeping product eligibility, tenant configuration, and Conditional Access feature support as explicit validation questions.",
+        "chosenReason": "It follows the supplied direction without assuming a service entitlement or feature availability that the brief does not establish.",
+        "alternatives": [
+          {"option": "Reuse a workforce directory without review", "tradeoff": "Customer lifecycle, branding, social federation, and privacy needs may not match employee identity controls."},
+          {"option": "Commit to a different customer identity service now", "tradeoff": "The brief does not provide a decision or migration constraints for replacing its Azure hint."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "identity_05",
+      "stepNumber": 5,
+      "phase": "Frame the customer identity boundary and targets",
+      "title": "Represent customer applications without assuming a channel",
+      "type": "add_component",
+      "content": "Add the relying customer applications as a custom catalog component because the brief does not say whether clients are web, mobile, or both. They initiate registration and sign-in with the identity service, then present issued credentials to protected application APIs. Keep client secrets out of public/native clients and avoid placing password or MFA verification logic in the application itself.",
+      "component": {
+        "nodeId": "customer_apps",
+        "componentType": "custom-component",
+        "label": "Customer Applications (channel TBD)",
+        "description": "Relying clients for registration, sign-in, and protected API access",
+        "position": {"x": 40, "y": 300},
+        "properties": {
+          "componentName": "Customer Applications (channel TBD)",
+          "subtitle": "Web/mobile channel is an interview question",
+          "componentType": "Client applications",
+          "technology": "Channel and client stack TBD",
+          "purpose": "Initiate customer registration and sign-in through the approved identity-provider flow; receive credentials using the selected client flow; call protected application APIs with issued tokens. Keep client type, redirect URIs, and native-versus-web behavior as product decisions.",
+          "notes": "Do not embed confidential credentials in a public client."
+        },
+        "highlightReason": "No single client-channel choice is supplied, so the existing Custom Component catalog type preserves that question instead of inventing web or mobile clients."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "identity_06",
+      "stepNumber": 6,
+      "phase": "Frame the customer identity boundary and targets",
+      "title": "Add the customer identity authority",
+      "type": "add_component",
+      "content": "Use the existing Auth Service catalog component to represent the Azure AD B2C customer identity direction named in the supplied hints. Its proposed role is to host supported customer registration, sign-in, federation, MFA, recovery, attribute, branding, and policy journeys and issue credentials. Confirm that the selected service and tenant actually support each required flow and policy before relying on it. Treat scale, latency, Conditional Access, risk signals, and privacy behavior as items to verify; the component label is not a service or compliance guarantee.",
+      "component": {
+        "nodeId": "customer_identity",
+        "componentType": "auth-service",
+        "label": "Azure AD B2C Customer Identity",
+        "description": "Customer directory, user journeys, MFA, policy, and token issuer",
+        "position": {"x": 410, "y": 300},
+        "properties": {
+          "componentName": "Azure AD B2C Customer Identity",
+          "purpose": "Provide customer registration and sign-in; support social federation, custom user attributes, password reset and recovery, branding, MFA, and configured risk/conditional-access policies. Issue tokens for relying applications. Confirm eligible service features, tenant policy, directory limits, and measured capacity with the identity owner.",
+          "oauth": true,
+          "mfa": true
+        },
+        "highlightReason": "The catalog Auth Service supports OAuth and an explicit MFA setting; the component uses the Azure AD B2C hint without adding a new palette type."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "identity_07",
+      "stepNumber": 7,
+      "phase": "Frame the customer identity boundary and targets",
+      "title": "Route customer sign-in through the identity authority",
+      "type": "add_connection",
+      "content": "The client starts a supported registration or sign-in journey at the identity service and returns through a registered redirect. Use the selected protocol and client flow for the actual channel; the diagram does not imply that passwords or MFA secrets pass through an application API.",
+      "connection": {
+        "edgeId": "apps_to_identity",
+        "sourceNodeId": "customer_apps",
+        "targetNodeId": "customer_identity",
+        "connectionType": "customer-authentication",
+        "label": "Registration / sign-in redirect and callback",
+        "description": "Customer clients use registered identity flows and receive the resulting credential through the selected channel-safe protocol."
+      },
+      "requirementIds": ["legacy-requirement:1"]
+    },
+    {
+      "id": "identity_08",
+      "stepNumber": 8,
+      "phase": "Frame the customer identity boundary and targets",
+      "title": "Keep the identity directory authoritative",
+      "type": "decision_point",
+      "content": "Use the customer identity directory as the source of truth for authentication credentials and identity attributes unless a concrete application-owned data need requires a separate store. Avoid duplicating passwords or MFA secrets. If applications keep profile copies, define which fields are authoritative, how changes propagate, and how account deletion and export reach each copy.",
+      "decision": {
+        "question": "Should customer identity attributes be copied into a separate application database?",
+        "chosen": "Keep authentication credentials and identity attributes in the approved identity directory; add only application-owned profile data to a separate store when a product access pattern requires it.",
+        "chosenReason": "An unnecessary mirror adds synchronization, deletion, and privacy obligations without a stated requirement for a second identity store.",
+        "alternatives": [
+          {"option": "Replicate every identity attribute to an application database", "tradeoff": "Creates more copies to secure, reconcile, export, and delete."},
+          {"option": "Store credentials in the application database", "tradeoff": "Duplicates authentication responsibility and increases credential exposure risk."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "identity_09",
+      "stepNumber": 9,
+      "phase": "Build the customer sign-in and policy journeys",
+      "title": "Represent external social identity providers",
+      "type": "add_component",
+      "content": "Add social providers as a custom component because the brief does not name providers or say which are required. The identity service owns protocol configuration, redirect allow-lists, issuer validation, account-linking policy, and failure behavior; applications should not trust provider claims before the identity service validates and maps them.",
+      "component": {
+        "nodeId": "social_idps",
+        "componentType": "custom-component",
+        "label": "Approved Social Identity Providers (TBD)",
+        "description": "Federated providers selected by product and privacy owners",
+        "position": {"x": 410, "y": 40},
+        "properties": {
+          "componentName": "Approved Social Identity Providers (TBD)",
+          "subtitle": "Provider selection is not specified",
+          "componentType": "External identity providers",
+          "technology": "Provider protocols and list TBD",
+          "purpose": "Authenticate customers through only the social providers approved by product, security, and privacy owners. Validate issuer, audience, signature, state, nonce, and redirect configuration in the identity federation flow; define linking and unlinking rules before enabling accounts from multiple providers.",
+          "notes": "No provider brands, scopes, or claims are assumed by this draft."
+        },
+        "highlightReason": "The catalog has no dedicated social-identity-provider node; the existing Custom Component represents the unspecified external provider set."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "identity_10",
+      "stepNumber": 10,
+      "phase": "Build the customer sign-in and policy journeys",
+      "title": "Federate through the identity service",
+      "type": "add_connection",
+      "content": "The identity provider initiates the configured social redirect and validates the provider response before resolving the customer account. Document account-linking, duplicate-email, provider-outage, and consent behavior; do not use a social email claim as proof of account ownership unless the selected provider and policy establish that guarantee.",
+      "connection": {
+        "edgeId": "identity_to_social_idps",
+        "sourceNodeId": "customer_identity",
+        "targetNodeId": "social_idps",
+        "connectionType": "social-federation",
+        "label": "Federated redirect and validated response",
+        "description": "The identity service brokers social sign-in and applies issuer, account-linking, and claim-mapping policy."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "identity_11",
+      "stepNumber": 11,
+      "phase": "Build the customer sign-in and policy journeys",
+      "title": "Choose social account-linking behavior explicitly",
+      "type": "decision_point",
+      "content": "A customer may approach with a local credential or a social identity, and two providers may return matching attributes. Social authentication establishes control of a provider account only to the extent guaranteed by that provider and flow; it is not formal proofing of a person's real-world identity. The frozen brief asks for social sign-in, not identity proofing. Ask whether any product journey separately requires proofing, what assurance/evidence it needs, and which privacy owner approves collection before designing such a flow. For account linking, verify control of both methods, define accepted attributes, and support safe unlinking and recovery; never merge solely on matching email text.",
+      "decision": {
+        "question": "When may two sign-in methods map to one customer account?",
+        "chosen": "Require an explicit, verified account-linking flow defined by the product and security owners; do not silently merge accounts on an email match alone.",
+        "chosenReason": "This limits account-takeover risk when providers differ in email verification and attribute semantics.",
+        "alternatives": [
+          {"option": "Automatically merge on matching email text", "tradeoff": "A weak or unverified claim could attach an attacker-controlled provider to another customer's account."},
+          {"option": "Prohibit all linking", "tradeoff": "Customers may be unable to manage multiple legitimate sign-in methods or recover access consistently."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "identity_12",
+      "stepNumber": 12,
+      "phase": "Build the customer sign-in and policy journeys",
+      "title": "Require MFA according to the approved journey policy",
+      "type": "decision_point",
+      "content": "The identity component starts with MFA enabled as required by the brief. Define which account actions and risk states require a challenge, which factors are permitted, how enrollment and recovery work, and how lost-factor support avoids bypassing account protections. The brief does not specify a factor, remembered-device period, or exception policy.",
+      "decision": {
+        "question": "When and by which approved factors must customers complete MFA?",
+        "chosen": "Enforce MFA in the customer identity journey using factors and challenge conditions approved by the security owner; retain recovery protections at the same trust level.",
+        "chosenReason": "The brief requires MFA but leaves factors and challenge policy to product and security decisions.",
+        "alternatives": [
+          {"option": "Allow each application to implement its own MFA", "tradeoff": "Policy and recovery behavior can diverge across relying applications."},
+          {"option": "Use a permanent MFA bypass after enrollment", "tradeoff": "A stolen session or weak recovery path may defeat the intended account protection."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "customer_identity",
+        "properties": {"mfa": true, "oauth": true}
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "identity_13",
+      "stepNumber": 13,
+      "phase": "Build the customer sign-in and policy journeys",
+      "title": "Define the risk inputs and conditional response",
+      "type": "decision_point",
+      "content": "Risk-based authentication requires a trustworthy risk signal and an action policy. Ask which signals the approved identity service can evaluate, whether risk evaluation is synchronous, how false positives are handled, and when the journey steps up MFA, denies access, or permits a low-risk sign-in. Validate Conditional Access support for the selected customer identity service before treating the hint as an available feature.",
+      "decision": {
+        "question": "Which risk signals and actions are supported and approved for customer sign-in?",
+        "chosen": "Keep risk evaluation within the approved identity-policy boundary and use only supported signals; require owner validation of the feature set and challenge/deny rules.",
+        "chosenReason": "It addresses risk-based authentication without inventing a risk provider, score threshold, or product capability.",
+        "alternatives": [
+          {"option": "Trust a client-supplied risk score", "tradeoff": "An untrusted client can forge or omit the signal."},
+          {"option": "Deny every sign-in when a risk dependency is unavailable", "tradeoff": "Could create a broad outage; the owner must decide the security-versus-availability behavior for each journey."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "identity_14",
+      "stepNumber": 14,
+      "phase": "Build the customer sign-in and policy journeys",
+      "title": "Prevent account takeover across sign-in and recovery",
+      "type": "explanation",
+      "content": "Treat account-takeover prevention as a set of controls across registration, login, MFA, recovery, and support operations. Use risk-based step-up or denial, abuse protections supported by the identity service, verified recovery, safe account-linking, and auditable changes to factors and credentials. Avoid account-enumerating responses and do not weaken recovery to meet a latency target. Exact lockout and challenge thresholds are security-owner decisions, not values supplied by the brief.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "identity_15",
+      "stepNumber": 15,
+      "phase": "Build the customer sign-in and policy journeys",
+      "title": "Make password recovery a first-class identity journey",
+      "type": "explanation",
+      "content": "Implement reset and recovery in the identity service's approved user journey. Verify control of an allowed recovery channel, protect factor replacement with appropriate step-up, and expire or invalidate recovery artifacts according to supported controls. Separately decide whether a password reset or recovery event revokes existing sessions or refresh credentials and requires reauthentication; verify the selected provider's actual behavior. Define access-token and refresh-token lifetime, rotation/revocation, logout semantics, idle/absolute session limits, and recovery-artifact expiry with the identity owner. None of those durations or guarantees is supplied by the brief, so do not hard-code or imply them here. Never log passwords, tokens, MFA secrets, or recovery codes.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:3", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "identity_16",
+      "stepNumber": 16,
+      "phase": "Build the customer sign-in and policy journeys",
+      "title": "Version and validate custom user attributes",
+      "type": "explanation",
+      "content": "Define a minimal attribute schema with purpose, owner, validation, sensitivity, and lifecycle for every custom field. Keep identity attributes in the customer directory when they are required for identity journeys; use Microsoft Graph for approved management operations. Ask which attributes are customer-editable, which are trusted administrative values, and how schema changes remain compatible with existing accounts.",
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3"]
+    },
+    {
+      "id": "identity_17",
+      "stepNumber": 17,
+      "phase": "Build the customer sign-in and policy journeys",
+      "title": "Design journeys for registration, sign-in, and recovery",
+      "type": "decision_point",
+      "content": "Use the supplied custom-policies hint to model journeys as explicit, reviewable steps: validate inputs, collect only required attributes, verify the selected credential or federation, apply risk and MFA policy, and issue a token only after the required checks pass. Ask which journeys need custom policy logic and how policy changes are tested, approved, rolled back, and audited.",
+      "decision": {
+        "question": "Which user journeys need custom policies rather than a simpler built-in flow?",
+        "chosen": "Start from the simplest supported flow that meets registration, sign-in, recovery, federation, MFA, and risk needs; add custom policy logic only for verified gaps.",
+        "chosenReason": "Custom policy complexity should correspond to a concrete user or security requirement and remain testable by journey.",
+        "alternatives": [
+          {"option": "Implement every journey as a custom policy from the outset", "tradeoff": "Increases policy maintenance and regression surface before the requirements justify it."},
+          {"option": "Use one generic journey for every operation", "tradeoff": "May fail to enforce different recovery, enrollment, and risk controls."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6"]
+    },
+    {
+      "id": "identity_18",
+      "stepNumber": 18,
+      "phase": "Build the customer sign-in and policy journeys",
+      "title": "Apply product branding without weakening trust",
+      "type": "decision_point",
+      "content": "Apply approved logos, language, and page styling to registration, sign-in, MFA, and recovery journeys. Confirm localization, accessibility, domain and redirect behavior, and how branded content is reviewed and deployed. Branding must not obscure the identity origin or make security challenges look like unrelated application prompts.",
+      "decision": {
+        "question": "How should branded identity pages be governed across journeys?",
+        "chosen": "Use centrally reviewed, accessible branding for every enabled journey and keep the identity origin and security prompts clear to customers.",
+        "chosenReason": "Consistent branding supports the requirement without reducing clarity about where credentials and factors are entered.",
+        "alternatives": [
+          {"option": "Let each relying app host credential collection", "tradeoff": "Fragments security behavior and exposes credentials to application-specific code."},
+          {"option": "Brand only the initial sign-in page", "tradeoff": "Recovery, federation, or MFA screens may appear inconsistent or suspicious."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:7"]
+    },
+    {
+      "id": "identity_19",
+      "stepNumber": 19,
+      "phase": "Protect application APIs and privileged user management",
+      "title": "Add the relying-application API boundary",
+      "type": "add_component",
+      "content": "Use the existing API Gateway component to represent the protected application API boundary; its concrete Azure product and placement are not specified by the brief. It validates identity tokens and applies request validation and traffic policies before forwarding to application operations. This gateway is not the customer identity provider and should not receive passwords or MFA secrets.",
+      "component": {
+        "nodeId": "customer_api_gateway",
+        "componentType": "api-gateway",
+        "label": "Protected Customer API Gateway (platform TBD)",
+        "description": "Validates issued credentials and protects application API routes",
+        "position": {"x": 860, "y": 300},
+        "properties": {
+          "componentName": "Protected Customer API Gateway (platform TBD)",
+          "purpose": "Protect relying-application API routes by validating configured issuer, audience, signature, expiry, and required claims; apply schema validation and owner-defined traffic policies before forwarding. Choose the actual gateway product and capacity from the existing application topology and measured workload.",
+          "inputValidation": true,
+          "authentication": "JWT",
+          "rateLimiting": true,
+          "tlsTermination": true,
+          "throttling": true
+        },
+        "highlightReason": "The existing API Gateway type supports JWT, input validation, TLS, rate limiting, and throttling; the brief does not force a specific gateway vendor."
+      },
+      "requirementIds": ["legacy-constraint:5"]
+    },
+    {
+      "id": "identity_20",
+      "stepNumber": 20,
+      "phase": "Protect application APIs and privileged user management",
+      "title": "Send authenticated application requests to the API boundary",
+      "type": "add_connection",
+      "content": "After sign-in, the client calls an application API using the credential issued for that API. Keep the token audience and allowed scopes or roles specific to the relying application; do not treat a successful sign-in as authorization to every customer resource.",
+      "connection": {
+        "edgeId": "apps_to_customer_api",
+        "sourceNodeId": "customer_apps",
+        "targetNodeId": "customer_api_gateway",
+        "connectionType": "authenticated-api-request",
+        "label": "Bearer token + customer API request",
+        "description": "Relying applications call protected routes with a token intended for that API."
+      },
+      "requirementIds": ["legacy-constraint:5"]
+    },
+    {
+      "id": "identity_21",
+      "stepNumber": 21,
+      "phase": "Protect application APIs and privileged user management",
+      "title": "Validate tokens and authorize each customer resource",
+      "type": "decision_point",
+      "content": "Separate the checks at the API boundary. Authentication validates the configured issuer, audience, signature, expiry, and required claims against trusted metadata and establishes which principal presented the token. Authorization then evaluates whether that principal may perform this action on this resource under application policy; a valid sign-in or token alone grants no resource access. Conditional Access is an identity-provider policy decision and does not replace API authorization. The brief does not state whether the application is multi-tenant. If it is, derive tenant context from validated identity plus authoritative server-side membership, scope every data and directory-management operation to that context, never trust a client-supplied tenant identifier alone, and test cross-tenant noninterference. If not, do not invent a tenant model. Define token lifetime, key rollover, scopes/roles, and revocation with the owner; none is specified by the brief.",
+      "decision": {
+        "question": "What evidence allows a customer token to access a particular resource?",
+        "chosen": "Require cryptographic token validation plus server-side authorization for the requested customer resource; make issuer, audience, claims, and key rollover explicit configuration.",
+        "chosenReason": "Authentication identifies a principal, while per-resource authorization prevents identity alone from granting broad access.",
+        "alternatives": [
+          {"option": "Trust a user ID supplied in the request body", "tradeoff": "A caller could change the identifier and access another customer's data."},
+          {"option": "Treat any valid token from the tenant as unrestricted access", "tradeoff": "Does not enforce application or resource-level permissions."}
+        ]
+      },
+      "requirementIds": ["legacy-constraint:5"]
+    },
+    {
+      "id": "identity_22",
+      "stepNumber": 22,
+      "phase": "Protect application APIs and privileged user management",
+      "title": "Publish trusted identity metadata to the API boundary",
+      "type": "add_connection",
+      "content": "Configure the API boundary to trust only the selected customer identity issuer and its supported signing-key metadata. Key rotation and metadata-fetch failure behavior must be tested; do not accept arbitrary issuers or fetch keys from token-controlled locations.",
+      "connection": {
+        "edgeId": "identity_to_customer_api",
+        "sourceNodeId": "customer_identity",
+        "targetNodeId": "customer_api_gateway",
+        "connectionType": "trusted-token-validation-metadata",
+        "label": "Issuer configuration + signing-key metadata",
+        "description": "The gateway uses the approved identity issuer configuration to validate customer tokens."
+      },
+      "requirementIds": ["legacy-constraint:5"]
+    },
+    {
+      "id": "identity_23",
+      "stepNumber": 23,
+      "phase": "Protect application APIs and privileged user management",
+      "title": "Add a server-side identity administration boundary",
+      "type": "add_component",
+      "content": "Use the existing Serverless Function catalog component for a thin Azure Functions identity-management API. It handles only approved application operations that require directory administration, applies business authorization, and calls Microsoft Graph server-side. Select its runtime and hosting mode from the existing platform and measured workload; do not route the interactive sign-in critical path through it.",
+      "component": {
+        "nodeId": "identity_admin_api",
+        "componentType": "serverless-function",
+        "label": "Azure Functions — Identity Management API",
+        "description": "Server-side, authorized operations for customer directory management",
+        "position": {"x": 1210, "y": 300},
+        "properties": {
+          "componentName": "Azure Functions — Identity Management API",
+          "purpose": "Expose only required identity-administration operations to authorized application callers; validate customer and operator permissions, minimize returned attributes, and invoke Microsoft Graph with a server-side least-privilege identity. Keep credentials out of clients and keep this management dependency off the interactive sign-in path.",
+          "coldStart": true
+        },
+        "highlightReason": "Serverless Function is an existing catalog component tagged for Azure Functions and provides a server-side boundary for privileged directory operations."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "identity_24",
+      "stepNumber": 24,
+      "phase": "Protect application APIs and privileged user management",
+      "title": "Route approved management operations to the function",
+      "type": "add_connection",
+      "content": "Forward only authorized identity-management requests from protected application routes. The function rechecks business permissions and validates each requested attribute or lifecycle operation rather than assuming the gateway alone has made the decision.",
+      "connection": {
+        "edgeId": "customer_api_to_identity_admin",
+        "sourceNodeId": "customer_api_gateway",
+        "targetNodeId": "identity_admin_api",
+        "connectionType": "authorized-identity-management",
+        "label": "Validated profile / lifecycle operation",
+        "description": "The server-side API applies resource authorization before privileged directory work."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "identity_25",
+      "stepNumber": 25,
+      "phase": "Protect application APIs and privileged user management",
+      "title": "Use Microsoft Graph for approved directory management",
+      "type": "add_component",
+      "content": "Represent Microsoft Graph with a custom component because the catalog has no Graph-specific node. Use it only for documented directory-management operations that the approved customer identity service exposes; sign-in, MFA verification, and token issuance remain in the identity service. Confirm supported APIs, application permissions, and directory operations before building around Graph.",
+      "component": {
+        "nodeId": "microsoft_graph",
+        "componentType": "custom-component",
+        "label": "Microsoft Graph — Directory Management",
+        "description": "Privileged user and custom-attribute operations",
+        "position": {"x": 1570, "y": 300},
+        "properties": {
+          "componentName": "Microsoft Graph — Directory Management",
+          "subtitle": "Supported operations and permissions to verify",
+          "componentType": "Identity management API",
+          "technology": "Microsoft Graph",
+          "purpose": "Perform only the customer directory operations required for approved user lifecycle and custom-attribute management. Use server-side credentials with least privilege, validate tenant and object scope, and return only attributes needed by the caller.",
+          "notes": "Graph API availability and permissions must be verified for the selected customer identity service and tenant."
+        },
+        "highlightReason": "Microsoft Graph is explicitly named in the supplied hints; the existing Custom Component represents it without adding an unsupported catalog type."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "identity_26",
+      "stepNumber": 26,
+      "phase": "Protect application APIs and privileged user management",
+      "title": "Call Graph only from the trusted server-side boundary",
+      "type": "add_connection",
+      "content": "The identity-management function calls Microsoft Graph through an approved server-side credential mechanism. Prefer a supported managed identity where available; otherwise use the approved secret store and least-privilege credential, with an owner-defined rotation, expiry, and revocation process. Do not expose Graph credentials to a customer client or logs, and do not let a customer choose arbitrary directory object identifiers without authorization checks. The brief specifies no credential type or rotation interval.",
+      "connection": {
+        "edgeId": "identity_admin_to_graph",
+        "sourceNodeId": "identity_admin_api",
+        "targetNodeId": "microsoft_graph",
+        "connectionType": "least-privilege-directory-management",
+        "label": "Authorized Graph API operations",
+        "description": "The server-side function scopes directory reads and writes to approved operations and customer authorization."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "identity_27",
+      "stepNumber": 27,
+      "phase": "Protect application APIs and privileged user management",
+      "title": "Keep Graph work out of the sign-in critical path",
+      "type": "decision_point",
+      "content": "A successful sign-in should not depend on an extra profile-management call unless a specific journey requires it. Keep Graph-backed administrative reads and writes separate from token issuance; return only the data required by the user journey and define behavior when management APIs are throttled or unavailable.",
+      "decision": {
+        "question": "Should every sign-in call Microsoft Graph to hydrate a full user profile?",
+        "chosen": "Keep authentication and token issuance within the identity provider; call Graph only for required management operations and avoid blocking sign-in on nonessential profile reads.",
+        "chosenReason": "This protects the latency target and avoids turning an administrative dependency into a universal login bottleneck.",
+        "alternatives": [
+          {"option": "Fetch every directory field on each login", "tradeoff": "Adds latency, Graph dependency and throttling exposure, and unnecessary personal-data handling."},
+          {"option": "Copy all profile fields into tokens", "tradeoff": "Can enlarge tokens, expose data to relying applications, and make changes stale until token renewal."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "identity_28",
+      "stepNumber": 28,
+      "phase": "Protect application APIs and privileged user management",
+      "title": "Minimize claims and protect personal data",
+      "type": "decision_point",
+      "content": "Issue only claims required by relying applications. Avoid putting sensitive profile attributes, recovery data, or social-provider tokens into application tokens unless a documented need and privacy review approve them. Define how logs, support tooling, exports, account deletion, and backups handle identity data under the applicable privacy obligations.",
+      "decision": {
+        "question": "Which identity attributes may leave the customer identity boundary?",
+        "chosen": "Allow-list minimal claims for each relying application and retrieve additional profile data through an authorized, purpose-limited API when needed.",
+        "chosenReason": "Minimizing token and log contents reduces unnecessary dissemination of personal data and simplifies access review.",
+        "alternatives": [
+          {"option": "Place the full customer profile in every token", "tradeoff": "Replicates personal data to every client and downstream service and can make updates stale."},
+          {"option": "Log complete tokens for troubleshooting", "tradeoff": "Exposes reusable credentials and personal claims to telemetry and support users."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3"]
+    },
+    {
+      "id": "identity_29",
+      "stepNumber": 29,
+      "phase": "Protect application APIs and privileged user management",
+      "title": "Add Application Insights with privacy-aware telemetry",
+      "type": "add_component",
+      "content": "Use the existing Monitoring component with Azure Application Insights selected. Capture journey outcomes, dependency timing, error categories, and correlation identifiers while excluding passwords, tokens, MFA secrets, recovery codes, and unnecessary personal attributes.",
+      "component": {
+        "nodeId": "application_insights",
+      "componentType": "monitoring",
+        "label": "Application Insights — Identity Telemetry",
+        "description": "Identity journey, API, and Graph dependency observability",
+        "position": {"x": 1570, "y": 570},
+    "properties": {
+      "componentName": "Application Insights — Identity Telemetry",
+      "purpose": "Collect privacy-filtered identity journey outcomes, server-side latency, dependency timing, error categories, and correlation identifiers. Restrict access and retention according to approved privacy policy; never capture passwords, bearer tokens, MFA or recovery secrets, or unnecessary personal attributes.",
+      "stack": "Azure Application Insights"
+    },
+    "highlightReason": "The existing Monitoring component now exposes Azure Application Insights as a selectable stack."
+      },
+      "requirementIds": ["legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "identity_30",
+      "stepNumber": 30,
+      "phase": "Protect application APIs and privileged user management",
+      "title": "Observe identity outcomes without recording secrets",
+      "type": "add_connection",
+      "content": "Send filtered identity journey and policy outcomes to Application Insights. Use bounded categories such as challenge, denial, recovery, federation, and completion; avoid raw claims or provider payloads. Preserve a correlation path without making telemetry availability a dependency for issuing a valid token.",
+      "connection": {
+        "edgeId": "identity_to_insights",
+        "sourceNodeId": "customer_identity",
+        "targetNodeId": "application_insights",
+        "connectionType": "privacy-filtered-identity-telemetry",
+        "label": "Journey outcome + filtered timing",
+        "description": "Identity diagnostics exclude credentials, tokens, recovery secrets, and unnecessary personal attributes."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "identity_31",
+      "stepNumber": 31,
+      "phase": "Address privacy, failures, scale, and verification",
+      "title": "Trace protected API outcomes",
+      "type": "add_connection",
+      "content": "Record token-validation outcome, route, dependency timing, and safe error category at the API boundary. Do not log bearer tokens or full authorization headers. Separate invalid credentials, insufficient authorization, identity-provider dependency failures, and application failures in dashboards and alerts.",
+      "connection": {
+        "edgeId": "api_to_insights",
+        "sourceNodeId": "customer_api_gateway",
+        "targetNodeId": "application_insights",
+        "connectionType": "privacy-filtered-api-telemetry",
+        "label": "Validation, latency, and safe error categories",
+        "description": "API metrics expose performance and authorization outcomes without credential payloads."
+      },
+      "requirementIds": ["legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "identity_32",
+      "stepNumber": 32,
+      "phase": "Address privacy, failures, scale, and verification",
+      "title": "Trace Graph dependency health separately from sign-in",
+      "type": "add_connection",
+      "content": "Capture Graph operation type, outcome, dependency timing, and safe correlation data from the server-side function. Keep diagnostics free of full profile payloads and Graph credentials; use separate views for login health and administrative lifecycle operations so a Graph issue is not misreported as universal authentication failure.",
+      "connection": {
+        "edgeId": "admin_api_to_insights",
+        "sourceNodeId": "identity_admin_api",
+        "targetNodeId": "application_insights",
+        "connectionType": "privacy-filtered-graph-telemetry",
+        "label": "Graph operation outcome + dependency timing",
+        "description": "Directory-management telemetry is separated from authentication and excludes personal-data payloads."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3"]
+    },
+    {
+      "id": "identity_33",
+      "stepNumber": 33,
+      "phase": "Address privacy, failures, scale, and verification",
+      "title": "Define safe behavior for identity and federation failures",
+      "type": "decision_point",
+      "content": "Decide how each journey behaves when the identity service, a social provider, risk evaluation, signing-key metadata, or an application dependency is unavailable. Fail closed for token validation and security decisions that cannot be trusted; do not silently bypass MFA or conditional access. For nonessential profile-management operations, preserve sign-in where safe and return a clear retryable outcome without duplicating a user mutation.",
+      "decision": {
+        "question": "What may continue when a sign-in or policy dependency is degraded?",
+        "chosen": "Fail closed when identity or risk evidence required for authorization is unavailable, and isolate noncritical Graph/profile work so it cannot create a hidden MFA bypass or broad login dependency.",
+        "chosenReason": "Security decisions must not be guessed during an outage, while unrelated management dependencies should not unnecessarily block every authentication journey.",
+        "alternatives": [
+          {"option": "Accept a token when signing-key validation is unavailable", "tradeoff": "Could admit an unverified or forged credential."},
+          {"option": "Make every login wait for all profile and telemetry dependencies", "tradeoff": "Expands the critical path and turns nonessential dependencies into authentication outages."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "identity_34",
+      "stepNumber": 34,
+      "phase": "Address privacy, failures, scale, and verification",
+      "title": "Handle Graph throttling and ambiguous writes safely",
+      "type": "decision_point",
+      "content": "For directory operations actually exposed through the approved Graph API, respect service throttling guidance and use bounded, observable retries only where safe. Make supported create/update operations idempotent where possible and reconcile ambiguous outcomes before replaying a mutation. Keep password recovery and session revocation in the identity provider's supported journeys unless an explicitly approved API is verified; do not assume Graph exposes them. Keep retries off the interactive login path and do not invent retry counts or delays before observing the service contract.",
+      "decision": {
+        "question": "How should user-management writes recover from throttling or uncertain completion?",
+        "chosen": "Use operation-aware retry and reconciliation based on Graph responses, with idempotency and an owner-approved retry budget.",
+        "chosenReason": "Blind replay can duplicate or overwrite identity state, while a documented policy makes recovery bounded and testable.",
+        "alternatives": [
+          {"option": "Retry every failure immediately", "tradeoff": "Can amplify throttling and create duplicate or conflicting operations."},
+          {"option": "Retry a mutation without checking its outcome", "tradeoff": "An uncertain first result may be applied twice."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "identity_35",
+      "stepNumber": 35,
+      "phase": "Address privacy, failures, scale, and verification",
+      "title": "Plan privacy lifecycle behavior with the compliance owner",
+      "type": "decision_point",
+      "content": "Map each personal attribute to a purpose, lawful handling basis, access path, retention owner, and deletion/export behavior with the privacy owner. Cover identity-directory data, application copies, social-provider identifiers, telemetry, support records, and backups. The brief names GDPR and privacy laws but provides no retention duration, data residency region, or legal interpretation; keep each as a compliance decision rather than inventing one.",
+      "decision": {
+        "question": "How are customer access, export, correction, and deletion requests fulfilled end to end?",
+        "chosen": "Define an auditable data inventory and lifecycle workflow spanning the identity provider, Graph-managed records, relying applications, and telemetry under privacy-owner guidance.",
+        "chosenReason": "A directory-only deletion may leave personal data in application copies or observability systems.",
+        "alternatives": [
+          {"option": "Delete only the identity account", "tradeoff": "May leave linked application records, social identifiers, or telemetry outside the request workflow."},
+          {"option": "Keep identity data indefinitely by default", "tradeoff": "Does not establish purpose-limited retention or support a reviewed privacy lifecycle."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3"]
+    },
+    {
+      "id": "identity_36",
+      "stepNumber": 36,
+      "phase": "Address privacy, failures, scale, and verification",
+      "title": "Protect the latency target without caching security decisions",
+      "type": "decision_point",
+      "content": "Measure the identity flow and its dependencies before optimizing. Keep telemetry nonblocking, avoid unnecessary Graph calls and repeated profile hydration, and use supported identity-service performance controls. Do not cache authorization or risk decisions beyond their approved freshness semantics merely to reduce latency; stale policy can undermine Conditional Access and account-takeover protections.",
+      "decision": {
+        "question": "Which optimizations preserve the under-500ms authentication requirement and current security policy?",
+        "chosen": "Profile the server-side journey, remove unnecessary synchronous dependencies, and optimize only with documented token, key, policy, and risk freshness behavior.",
+        "chosenReason": "This keeps performance work measurable without trading away correct policy evaluation or token validation.",
+        "alternatives": [
+          {"option": "Cache risk decisions without an owner-defined freshness rule", "tradeoff": "A prior low-risk result may outlive the conditions that justified it."},
+          {"option": "Add Graph profile reads to every sign-in", "tradeoff": "Adds dependency latency and data handling to a path that can often issue a minimal identity token."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "identity_37",
+      "stepNumber": 37,
+      "phase": "Address privacy, failures, scale, and verification",
+      "title": "Scale against the stated population and login volume",
+      "type": "scale_trigger",
+      "content": "Treat millions of users and 100k+ daily logins as acceptance inputs, not evidence of a preselected service tier. Measure registration and login mix, peak concurrency, MFA and federation dependencies, directory operations, throttling, and latency under representative load before selecting service capacity or application concurrency.",
+      "scaleTrigger": {
+        "metric": "Measured active-user population, login distribution, dependency throttling, and authentication latency against the supplied scale and under-500ms requirements",
+        "action": "Run representative load and journey tests; scale or partition only at service-supported boundaries indicated by observed bottlenecks.",
+        "impact": "Capacity decisions are grounded in actual peak behavior and do not imply a provider tier or throughput guarantee absent from the brief."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "identity_38",
+      "stepNumber": 38,
+      "phase": "Address privacy, failures, scale, and verification",
+      "title": "Do not derive peak traffic from the daily total",
+      "type": "explanation",
+      "content": "A system that handles 100k+ daily logins must be tested for realistic bursts, but the brief does not supply a peak factor, concurrent-login target, registration rate, or geographic distribution. Ask for those workload inputs and the service's applicable limits. Keep the test plan parameterized until owners provide them; do not claim a particular requests-per-second capacity from daily volume alone.",
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:2"]
+    },
+    {
+      "id": "identity_39",
+      "stepNumber": 39,
+      "phase": "Address privacy, failures, scale, and verification",
+      "title": "Ask for availability and recovery objectives",
+      "type": "decision_point",
+      "content": "The brief states no availability SLA, recovery time, recovery point, service region, or data-residency region. Ask the product and compliance owners for these objectives and confirm the selected identity service's supported topology before choosing deployment regions, failover behavior, or data replication. Do not present a region or availability number as a requirement in this draft.",
+      "decision": {
+        "question": "What availability, recovery, and residency commitments must the identity service satisfy?",
+        "chosen": "Keep SLA, recovery objectives, and regions unresolved until the business and privacy owners provide them and the chosen service confirms support.",
+        "chosenReason": "These choices materially affect identity availability, data location, and architecture, but are absent from the supplied brief.",
+        "alternatives": [
+          {"option": "Assume a multi-region deployment", "tradeoff": "It may conflict with residency constraints and still requires a tested failover and consistency design."},
+          {"option": "Assume the provider's default availability is sufficient", "tradeoff": "No target or contractual service fit has been established."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "identity_40",
+      "stepNumber": 40,
+      "phase": "Address privacy, failures, scale, and verification",
+      "title": "Build a journey-focused validation matrix",
+      "type": "explanation",
+      "content": "Test registration and credential authentication separately from API authorization: include an authenticated customer attempting an unauthorized resource action, invalid issuer/audience, expired credentials, and unauthorized profile changes. Test each approved social flow, MFA enrollment/challenge, custom attributes, password recovery, Conditional Access outcomes, branding, account linking, and safe account lifecycle. The brief does not require formal identity proofing; if the product owner adds it, test its approved evidence and assurance flow separately from sign-in. Tenant isolation is also unspecified; if the product is multi-tenant, include cross-tenant read/write and directory-operation denial tests. Validate accessibility and localization with the product team; the brief gives no locale list.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "identity_41",
+      "stepNumber": 41,
+      "phase": "Address privacy, failures, scale, and verification",
+      "title": "Prove latency, scale, privacy, and security with evidence",
+      "type": "explanation",
+      "content": "Report authentication timing using the owner-approved measurement boundary and percentile; test the supplied under-500ms target and 100k+ daily login requirement with a representative workload. Review policy coverage, takeover scenarios, Graph permissions, token claims, privacy data flows, telemetry redaction, and lifecycle requests. A successful diagram or synthetic test is not proof of production capacity, GDPR compliance, or a provider SLA.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "identity_42",
+      "stepNumber": 42,
+      "phase": "Address privacy, failures, scale, and verification",
+      "title": "Review the end-to-end customer identity flow",
+      "type": "conclusion",
+      "content": "Customer applications delegate registration and sign-in to the customer identity service, which owns social federation, MFA, recovery, custom attributes, branding, and configured risk policy. Relying APIs validate the issued credential and authorize each resource. A server-side Azure Functions boundary uses Microsoft Graph only for approved directory-management operations; Application Insights receives filtered journey and dependency telemetry. The design keeps SLA, regions, provider eligibility, conditional-access support, peak traffic, and privacy retention decisions open, and makes the under-500ms and 100k+ daily-login requirements measurable rather than assumed to be satisfied.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

@@ -1,0 +1,474 @@
+{
+  "problem_id": "cloud_azure_012",
+  "version": "1.0-review",
+  "totalSteps": 36,
+  "requirementRevision": null,
+  "phases": [
+    {
+      "name": "Set the VDI contract and trust boundary",
+      "stepRange": [1, 7],
+      "description": "Separate the stated 10k+ concurrency and sub-30-second logon targets from assumptions, then place remote clients, identity, and the managed AVD control plane."
+    },
+    {
+      "name": "Build session hosts and profile storage",
+      "stepRange": [8, 17],
+      "description": "Connect brokered sessions to scalable multi-session hosts, FSLogix profile containers, and explicit network policy."
+    },
+    {
+      "name": "Scale and observe the desktop fleet",
+      "stepRange": [18, 27],
+      "description": "Drive host-pool capacity from demand and surface the measurements that explain logon time and interactive quality."
+    },
+    {
+      "name": "Exercise secure login, failure, and acceptance paths",
+      "stepRange": [28, 36],
+      "description": "Walk the user journey, preserve fail-closed access and recovery behavior, and validate the explicit brief without inventing an availability SLA."
+    }
+  ],
+  "steps": [
+    {
+      "id": "vdi_01",
+      "stepNumber": 1,
+      "phase": "Set the VDI contract and trust boundary",
+      "title": "Separate requirements from sizing assumptions",
+      "type": "explanation",
+      "content": "The live brief requires virtual desktop pools, managed profiles, secure identity, responsive remote access, demand-based scaling, reduced logon time, and performance monitoring. Its hard constraints are logon under 30 seconds and 10k+ concurrent users, with bandwidth efficiency and security best practices. It does not state regions, user workload, availability target, profile sizes, host session density, or licensing. Treat those as discovery items, not silent design facts.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "vdi_02",
+      "stepNumber": 2,
+      "phase": "Set the VDI contract and trust boundary",
+      "title": "Make the 30-second logon measurable",
+      "type": "decision_point",
+      "content": "A short sign-in request alone is not a successful logon. Include identity policy, brokering, host assignment, profile attachment, and the first usable desktop in the end-to-end timer. The problem gives a 30-second ceiling but no percentile; preserve that ceiling and report p50 and p95 separately until the product owner defines the measurement statistic.",
+      "decision": {
+        "question": "What counts as meeting the under-30-second logon requirement?",
+        "chosen": "Measure connection initiation through an interactive desktop with the user profile mounted; separately attribute identity, broker, host-ready, and profile-attach durations.",
+        "chosenReason": "A component-local timer can look healthy while a slow profile mount still leaves the user waiting.",
+        "alternatives": [
+          {"option": "Measure only identity authentication", "tradeoff": "Does not include host allocation or profile loading, both visible to the user."},
+          {"option": "Measure only the time until a session token is issued", "tradeoff": "A token is not a ready desktop and can hide cold-host delays."}
+        ]
+      },
+      "requirementIds": ["legacy-constraint:1", "legacy-requirement:6"]
+    },
+    {
+      "id": "vdi_03",
+      "stepNumber": 3,
+      "phase": "Set the VDI contract and trust boundary",
+      "title": "Add remote-worker clients",
+      "type": "add_component",
+      "content": "Represent the browser and desktop clients used by remote workers. The client submits sign-in, receives a brokered session, and renders the remote desktop; it must not receive host credentials or direct network access to session hosts.",
+      "component": {
+        "nodeId": "vdi_clients",
+        "componentType": "web-app",
+        "label": "Remote Worker Clients",
+        "description": "Browser and desktop clients for authenticated remote sessions",
+        "position": {"x": 0, "y": 220},
+        "properties": {"componentName": "Remote Worker Clients", "purpose": "Start secure Azure Virtual Desktop sessions from supported browser or desktop clients; render remote sessions without exposing session-host credentials or direct inbound host access."},
+        "highlightReason": "Remote access begins at the user client, while the desktop workload remains in the cloud trust boundary."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "vdi_04",
+      "stepNumber": 4,
+      "phase": "Set the VDI contract and trust boundary",
+      "title": "Authenticate users through the organization identity provider",
+      "type": "add_component",
+      "content": "Use the existing authentication component to represent Microsoft Entra ID sign-in, MFA, and conditional-access evaluation. Session authorization remains scoped to the assigned workspace and user; do not bypass identity checks when the desktop service is degraded.",
+      "component": {
+        "nodeId": "vdi_identity",
+        "componentType": "auth-service",
+        "label": "Microsoft Entra ID",
+        "description": "Federated sign-in, MFA, and conditional access",
+        "position": {"x": 300, "y": 30},
+        "properties": {"componentName": "Microsoft Entra ID", "purpose": "Authenticate workforce identities, require MFA and conditional access for remote sessions, and issue scoped identity claims for workspace authorization.", "oauth": true, "sessions": "none", "mfa": true},
+        "highlightReason": "Identity is a security boundary; a valid desktop session must follow successful organization authentication and policy evaluation."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "vdi_05",
+      "stepNumber": 5,
+      "phase": "Set the VDI contract and trust boundary",
+      "title": "Send the client through federated sign-in",
+      "type": "add_connection",
+      "content": "The client redirects to organization sign-in and returns with an authenticated identity context. MFA, conditional access, and device posture are enforced before any desktop assignment.",
+      "connection": {"edgeId": "vdi_client_identity", "sourceNodeId": "vdi_clients", "targetNodeId": "vdi_identity", "connectionType": "https-auth", "label": "OIDC sign-in + MFA", "description": "Federated user authentication and conditional-access evaluation"},
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "vdi_06",
+      "stepNumber": 6,
+      "phase": "Set the VDI contract and trust boundary",
+      "title": "Use the managed desktop control plane",
+      "type": "add_component",
+      "content": "No existing catalog component represents Azure Virtual Desktop's managed workspace discovery and connection-brokering plane, so use the catalog's supported custom component as the documented fallback. This service validates the authenticated workspace request and selects an eligible host; it is not a place to store profile contents.",
+      "component": {
+        "nodeId": "vdi_broker",
+        "componentType": "custom-component",
+        "label": "Azure Virtual Desktop Broker",
+        "description": "Managed workspace discovery and session brokering",
+        "position": {"x": 620, "y": 220},
+        "properties": {"componentName": "Azure Virtual Desktop Broker", "subtitle": "Managed control plane", "purpose": "Validate workspace authorization, discover host-pool capacity, and broker a client connection to an eligible session host. Keep user profile data on the profile store, not in this control plane.", "componentType": "Managed desktop control plane", "technology": "Azure Virtual Desktop", "notes": "Use the managed reverse-connect path; do not expose inbound RDP on session hosts."},
+        "highlightReason": "The broker is a distinct managed control-plane responsibility and no more specific built-in catalog component exists."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "vdi_07",
+      "stepNumber": 7,
+      "phase": "Set the VDI contract and trust boundary",
+      "title": "Request a workspace connection",
+      "type": "add_connection",
+      "content": "After sign-in, the client asks the managed control plane to resolve the user's authorized workspace and establish a session. The client does not choose an arbitrary host or receive a reusable host password.",
+      "connection": {"edgeId": "vdi_client_broker", "sourceNodeId": "vdi_clients", "targetNodeId": "vdi_broker", "connectionType": "https-session-request", "label": "Workspace request", "description": "Authenticated client asks the managed broker for an authorized desktop session"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "vdi_08",
+      "stepNumber": 8,
+      "phase": "Build session hosts and profile storage",
+      "title": "Pass identity claims to the broker",
+      "type": "add_connection",
+      "content": "The identity provider returns signed claims that the broker validates for tenant, user, and workspace access. Expired, invalid, or policy-rejected claims fail closed; no fallback account is used to preserve availability.",
+      "connection": {"edgeId": "vdi_identity_broker", "sourceNodeId": "vdi_identity", "targetNodeId": "vdi_broker", "connectionType": "oidc-claims", "label": "Signed identity claims", "description": "Validated tenant and user claims constrain workspace assignment"},
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "vdi_09",
+      "stepNumber": 9,
+      "phase": "Build session hosts and profile storage",
+      "title": "Keep the control plane separate from session data",
+      "type": "explanation",
+      "content": "The broker handles workspace authorization and placement; interactive applications and user profile data live on the assigned session host and profile service. This split limits blast radius and makes host-pool scaling independent from identity and control-plane scaling.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "vdi_10",
+      "stepNumber": 10,
+      "phase": "Build session hosts and profile storage",
+      "title": "Add the multi-session host pool",
+      "type": "add_component",
+      "content": "The base catalog has no Azure Virtual Desktop session-host pool type. Reuse its custom component and explicitly name the existing Azure service instead of inventing a new catalog node. Select multi-session hosts only for application and isolation requirements that permit it; measure real session density before capacity sizing.",
+      "component": {
+        "nodeId": "vdi_hostpool",
+        "componentType": "custom-component",
+        "label": "AVD Session Host Pool",
+        "description": "Autoscaled multi-session desktop compute",
+        "position": {"x": 960, "y": 220},
+        "properties": {"componentName": "AVD Session Host Pool", "subtitle": "Multi-session compute", "purpose": "Run approved desktop applications in isolated user sessions; distribute hosts across failure domains, health-check before assignment, and drain hosts before maintenance or scale-in. Tune host density from measured workload and the 10k+ concurrent-user target.", "componentType": "Compute / session-host pool", "technology": "Azure Virtual Desktop session hosts", "notes": "The brief does not specify workload mix or safe session density; benchmark representative users before committing capacity."},
+        "highlightReason": "The host pool is the actual desktop execution tier and is distinct from the existing Desktop App client component."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:2"]
+    },
+    {
+      "id": "vdi_11",
+      "stepNumber": 11,
+      "phase": "Build session hosts and profile storage",
+      "title": "Assign each session to a healthy host",
+      "type": "add_connection",
+      "content": "The broker selects a healthy host in the user's authorized pool using session capacity and health, then establishes the managed reverse-connect session. If no host is ready, do not route to an unhealthy host; report a controlled retry state and alert on capacity pressure.",
+      "connection": {"edgeId": "vdi_broker_hostpool", "sourceNodeId": "vdi_broker", "targetNodeId": "vdi_hostpool", "connectionType": "brokered-session", "label": "Assign healthy session host", "description": "Brokered placement uses host health and available session capacity"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "vdi_12",
+      "stepNumber": 12,
+      "phase": "Build session hosts and profile storage",
+      "title": "Add shared Azure Files profile storage",
+      "type": "add_component",
+      "content": "File Storage already supports Azure Files, so use that catalog component rather than creating an Azure-specific storage node. Attach FSLogix profile containers to the host pool, apply per-user identity permissions, and size throughput from concurrent logon and profile-write measurements.",
+      "component": {
+        "nodeId": "vdi_profiles",
+        "componentType": "file-storage",
+        "label": "Azure Files + FSLogix Profiles",
+        "description": "Identity-scoped profile containers shared across hosts",
+        "position": {"x": 1280, "y": 380},
+        "properties": {"componentName": "Azure Files + FSLogix Profiles", "purpose": "Persist user profiles in identity-scoped FSLogix containers so a user can move between eligible hosts. Use private connectivity, encryption, least-privilege ACLs, tested backup/restore, and throughput sized to simultaneous sign-ins and profile I/O.", "type": "Azure Files"},
+        "highlightReason": "Azure Files is a supported option on the existing shared File Storage component and directly fits the profile-container access pattern."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "vdi_13",
+      "stepNumber": 13,
+      "phase": "Build session hosts and profile storage",
+      "title": "Mount the profile before presenting the desktop",
+      "type": "add_connection",
+      "content": "The host attaches the user's FSLogix profile before declaring the desktop ready. Include profile-container mount and shell initialization in the measured logon path; cap retry time so a storage outage cannot make logon wait indefinitely.",
+      "connection": {"edgeId": "vdi_hostpool_profiles", "sourceNodeId": "vdi_hostpool", "targetNodeId": "vdi_profiles", "connectionType": "profile-container-io", "label": "FSLogix profile mount / save", "description": "Session hosts attach and persist identity-scoped user profiles"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "vdi_14",
+      "stepNumber": 14,
+      "phase": "Build session hosts and profile storage",
+      "title": "Choose a profile persistence model",
+      "type": "decision_point",
+      "content": "The brief requires managed user profiles but does not say every desktop must be personal or persistent. Use roaming FSLogix profiles with pooled hosts as the default only after validating application compatibility and user-data policy; keep persistent assignment for workloads that demonstrably need it.",
+      "decision": {
+        "question": "How should user state survive host changes?",
+        "chosen": "Keep profile state in identity-scoped FSLogix containers and treat pooled session hosts as replaceable compute, with an explicitly approved persistent-pool exception where required.",
+        "chosenReason": "Separating profile state from host lifecycle supports demand-based scaling while acknowledging application-specific persistence requirements.",
+        "alternatives": [
+          {"option": "Store all user data only on each local host", "tradeoff": "Host replacement or reassignment can lose state and breaks a consistent roaming experience."},
+          {"option": "Make every user desktop permanently assigned", "tradeoff": "Can increase idle capacity cost and does not satisfy elastic pooled demand efficiently."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5"]
+    },
+    {
+      "id": "vdi_15",
+      "stepNumber": 15,
+      "phase": "Build session hosts and profile storage",
+      "title": "Add Azure network security policy",
+      "type": "add_component",
+      "content": "The catalog has a generic Firewall, but no exact Azure Network Security Group policy component or matching NSG configuration. Use its supported custom component to name the existing Azure construct, express deny-by-default session-host rules, and avoid implying that a WAF protects private desktop traffic.",
+      "component": {
+        "nodeId": "vdi_nsg",
+        "componentType": "custom-component",
+        "label": "Azure NSG Policies",
+        "description": "Private subnet allow-lists for broker and host traffic",
+        "position": {"x": 940, "y": 500},
+        "properties": {"componentName": "Azure NSG Policies", "subtitle": "Deny by default", "purpose": "Allow only required managed-service, identity, profile-storage, and monitoring flows. Keep session hosts private, restrict outbound destinations, and prohibit public inbound RDP; review rule changes and log denied flows.", "componentType": "Network security policy", "technology": "Azure Network Security Groups", "notes": "Exact rule ports and service tags must be verified against the deployed Azure Virtual Desktop topology and tenant policy."},
+        "highlightReason": "The exact cloud network-policy component is absent from the generic catalog; the supported Custom Component records the Azure NSG choice without adding a new node type."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "vdi_16",
+      "stepNumber": 16,
+      "phase": "Build session hosts and profile storage",
+      "title": "Constrain the managed control-plane path",
+      "type": "add_connection",
+      "content": "Apply the tenant's verified service-tag and egress rules to the broker-to-host control path. Because AVD uses managed reverse-connect behavior, do not open broad inbound Internet access to a host subnet.",
+      "connection": {"edgeId": "vdi_nsg_broker", "sourceNodeId": "vdi_nsg", "targetNodeId": "vdi_broker", "connectionType": "network-policy", "label": "Restrict broker service traffic", "description": "Validated service-tag and egress rules protect the managed desktop control path"},
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "vdi_17",
+      "stepNumber": 17,
+      "phase": "Build session hosts and profile storage",
+      "title": "Keep session hosts and profile storage private",
+      "type": "add_connection",
+      "content": "The same network-policy boundary restricts host and file-service traffic to required private endpoints and identity flows. The storage ACL remains an independent authorization layer; a network allow rule alone does not grant access to another user's profile.",
+      "connection": {"edgeId": "vdi_nsg_hostpool", "sourceNodeId": "vdi_nsg", "targetNodeId": "vdi_hostpool", "connectionType": "private-network-policy", "label": "Private host + profile paths", "description": "Restrict host-pool connectivity; enforce separate identity-based profile ACLs"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "vdi_18",
+      "stepNumber": 18,
+      "phase": "Scale and observe the desktop fleet",
+      "title": "Protect the logon target from cold capacity",
+      "type": "explanation",
+      "content": "Scaling only after every host is full can violate the 30-second logon ceiling because a new host may need provisioning, image preparation, health checks, and profile access. Keep a measured warm buffer in supported regions and track time-to-ready; determine the buffer from burst and startup data rather than assuming a universal percentage.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "vdi_19",
+      "stepNumber": 19,
+      "phase": "Scale and observe the desktop fleet",
+      "title": "Add demand-based host-pool autoscaling",
+      "type": "add_component",
+      "content": "Use a custom catalog component to represent the AVD scaling plan because the generic container orchestrator would mislabel desktop session hosts as Kubernetes or containers. Scale out before available session capacity is exhausted; scale in only after users disconnect and hosts are safely drained.",
+      "component": {
+        "nodeId": "vdi_autoscale",
+        "componentType": "custom-component",
+        "label": "AVD Autoscale Plan",
+        "description": "Schedule- and demand-aware host capacity",
+        "position": {"x": 1280, "y": 40},
+        "properties": {"componentName": "AVD Autoscale Plan", "subtitle": "Warm capacity + safe drain", "purpose": "Scale host-pool capacity from active sessions, available slots, login queue, and host-ready time. Preserve a measured warm buffer for the 10k+ concurrent-user profile; drain before scale-in and stop scale-in while sessions remain active.", "componentType": "Capacity controller", "technology": "Azure Virtual Desktop autoscale", "notes": "Tune thresholds, schedules, and regional quotas from representative peak and burst tests; the brief supplies no host-density or scale-out delay values."},
+        "highlightReason": "The existing container autoscaler is semantically wrong for managed desktop sessions; custom represents the named AVD autoscale feature."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "vdi_20",
+      "stepNumber": 20,
+      "phase": "Scale and observe the desktop fleet",
+      "title": "Feed capacity signals to the scaling plan",
+      "type": "add_connection",
+      "content": "Send active-session counts, free host slots, host health, and host-startup duration to the scaling policy. Use smoothed signals with a bounded evaluation interval so brief telemetry spikes do not flap the pool.",
+      "connection": {"edgeId": "vdi_hostpool_autoscale_metrics", "sourceNodeId": "vdi_hostpool", "targetNodeId": "vdi_autoscale", "connectionType": "capacity-metrics", "label": "Sessions, slots, host health", "description": "Measured pool demand informs the autoscale decision"},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8"]
+    },
+    {
+      "id": "vdi_21",
+      "stepNumber": 21,
+      "phase": "Scale and observe the desktop fleet",
+      "title": "Apply safe desired capacity",
+      "type": "add_connection",
+      "content": "The autoscale plan requests host capacity and a drain operation through the supported Azure control plane. Bound scale-out to available regional quota and stop admitting sessions when the configured safe capacity is exhausted rather than silently overloading existing users.",
+      "connection": {"edgeId": "vdi_autoscale_hostpool", "sourceNodeId": "vdi_autoscale", "targetNodeId": "vdi_hostpool", "connectionType": "capacity-control", "label": "Scale out / drain safely", "description": "Autoscale adjusts desired host capacity subject to quota and active-session safety"},
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:2"]
+    },
+    {
+      "id": "vdi_22",
+      "stepNumber": 22,
+      "phase": "Scale and observe the desktop fleet",
+      "title": "Scale on demand without guessing host density",
+      "type": "decision_point",
+      "content": "10k+ concurrent users is an explicit demand constraint; safe sessions per host depends on application mix, CPU, memory, graphics, and profile I/O. Benchmark representative personas, then calculate required hosts and warm capacity for the measured mix. Use session pressure and login wait time as leading signals, not CPU alone.",
+      "decision": {
+        "question": "Which signal should initiate host-pool scale-out?",
+        "chosen": "Combine active sessions versus tested host density, free slots, login queue, host-ready delay, and service health, with separate guardrails for each user workload tier.",
+        "chosenReason": "CPU-only scaling can react too late to sign-in bursts or overreact to short utilization spikes.",
+        "alternatives": [
+          {"option": "Use a fixed host count for all hours", "tradeoff": "Either wastes capacity off-peak or leaves users waiting during bursts."},
+          {"option": "Scale only on CPU utilization", "tradeoff": "Does not directly reflect session slots, profile attach delay, or host startup time."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "vdi_23",
+      "stepNumber": 23,
+      "phase": "Scale and observe the desktop fleet",
+      "title": "Add Azure desktop observability",
+      "type": "add_component",
+      "content": "The existing Monitoring type has no Azure Monitor/Application Insights stack option. Reuse the catalog's custom-component to name this Azure observability service rather than selecting a mismatched vendor. Correlate identity, broker, host, and profile spans without recording secrets or profile contents.",
+      "component": {
+        "nodeId": "vdi_monitoring",
+        "componentType": "custom-component",
+        "label": "Azure Monitor + Application Insights",
+        "description": "Login, profile, host, and session experience telemetry",
+        "position": {"x": 1600, "y": 220},
+        "properties": {"componentName": "Azure Monitor + Application Insights", "subtitle": "Experience and capacity signals", "purpose": "Collect correlated sign-in-to-desktop duration, profile-mount latency, host readiness, active sessions, resource pressure, network quality, and autoscale outcomes; alert on the 30-second logon ceiling and sustained capacity shortage.", "componentType": "Observability", "technology": "Azure Monitor and Application Insights", "notes": "Keep identity tokens, clipboard contents, and user profile data out of logs; use tenant-aware access and retention controls."},
+        "highlightReason": "The Azure-native monitoring stack is not a selectable option in the generic Monitoring catalog component, so the existing custom type makes the provider choice explicit."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "vdi_24",
+      "stepNumber": 24,
+      "phase": "Scale and observe the desktop fleet",
+      "title": "Trace session setup across services",
+      "type": "add_connection",
+      "content": "Instrument the broker and host path with a correlation ID so the end-to-end logon timer can be decomposed into identity, placement, host-ready, profile attach, and shell-ready spans.",
+      "connection": {"edgeId": "vdi_hostpool_monitoring", "sourceNodeId": "vdi_hostpool", "targetNodeId": "vdi_monitoring", "connectionType": "telemetry", "label": "Session + host health", "description": "Host capacity, logon spans, and interactive health feed Azure observability"},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:1"]
+    },
+    {
+      "id": "vdi_25",
+      "stepNumber": 25,
+      "phase": "Scale and observe the desktop fleet",
+      "title": "Measure profile storage as part of user experience",
+      "type": "add_connection",
+      "content": "Collect profile attach duration, storage throttling, failed mounts, and per-region throughput from the profile path. Alert before a storage bottleneck pushes sign-in beyond the required ceiling.",
+      "connection": {"edgeId": "vdi_profiles_monitoring", "sourceNodeId": "vdi_profiles", "targetNodeId": "vdi_monitoring", "connectionType": "storage-telemetry", "label": "Profile I/O + mount latency", "description": "Azure Files health and FSLogix attach time contribute to the logon SLI"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "vdi_26",
+      "stepNumber": 26,
+      "phase": "Scale and observe the desktop fleet",
+      "title": "Close the autoscale feedback loop",
+      "type": "add_connection",
+      "content": "Record scale decisions, host-start latency, quota errors, and drain outcomes. The autoscale controller should use observed outcomes to alert and throttle safely, not repeatedly retry a quota-blocked deployment.",
+      "connection": {"edgeId": "vdi_autoscale_monitoring", "sourceNodeId": "vdi_autoscale", "targetNodeId": "vdi_monitoring", "connectionType": "autoscale-telemetry", "label": "Capacity actions + outcomes", "description": "Scaling decisions and failed host starts are observable and alertable"},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:2"]
+    },
+    {
+      "id": "vdi_27",
+      "stepNumber": 27,
+      "phase": "Scale and observe the desktop fleet",
+      "title": "Reduce bandwidth without hiding responsiveness problems",
+      "type": "explanation",
+      "content": "Place users in supported regions near their workloads, enable only the client protocol features needed for each persona, and test media redirection and display settings under constrained links. Do not suppress profile synchronization or application traffic just to make bandwidth numbers look smaller; report round-trip time, packet loss, and interactive responsiveness by region.",
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "vdi_28",
+      "stepNumber": 28,
+      "phase": "Exercise secure login, failure, and acceptance paths",
+      "title": "Keep host replacement separate from user state",
+      "type": "decision_point",
+      "content": "Update desktop images using a staged host pool: validate a representative image, admit a small canary cohort, then drain and replace old hosts while profiles remain in the separate Azure Files layer. Keep rollback to the previous validated image available.",
+      "decision": {
+        "question": "How should a bad desktop image rollout be reversed?",
+        "chosen": "Version the image and pool configuration, canary before broad rollout, and restore the previous version while user profiles remain outside the replaceable host.",
+        "chosenReason": "This limits the impact of incompatible updates without coupling user state to a host image.",
+        "alternatives": [
+          {"option": "Patch every active host in place", "tradeoff": "Makes rollback inconsistent and can interrupt active users simultaneously."},
+          {"option": "Store profiles on the image disk", "tradeoff": "Host replacement risks user-state loss and complicates autoscale."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "vdi_29",
+      "stepNumber": 29,
+      "phase": "Exercise secure login, failure, and acceptance paths",
+      "title": "Fail closed when identity policy is unavailable",
+      "type": "explanation",
+      "content": "If Entra sign-in or conditional-access evaluation cannot complete, do not issue a desktop session from cached broad privileges. Return an explicit retryable sign-in error, preserve audit events, and alert on the identity dependency; the problem supplies no availability target that would justify bypassing authentication.",
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "vdi_30",
+      "stepNumber": 30,
+      "phase": "Exercise secure login, failure, and acceptance paths",
+      "title": "Recover from an unhealthy session host",
+      "type": "explanation",
+      "content": "On host health-check failure, stop assigning new sessions to that host, drain it where possible, and direct new logons to healthy pool capacity. If a running session is lost, explain the reconnect behavior and rely on the separately persisted profile for user settings; do not promise transparent session continuity unless the workload and service configuration prove it.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:2"]
+    },
+    {
+      "id": "vdi_31",
+      "stepNumber": 31,
+      "phase": "Exercise secure login, failure, and acceptance paths",
+      "title": "Protect profile confidentiality and remote access",
+      "type": "explanation",
+      "content": "Use identity-scoped profile ACLs, encryption in transit and at rest, private storage access, least-privilege administration, MFA, and reviewed network rules. Apply clipboard, drive, printer, and peripheral redirection controls to the data classification and user persona; log policy decisions without capturing the sensitive content itself.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "vdi_32",
+      "stepNumber": 32,
+      "phase": "Exercise secure login, failure, and acceptance paths",
+      "title": "Walk the successful logon path",
+      "type": "explanation",
+      "content": "A remote worker starts a workspace connection; Entra ID evaluates identity and policy; the AVD broker resolves the authorized pool; the host pool assigns a healthy session host; FSLogix attaches the user's Azure Files profile; and the shell becomes interactive. The complete measured path must remain under 30 seconds for the specified acceptance population.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1"]
+    },
+    {
+      "id": "vdi_33",
+      "stepNumber": 33,
+      "phase": "Exercise secure login, failure, and acceptance paths",
+      "title": "Validate the 10k-user capacity profile",
+      "type": "explanation",
+      "content": "Load-test at least the stated 10k+ concurrent-user target using representative application, graphics, profile, and network personas. Verify regional quota, host density, profile throughput, broker capacity, and autoscale startup time together; capacity in one tier cannot compensate for a saturated profile share or exhausted regional quota.",
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "vdi_34",
+      "stepNumber": 34,
+      "phase": "Exercise secure login, failure, and acceptance paths",
+      "title": "Test operational failure cases",
+      "type": "explanation",
+      "content": "Exercise a profile-store slowdown, identity dependency failure, unhealthy host, regional quota exhaustion, and burst sign-in. Confirm the user gets a bounded failure or retry path, healthy sessions are not displaced by unsafe scale-in, alerts identify the failing dependency, and access controls remain enforced.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "vdi_35",
+      "stepNumber": 35,
+      "phase": "Exercise secure login, failure, and acceptance paths",
+      "title": "Set acceptance checks from the supplied brief",
+      "type": "explanation",
+      "content": "Accept only when the tested workload sustains 10k+ concurrent users, the defined end-to-end logon measure stays under 30 seconds, remote sessions remain responsive under the agreed bandwidth profile, profiles survive host reassignment, demand scaling is observable, and identity/network controls deny unauthorized access. Confirm workload mix, percentile, geography, profile size, and availability objectives with stakeholders before treating assumptions as commitments.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "vdi_36",
+      "stepNumber": 36,
+      "phase": "Exercise secure login, failure, and acceptance paths",
+      "title": "Record unresolved sizing decisions",
+      "type": "conclusion",
+      "content": "Before production sizing, confirm regions and data residency, workload and graphics mix, pooled versus personal desktops, expected profile size and churn, peak sign-in burst, licensing, recovery objectives, and the exact statistic for the 30-second logon ceiling. These answers determine host density, warm capacity, profile throughput, and whether regional failover is required; the brief does not provide them.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    }
+  ]
+}

@@ -1,0 +1,731 @@
+{
+  "problem_id": "6901ef1b9420d83630aca875",
+  "version": "1.0.0-review-draft",
+  "requirementRevision": null,
+  "totalSteps": 40,
+  "phases": [
+    {
+      "name": "Scope, facts, and assumptions",
+      "stepRange": [1, 2],
+      "description": "Start from the frozen brief, distinguish its guarantees from design proposals, and identify decisions the prompt leaves open."
+    },
+    {
+      "name": "Instrument services and propagate trace context",
+      "stepRange": [3, 13],
+      "description": "Model an example request across services, propagate trace context, and export spans asynchronously through a collector tier."
+    },
+    {
+      "name": "Ingest, sample, persist, and build dependency data",
+      "stepRange": [14, 23],
+      "description": "Buffer high-volume telemetry, make trace-level sampling decisions, store queryable spans, archive older data, and derive service dependencies."
+    },
+    {
+      "name": "Query traces and diagnose bottlenecks",
+      "stepRange": [24, 31],
+      "description": "Provide a trace query path for trace details, service maps, and latency investigations without coupling reads to ingestion."
+    },
+    {
+      "name": "Operate at high volume and review open decisions",
+      "stepRange": [32, 40],
+      "description": "Observe overhead, freshness, queue pressure, and query health; then review capacity and policy questions before treating the design as production-ready."
+    }
+  ],
+  "steps": [
+    {
+      "id": "trace_01_brief",
+      "stepNumber": 1,
+      "phase": "Scope, facts, and assumptions",
+      "title": "Separate the prompt from the design",
+      "type": "explanation",
+      "content": "The frozen brief asks for tracing requests across distributed services, capturing timing and latency, visualizing service dependencies, sampling traces, storing and querying trace data, identifying bottlenecks, handling billions of spans per day, and integrating different frameworks. Its constraints are low application overhead, high trace volume, efficient storage, trace-context propagation, and real-time analysis. It does not specify a numeric ingest rate, peak-to-average ratio, latency SLO, retention period, sampling policy, deployment provider, or supported framework list. The fixture records has_guided_walkthrough=false; that is the frozen snapshot value, not a fresh AWS check.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "trace_02_assumptions",
+      "stepNumber": 2,
+      "phase": "Scope, facts, and assumptions",
+      "title": "Mark assumptions and open questions",
+      "type": "explanation",
+      "content": "Design assumptions (proposals, not facts from the brief): use vendor-neutral OpenTelemetry APIs and OTLP; propagate W3C Trace Context; separate asynchronous span ingestion from interactive queries; partition buffered work by trace ID where trace-level decisions require co-location; keep recent searchable spans separately from a lower-cost archive; and derive service maps from observed spans. Open questions: what does “real-time” mean for ingest, search, and service maps; what are peak spans/second and span-size distributions; which languages and framework versions must be supported; which attributes are sensitive; what retention and deletion rules apply; what sampling bias is acceptable; and what regional recovery objectives are required? No numeric SLO, retention, or sampling rate is assumed here.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "trace_03_gateway",
+      "stepNumber": 3,
+      "phase": "Instrument services and propagate trace context",
+      "title": "Add an instrumented request entry point",
+      "type": "add_component",
+      "content": "Represent the example application entry point as instrumented. Its gateway instrumentation creates or continues a trace, records request timing and status, and forwards trace context to downstream services. This is the workload being observed, not a tracing-product ingress API.",
+      "component": {
+        "nodeId": "trace_app_gateway",
+        "componentType": "api-gateway",
+        "label": "Instrumented Application Gateway",
+        "description": "Example request entry point with trace-context propagation",
+        "position": {"x": 0, "y": 220},
+        "properties": {
+          "componentName": "Instrumented Application Gateway",
+          "purpose": "Represent the observed application's request entry point; create or continue trace context, record request timing and outcome, and propagate context to downstream services."
+        },
+        "highlightReason": "The existing API Gateway catalog component models the example application's edge; instrumentation is configuration of that component, not a new product-specific node."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "trace_04_service_a",
+      "stepNumber": 4,
+      "phase": "Instrument services and propagate trace context",
+      "title": "Add the first instrumented service",
+      "type": "add_component",
+      "content": "Model a representative application service with framework instrumentation. The SDK should record bounded span attributes and duration/status, use asynchronous batched export, and avoid blocking the user request on telemetry delivery. Framework adapters and auto-instrumentation coverage must be validated for the actual supported runtimes.",
+      "component": {
+        "nodeId": "trace_service_checkout",
+        "componentType": "backend-server",
+        "label": "Instrumented Checkout Service",
+        "description": "Example service emitting spans from its application runtime",
+        "position": {"x": 300, "y": 220},
+        "properties": {
+          "componentName": "Instrumented Checkout Service",
+          "purpose": "Run framework-specific OpenTelemetry instrumentation in-process; create spans for work and dependencies, record duration and outcome, and export asynchronously so telemetry does not block application requests."
+        },
+        "highlightReason": "The catalog Backend Server supports the real service boundary; SDK instrumentation is embedded in the service rather than modeled as an unsupported standalone node."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "trace_05_service_b",
+      "stepNumber": 5,
+      "phase": "Instrument services and propagate trace context",
+      "title": "Add a downstream instrumented service",
+      "type": "add_component",
+      "content": "A second service demonstrates that one logical request can produce related spans in multiple processes. It extracts the incoming context, creates child spans, and retains the same trace identity when it calls another service; it must not start an unrelated trace for every hop.",
+      "component": {
+        "nodeId": "trace_service_inventory",
+        "componentType": "backend-server",
+        "label": "Instrumented Inventory Service",
+        "description": "Downstream service continuing the distributed trace",
+        "position": {"x": 600, "y": 220},
+        "properties": {
+          "componentName": "Instrumented Inventory Service",
+          "purpose": "Extract propagated trace context, create child spans for local work, preserve the trace identity across framework boundaries, and export spans asynchronously."
+        },
+        "highlightReason": "A second catalog Backend Server makes cross-service propagation and dependency discovery explicit."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "trace_06_gateway_service",
+      "stepNumber": 6,
+      "phase": "Instrument services and propagate trace context",
+      "title": "Propagate context from the gateway to the first service",
+      "type": "add_connection",
+      "content": "Forward the request together with the W3C trace context headers. Validate and continue a well-formed context; define an explicit policy for absent or invalid context so the entry point can start a new trace without trusting arbitrary baggage.",
+      "connection": {
+        "edgeId": "trace_gateway_checkout",
+        "sourceNodeId": "trace_app_gateway",
+        "targetNodeId": "trace_service_checkout",
+        "connectionType": "http",
+        "label": "Application request + W3C trace context",
+        "description": "The downstream service continues the same trace and records its own span."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:8", "legacy-constraint:4"]
+    },
+    {
+      "id": "trace_07_service_hop",
+      "stepNumber": 7,
+      "phase": "Instrument services and propagate trace context",
+      "title": "Continue the trace across another service hop",
+      "type": "add_connection",
+      "content": "Propagate trace context on the downstream call and create a child span at the receiving service. Propagate only reviewed baggage; avoid putting secrets, credentials, or unbounded user data into headers or span attributes.",
+      "connection": {
+        "edgeId": "trace_checkout_inventory",
+        "sourceNodeId": "trace_service_checkout",
+        "targetNodeId": "trace_service_inventory",
+        "connectionType": "http",
+        "label": "Downstream call + propagated traceparent",
+        "description": "Parent/child span relationships let a query reconstruct one request across services."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:8", "legacy-constraint:4"]
+    },
+    {
+      "id": "trace_08_ingest_lb",
+      "stepNumber": 8,
+      "phase": "Instrument services and propagate trace context",
+      "title": "Add a horizontally scalable telemetry front door",
+      "type": "add_component",
+      "content": "Put a load-balancing boundary in front of collector instances so exporters can distribute OTLP traffic and the collector tier can scale independently from application services. Health checks and drain behavior should avoid dropping in-flight batches during rollout; exact topology depends on the deployment environment.",
+      "component": {
+        "nodeId": "trace_ingest_lb",
+        "componentType": "loadbalancer",
+        "label": "OTLP Ingest Load Balancer",
+        "description": "Distributes telemetry export traffic across collector capacity",
+        "position": {"x": 900, "y": 220},
+        "properties": {
+          "componentName": "OTLP Ingest Load Balancer",
+          "purpose": "Distribute OTLP exports to healthy collector instances, support controlled draining, and expose collector-tier health for independent scaling."
+        },
+        "highlightReason": "The existing Load Balancer catalog component fits this traffic-distribution boundary without selecting a cloud provider."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "trace_09_collector",
+      "stepNumber": 9,
+      "phase": "Instrument services and propagate trace context",
+      "title": "Add the OpenTelemetry Collector boundary",
+      "type": "add_component",
+      "content": "The current component catalog has no dedicated trace collector or telemetry-ingest component, so use its generic custom component for this missing fit only. The proposed collector validates OTLP, batches and normalizes resource metadata, redacts configured sensitive attributes, and applies bounded buffering before asynchronous delivery. It is not a vendor commitment; collector deployment, processor chain, and failure behavior remain design choices.",
+      "component": {
+        "nodeId": "trace_otel_collector",
+        "componentType": "custom-component",
+        "label": "OpenTelemetry Collector Tier",
+        "description": "Vendor-neutral OTLP receive, normalize, redact, and batch boundary",
+        "position": {"x": 1200, "y": 220},
+        "properties": {
+          "componentName": "OpenTelemetry Collector Tier",
+          "subtitle": "Telemetry ingest",
+          "componentType": "Trace Collector",
+          "technology": "OpenTelemetry Collector (proposed)",
+          "purpose": "Receive OTLP spans, validate and normalize resource metadata, redact configured sensitive attributes, batch exports, and apply bounded buffering before asynchronous ingestion.",
+          "notes": "Generic custom node is used because the current catalog has no trace collector component; provider, processor configuration, and deployment topology are open decisions."
+        },
+        "highlightReason": "A focused custom component is justified: the catalog contains monitoring but no trace collector/OTLP ingest fit. All surrounding nodes reuse existing catalog components."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "trace_10_gateway_export",
+      "stepNumber": 10,
+      "phase": "Instrument services and propagate trace context",
+      "title": "Export gateway spans asynchronously",
+      "type": "add_connection",
+      "content": "The instrumented gateway exports OTLP batches through the ingest front door. A bounded exporter queue and timeout prevent a slow collector from extending request latency; the application owner's policy must decide whether telemetry is dropped, retried, or locally buffered under sustained failure.",
+      "connection": {
+        "edgeId": "trace_gateway_otlp",
+        "sourceNodeId": "trace_app_gateway",
+        "targetNodeId": "trace_ingest_lb",
+        "connectionType": "data-flow",
+        "label": "Asynchronous OTLP span batches",
+        "description": "The exporter keeps telemetry delivery off the synchronous application request path."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "trace_11_checkout_export",
+      "stepNumber": 11,
+      "phase": "Instrument services and propagate trace context",
+      "title": "Export service spans asynchronously",
+      "type": "add_connection",
+      "content": "Export completed spans in batches over OTLP rather than synchronously calling the tracing query service. Bound queue memory, batch size, retry time, and attribute count according to measured overhead and loss objectives.",
+      "connection": {
+        "edgeId": "trace_checkout_otlp",
+        "sourceNodeId": "trace_service_checkout",
+        "targetNodeId": "trace_ingest_lb",
+        "connectionType": "data-flow",
+        "label": "Batched OTLP spans",
+        "description": "Service instrumentation exports spans asynchronously to the collector tier."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "trace_12_inventory_export",
+      "stepNumber": 12,
+      "phase": "Instrument services and propagate trace context",
+      "title": "Export downstream spans with the same trace identity",
+      "type": "add_connection",
+      "content": "Each participating framework exports spans carrying the shared trace ID and its local span/parent IDs. The collector can then correlate framework-specific instrumentation into one request view; unsupported runtimes need an adapter or explicit instrumentation plan.",
+      "connection": {
+        "edgeId": "trace_inventory_otlp",
+        "sourceNodeId": "trace_service_inventory",
+        "targetNodeId": "trace_ingest_lb",
+        "connectionType": "data-flow",
+        "label": "Batched OTLP spans with trace identity",
+        "description": "Framework exporters converge on one provider-neutral ingest contract."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "trace_13_lb_collector",
+      "stepNumber": 13,
+      "phase": "Instrument services and propagate trace context",
+      "title": "Route OTLP traffic into collectors",
+      "type": "add_connection",
+      "content": "Route authenticated, encrypted OTLP traffic to healthy collector instances. Apply request and payload bounds so malformed or oversized telemetry cannot exhaust ingest capacity; transport and identity mechanisms depend on the deployment environment.",
+      "connection": {
+        "edgeId": "trace_ingest_to_collector",
+        "sourceNodeId": "trace_ingest_lb",
+        "targetNodeId": "trace_otel_collector",
+        "connectionType": "api-call",
+        "label": "Validated OTLP ingest",
+        "description": "Collector capacity scales independently and receives batches from instrumented runtimes."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "trace_14_broker",
+      "stepNumber": 14,
+      "phase": "Ingest, sample, persist, and build dependency data",
+      "title": "Add a durable telemetry buffer",
+      "type": "add_component",
+      "content": "Use a broker to absorb bursts and decouple collectors from downstream sampling and storage. Partition by trace ID when the selected trace-level sampler needs all spans for a trace to reach one worker; size partitions, replication, and retention from measured peak volume and recovery objectives rather than catalog defaults.",
+      "component": {
+        "nodeId": "trace_span_broker",
+        "componentType": "message-broker",
+        "label": "Trace Span Stream",
+        "description": "Buffered span stream for burst absorption and consumer isolation",
+        "position": {"x": 1500, "y": 220},
+        "properties": {
+          "componentName": "Trace Span Stream",
+          "purpose": "Buffer normalized span batches, absorb bursts, and isolate collectors from storage consumers; use trace-ID-aware partitioning if trace-level decisions require spans for one trace to co-locate."
+        },
+        "highlightReason": "The existing Message Broker catalog component fits asynchronous high-volume ingestion; no broker vendor or partition count is assumed."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "trace_15_collector_broker",
+      "stepNumber": 15,
+      "phase": "Ingest, sample, persist, and build dependency data",
+      "title": "Buffer normalized spans before processing",
+      "type": "add_connection",
+      "content": "Publish bounded, normalized span records to the stream. Define acknowledgment and retry semantics to avoid silent loss or unbounded duplicates; downstream writes should be idempotent on stable trace/span identifiers.",
+      "connection": {
+        "edgeId": "trace_collector_broker",
+        "sourceNodeId": "trace_otel_collector",
+        "targetNodeId": "trace_span_broker",
+        "connectionType": "message-queue",
+        "label": "Normalized spans keyed by trace ID",
+        "description": "The stream absorbs bursts and provides a replay boundary for consumers."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "trace_16_processor",
+      "stepNumber": 16,
+      "phase": "Ingest, sample, persist, and build dependency data",
+      "title": "Add a trace-aware processing and sampling tier",
+      "type": "add_component",
+      "content": "Consumers group spans by trace identity, handle late arrivals within a bounded decision window, apply the reviewed sampling policy, and write retained traces and derived service edges. A tail-sampling policy can preserve slow or failed traces, but requires state, trace affinity, and a decision delay; head sampling is cheaper but may discard a trace before its outcome is known. The policy and loss budget are open decisions.",
+      "component": {
+        "nodeId": "trace_span_processor",
+        "componentType": "processing-worker",
+        "label": "Trace Sampling and Indexing Workers",
+        "description": "Trace-aware sampling, enrichment, indexing, and dependency aggregation",
+        "position": {"x": 1800, "y": 220},
+        "properties": {
+          "componentName": "Trace Sampling and Indexing Workers",
+          "purpose": "Group spans by trace ID, handle bounded late arrivals, apply the selected sampling policy, idempotently persist retained spans, and aggregate service-dependency observations."
+        },
+        "highlightReason": "The catalog Processing Worker models asynchronous trace processing; trace-specific behavior is described in its editable purpose."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "trace_17_broker_worker",
+      "stepNumber": 17,
+      "phase": "Ingest, sample, persist, and build dependency data",
+      "title": "Scale processing independently from ingestion",
+      "type": "add_connection",
+      "content": "Workers consume partitions independently and report lag and failures. If tail sampling is enabled, preserve trace affinity and hold spans only for the reviewed decision window; on overload, make the degradation policy observable rather than silently presenting partial traces as complete.",
+      "connection": {
+        "edgeId": "trace_broker_worker",
+        "sourceNodeId": "trace_span_broker",
+        "targetNodeId": "trace_span_processor",
+        "connectionType": "message-queue",
+        "label": "Partitioned span batches and replay",
+        "description": "Consumer scaling and lag are independent from collector capacity."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "trace_18_hot_store",
+      "stepNumber": 18,
+      "phase": "Ingest, sample, persist, and build dependency data",
+      "title": "Add the queryable recent-span store",
+      "type": "add_component",
+      "content": "Use a time-oriented store for recent retained spans, with access paths for trace ID and the supported time/service/error filters. The exact physical model, index cardinality, retention, compression, and consistency behavior require workload testing; avoid indexing every arbitrary attribute without a cardinality and cost policy.",
+      "component": {
+        "nodeId": "trace_hot_store",
+        "componentType": "database",
+        "label": "Recent Trace Store",
+        "description": "Queryable retained spans and trace-level indexes",
+        "position": {"x": 2100, "y": 80},
+        "properties": {
+          "componentName": "Recent Trace Store",
+          "purpose": "Persist retained spans and trace indexes for recent trace-ID, time, service, and error queries; choose partitions, indexes, compression, and retention from measured access patterns.",
+          "type": "Time-Series"
+        },
+        "highlightReason": "The catalog Database supports a Time-Series type, an appropriate generic fit for time-stamped span data without naming a vendor."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "trace_19_worker_hot_store",
+      "stepNumber": 19,
+      "phase": "Ingest, sample, persist, and build dependency data",
+      "title": "Persist selected spans and searchable trace metadata",
+      "type": "add_connection",
+      "content": "Write a trace's retained spans and searchable metadata using idempotent trace/span keys. Keep writes partition-aware and make sampling status, missing-span indicators, and ingest time available to queries so partial or delayed data is not mistaken for a complete trace.",
+      "connection": {
+        "edgeId": "trace_processor_hot_store",
+        "sourceNodeId": "trace_span_processor",
+        "targetNodeId": "trace_hot_store",
+        "connectionType": "database-connection",
+        "label": "Retained spans + trace indexes",
+        "description": "The query store is optimized for recent trace retrieval and investigation."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "trace_20_archive",
+      "stepNumber": 20,
+      "phase": "Ingest, sample, persist, and build dependency data",
+      "title": "Add lower-cost trace block storage",
+      "type": "add_component",
+      "content": "Archive compressed trace blocks or retained raw span batches separately from the hot query index. Lifecycle and deletion rules must keep archive retention consistent with privacy, legal, and customer policies; the brief gives no retention duration or provider.",
+      "component": {
+        "nodeId": "trace_archive",
+        "componentType": "object-storage",
+        "label": "Trace Archive",
+        "description": "Compressed trace blocks for policy-governed longer retention",
+        "position": {"x": 2100, "y": 300},
+        "properties": {
+          "componentName": "Trace Archive",
+          "purpose": "Store compressed trace blocks outside the hot index for policy-governed retention and replay; lifecycle, encryption, deletion, and provider choices require review."
+        },
+        "highlightReason": "The catalog Object Storage component is a reusable fit for large compressed trace blocks; no provider or retention period is invented."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "trace_21_worker_archive",
+      "stepNumber": 21,
+      "phase": "Ingest, sample, persist, and build dependency data",
+      "title": "Archive according to reviewed retention tiers",
+      "type": "add_connection",
+      "content": "Write compressed or immutable blocks from the processing tier after the sampling decision. Reconciliation should detect archive gaps; lifecycle expiration must honor the final retention and deletion policy rather than a guessed duration.",
+      "connection": {
+        "edgeId": "trace_processor_archive",
+        "sourceNodeId": "trace_span_processor",
+        "targetNodeId": "trace_archive",
+        "connectionType": "data-flow",
+        "label": "Compressed retained trace blocks",
+        "description": "The archive separates long-lived bulk data from interactive indexes."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "trace_22_dependency_store",
+      "stepNumber": 22,
+      "phase": "Ingest, sample, persist, and build dependency data",
+      "title": "Add a derived service-dependency store",
+      "type": "add_component",
+      "content": "Store aggregated service-to-service relationships and time-windowed signals derived from parent/child spans. This is a derived view, not a second source of truth for raw spans; define aggregation windows, edge cardinality, and freshness from query needs.",
+      "component": {
+        "nodeId": "trace_dependency_store",
+        "componentType": "database",
+        "label": "Service Dependency Graph",
+        "description": "Derived service edges and time-windowed dependency signals",
+        "position": {"x": 2400, "y": 300},
+        "properties": {
+          "componentName": "Service Dependency Graph",
+          "purpose": "Store aggregated service-to-service edges and time-windowed dependency signals derived from spans; remain a rebuildable view rather than the raw-span source of truth.",
+          "type": "Graph"
+        },
+        "highlightReason": "The catalog Database's Graph type fits derived dependency relationships; no standalone unsupported graph product is introduced."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "trace_23_worker_dependency_store",
+      "stepNumber": 23,
+      "phase": "Ingest, sample, persist, and build dependency data",
+      "title": "Build dependency edges from observed spans",
+      "type": "add_connection",
+      "content": "Aggregate service identity and parent/child relationships from retained or policy-approved sampled spans. Track the observation window and freshness so the service map distinguishes current topology from historical or incomplete data.",
+      "connection": {
+        "edgeId": "trace_processor_dependency_store",
+        "sourceNodeId": "trace_span_processor",
+        "targetNodeId": "trace_dependency_store",
+        "connectionType": "database-connection",
+        "label": "Aggregated service edges and latency signals",
+        "description": "Derived topology supports service maps without scanning all raw spans per view."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "trace_24_query_api",
+      "stepNumber": 24,
+      "phase": "Query traces and diagnose bottlenecks",
+      "title": "Add an independent trace query service",
+      "type": "add_component",
+      "content": "Serve trace lookup, time/service/error filters, span waterfalls, and dependency views from a separate stateless API. Enforce tenant authorization and query bounds; avoid unbounded scans across high-cardinality attributes.",
+      "component": {
+        "nodeId": "trace_query_api",
+        "componentType": "backend-server",
+        "label": "Trace Query API",
+        "description": "Authorized trace retrieval and service-map query orchestration",
+        "position": {"x": 2700, "y": 80},
+        "properties": {
+          "componentName": "Trace Query API",
+          "purpose": "Authorize and bound trace-ID, time, service, and error queries; compose span waterfalls and service-map data from hot storage, archive, and derived topology."
+        },
+        "highlightReason": "The catalog Backend Server is the existing fit for the stateless trace-query service."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "trace_25_query_cache",
+      "stepNumber": 25,
+      "phase": "Query traces and diagnose bottlenecks",
+      "title": "Add a bounded cache for repeated investigation reads",
+      "type": "add_component",
+      "content": "Cache only safe, frequently repeated query results with tenant-aware keys and short, policy-driven freshness. Do not let cache state hide newly arrived spans or bypass authorization; the cache is an optimization and the stores remain authoritative.",
+      "component": {
+        "nodeId": "trace_query_cache",
+        "componentType": "cache",
+        "label": "Trace Query Cache",
+        "description": "Bounded cache for repeated trace and dependency queries",
+        "position": {"x": 3000, "y": 80},
+        "properties": {
+          "componentName": "Trace Query Cache",
+          "purpose": "Cache selected repeated trace and service-map query results with tenant-aware keys and reviewed freshness; never bypass authorization or replace authoritative storage."
+        },
+        "highlightReason": "The existing Cache catalog component fits this optional read optimization without requiring a vendor choice."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "trace_26_query_ui",
+      "stepNumber": 26,
+      "phase": "Query traces and diagnose bottlenecks",
+      "title": "Add the trace investigation interface",
+      "type": "add_component",
+      "content": "Present a trace waterfall with service, duration, parent/child, error, and timing information, plus a service dependency view. Mark sampled, delayed, missing, or partial trace data so an investigator does not mistake absent spans for proof that work did not occur.",
+      "component": {
+        "nodeId": "trace_query_ui",
+        "componentType": "web-app",
+        "label": "Trace Explorer UI",
+        "description": "Trace waterfall, service map, and bottleneck investigation",
+        "position": {"x": 3000, "y": 360},
+        "properties": {
+          "componentName": "Trace Explorer UI",
+          "purpose": "Let authorized users inspect trace waterfalls, service dependencies, latency, and errors while exposing sampling, freshness, and partial-data status."
+        },
+        "highlightReason": "The existing Web App component provides the UI boundary; the trace-specific views are application behavior, not a new catalog component."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "trace_27_ui_query_api",
+      "stepNumber": 27,
+      "phase": "Query traces and diagnose bottlenecks",
+      "title": "Connect the investigator to the query API",
+      "type": "add_connection",
+      "content": "The UI calls an authenticated query API rather than accessing storage directly. Paginate or bound results, and include timestamps and sampling/freshness metadata in the response contract.",
+      "connection": {
+        "edgeId": "trace_ui_query_api",
+        "sourceNodeId": "trace_query_ui",
+        "targetNodeId": "trace_query_api",
+        "connectionType": "http",
+        "label": "Authorized trace and service-map queries",
+        "description": "The query API enforces access and query bounds before reading storage."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "trace_28_query_hot_store",
+      "stepNumber": 28,
+      "phase": "Query traces and diagnose bottlenecks",
+      "title": "Read recent traces and span details",
+      "type": "add_connection",
+      "content": "Fetch a trace by identity and retrieve bounded indexed spans for the selected time range. Reassemble parent/child ordering using span identifiers and timestamps, and return missing-span or ingest-lag signals when data is incomplete.",
+      "connection": {
+        "edgeId": "trace_query_hot_store",
+        "sourceNodeId": "trace_query_api",
+        "targetNodeId": "trace_hot_store",
+        "connectionType": "database-connection",
+        "label": "Trace ID, time, service, and error lookups",
+        "description": "Recent indexed spans support interactive trace reconstruction."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "trace_29_query_archive",
+      "stepNumber": 29,
+      "phase": "Query traces and diagnose bottlenecks",
+      "title": "Retrieve older trace data under policy",
+      "type": "add_connection",
+      "content": "When a query falls outside the hot tier, fetch archive blocks only if the caller is authorized and the retention policy permits it. Older-data latency may differ from recent search and should be visible to users rather than hidden behind one implied SLO.",
+      "connection": {
+        "edgeId": "trace_query_archive",
+        "sourceNodeId": "trace_query_api",
+        "targetNodeId": "trace_archive",
+        "connectionType": "data-flow",
+        "label": "Policy-checked older trace retrieval",
+        "description": "The archive supports retained historical traces with a distinct access path."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "trace_30_query_dependency_store",
+      "stepNumber": 30,
+      "phase": "Query traces and diagnose bottlenecks",
+      "title": "Read service relationships and aggregate signals",
+      "type": "add_connection",
+      "content": "Read the derived service graph for dependency visualization and time-windowed latency/error summaries. Include its observation window and freshness in the response because graph data is aggregated and may lag raw spans.",
+      "connection": {
+        "edgeId": "trace_query_dependency_store",
+        "sourceNodeId": "trace_query_api",
+        "targetNodeId": "trace_dependency_store",
+        "connectionType": "database-connection",
+        "label": "Service map and dependency summaries",
+        "description": "Aggregated topology supports dependency visualization without a raw-span full scan."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "trace_31_query_cache",
+      "stepNumber": 31,
+      "phase": "Query traces and diagnose bottlenecks",
+      "title": "Use the cache without weakening correctness",
+      "type": "add_connection",
+      "content": "The query API checks the cache for eligible repeated reads, validates tenant and authorization scope, and falls back to authoritative stores on a miss or stale entry. Cache invalidation/freshness should be aligned with ingest delay and the eventual consistency users accept.",
+      "connection": {
+        "edgeId": "trace_query_cache",
+        "sourceNodeId": "trace_query_api",
+        "targetNodeId": "trace_query_cache",
+        "connectionType": "data-flow",
+        "label": "Tenant-scoped query result cache",
+        "description": "The cache accelerates eligible reads but is never the source of truth."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "trace_32_monitoring",
+      "stepNumber": 32,
+      "phase": "Operate at high volume and review open decisions",
+      "title": "Add telemetry-pipeline monitoring",
+      "type": "add_component",
+      "content": "Monitor application-side export overhead and drops, collector acceptance/errors, broker age and backlog, sampler decisions, stored-span freshness, archive completeness, and query latency/errors. Alert thresholds must come from agreed service objectives and observed baselines, not from this brief.",
+      "component": {
+        "nodeId": "trace_platform_monitoring",
+        "componentType": "monitoring",
+        "label": "Tracing Platform Monitoring",
+        "description": "Ingest, sampling, storage freshness, and query health",
+        "position": {"x": 1800, "y": 560},
+        "properties": {
+          "componentName": "Tracing Platform Monitoring",
+          "purpose": "Observe exporter overhead and drops, collector acceptance, queue age, sampling outcomes, storage freshness, archive completeness, and query latency/errors; set alert thresholds only after objectives are agreed.",
+          "metrics": true,
+          "alerts": true
+        },
+        "highlightReason": "The catalog Monitoring component supports metrics and alerting; its scope is described in catalog-supported editable properties."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "trace_33_collector_monitoring",
+      "stepNumber": 33,
+      "phase": "Operate at high volume and review open decisions",
+      "title": "Measure collector health and overhead signals",
+      "type": "add_connection",
+      "content": "Export collector receive/accepted/rejected counts, batch sizes, processor duration, memory pressure, and exporter failures. Correlate these with application-side instrumentation cost so low overhead is measured end to end rather than inferred from configuration.",
+      "connection": {
+        "edgeId": "trace_collector_monitoring",
+        "sourceNodeId": "trace_otel_collector",
+        "targetNodeId": "trace_platform_monitoring",
+        "connectionType": "data-flow",
+        "label": "Collector acceptance, errors, and resource metrics",
+        "description": "Ingest telemetry exposes collector health and contributes to overhead measurements."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "trace_34_broker_monitoring",
+      "stepNumber": 34,
+      "phase": "Operate at high volume and review open decisions",
+      "title": "Observe backlog and replay behavior",
+      "type": "add_connection",
+      "content": "Track queue age, partition skew, consumer lag, replay rate, and redelivery/duplicate rates. These signals distinguish a healthy ingest front door from a downstream pipeline that is quietly falling behind.",
+      "connection": {
+        "edgeId": "trace_broker_monitoring",
+        "sourceNodeId": "trace_span_broker",
+        "targetNodeId": "trace_platform_monitoring",
+        "connectionType": "data-flow",
+        "label": "Queue age, skew, lag, and replay metrics",
+        "description": "Backlog signals indicate whether sampling and storage consumers keep pace."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "trace_35_worker_monitoring",
+      "stepNumber": 35,
+      "phase": "Operate at high volume and review open decisions",
+      "title": "Measure sampling decisions and data completeness",
+      "type": "add_connection",
+      "content": "Report retained/dropped decisions by policy, trace-decision delay, late/missing spans, write failures, and derived-graph freshness. Make policy changes auditable and compare their impact on error and slow-trace discovery.",
+      "connection": {
+        "edgeId": "trace_worker_monitoring",
+        "sourceNodeId": "trace_span_processor",
+        "targetNodeId": "trace_platform_monitoring",
+        "connectionType": "data-flow",
+        "label": "Sampling, processing, and freshness outcomes",
+        "description": "Processing telemetry reveals sampling behavior and incomplete trace risk."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "trace_36_query_monitoring",
+      "stepNumber": 36,
+      "phase": "Operate at high volume and review open decisions",
+      "title": "Measure investigation latency and effectiveness",
+      "type": "add_connection",
+      "content": "Measure query latency and errors by query class (trace ID, time filters, service map, archive), plus cache hit rate and stale-result behavior. To validate bottleneck identification, test whether known injected slow/error spans can be found and correctly attributed in the UI.",
+      "connection": {
+        "edgeId": "trace_query_monitoring",
+        "sourceNodeId": "trace_query_api",
+        "targetNodeId": "trace_platform_monitoring",
+        "connectionType": "data-flow",
+        "label": "Query latency, errors, and result freshness",
+        "description": "Query telemetry verifies the operational behavior of trace investigation."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "trace_37_sampling_tradeoffs",
+      "stepNumber": 37,
+      "phase": "Operate at high volume and review open decisions",
+      "title": "Choose sampling with an explicit observability tradeoff",
+      "type": "explanation",
+      "content": "Sampling can bound cost, but changes which incidents are visible. Head sampling is fast and low-state but decides before request outcome; tail sampling can retain slow/error traces but needs trace affinity, buffering, and a decision window. A hybrid policy may preserve selected errors or tenant-critical traffic, but rates and rules must be based on measured volume, privacy policy, and an agreed loss budget. Always expose sampling metadata and do not claim unsampled absence proves an event did not happen.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "trace_38_capacity",
+      "stepNumber": 38,
+      "phase": "Operate at high volume and review open decisions",
+      "title": "Scale from a measured span envelope",
+      "type": "explanation",
+      "content": "“Billions of spans per day” is not a complete capacity plan: burst factor, span size, sampling rate, tenant skew, retention, and query mix are unspecified. Benchmark collection, broker partitions, trace-affine processing, storage indexes, and archive writes separately using representative payloads. Scale each tier from throughput, lag, freshness, and saturation evidence; do not convert the brief into invented capacity numbers.",
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "trace_39_real_time",
+      "stepNumber": 39,
+      "phase": "Operate at high volume and review open decisions",
+      "title": "Define what real-time analysis means",
+      "type": "explanation",
+      "content": "The interactive path is: instrumented service → asynchronous export → collector → buffered stream → trace-aware processing → hot span/dependency stores → query API → trace UI. This keeps ingest independent from investigation, but the queue, sampling window, indexing, and graph aggregation add delay. Agree separate freshness and latency objectives for trace-by-ID lookup, filtered search, and service maps before claiming real-time behavior.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "trace_40_open_questions",
+      "stepNumber": 40,
+      "phase": "Operate at high volume and review open decisions",
+      "title": "Resolve production decisions before finalizing",
+      "type": "explanation",
+      "content": "Open questions: which languages/frameworks and propagation formats are required; what peak spans/second, payload sizes, tenant skew, and query mix should tests represent; what overhead and ingest/query freshness objectives define success; which head/tail/hybrid sampling policy and loss budget are acceptable; which span attributes require redaction and access control; how long hot and archived data must remain and how deletion works; what replication, regional recovery, and replay guarantees are needed; and what trace search dimensions are supported? The graph is a review draft, not a verified production architecture or an AI/browser acceptance result.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

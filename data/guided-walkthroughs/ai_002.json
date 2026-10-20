@@ -1,0 +1,1083 @@
+{
+  "problem_id": "ai_002",
+  "version": "1.0",
+  "totalSteps": 57,
+  "phases": [
+    {
+      "name": "Establish the moderation contract",
+      "stepRange": [1, 2],
+      "description": "Preserve the supplied problem exactly, then distinguish its latency, quality, scale, and streaming targets from decisions that still need product definition."
+    },
+    {
+      "name": "Build the low-latency moderation path",
+      "stepRange": [3, 28],
+      "description": "Authenticate the caller, apply a cautious fast cascade, run modality-specific models, and keep similarity signals subordinate to model and policy evidence."
+    },
+    {
+      "name": "Process live video as a stream",
+      "stepRange": [29, 40],
+      "description": "Separate stream intake from synchronous text and image decisions, retain verifiable media references, and aggregate frame-level results into a content decision."
+    },
+    {
+      "name": "Make human review and model changes auditable",
+      "stepRange": [41, 50],
+      "description": "Persist decision evidence, route uncertain cases and appeals to people, and release validated model versions without interrupting serving."
+    },
+    {
+      "name": "Measure safety, latency, and capacity",
+      "stepRange": [51, 57],
+      "description": "Measure error rates by language and modality, test the stated daily volume against observed peaks, and alert on end-to-end service objectives."
+    }
+  ],
+  "steps": [
+    {
+      "id": "mod_01_frozen_brief",
+      "stepNumber": 1,
+      "phase": "Establish the moderation contract",
+      "title": "Start with the exact problem brief",
+      "type": "explanation",
+      "content": "Problem: Design a Real-time AI Content Moderation System (ai_002; design-a-real-time-ai-content-moderation-system). Category: AI - Content Safety; domain: aiml; difficulty: Hard; estimated time: 60-90 minutes.\n\nDescription (verbatim): Design an AI-powered content moderation system that detects harmful content across text, images, and video in real-time, supports multiple languages, and provides human-in-the-loop review workflows.\n\nRequirements (verbatim):\n- Classify text for toxicity, hate speech, and spam\n- Detect NSFW and violent imagery\n- Process video frames for harmful content\n- Support 50+ languages\n- Implement human review queues for edge cases\n- Provide appeal and feedback mechanisms\n- Generate moderation audit trails\n- Update detection models without downtime\n\nConstraints (verbatim):\n- Moderation latency under 200ms for text\n- Image classification under 500ms\n- False positive rate below 1%\n- Process 10M+ items per day\n- Support real-time streaming content\n\nHints (verbatim):\n- Use multi-modal models for text and image classification\n- Implement cascade filtering (fast rules then ML models)\n- Use embedding similarity for known harmful content\n- Queue borderline cases for human review\n- Implement feedback loops to improve model accuracy\n- Use content hashing for duplicate detection\n\nCompanies listed for context only: Meta, Google, OpenAI, TikTok. These names do not mandate a vendor or establish product capabilities. The brief does not define peak traffic, the latency percentile or measurement boundary, the false-positive denominator and evaluation population, video decision latency, retention, or the policy for borderline content.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "mod_02_targets_and_open_questions",
+      "stepNumber": 2,
+      "phase": "Establish the moderation contract",
+      "title": "Turn targets into measurable service behavior",
+      "type": "explanation",
+      "content": "Treat 200ms for text, 500ms for image classification, below-1% false positives, and 10M+ items per day as acceptance targets—not achieved guarantees. For this worked example, label these replaceable assumptions: provision for a 10x daily-average burst (about 1,200 items/second); define text and image latency as p95 from gateway acceptance to the caller-visible decision; target 99.9% monthly availability for synchronous decisions; synchronously persist an idempotent decision and audit event before returning a terminal allow/block; let analytics and retraining consume committed events asynchronously; keep stream status ongoing until end-of-stream or a configurable gap watermark, with incomplete evidence pending review; and use a configurable 30-day media-evidence retention window pending product/privacy approval. Ten million items per day averages about 116 items/second, so load-test the assumed peak rather than treating the average as capacity. Measure false-positive rate on a reviewed, representative population and report it by language, modality, and policy category. These choices are assumptions to validate, not new requirements or achieved guarantees."
+    },
+    {
+      "id": "mod_03_publishing_client",
+      "stepNumber": 3,
+      "phase": "Build the low-latency moderation path",
+      "title": "Represent the content producer",
+      "type": "add_component",
+      "content": "Use this client as the publishing platform that submits text, image references, or a live-stream session and receives a moderation outcome. It also presents appeal status and permits submitters to provide feedback. The brief does not prescribe a browser framework or a specific caller identity model.",
+      "component": {
+        "nodeId": "mod_publishing_client",
+        "componentType": "web-app",
+        "label": "Publishing Platform",
+        "description": "Content producer that requests moderation and displays decisions, appeal status, and feedback controls.",
+        "position": {"x": 0, "y": 320},
+        "properties": {
+          "componentName": "Publishing Platform",
+          "purpose": "Submit text, images, and live-stream references for moderation; display a clear decision or pending-review state; and let a submitter file an appeal and provide feedback.",
+          "framework": "React"
+        },
+        "highlightReason": "The moderation workflow needs a visible request and outcome boundary for its callers."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "mod_04_api_gateway",
+      "stepNumber": 4,
+      "phase": "Build the low-latency moderation path",
+      "title": "Validate requests at the service boundary",
+      "type": "add_component",
+      "content": "Validate modality, size, encoding, idempotency key, and stream metadata before work begins. Enforce a deadline budget, rate limits, and a clear response contract. Authentication is a supporting design choice for accountable appeals and operations; the brief does not mandate a particular identity provider.",
+      "component": {
+        "nodeId": "mod_api_gateway",
+        "componentType": "api-gateway",
+        "label": "Moderation API Gateway",
+        "description": "Validated, deadline-aware entry point for moderation and appeal requests.",
+        "position": {"x": 340, "y": 320},
+        "properties": {
+          "componentName": "Moderation API Gateway",
+          "purpose": "Validate modality-specific request schemas and media references, authenticate supported callers, enforce quotas and idempotency, and propagate a deadline for p95 caller-visible decisions measured from gateway acceptance. Size the initial worked example for an assumed 1,200 items/second peak; load-test and replace this assumption with observed traffic.",
+          "inputValidation": true,
+          "authentication": "OAuth 2.0",
+          "rateLimiting": true
+        },
+        "highlightReason": "Invalid or unbounded requests can consume inference capacity and make caller-visible latency unpredictable."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "mod_05_client_to_gateway",
+      "stepNumber": 5,
+      "phase": "Build the low-latency moderation path",
+      "title": "Send submissions through the bounded API",
+      "type": "add_connection",
+      "content": "Submit text and image moderation requests synchronously under the propagated deadline. For a stream, submit a session/reference and accept incremental processing state rather than waiting for an entire video to finish.",
+      "connection": {
+        "edgeId": "mod_client_to_gateway",
+        "sourceNodeId": "mod_publishing_client",
+        "targetNodeId": "mod_api_gateway",
+        "connectionType": "api-call",
+        "label": "Moderation request / appeal",
+        "description": "Validated text, image, stream-session, or appeal request with an idempotency key and caller context."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "mod_06_identity_service",
+      "stepNumber": 6,
+      "phase": "Build the low-latency moderation path",
+      "title": "Resolve caller and reviewer identity",
+      "type": "add_component",
+      "content": "Resolve caller identity and permissions for moderation results, appeals, and reviewer actions. Keep this as an explicit boundary so audit records can attribute a human decision. Select the actual identity and session technology with the product team.",
+      "component": {
+        "nodeId": "mod_identity_service",
+        "componentType": "auth-service",
+        "label": "Identity and Access Service",
+        "description": "Authenticates callers and supplies identity context for review and appeal actions.",
+        "position": {"x": 660, "y": 70},
+        "properties": {
+          "componentName": "Identity and Access Service",
+          "purpose": "Validate caller and moderator identity, resolve permitted actions, and provide a stable actor reference for auditable decisions. Apply least privilege to media and review-case access.",
+          "oauth": true,
+          "sessions": "redis"
+        },
+        "highlightReason": "Appeals and human moderation need attributable actors and controlled access to potentially harmful material."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7"]
+    },
+    {
+      "id": "mod_07_gateway_identity",
+      "stepNumber": 7,
+      "phase": "Build the low-latency moderation path",
+      "title": "Attach verified identity context",
+      "type": "add_connection",
+      "content": "Resolve the authenticated actor and authorization context before exposing decisions or allowing appeal and review operations. Keep the synchronous inference path free of unnecessary identity round trips where the gateway can safely validate a signed context.",
+      "connection": {
+        "edgeId": "mod_gateway_to_identity",
+        "sourceNodeId": "mod_api_gateway",
+        "targetNodeId": "mod_identity_service",
+        "connectionType": "api-call",
+        "label": "Verify identity and permissions",
+        "description": "Gateway resolves caller and moderator permissions and associates an actor reference with protected operations."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7"]
+    },
+    {
+      "id": "mod_08_orchestrator",
+      "stepNumber": 8,
+      "phase": "Build the low-latency moderation path",
+      "title": "Add the policy-aware moderation orchestrator",
+      "type": "add_component",
+      "content": "Coordinate a bounded cascade: normalize the modality and language, check exact known-content signals, apply inexpensive deterministic rules, invoke the appropriate model when needed, and map calibrated evidence to allow, block, or review. Pin every decision to a policy and model version. Keep policy thresholds explicit, return abstention for unsupported or uncertain cases, and never let similarity alone make an irreversible decision.",
+      "component": {
+        "nodeId": "mod_orchestrator",
+        "componentType": "backend-server",
+        "label": "Moderation Orchestrator",
+        "description": "Coordinates modality routing, policy, fast checks, inference, review, and durable decision recording.",
+        "position": {"x": 700, "y": 340},
+        "properties": {
+          "componentName": "Moderation Orchestrator",
+          "purpose": "Worked-example assumptions: 99.9% monthly availability for the synchronous decision API; p95 caller-visible latency below 200ms for text and 500ms for images, measured from gateway acceptance. Text sync path: authenticate/normalize, check the exact-content cache scoped to active policy+model versions, apply rules, and call deadline-bounded inference. Optional similarity is best-effort and skipped if it threatens the 200ms response. Before a terminal allow/block, synchronously and idempotently persist the decision plus audit event. If that durable commit, policy/model, or inference is unavailable or late, return pending/review rather than an untraceable or stale verdict. Export analytics asynchronously after commit. These are replaceable assumptions, not brief guarantees.",
+          "architecture": "Microservices",
+          "caching": false
+        },
+        "highlightReason": "One policy-aware decision boundary keeps fast paths, model evidence, review escalation, and audit provenance consistent."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "mod_09_gateway_to_orchestrator",
+      "stepNumber": 9,
+      "phase": "Build the low-latency moderation path",
+      "title": "Route validated work to the policy boundary",
+      "type": "add_connection",
+      "content": "Pass a normalized request, caller context, modality, idempotency key, and remaining deadline. Reject unsupported input explicitly; do not silently skip a modality-specific check.",
+      "connection": {
+        "edgeId": "mod_gateway_to_orchestrator",
+        "sourceNodeId": "mod_api_gateway",
+        "targetNodeId": "mod_orchestrator",
+        "connectionType": "api-call",
+        "label": "Validated request + deadline",
+        "description": "Normalized text, image, stream, or appeal request with verified context and a bounded response deadline."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "mod_10_identity_context",
+      "stepNumber": 10,
+      "phase": "Build the low-latency moderation path",
+      "title": "Carry the verified actor into the decision",
+      "type": "add_connection",
+      "content": "Attach a stable, verified actor reference and permitted scope to actions that create, inspect, appeal, or resolve a moderation case. Avoid copying credentials or unnecessary personal data into model prompts and audit payloads.",
+      "connection": {
+        "edgeId": "mod_identity_to_orchestrator",
+        "sourceNodeId": "mod_identity_service",
+        "targetNodeId": "mod_orchestrator",
+        "connectionType": "data-flow",
+        "label": "Verified actor context",
+        "description": "Minimal identity and authorization claims used for audit attribution and access decisions."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7"]
+    },
+    {
+      "id": "mod_11_hash_cache",
+      "stepNumber": 11,
+      "phase": "Build the low-latency moderation path",
+      "title": "Add a bounded exact-hash lookup",
+      "type": "add_component",
+      "content": "Use a keyed content fingerprint to detect exact duplicates and look up previously adjudicated known-harmful material. Scope keys by applicable policy and model version; expire or invalidate entries when policy or model evidence changes. A cache hit is a signal to verify, not permission to bypass current policy or create cross-tenant disclosure.",
+      "component": {
+        "nodeId": "mod_hash_cache",
+        "componentType": "cache",
+        "label": "Versioned Hash and Decision Cache",
+        "description": "Low-latency exact-duplicate lookup keyed by content fingerprint and decision context.",
+        "position": {"x": 1060, "y": 80},
+        "properties": {
+          "componentName": "Versioned Hash and Decision Cache",
+          "purpose": "Key reusable signals by exact content hash plus active policy and model versions with bounded lifetime. Promotion or rollback changes the active version namespace; mismatched/stale entries are invalidated or treated as misses, never as an allow/block verdict."
+        },
+        "highlightReason": "Exact duplicate detection can save inference work, but stale or broadly shared verdicts can create unsafe decisions."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "mod_12_hash_lookup",
+      "stepNumber": 12,
+      "phase": "Build the low-latency moderation path",
+      "title": "Check the fingerprint before expensive inference",
+      "type": "add_connection",
+      "content": "Compute a privacy-conscious keyed fingerprint and use it for exact duplicate lookup. Continue through policy and current-version checks before returning any cached disposition.",
+      "connection": {
+        "edgeId": "mod_orchestrator_to_hash_cache",
+        "sourceNodeId": "mod_orchestrator",
+        "targetNodeId": "mod_hash_cache",
+        "connectionType": "api-call",
+        "label": "Versioned content-hash lookup",
+        "description": "Keyed fingerprint lookup scoped to policy/model versions, with a bounded deadline."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "mod_13_hash_result",
+      "stepNumber": 13,
+      "phase": "Build the low-latency moderation path",
+      "title": "Return a match as evidence, not an unchecked verdict",
+      "type": "add_connection",
+      "content": "Return the fingerprint match and its provenance. Re-run applicable policy checks and route stale, conflicting, or uncertain matches to inference or human review.",
+      "connection": {
+        "edgeId": "mod_hash_cache_to_orchestrator",
+        "sourceNodeId": "mod_hash_cache",
+        "targetNodeId": "mod_orchestrator",
+        "connectionType": "data-flow",
+        "label": "Match evidence + version",
+        "description": "Exact-match signal, adjudication provenance, and cache context for current policy validation."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "mod_14_model_serving",
+      "stepNumber": 14,
+      "phase": "Build the low-latency moderation path",
+      "title": "Keep inference behind a versioned serving boundary",
+      "type": "add_component",
+      "content": "Expose stable, modality-aware inference contracts with strict deadlines, bounded payloads, concurrency controls, and explicit timeout/unavailable results. Keep the serving endpoint separate from policy decisions so model output is evidence, not the final disposition. Maintain multiple model versions during a staged release so traffic can move without downtime.",
+      "component": {
+        "nodeId": "mod_model_serving",
+        "componentType": "model-serving",
+        "label": "Moderation Model Serving",
+        "description": "Versioned inference API for multilingual text and image safety models.",
+        "position": {"x": 1080, "y": 350},
+        "properties": {
+          "componentName": "Moderation Model Serving",
+          "purpose": "Serve health-checked, version-pinned text/image inference with concurrent old/new models. Promote only an approved policy/model pair; atomically switch the active version namespace, invalidate mismatched cache entries, and roll back the pointer plus cache namespace on a confirmed safety breach without interrupting in-flight requests.",
+          "platform": "Custom API"
+        },
+        "highlightReason": "Distinct serving and policy boundaries allow model changes while preserving predictable latency and auditable decisions."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "mod_15_text_model",
+      "stepNumber": 15,
+      "phase": "Build the low-latency moderation path",
+      "title": "Add multilingual text classification",
+      "type": "add_component",
+      "content": "Classify toxicity, hate speech, and spam across at least the 50+ languages in the brief. Return per-category scores, language identification/confidence, model version, and calibrated uncertainty. Evaluate language-specific coverage and error rates; do not treat unsupported-language output as a safe result.",
+      "component": {
+        "nodeId": "mod_text_model",
+        "componentType": "ml-model",
+        "label": "Multilingual Text Safety Model",
+        "description": "Versioned NLP classifier for toxicity, hate speech, and spam across supported languages.",
+        "position": {"x": 1420, "y": 200},
+        "properties": {
+          "componentName": "Multilingual Text Safety Model",
+          "purpose": "Classify toxicity, hate speech, and spam in the brief's 50+ languages; return calibrated per-category evidence with identified language, confidence, and immutable model version for each validated language. Abstain to human review for unsupported languages instead of guessing or silently allowing content.",
+          "modelType": "NLP",
+          "framework": "PyTorch"
+        },
+        "highlightReason": "Language coverage and per-language error measurement are essential to a credible 50+ language safety claim."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "mod_16_visual_model",
+      "stepNumber": 16,
+      "phase": "Build the low-latency moderation path",
+      "title": "Add NSFW and violence image detection",
+      "type": "add_component",
+      "content": "Classify NSFW and violent imagery and return category evidence, confidence, and model version. Optimize and load-test the complete image path against the 500ms target, including preprocessing and network time; the target is not satisfied merely because model compute is below 500ms.",
+      "component": {
+        "nodeId": "mod_image_model",
+        "componentType": "ml-model",
+        "label": "Image Safety Model",
+        "description": "Computer-vision classifier for NSFW and violent imagery.",
+        "position": {"x": 1420, "y": 500},
+        "properties": {
+          "componentName": "Image Safety Model",
+          "purpose": "Return calibrated NSFW and violence evidence with confidence and immutable model version; enforce image-size and preprocessing limits and report unsupported or corrupt inputs explicitly.",
+          "modelType": "Computer Vision",
+          "framework": "PyTorch"
+        },
+        "highlightReason": "The image path has its own classification target and must be measured end to end."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "mod_17_orchestrator_to_serving",
+      "stepNumber": 17,
+      "phase": "Build the low-latency moderation path",
+      "title": "Invoke only the model path required by the modality",
+      "type": "add_connection",
+      "content": "Route text and image requests to their respective model contracts. Keep a shared end-to-end deadline, and leave enough budget for policy evaluation and response serialization after inference.",
+      "connection": {
+        "edgeId": "mod_orchestrator_to_serving",
+        "sourceNodeId": "mod_orchestrator",
+        "targetNodeId": "mod_model_serving",
+        "connectionType": "api-call",
+        "label": "Deadline-bounded modality inference",
+        "description": "Text or image request with a pinned model/policy context and remaining request budget."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "mod_18_serving_to_text",
+      "stepNumber": 18,
+      "phase": "Build the low-latency moderation path",
+      "title": "Run multilingual text inference",
+      "type": "add_connection",
+      "content": "Pass normalized text and only the context needed for classification. Do not include unrelated user data in model inputs or logs.",
+      "connection": {
+        "edgeId": "mod_serving_to_text_model",
+        "sourceNodeId": "mod_model_serving",
+        "targetNodeId": "mod_text_model",
+        "connectionType": "api-call",
+        "label": "Text + language context",
+        "description": "Bounded NLP inference request with supported-language and model-version context."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "mod_19_text_scores",
+      "stepNumber": 19,
+      "phase": "Build the low-latency moderation path",
+      "title": "Return calibrated text evidence",
+      "type": "add_connection",
+      "content": "Return per-label scores, language, uncertainty, and model version. The orchestrator applies a validated policy threshold and may abstain; the raw highest score is not itself an allow/block decision.",
+      "connection": {
+        "edgeId": "mod_text_model_to_serving",
+        "sourceNodeId": "mod_text_model",
+        "targetNodeId": "mod_model_serving",
+        "connectionType": "data-flow",
+        "label": "Text scores + provenance",
+        "description": "Per-category evidence, language, uncertainty, and exact model version for policy evaluation."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "mod_20_serving_to_image",
+      "stepNumber": 20,
+      "phase": "Build the low-latency moderation path",
+      "title": "Run NSFW and violence image inference",
+      "type": "add_connection",
+      "content": "Send a bounded image reference or normalized payload to computer-vision inference. Avoid transferring a complete video through this synchronous image path.",
+      "connection": {
+        "edgeId": "mod_serving_to_image_model",
+        "sourceNodeId": "mod_model_serving",
+        "targetNodeId": "mod_image_model",
+        "connectionType": "api-call",
+        "label": "Image classification request",
+        "description": "Bounded image input for NSFW and violence detection under the image response budget."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:2"]
+    },
+    {
+      "id": "mod_21_image_scores",
+      "stepNumber": 21,
+      "phase": "Build the low-latency moderation path",
+      "title": "Return image evidence to policy",
+      "type": "add_connection",
+      "content": "Return category scores, preprocessing status, uncertainty, and model version. If the request times out or content is unsupported, emit an explicit unresolved state and apply the agreed safe fallback.",
+      "connection": {
+        "edgeId": "mod_image_model_to_serving",
+        "sourceNodeId": "mod_image_model",
+        "targetNodeId": "mod_model_serving",
+        "connectionType": "data-flow",
+        "label": "Image scores + provenance",
+        "description": "NSFW/violence evidence, confidence, preprocessing status, and model version."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "mod_22_embedding_service",
+      "stepNumber": 22,
+      "phase": "Build the low-latency moderation path",
+      "title": "Add an optional similarity signal",
+      "type": "add_component",
+      "content": "Generate embeddings for supported text or media when the fast cascade needs similarity against known harmful examples. This is a supplemental signal; access controls, threshold validation, and false-positive evaluation are required before it can affect disposition.",
+      "component": {
+        "nodeId": "mod_embedding_service",
+        "componentType": "embedding-service",
+        "label": "Safety Similarity Encoder",
+        "description": "Creates modality-appropriate representations for similarity lookup against reviewed known-harmful examples.",
+        "position": {"x": 1040, "y": 690},
+        "properties": {
+          "componentName": "Safety Similarity Encoder",
+          "purpose": "Encode supported text or media for an optional similarity lookup; version the encoder and never treat nearest-neighbor similarity alone as a moderation verdict.",
+          "model": "Self-hosted"
+        },
+        "highlightReason": "Similarity can identify known patterns, but it must remain an evaluated evidence source rather than a standalone policy."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "mod_23_vector_database",
+      "stepNumber": 23,
+      "phase": "Build the low-latency moderation path",
+      "title": "Store reviewed similarity references",
+      "type": "add_component",
+      "content": "Keep embeddings and their review provenance, policy scope, and encoder version together. Define deletion, access, and retention policies with the data owners; the problem brief does not supply those policies.",
+      "component": {
+        "nodeId": "mod_safety_vectors",
+        "componentType": "vector-database",
+        "label": "Reviewed Safety Reference Index",
+        "description": "Similarity index for reviewed examples with encoder and policy provenance.",
+        "position": {"x": 1400, "y": 750},
+        "properties": {
+          "componentName": "Reviewed Safety Reference Index",
+          "purpose": "Store access-controlled embeddings for reviewed reference examples, partitioned by applicable policy and encoder version, with a path to the underlying review provenance."
+        },
+        "highlightReason": "Similarity results are only useful when the reference set is reviewed and its scope/version are known."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "mod_24_orchestrator_to_encoder",
+      "stepNumber": 24,
+      "phase": "Build the low-latency moderation path",
+      "title": "Request similarity only when useful",
+      "type": "add_connection",
+      "content": "Invoke the encoder only when the policy and latency budget permit. If the optional path is unavailable or too slow, continue with validated rules/models or route uncertainty to review.",
+      "connection": {
+        "edgeId": "mod_orchestrator_to_embedding",
+        "sourceNodeId": "mod_orchestrator",
+        "targetNodeId": "mod_embedding_service",
+        "connectionType": "api-call",
+        "label": "Optional similarity encoding",
+        "description": "Policy-scoped content representation requested within the remaining latency budget."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "mod_25_encoder_to_index",
+      "stepNumber": 25,
+      "phase": "Build the low-latency moderation path",
+      "title": "Search the reviewed reference set",
+      "type": "add_connection",
+      "content": "Query only the permitted policy/version partition and return top matches with similarity, provenance, and review status. Avoid returning raw reference content to an unauthorized caller.",
+      "connection": {
+        "edgeId": "mod_embedding_to_vectors",
+        "sourceNodeId": "mod_embedding_service",
+        "targetNodeId": "mod_safety_vectors",
+        "connectionType": "api-call",
+        "label": "Versioned vector lookup",
+        "description": "Encoder-versioned similarity query against the access-controlled reviewed reference set."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "mod_26_similarity_evidence",
+      "stepNumber": 26,
+      "phase": "Build the low-latency moderation path",
+      "title": "Return similarity as one policy input",
+      "type": "add_connection",
+      "content": "Return scoped matches and provenance to the orchestrator. Require agreement with current policy/model evidence or human review where the validated operating point is uncertain.",
+      "connection": {
+        "edgeId": "mod_vectors_to_orchestrator",
+        "sourceNodeId": "mod_safety_vectors",
+        "targetNodeId": "mod_orchestrator",
+        "connectionType": "data-flow",
+        "label": "Scoped matches + provenance",
+        "description": "Similarity evidence, reference review status, and encoder/policy versions for a non-authoritative signal."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "mod_27_media_store",
+      "stepNumber": 27,
+      "phase": "Build the low-latency moderation path",
+      "title": "Keep media bytes outside the decision database",
+      "type": "add_component",
+      "content": "Store submitted media or immutable references separately from decision metadata. Verify checksums and object/version identity before processing; establish access, deletion, and retention rules with product and policy owners because the brief does not specify them.",
+      "component": {
+        "nodeId": "mod_media_store",
+        "componentType": "object-storage",
+        "label": "Media Evidence Store",
+        "description": "Durable media and derived-frame storage referenced by moderation jobs and audit records.",
+        "position": {"x": 1450, "y": 1050},
+        "properties": {
+          "componentName": "Media Evidence Store",
+          "purpose": "Retain versioned source media or derived-frame objects with checksum validation and access-controlled references; keep large media payloads out of queues and audit rows. Assume a configurable 30-day evidence-retention window for this worked example, then expire media by lifecycle policy while preserving only the minimal audit metadata required by approved policy."
+        },
+        "highlightReason": "Asynchronous video work and later review need stable evidence references rather than mutable paths or oversized messages."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:7"]
+    },
+    {
+      "id": "mod_28_orchestrator_to_media",
+      "stepNumber": 28,
+      "phase": "Build the low-latency moderation path",
+      "title": "Pass stable media references to processing",
+      "type": "add_connection",
+      "content": "Persist or resolve the immutable media version before asynchronous video processing. Pass only the reference and integrity metadata through events; authorize review access independently.",
+      "connection": {
+        "edgeId": "mod_orchestrator_to_media_store",
+        "sourceNodeId": "mod_orchestrator",
+        "targetNodeId": "mod_media_store",
+        "connectionType": "data-flow",
+        "label": "Versioned media reference",
+        "description": "Object/version identifier and checksum used by stream jobs and authorized human review."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "mod_29_event_broker",
+      "stepNumber": 29,
+      "phase": "Process live video as a stream",
+      "title": "Introduce a durable event boundary for streams",
+      "type": "add_component",
+      "content": "Publish stream-session and moderation work events with stable event IDs and media references. Partition by a stable content/session key to preserve the ordering needed for a single stream; isolate retries and dead letters so backlog does not silently drop content.",
+      "component": {
+        "nodeId": "mod_event_broker",
+        "componentType": "message-broker",
+        "label": "Moderation Event Broker",
+        "description": "Durable event transport for live-stream moderation and review workflows.",
+        "position": {"x": 1040, "y": 1030},
+        "properties": {
+          "componentName": "Moderation Event Broker",
+          "purpose": "Buffer stream-session and moderation events with stable event IDs, content/session partitioning, replayable retention, bounded retries, and an observable dead-letter path; carry references rather than media bytes.",
+          "durable": true
+        },
+        "highlightReason": "A durable event boundary absorbs bursts and decouples stream intake from slower frame and review work."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "mod_30_publish_stream_work",
+      "stepNumber": 30,
+      "phase": "Process live video as a stream",
+      "title": "Publish stream work without blocking the request path",
+      "type": "add_connection",
+      "content": "The synchronous service accepts the stream reference and returns an accepted/pending state, while the durable event drives ongoing frame analysis. Make publishing idempotent so a retry cannot create duplicate review actions.",
+      "connection": {
+        "edgeId": "mod_orchestrator_to_broker",
+        "sourceNodeId": "mod_orchestrator",
+        "targetNodeId": "mod_event_broker",
+        "connectionType": "data-flow",
+        "label": "Idempotent stream moderation event",
+        "description": "Stream/session ID, immutable media reference, event ID, and policy version; no media bytes."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "mod_31_stream_processor",
+      "stepNumber": 31,
+      "phase": "Process live video as a stream",
+      "title": "Track stream state and frame work",
+      "type": "add_component",
+      "content": "Maintain per-stream ordering and bounded windows, detect gaps or stalled input, and aggregate frame-level findings into a stream state. Define sampling cadence and the action on late frames with product safety owners; the brief does not specify either.",
+      "component": {
+        "nodeId": "mod_stream_processor",
+        "componentType": "stream-processor",
+        "label": "Live Stream Coordinator",
+        "description": "Maintains stream ordering, frame work, and incremental moderation state.",
+        "position": {"x": 1400, "y": 1160},
+        "properties": {
+          "componentName": "Live Stream Coordinator",
+          "purpose": "Consume ordered session events, maintain bounded stream state, schedule frame analysis, detect late/gapped input, and aggregate idempotent frame findings. Report ongoing status while a stream is active; close it at end-of-stream or a product-configurable gap watermark. If frames are missing or late at closure, retain a pending/review state rather than silently allowing the content. The gap policy is an explicit replaceable assumption, not a brief-specified video latency target."
+        },
+        "highlightReason": "Real-time streaming needs stateful incremental handling rather than treating a live video as one synchronous image."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "mod_32_broker_to_stream_processor",
+      "stepNumber": 32,
+      "phase": "Process live video as a stream",
+      "title": "Consume events with replay and ordering",
+      "type": "add_connection",
+      "content": "Consume by stable stream key, checkpoint progress, and make event handling idempotent. Monitor consumer lag so a system that is technically accepting messages does not hide stale moderation decisions.",
+      "connection": {
+        "edgeId": "mod_broker_to_stream_processor",
+        "sourceNodeId": "mod_event_broker",
+        "targetNodeId": "mod_stream_processor",
+        "connectionType": "data-flow",
+        "label": "Ordered stream events",
+        "description": "Replayable stream/session events partitioned by a stable key and processed idempotently."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "mod_33_video_worker",
+      "stepNumber": 33,
+      "phase": "Process live video as a stream",
+      "title": "Decode bounded frame-analysis jobs",
+      "type": "add_component",
+      "content": "Decode or sample frames under a documented resource budget and preserve timestamps and source references. Apply the image safety model to frames, optionally extract text/audio only if product policy requires it, and never imply that frame sampling guarantees detection of every transient event.",
+      "component": {
+        "nodeId": "mod_video_worker",
+        "componentType": "processing-worker",
+        "label": "Video Frame Worker",
+        "description": "Scalable worker for bounded frame extraction and per-frame moderation inference.",
+        "position": {"x": 1760, "y": 1160},
+        "properties": {
+          "componentName": "Video Frame Worker",
+          "purpose": "Fetch the exact media version, verify integrity, decode/sample frames under a bounded CPU/GPU and time budget, preserve timestamps, and call the vision model; emit partial, timeout, and failure states explicitly.",
+          "tasks": "ML Inference",
+          "autoscale": true
+        },
+        "highlightReason": "Frame decoding and inference are variable-cost background work and should scale independently of text moderation."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "mod_34_stream_to_worker",
+      "stepNumber": 34,
+      "phase": "Process live video as a stream",
+      "title": "Schedule bounded per-frame analysis",
+      "type": "add_connection",
+      "content": "Create frame-analysis jobs with stable IDs derived from stream/session and frame timestamp so retries do not duplicate decisions. Preserve stream order where policy depends on temporal context.",
+      "connection": {
+        "edgeId": "mod_stream_to_video_worker",
+        "sourceNodeId": "mod_stream_processor",
+        "targetNodeId": "mod_video_worker",
+        "connectionType": "data-flow",
+        "label": "Idempotent frame-analysis jobs",
+        "description": "Bounded work descriptors containing stream ID, frame timestamp, and immutable source reference."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "mod_35_worker_to_store",
+      "stepNumber": 35,
+      "phase": "Process live video as a stream",
+      "title": "Persist only needed derived evidence",
+      "type": "add_connection",
+      "content": "When derived frames or review evidence must be retained, write immutable versions with checksum and source timestamp. Follow an explicit retention and deletion policy rather than keeping every frame by default.",
+      "connection": {
+        "edgeId": "mod_video_worker_to_media_store",
+        "sourceNodeId": "mod_video_worker",
+        "targetNodeId": "mod_media_store",
+        "connectionType": "data-flow",
+        "label": "Derived evidence + source timestamp",
+        "description": "Versioned, integrity-checked frame evidence retained only as permitted by the configured policy."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "mod_36_store_to_worker",
+      "stepNumber": 36,
+      "phase": "Process live video as a stream",
+      "title": "Read the exact stream media version",
+      "type": "add_connection",
+      "content": "Resolve the event's immutable source version, verify its checksum and authorization, and report missing or changed media as an explicit processing failure.",
+      "connection": {
+        "edgeId": "mod_media_store_to_video_worker",
+        "sourceNodeId": "mod_media_store",
+        "targetNodeId": "mod_video_worker",
+        "connectionType": "data-flow",
+        "label": "Immutable media read",
+        "description": "Authorized source object version and checksum for deterministic frame processing."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "mod_37_worker_to_serving",
+      "stepNumber": 37,
+      "phase": "Process live video as a stream",
+      "title": "Send frames through the vision model contract",
+      "type": "add_connection",
+      "content": "Use the same version-pinned visual safety contract as uploaded images, while tracking stream/frame identifiers. Do not apply the under-500ms image target to an entire video session unless product owners explicitly define that target.",
+      "connection": {
+        "edgeId": "mod_video_worker_to_serving",
+        "sourceNodeId": "mod_video_worker",
+        "targetNodeId": "mod_model_serving",
+        "connectionType": "api-call",
+        "label": "Timestamped frame inference",
+        "description": "Bounded frame request tagged with stream, timestamp, and pinned vision-model version."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "mod_38_serving_to_worker",
+      "stepNumber": 38,
+      "phase": "Process live video as a stream",
+      "title": "Return frame-level evidence",
+      "type": "add_connection",
+      "content": "Return the frame's categories, confidence, model version, and processing status with its timestamp. A frame result is evidence for stream aggregation, not automatically the final stream disposition.",
+      "connection": {
+        "edgeId": "mod_serving_to_video_worker",
+        "sourceNodeId": "mod_model_serving",
+        "targetNodeId": "mod_video_worker",
+        "connectionType": "data-flow",
+        "label": "Frame evidence + status",
+        "description": "Versioned per-frame category scores and explicit success, timeout, or unsupported status."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "mod_39_worker_to_stream",
+      "stepNumber": 39,
+      "phase": "Process live video as a stream",
+      "title": "Aggregate frame outcomes idempotently",
+      "type": "add_connection",
+      "content": "Emit one idempotent result per frame and update bounded stream state. Preserve late/error states and the exact policy/model versions used so downstream decisions can be reproduced.",
+      "connection": {
+        "edgeId": "mod_video_worker_to_stream",
+        "sourceNodeId": "mod_video_worker",
+        "targetNodeId": "mod_stream_processor",
+        "connectionType": "data-flow",
+        "label": "Frame scores + processing state",
+        "description": "Deduplicated timestamped evidence and explicit processing status for stream-level aggregation."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "mod_40_stream_decision",
+      "stepNumber": 40,
+      "phase": "Process live video as a stream",
+      "title": "Send incremental stream decisions to policy",
+      "type": "add_connection",
+      "content": "Send an incremental signal when the stream crosses an approved policy threshold, and keep the final/pending state attributable to the analyzed frame range. Define the exact content action and sampling policy with safety stakeholders.",
+      "connection": {
+        "edgeId": "mod_stream_to_orchestrator",
+        "sourceNodeId": "mod_stream_processor",
+        "targetNodeId": "mod_orchestrator",
+        "connectionType": "data-flow",
+        "label": "Incremental stream disposition evidence",
+        "description": "Aggregated frame findings, analyzed time range, and any unresolved processing gaps."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "mod_41_decision_audit_store",
+      "stepNumber": 41,
+      "phase": "Make human review and model changes auditable",
+      "title": "Persist decisions and their evidence references",
+      "type": "add_component",
+      "content": "Store decision metadata, not large media blobs: content/event ID, policy and model versions, modality/language, evidence references, disposition, timestamps, and later review/appeal transitions. Make audit append/idempotency behavior explicit and define retention with the relevant owners.",
+      "component": {
+        "nodeId": "mod_decision_store",
+        "componentType": "database",
+        "label": "Moderation Decision and Audit Store",
+        "description": "Queryable decision records, review cases, appeal state, and immutable audit events.",
+        "position": {"x": 1080, "y": 1460},
+        "properties": {
+          "componentName": "Moderation Decision and Audit Store",
+          "purpose": "Persist the terminal or pending decision and its append-only audit event atomically and idempotently, with event/content IDs, policy/model versions, modality/language, evidence references, disposition, actor, and review/appeal transitions; exclude raw media payloads. Use strongly consistent reads for the authoritative decision and audit state; downstream analytics/retraining may be eventual. Retain linked media only under the separately configured lifecycle policy."
+        },
+        "highlightReason": "A moderation outcome must be explainable and traceable to the exact evidence and versions that produced it."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "mod_42_record_decision",
+      "stepNumber": 42,
+      "phase": "Make human review and model changes auditable",
+      "title": "Record every final or pending decision",
+      "type": "add_connection",
+      "content": "Persist allow, block, pending, and appeal states with idempotency keys and versioned evidence. If durable audit acceptance is unavailable, apply an explicit fail-safe policy rather than returning an untraceable final decision.",
+      "connection": {
+        "edgeId": "mod_orchestrator_to_decision_store",
+        "sourceNodeId": "mod_orchestrator",
+        "targetNodeId": "mod_decision_store",
+        "connectionType": "data-flow",
+        "label": "Idempotent decision + audit event",
+        "description": "Disposition, evidence references, model/policy versions, event identity, and state transition."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "mod_43_human_review_queue",
+      "stepNumber": 43,
+      "phase": "Make human review and model changes auditable",
+      "title": "Queue uncertain cases and appeals",
+      "type": "add_component",
+      "content": "Create review work for low-confidence, conflicting, unsupported-language, policy-sensitive, and appealed cases. Prioritize by safety and age, cap retries, preserve case ordering where needed, and expose queue age and backlog to operations.",
+      "component": {
+        "nodeId": "mod_review_queue",
+        "componentType": "queue",
+        "label": "Human Review and Appeals Queue",
+        "description": "Durable prioritized work queue for uncertain moderation cases and appeals.",
+        "position": {"x": 1450, "y": 1460},
+        "properties": {
+          "componentName": "Human Review and Appeals Queue",
+          "purpose": "Hold uncertain, conflicting, unsupported, and appealed cases with priority, age, idempotency, bounded retries, and a dead-letter/escalation path; carry case and evidence references rather than raw media."
+        },
+        "highlightReason": "Edge cases need an explicit human decision path instead of a forced low-confidence automated outcome."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "mod_44_orchestrator_to_review_queue",
+      "stepNumber": 44,
+      "phase": "Make human review and model changes auditable",
+      "title": "Escalate uncertainty without hiding it",
+      "type": "add_connection",
+      "content": "Route borderline cases and appeals to review with the reason, language/modality, evidence references, and current disposition. Tell the caller that review is pending and define the product's safe interim action.",
+      "connection": {
+        "edgeId": "mod_orchestrator_to_review_queue",
+        "sourceNodeId": "mod_orchestrator",
+        "targetNodeId": "mod_review_queue",
+        "connectionType": "data-flow",
+        "label": "Prioritized case + appeal work",
+        "description": "Idempotent case reference, reason for escalation, evidence pointers, and safe pending state."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7"]
+    },
+    {
+      "id": "mod_45_moderator_console",
+      "stepNumber": 45,
+      "phase": "Make human review and model changes auditable",
+      "title": "Give moderators an evidence-linked workspace",
+      "type": "add_component",
+      "content": "Show policy reason, model and policy versions, language, relevant text spans or authorized media evidence, uncertainty, and prior appeal state. Let moderators record a reasoned disposition and feedback. Use least-privilege access and avoid exposing unrelated or unredacted content by default.",
+      "component": {
+        "nodeId": "mod_moderator_console",
+        "componentType": "web-app",
+        "label": "Moderator Review Console",
+        "description": "Restricted workspace for evidence-led moderation review and appeals.",
+        "position": {"x": 1800, "y": 1460},
+        "properties": {
+          "componentName": "Moderator Review Console",
+          "purpose": "Present authorized, version-linked text/media evidence and appeal context; capture moderator disposition, rationale, and feedback as attributable events."
+        },
+        "highlightReason": "Human review is a product workflow: reviewers need evidence, context, and a durable way to explain a correction."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7"]
+    },
+    {
+      "id": "mod_46_queue_to_console",
+      "stepNumber": 46,
+      "phase": "Make human review and model changes auditable",
+      "title": "Deliver review work with its evidence pointers",
+      "type": "add_connection",
+      "content": "Lease prioritized cases to authorized reviewers and preserve a stable case ID across retries. Do not put sensitive media itself into the queue message.",
+      "connection": {
+        "edgeId": "mod_queue_to_console",
+        "sourceNodeId": "mod_review_queue",
+        "targetNodeId": "mod_moderator_console",
+        "connectionType": "data-flow",
+        "label": "Prioritized case + evidence pointers",
+        "description": "Case ID, priority, reason, and access-controlled evidence references for an authorized reviewer."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7"]
+    },
+    {
+      "id": "mod_47_console_actions",
+      "stepNumber": 47,
+      "phase": "Make human review and model changes auditable",
+      "title": "Record review outcomes and appeals through the API",
+      "type": "add_connection",
+      "content": "Submit reviewer dispositions, appeal decisions, and feedback through authenticated APIs. Require a reason and case version so stale reviewers cannot overwrite a newer decision.",
+      "connection": {
+        "edgeId": "mod_console_to_gateway",
+        "sourceNodeId": "mod_moderator_console",
+        "targetNodeId": "mod_api_gateway",
+        "connectionType": "api-call",
+        "label": "Attributed review / appeal outcome",
+        "description": "Authenticated, version-checked disposition and reviewer feedback submitted through the protected API."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7"]
+    },
+    {
+      "id": "mod_48_model_training",
+      "stepNumber": 48,
+      "phase": "Make human review and model changes auditable",
+      "title": "Use reviewed feedback in a gated model lifecycle",
+      "type": "add_component",
+      "content": "Treat reviewer corrections as candidate labels requiring quality controls, privacy review, and representative evaluation—not as unquestioned training truth. Compare candidate versions by language, modality, and false-positive rate before release; preserve rollback artifacts and approval metadata.",
+      "component": {
+        "nodeId": "mod_model_training",
+        "componentType": "model-training",
+        "label": "Model Evaluation and Release Pipeline",
+        "description": "Validates candidate models and prepares versioned, reversible releases from reviewed data.",
+        "position": {"x": 1450, "y": 1810},
+        "properties": {
+          "componentName": "Model Evaluation and Release Pipeline",
+          "purpose": "Curate privacy-reviewed labels and promote only when every supported language×modality×policy slice has an adequately sampled holdout with upper 95% confidence bound for FPR below 1%; otherwise block and keep the approved pair. Monitor canaries per slice and roll back on a confirmed breach; retain signed evaluation and release provenance."
+        },
+        "highlightReason": "Feedback can improve detection only when label quality and regressions are checked before production traffic changes."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "mod_49_audit_to_training",
+      "stepNumber": 49,
+      "phase": "Make human review and model changes auditable",
+      "title": "Source candidate labels from reviewed records",
+      "type": "add_connection",
+      "content": "Export only authorized, quality-reviewed correction records with the policy and model context needed for evaluation. Keep feedback provenance and exclusions so training sets can be reproduced.",
+      "connection": {
+        "edgeId": "mod_decision_store_to_training",
+        "sourceNodeId": "mod_decision_store",
+        "targetNodeId": "mod_model_training",
+        "connectionType": "data-flow",
+        "label": "Reviewed and versioned feedback",
+        "description": "Authorized human corrections and audit provenance prepared for evaluation and controlled training."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "mod_50_staged_model_release",
+      "stepNumber": 50,
+      "phase": "Make human review and model changes auditable",
+      "title": "Release models by staged traffic shift",
+      "type": "add_connection",
+      "content": "Load and health-check a candidate while the prior version continues serving. Compare shadow/canary outcomes against release criteria, shift traffic gradually, and roll back automatically on safety or latency regressions. Version the policy/model pairing and keep active requests pinned to their starting version.",
+      "connection": {
+        "edgeId": "mod_training_to_serving",
+        "sourceNodeId": "mod_model_training",
+        "targetNodeId": "mod_model_serving",
+        "connectionType": "data-flow",
+        "label": "Approved candidate + staged release",
+        "description": "Promote only when every adequately sampled language×modality×policy slice has upper 95% FPR confidence bound below 1%; otherwise hold the approved pair. Canary per slice; on confirmed breach atomically roll back the active model/policy pointer and invalidate mismatched cache entries."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "mod_51_quality_analytics",
+      "stepNumber": 51,
+      "phase": "Measure safety, latency, and capacity",
+      "title": "Measure quality by language and modality",
+      "type": "add_component",
+      "content": "Compute false-positive and false-negative measures from a representative, human-reviewed evaluation population, with denominators and confidence intervals visible. Break down by language, modality, category, and policy version; a global aggregate can conceal a failing language or rare class. The below-1% target is not demonstrated until this evaluation passes.",
+      "component": {
+        "nodeId": "mod_quality_analytics",
+        "componentType": "analytics",
+        "label": "Safety Quality Analytics",
+        "description": "Evaluation and feedback metrics for false positives, language coverage, and category-level quality.",
+        "position": {"x": 1810, "y": 1810},
+        "properties": {
+          "componentName": "Safety Quality Analytics",
+          "purpose": "On a frozen human-reviewed benign holdout, compute FPR=FP/(FP+TN) with sample counts and confidence bounds per supported language×modality×policy slice. Pass the release gate only when each adequately sampled slice's upper 95% confidence bound is below 1%; insufficient samples are inconclusive, not a pass."
+        },
+        "highlightReason": "A false-positive target is meaningful only with a defined population, denominator, and per-segment result."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "mod_52_audit_to_quality",
+      "stepNumber": 52,
+      "phase": "Measure safety, latency, and capacity",
+      "title": "Feed outcomes into quality evaluation",
+      "type": "add_connection",
+      "content": "Join decisions to audited human outcomes using stable IDs and version context. Exclude unresolved labels from accuracy claims and expose sample size and data freshness.",
+      "connection": {
+        "edgeId": "mod_decision_store_to_analytics",
+        "sourceNodeId": "mod_decision_store",
+        "targetNodeId": "mod_quality_analytics",
+        "connectionType": "data-flow",
+        "label": "Versioned decisions + reviewed labels",
+        "description": "Auditable outcomes joined to human-reviewed corrections for segmented quality measurement."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "mod_53_quality_to_release_gate",
+      "stepNumber": 53,
+      "phase": "Measure safety, latency, and capacity",
+      "title": "Block promotion unless every safety slice passes",
+      "type": "add_connection",
+      "content": "Send a versioned evaluation manifest and explicit pass/fail result from quality analytics to the model-release pipeline. Define false-positive rate as FP/(FP+TN) over human-reviewed ground-truth benign examples and evaluate every supported language × modality × policy-category slice independently. As a conservative launch assumption pending safety-owner approval, promote only when each adequately sampled slice has an upper 95% confidence bound below the 1% target. Any failed or underpowered slice blocks promotion and keeps the current approved model/policy; a confirmed canary breach rolls back to that pair. For request-time inference timeout, unhealthy serving, or pinned-version mismatch, return pending/review (never silently allow/block), do not use stale cache verdicts, and retry only within the remaining deadline with the same idempotency key. The brief does not specify the holdout, minimum sample, or confidence rule, so agree and version those before launch.",
+      "connection": {
+        "edgeId": "mod_quality_analytics_to_release_gate",
+        "sourceNodeId": "mod_quality_analytics",
+        "targetNodeId": "mod_model_training",
+        "connectionType": "data-flow",
+        "label": "Segmented safety gate + evaluation manifest",
+        "description": "Versioned holdout report with FPR=FP/(FP+TN) per language×modality×policy slice. Promote only if every sufficiently sampled slice has upper 95% confidence bound below 1%; any fail/inconclusive result blocks release and preserves the approved pair; a confirmed canary breach triggers rollback and cache invalidation."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "mod_54_observability",
+      "stepNumber": 54,
+      "phase": "Measure safety, latency, and capacity",
+      "title": "Observe the entire moderation service",
+      "type": "add_component",
+      "content": "Track caller-visible latency separately for text and image, model time, timeouts, error/abstention rate, stream lag, queue age, throughput, and resource saturation. Alert on target breaches and quality regressions without placing raw content or sensitive text in metrics.",
+      "component": {
+        "nodeId": "mod_monitoring",
+        "componentType": "monitoring",
+        "label": "Moderation SLO and Safety Monitoring",
+        "description": "Operational and safety telemetry for request latency, stream lag, review backlog, and model health.",
+        "position": {"x": 2180, "y": 850},
+        "properties": {
+          "componentName": "Moderation SLO and Safety Monitoring",
+          "purpose": "Measure p95 end-to-end text (<200ms) and image (<500ms) latency from gateway acceptance, 99.9% monthly decision-API availability, stream consumer lag, review queue age, model health, abstentions, and privacy-safe safety-quality alerts. Treat 10M-plus items/day as about 116 items/second average and load-test the worked-example 1,200 items/second peak assumption; report observed peak separately. Track false-positive bounds by adequately sampled language, modality, and policy slice. These are targets/assumptions, not achieved guarantees."
+        },
+        "highlightReason": "Fast averages alone can hide tail-latency, backlog, or safety-quality failures that damage user trust."
+      },
+      "requirementIds": ["legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "mod_55_gateway_telemetry",
+      "stepNumber": 55,
+      "phase": "Measure safety, latency, and capacity",
+      "title": "Measure caller-visible request latency",
+      "type": "add_connection",
+      "content": "Measure from gateway acceptance to final synchronous response, split by modality, and keep client-visible pending states for streams distinct from completed moderation outcomes.",
+      "connection": {
+        "edgeId": "mod_gateway_to_monitoring",
+        "sourceNodeId": "mod_api_gateway",
+        "targetNodeId": "mod_monitoring",
+        "connectionType": "data-flow",
+        "label": "Request latency + traffic telemetry",
+        "description": "Privacy-safe end-to-end text/image latency, errors, throughput, and deadline outcomes by modality."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "mod_56_inference_telemetry",
+      "stepNumber": 56,
+      "phase": "Measure safety, latency, and capacity",
+      "title": "Separate model health from policy quality",
+      "type": "add_connection",
+      "content": "Observe model latency and version-level failures independently from caller-visible latency and measured classification quality. Use these signals to gate release and diagnose a target miss without logging raw user content.",
+      "connection": {
+        "edgeId": "mod_serving_to_monitoring",
+        "sourceNodeId": "mod_model_serving",
+        "targetNodeId": "mod_monitoring",
+        "connectionType": "data-flow",
+        "label": "Inference latency + version health",
+        "description": "Privacy-safe per-modality serving latency, timeouts, saturation, active model version, and canary health."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "mod_57_review_telemetry",
+      "stepNumber": 57,
+      "phase": "Measure safety, latency, and capacity",
+      "title": "Alert when human review cannot keep up",
+      "type": "add_connection",
+      "content": "Alert on queue age and backlog, not just queue availability. Review capacity and the safe interim action are operational decisions to agree with policy owners before launch.",
+      "connection": {
+        "edgeId": "mod_review_queue_to_monitoring",
+        "sourceNodeId": "mod_review_queue",
+        "targetNodeId": "mod_monitoring",
+        "connectionType": "data-flow",
+        "label": "Review backlog + oldest-case age",
+        "description": "Privacy-safe queue depth, age, escalation, and dead-letter signals for human-review operations."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

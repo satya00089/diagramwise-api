@@ -1,0 +1,1226 @@
+{
+  "problem_id": "6901ef1b9420d83630aca866",
+  "version": "1.0-review",
+  "totalSteps": 50,
+  "requirementRevision": null,
+  "phases": [
+    {
+      "name": "Set the client, identity, and write contract",
+      "stepRange": [1, 13],
+      "description": "Separate the supplied calendar workload from unapproved scale assumptions, then establish authenticated clients and versioned, idempotent event writes."
+    },
+    {
+      "name": "Model sharing, time, and availability",
+      "stepRange": [14, 22],
+      "description": "Keep calendar permissions explicit, represent recurrence in civil time, and answer time-window queries through indexed, freshness-aware availability data."
+    },
+    {
+      "name": "Make recurrence and reminders durable",
+      "stepRange": [23, 35],
+      "description": "Publish committed changes through an outbox, expand recurring series safely, and deliver invitations and reminders with retry-safe semantics."
+    },
+    {
+      "name": "Synchronize devices and operate the system",
+      "stepRange": [36, 50],
+      "description": "Use cursor-based deltas for device convergence, observe correctness and lag, and scale or recover without silently dropping calendar work."
+    }
+  ],
+  "steps": [
+    {
+      "id": "calendar_01",
+      "stepNumber": 1,
+      "phase": "Set the client, identity, and write contract",
+      "title": "Read the live brief and label assumptions",
+      "type": "explanation",
+      "content": "The assigned problem is Design Google Calendar. The supplied live description is: Design a calendar application for creating, managing, and sharing events and appointments. Its exact requirements are: create/update/delete events; recurring events; share calendars/events; invitations/reminders; availability/scheduling; multiple calendars/user; millions of users; device sync. Its exact constraints are: concurrent updates to same event; timezones; real-time notifications; efficient conflict detection; cross-device consistency. The accompanying hints are time-based event indexes, concurrent-edit resolution, cron jobs for recurrence, push reminders, and CRDT offline sync; these are prompts, not mandates. The brief gives no DAU/peak write rate, geographic distribution, latency or availability SLO, retention, recurrence horizon, privacy policy, or definition of an availability conflict. All numbers, consistency boundaries, and engine choices below are provisional design assumptions to validate with product and operations owners, not supplied facts or service promises.",
+      "requirementIds": [
+        "legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4",
+        "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8",
+        "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "calendar_02",
+      "stepNumber": 2,
+      "phase": "Set the client, identity, and write contract",
+      "title": "Add the web calendar",
+      "type": "add_component",
+      "content": "The browser client lists calendars and events, edits event details, accepts invitations, and presents availability with its freshness time. It sends event revisions and stable request IDs on writes; it never treats a local cache or a push payload as the authoritative event.",
+      "component": {
+        "nodeId": "calendar_web",
+        "componentType": "web-app",
+        "label": "Calendar Web App",
+        "description": "Calendar views, event edits, sharing, and scheduling",
+        "position": {"x": 0, "y": 180},
+        "properties": {
+          "componentName": "Calendar Web App",
+          "purpose": "Render a user's authorized calendars and time-window event queries; submit revision-checked event commands and idempotency keys; show invitation, conflict, and sync state without treating cached data as authoritative.",
+          "framework": "React",
+          "cdn": true,
+          "ssl": true
+        },
+        "highlightReason": "The existing Web App catalog item represents the browser client without adding a calendar-specific node type."
+      },
+      "requirementIds": [
+        "legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6",
+        "legacy-constraint:1", "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "calendar_03",
+      "stepNumber": 3,
+      "phase": "Set the client, identity, and write contract",
+      "title": "Add the offline-capable mobile calendar",
+      "type": "add_component",
+      "content": "Mobile devices keep a bounded local view and an ordered queue of user commands while offline. Push is a wake-up or invalidation hint; the client reconnects and fetches authorized changes from its saved cursor before claiming it is current.",
+      "component": {
+        "nodeId": "calendar_mobile",
+        "componentType": "mobile-app",
+        "label": "Calendar Mobile App",
+        "description": "Offline edits, device sync, and push entry point",
+        "position": {"x": 0, "y": 430},
+        "properties": {
+          "componentName": "Calendar Mobile App",
+          "purpose": "Keep a bounded local calendar and queued commands for offline use; resume cursor-based sync after reconnect; reconcile event revisions and display conflicts; receive generic push hints and fetch private details only through an authorized sync request.",
+          "stack": "Swift/Kotlin",
+          "pushNotifications": true,
+          "offlineSupport": true
+        },
+        "highlightReason": "The existing Mobile App item already exposes offline and push capabilities needed by this brief."
+      },
+      "requirementIds": [
+        "legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:8",
+        "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "calendar_04",
+      "stepNumber": 4,
+      "phase": "Set the client, identity, and write contract",
+      "title": "Add the protected API boundary",
+      "type": "add_component",
+      "content": "Route calendar, sharing, availability, and sync requests through one authenticated boundary. Validate event payloads and request sizes, enforce quotas, and propagate a correlation ID. Authorization still belongs at the resource operation; a valid token alone does not grant access to a calendar.",
+      "component": {
+        "nodeId": "calendar_gateway",
+        "componentType": "api-gateway",
+        "label": "Calendar API Gateway",
+        "description": "TLS, request validation, authentication, and routing",
+        "position": {"x": 330, "y": 300},
+        "properties": {
+          "componentName": "Calendar API Gateway",
+          "purpose": "Terminate TLS, validate bounded request shapes, apply per-principal quotas, attach correlation IDs, and route event, share, availability, and sync calls; resource-level calendar ACL checks remain in application services.",
+          "inputValidation": true,
+          "authentication": "JWT",
+          "rateLimiting": true,
+          "tlsTermination": true
+        },
+        "highlightReason": "The catalog API Gateway supports the existing request-boundary role and its documented properties."
+      },
+      "requirementIds": [
+        "legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:5",
+        "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "calendar_05",
+      "stepNumber": 5,
+      "phase": "Set the client, identity, and write contract",
+      "title": "Connect the web client to the gateway",
+      "type": "add_connection",
+      "content": "Use authenticated HTTPS requests for event CRUD, calendar membership, availability windows, invitation responses, and cursor-based sync. Mutating calls carry an idempotency key and, for edits, the version the user last read.",
+      "connection": {
+        "edgeId": "calendar_web_gateway",
+        "sourceNodeId": "calendar_web",
+        "targetNodeId": "calendar_gateway",
+        "connectionType": "http",
+        "label": "Calendar, share, and sync API",
+        "description": "TLS requests carry principal context, event revision, and a retry-stable idempotency key"
+      },
+      "requirementIds": [
+        "legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:5",
+        "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "calendar_06",
+      "stepNumber": 6,
+      "phase": "Set the client, identity, and write contract",
+      "title": "Connect the mobile client",
+      "type": "add_connection",
+      "content": "On reconnect, the mobile client submits queued commands with their original idempotency keys and base revisions, then requests changes after its last durable cursor. A timeout does not create a new logical event or imply that the previous write failed.",
+      "connection": {
+        "edgeId": "calendar_mobile_gateway",
+        "sourceNodeId": "calendar_mobile",
+        "targetNodeId": "calendar_gateway",
+        "connectionType": "http",
+        "label": "Offline replay + delta sync",
+        "description": "Replays stable command identities and resumes from a per-user sync cursor"
+      },
+      "requirementIds": [
+        "legacy-requirement:1", "legacy-requirement:8",
+        "legacy-constraint:1", "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "calendar_07",
+      "stepNumber": 7,
+      "phase": "Set the client, identity, and write contract",
+      "title": "Add identity and session validation",
+      "type": "add_component",
+      "content": "Resolve the authenticated principal and token audience, then pass a short-lived identity context to downstream services. Calendar membership and event visibility are checked separately on every operation, including background invitation or sync work.",
+      "component": {
+        "nodeId": "calendar_auth",
+        "componentType": "auth-service",
+        "label": "Identity Service",
+        "description": "Principal authentication and scoped session claims",
+        "position": {"x": 330, "y": 45},
+        "properties": {
+          "componentName": "Identity Service",
+          "purpose": "Validate short-lived OAuth/JWT identity and token audience, provide a stable principal ID and scoped claims, and support policy-controlled step-up authentication; never use possession of an event ID as authorization.",
+          "oauth": true,
+          "sessions": "redis"
+        },
+        "highlightReason": "The catalog Auth Service represents authentication; resource ACL decisions remain explicit in the calendar service."
+      },
+      "requirementIds": [
+        "legacy-requirement:3", "legacy-requirement:6",
+        "legacy-constraint:1"
+      ]
+    },
+    {
+      "id": "calendar_08",
+      "stepNumber": 8,
+      "phase": "Set the client, identity, and write contract",
+      "title": "Validate the principal on every request",
+      "type": "add_connection",
+      "content": "The gateway verifies the token, while downstream services enforce ownership, membership, invitation state, and event-level visibility. Revoked membership must take effect on protected reads and writes rather than waiting for a long-lived authorization cache.",
+      "connection": {
+        "edgeId": "calendar_gateway_auth",
+        "sourceNodeId": "calendar_gateway",
+        "targetNodeId": "calendar_auth",
+        "connectionType": "api-call",
+        "label": "Principal + session claims",
+        "description": "Authentication is distinct from calendar and event authorization"
+      },
+      "requirementIds": [
+        "legacy-requirement:3", "legacy-requirement:6",
+        "legacy-constraint:1", "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "calendar_09",
+      "stepNumber": 9,
+      "phase": "Set the client, identity, and write contract",
+      "title": "Add the calendar command and query service",
+      "type": "add_component",
+      "content": "Expose create, update, delete, calendar-list, and event-range operations. Normalize and validate each event, authorize the principal against its calendar, and commit a new event revision plus change record before returning success. Store deletion as a tombstone long enough for offline devices to observe it.",
+      "component": {
+        "nodeId": "calendar_api",
+        "componentType": "backend-server",
+        "label": "Calendar Command + Query API",
+        "description": "Authorized event CRUD and calendar reads",
+        "position": {"x": 680, "y": 300},
+        "properties": {
+          "componentName": "Calendar Command + Query API",
+          "purpose": "Authorize each calendar resource operation; validate event and recurrence inputs; create, update, and tombstone events transactionally; require a stable idempotency key for mutation retries and a base event revision for edits; return the committed revision and sync cursor.",
+          "architecture": "Microservices",
+          "caching": false
+        },
+        "highlightReason": "The existing Backend Server represents the calendar application service without inventing a new component type."
+      },
+      "requirementIds": [
+        "legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:6",
+        "legacy-constraint:1", "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "calendar_10",
+      "stepNumber": 10,
+      "phase": "Set the client, identity, and write contract",
+      "title": "Route calendar commands and queries",
+      "type": "add_connection",
+      "content": "The API derives the principal from the verified session, checks calendar ACLs, and never trusts client-supplied ownership or revision state without comparing it to the stored event.",
+      "connection": {
+        "edgeId": "calendar_gateway_api",
+        "sourceNodeId": "calendar_gateway",
+        "targetNodeId": "calendar_api",
+        "connectionType": "http",
+        "label": "Authorized event + calendar calls",
+        "description": "Routes CRUD and range queries with identity, idempotency, and revision metadata"
+      },
+      "requirementIds": [
+        "legacy-requirement:1", "legacy-requirement:6",
+        "legacy-constraint:1", "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "calendar_11",
+      "stepNumber": 11,
+      "phase": "Set the client, identity, and write contract",
+      "title": "Resolve concurrent edits with revisions",
+      "type": "decision_point",
+      "content": "Use a monotonically increasing event revision and conditional update (If-Match/baseRevision). If the stored revision changed, return a conflict with the latest authorized version so the client can compare and reapply; do not silently overwrite another editor. Scope an idempotency record to principal, operation, and key, and bind it to a payload hash so identical retries return the original result while key reuse with a different payload is rejected.",
+      "decision": {
+        "question": "What should happen when two clients edit one event concurrently?",
+        "chosen": "Conditional revision write with explicit conflict response and durable idempotency",
+        "chosenReason": "It prevents lost updates and duplicate creates without holding a long-lived lock while a person edits.",
+        "alternatives": [
+          {"option": "Last-write-wins by client timestamp", "tradeoff": "Clock skew and delayed offline writes can erase a newer intentional edit."},
+          {"option": "Lock an event while a client has it open", "tradeoff": "Disconnected clients strand locks and readers cannot collaborate comfortably."},
+          {"option": "Merge every field automatically", "tradeoff": "Time, attendee, recurrence, and ACL changes can conflict semantically even when fields differ."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "calendar_api",
+        "properties": {
+          "purpose": "Authorize each calendar resource operation; validate event and recurrence inputs; create, update, and tombstone events transactionally; require a stable principal-scoped idempotency key and payload hash for mutation retries; compare a base event revision and return an explicit conflict rather than overwriting concurrent edits; return the committed revision and sync cursor."
+        }
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-constraint:1", "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "calendar_12",
+      "stepNumber": 12,
+      "phase": "Set the client, identity, and write contract",
+      "title": "Add the authoritative event and membership store",
+      "type": "add_component",
+      "content": "Keep calendar metadata, memberships, event revisions, recurrence masters and exceptions, invitation state, idempotency records, tombstones, per-calendar change sequence, and transactional outbox records in a durable OLTP store. A candidate distributed SQL engine is an assumption to benchmark, not dictated by the brief. Partitioning by calendar keeps common owner-calendar reads local; attendee-wide availability may fan out and needs a separate measured projection.",
+      "component": {
+        "nodeId": "calendar_store",
+        "componentType": "database",
+        "label": "Calendar OLTP Store",
+        "description": "Events, ACLs, revisions, cursors, and transactional outbox",
+        "position": {"x": 1010, "y": 300},
+        "properties": {
+          "componentName": "Calendar OLTP Store",
+          "purpose": "Authoritative transactional calendars, memberships, event revisions, recurrence masters/exceptions, invitation responses, unique idempotency records, deletion tombstones, per-calendar change sequence, and outbox. Use calendar-key partitions and a time index; attendee-wide projections are derived and freshness-marked.",
+          "type": "NewSQL",
+          "engine": "cockroachdb",
+          "workload": "OLTP",
+          "sharding": "Hash-based",
+          "replication": 3,
+          "replicationMode": "Sync",
+          "multiAZ": true,
+          "crossRegion": false,
+          "backups": true,
+          "pitr": true,
+          "encryption": true,
+          "connectionPooling": true,
+          "rbac": true,
+          "auditLog": true
+        },
+        "highlightReason": "The catalog Database supports an OLTP/NewSQL candidate and the existing sharding, replication, backup, encryption, and audit properties; engine and topology remain provisional."
+      },
+      "requirementIds": [
+        "legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3",
+        "legacy-requirement:6", "legacy-requirement:7",
+        "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "calendar_13",
+      "stepNumber": 13,
+      "phase": "Set the client, identity, and write contract",
+      "title": "Persist event mutations and time indexes",
+      "type": "add_connection",
+      "content": "In one transaction, conditionally write the event revision, idempotency result, calendar change sequence, and outbox row. Index event occurrences by calendar and UTC start/end for bounded time-range reads; keep the original timezone and recurrence rule on the series. In this design, canonical event reads and revision checks use the authoritative store (or a read replica must reach the returned revision before serving the read); return write success only after commit. Availability is a derived projection with an as-of watermark, and other devices apply durable cursor pages, so both views may lag until refreshed or caught up. Push is only a hint, not a freshness guarantee. This keeps projection and device fan-out off the write path but trades immediate cross-device and availability freshness for lower write-path coupling; the brief defines no propagation SLO.",
+      "connection": {
+        "edgeId": "calendar_api_store",
+        "sourceNodeId": "calendar_api",
+        "targetNodeId": "calendar_store",
+        "connectionType": "database-connection",
+        "label": "Versioned event + outbox transaction",
+        "description": "Atomic commit of event state, idempotency result, tombstone/change cursor, and outbox"
+      },
+      "requirementIds": [
+        "legacy-requirement:1", "legacy-requirement:2",
+        "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "calendar_14",
+      "stepNumber": 14,
+      "phase": "Model sharing, time, and availability",
+      "title": "Separate calendar sharing from identity",
+      "type": "add_component",
+      "content": "Represent calendar membership and event overrides explicitly: owner, editor, and reader capabilities; invitation pending/accepted/declined state; and private event fields. Validate the target principal and owner authority before changing ACLs. Share links, if later supported, need revocation, expiry, and scope rather than bypassing normal authorization.",
+      "component": {
+        "nodeId": "calendar_sharing",
+        "componentType": "backend-server",
+        "label": "Calendar Sharing + ACL Service",
+        "description": "Membership, invitations, roles, and event visibility",
+        "position": {"x": 680, "y": 20},
+        "properties": {
+          "componentName": "Calendar Sharing + ACL Service",
+          "purpose": "Manage owner/editor/reader membership, invitation state, event-level visibility overrides, and revocation; authorize every read and mutation against current ACL state; minimize private event details in responses and notifications.",
+          "architecture": "Microservices",
+          "caching": false
+        },
+        "highlightReason": "The existing Backend Server can represent the ACL domain; the catalog has no need for a new calendar-specific node."
+      },
+      "requirementIds": [
+        "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6"
+      ]
+    },
+    {
+      "id": "calendar_15",
+      "stepNumber": 15,
+      "phase": "Model sharing, time, and availability",
+      "title": "Authorize calendar and event sharing",
+      "type": "add_connection",
+      "content": "The command API delegates invitation and membership changes to the ACL service, then persists them with the calendar's durable change stream. Access revocation invalidates relevant cached authorization and causes subsequent sync pages to omit newly private fields.",
+      "connection": {
+        "edgeId": "calendar_api_sharing",
+        "sourceNodeId": "calendar_api",
+        "targetNodeId": "calendar_sharing",
+        "connectionType": "api-call",
+        "label": "Share, invite, and authorize",
+        "description": "Checks current roles and event visibility for calendar operations"
+      },
+      "requirementIds": [
+        "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "calendar_16",
+      "stepNumber": 16,
+      "phase": "Model sharing, time, and availability",
+      "title": "Persist membership and invitation state",
+      "type": "add_connection",
+      "content": "Commit membership changes, invitation state, and the corresponding change/outbox record together. Enforce unique active membership and invitation identities so a retried share action cannot create repeated invitations or grant broader access.",
+      "connection": {
+        "edgeId": "calendar_sharing_store",
+        "sourceNodeId": "calendar_sharing",
+        "targetNodeId": "calendar_store",
+        "connectionType": "database-connection",
+        "label": "Calendar membership + invite state",
+        "description": "Durable role, invitation response, revocation, and change sequence"
+      },
+      "requirementIds": [
+        "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6",
+        "legacy-constraint:1", "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "calendar_17",
+      "stepNumber": 17,
+      "phase": "Model sharing, time, and availability",
+      "title": "Add the availability and conflict query service",
+      "type": "add_component",
+      "content": "Answer a bounded time-window query across the caller's authorized calendars and attendee principals. Use an interval index over UTC instants and a principal-to-busy-range projection, while retaining timezone and all-day semantics in the event record. Apply privacy filtering before returning busy/free data; expose the projection's freshness watermark.",
+      "component": {
+        "nodeId": "calendar_availability",
+        "componentType": "backend-server",
+        "label": "Availability + Conflict Service",
+        "description": "Indexed free/busy queries across authorized calendars",
+        "position": {"x": 1010, "y": 30},
+        "properties": {
+          "componentName": "Availability + Conflict Service",
+          "purpose": "Query bounded UTC intervals from a principal/time busy-range projection and calendar/time event index; filter by current ACL and privacy rules; return overlaps plus an as-of watermark; never represent a stale read as conflict-free.",
+          "architecture": "Microservices",
+          "caching": false
+        },
+        "highlightReason": "The generic Backend Server catalog item can represent the query service; time indexes and projection logic are implementation details, not new component types."
+      },
+      "requirementIds": [
+        "legacy-requirement:5", "legacy-requirement:6",
+        "legacy-constraint:2", "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "calendar_18",
+      "stepNumber": 18,
+      "phase": "Model sharing, time, and availability",
+      "title": "Route free/busy and scheduling queries",
+      "type": "add_connection",
+      "content": "The API passes only authorized calendar IDs, attendee principals, requested interval, and caller timezone. Bound the interval width and participant count to prevent a broad query from scanning unbounded event history.",
+      "connection": {
+        "edgeId": "calendar_api_availability",
+        "sourceNodeId": "calendar_api",
+        "targetNodeId": "calendar_availability",
+        "connectionType": "api-call",
+        "label": "Authorized availability window",
+        "description": "Calendar-scoped free/busy request with bounded range and participant list"
+      },
+      "requirementIds": [
+        "legacy-requirement:5", "legacy-requirement:6",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "calendar_19",
+      "stepNumber": 19,
+      "phase": "Model sharing, time, and availability",
+      "title": "Read time-indexed event and busy data",
+      "type": "add_connection",
+      "content": "Use a range index such as calendar_id plus start_utc, with an end-time overlap predicate, and a separately maintained principal_id plus start_utc index for attendee queries. Projection updates carry source event revision and are idempotent; reject an older revision so delayed messages cannot roll availability backward.",
+      "connection": {
+        "edgeId": "calendar_availability_store",
+        "sourceNodeId": "calendar_availability",
+        "targetNodeId": "calendar_store",
+        "connectionType": "database-connection",
+        "label": "Event range + busy projection reads",
+        "description": "Bounded time-index lookups with source revision and projection freshness"
+      },
+      "requirementIds": [
+        "legacy-requirement:5", "legacy-requirement:6",
+        "legacy-constraint:2", "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "calendar_20",
+      "stepNumber": 20,
+      "phase": "Model sharing, time, and availability",
+      "title": "Add a derived short-lived cache",
+      "type": "add_component",
+      "content": "Cache only derived range results or non-sensitive calendar metadata under keys that include principal/ACL version and time window. The proposed short TTL is a tuning assumption, not a consistency guarantee. A cache miss, expiry, or invalidation failure falls back to the authoritative query; permission changes must not leave readable private details behind.",
+      "component": {
+        "nodeId": "calendar_cache",
+        "componentType": "cache",
+        "label": "ACL-Aware Range Cache",
+        "description": "Short-lived derived calendar query results",
+        "position": {"x": 1320, "y": 30},
+        "properties": {
+          "componentName": "ACL-Aware Range Cache",
+          "purpose": "Cache only derived, ACL-versioned range results and non-sensitive metadata; never store authorization truth or use a cached free result to approve a booking; invalidate on event, membership, and privacy changes.",
+          "engine": "redis",
+          "cacheStrategy": "cache-aside",
+          "ttl": 15,
+          "inMemory": true,
+          "eviction": "lru",
+          "replication": true,
+          "clusterMode": true,
+          "persistence": false
+        },
+        "highlightReason": "The existing Cache catalog item supports Redis/cache-aside behavior; the provisional TTL is labeled for later workload tuning."
+      },
+      "requirementIds": [
+        "legacy-requirement:5", "legacy-requirement:6",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "calendar_21",
+      "stepNumber": 21,
+      "phase": "Model sharing, time, and availability",
+      "title": "Connect derived availability caching",
+      "type": "add_connection",
+      "content": "Return cached data with an explicit as-of time and ACL version. On an event or permission change, invalidate affected windows; if invalidation is delayed, the watermark exposes that lag and the API must not claim strong current availability.",
+      "connection": {
+        "edgeId": "calendar_availability_cache",
+        "sourceNodeId": "calendar_availability",
+        "targetNodeId": "calendar_cache",
+        "connectionType": "data-flow",
+        "label": "Derived range cache",
+        "description": "Freshness- and ACL-versioned query acceleration only"
+      },
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "calendar_22",
+      "stepNumber": 22,
+      "phase": "Model sharing, time, and availability",
+      "title": "Define what a scheduling conflict means",
+      "type": "decision_point",
+      "content": "An overlap is a signal to show the user, not automatically a write rejection: calendars can intentionally contain overlapping events, and a free/busy check can race with another edit. Return the conflicting interval and freshness watermark. If the product later promises exclusive resource booking, add an explicit reservation/hold protocol with conditional commit and expiry; do not infer that invariant from this brief.",
+      "decision": {
+        "question": "How should availability checks handle stale data and overlapping events?",
+        "chosen": "Freshness-marked indexed free/busy results; treat overlaps as advisory unless a product-approved exclusive reservation contract exists",
+        "chosenReason": "This satisfies efficient conflict detection without silently forbidding legitimate overlapping personal events or promising a race-free booking guarantee.",
+        "alternatives": [
+          {"option": "Scan every event on every request", "tradeoff": "Unbounded history and attendee fan-out make latency and load unpredictable."},
+          {"option": "Treat cached free as an atomic booking reservation", "tradeoff": "A read cache cannot prevent two concurrent writers from selecting the same slot."},
+          {"option": "Reject every overlapping event", "tradeoff": "It changes product semantics and blocks intentional calendar overlaps."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "calendar_availability",
+        "properties": {
+          "purpose": "Query bounded UTC intervals from calendar/time and principal/time busy indexes; enforce current ACL and privacy rules; return overlaps with an as-of watermark; treat free/busy as advisory unless a separate product-approved reservation transaction exists; never label stale data conflict-free."
+        }
+      },
+      "requirementIds": [
+        "legacy-requirement:5", "legacy-requirement:6",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "calendar_23",
+      "stepNumber": 23,
+      "phase": "Make recurrence and reminders durable",
+      "title": "Add an outbox relay",
+      "type": "add_component",
+      "content": "The event database transaction writes an outbox row beside each committed event, ACL, invitation, or tombstone change. A relay publishes rows and advances its checkpoint only after broker acknowledgement; a crash between publish and checkpoint may duplicate a message, so consumers must be idempotent.",
+      "component": {
+        "nodeId": "calendar_outbox",
+        "componentType": "backend-server",
+        "label": "Transactional Outbox Relay",
+        "description": "Publishes committed calendar changes for asynchronous consumers",
+        "position": {"x": 1320, "y": 310},
+        "properties": {
+          "componentName": "Transactional Outbox Relay",
+          "purpose": "Poll committed outbox rows in sequence, publish with event ID, aggregate revision, and schema version, and checkpoint only after broker acknowledgement; reclaim leases after crashes and safely republish duplicate rows.",
+          "architecture": "Microservices",
+          "retry": true
+        },
+        "highlightReason": "The catalog Backend Server models a stateless relay; durable source state remains in the database."
+      },
+      "requirementIds": [
+        "legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4",
+        "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "calendar_24",
+      "stepNumber": 24,
+      "phase": "Make recurrence and reminders durable",
+      "title": "Read committed changes for publication",
+      "type": "add_connection",
+      "content": "The relay reads only committed outbox records; it cannot make an uncommitted event visible to notification or sync consumers. Monitor its oldest unpublished row and checkpoint age so a stalled relay is visible before reminders or devices fall behind.",
+      "connection": {
+        "edgeId": "calendar_store_outbox",
+        "sourceNodeId": "calendar_store",
+        "targetNodeId": "calendar_outbox",
+        "connectionType": "database-connection",
+        "label": "Committed outbox rows",
+        "description": "Durable ordered change records written atomically with calendar state"
+      },
+      "requirementIds": [
+        "legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:8",
+        "legacy-constraint:3", "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "calendar_25",
+      "stepNumber": 25,
+      "phase": "Make recurrence and reminders durable",
+      "title": "Add the durable calendar event broker",
+      "type": "add_component",
+      "content": "Publish versioned events such as EventChanged, InvitationCreated, MembershipRevoked, and EventDeleted. Partition by aggregate/calendar key to preserve per-calendar order; use bounded retention for replay and a dead-letter path for poison messages. The chosen broker and retention are operational assumptions to validate.",
+      "component": {
+        "nodeId": "calendar_broker",
+        "componentType": "message-broker",
+        "label": "Calendar Change Broker",
+        "description": "Durable, replayable event stream for background consumers",
+        "position": {"x": 1630, "y": 310},
+        "properties": {
+          "componentName": "Calendar Change Broker",
+          "purpose": "Distribute versioned committed event, invitation, ACL, and deletion changes by calendar aggregate; preserve partition order, retain a bounded replay window, and route poison records for inspection without blocking unrelated partitions.",
+          "durable": true,
+          "partitions": 16,
+          "replication": 3,
+          "retention": 168
+        },
+        "highlightReason": "The existing Message Broker supports durable partitioned change events; partition count and retention are provisional settings, not traffic-derived sizing."
+      },
+      "requirementIds": [
+        "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4",
+        "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "calendar_26",
+      "stepNumber": 26,
+      "phase": "Make recurrence and reminders durable",
+      "title": "Publish changes from the outbox",
+      "type": "add_connection",
+      "content": "Attach a stable event ID, calendar ID, source revision, occurrence generation, and schema version. Consumers deduplicate by event identity and reject stale aggregate revisions; broker delivery is at least once, not an exactly-once business guarantee.",
+      "connection": {
+        "edgeId": "calendar_outbox_broker",
+        "sourceNodeId": "calendar_outbox",
+        "targetNodeId": "calendar_broker",
+        "connectionType": "message-queue",
+        "label": "Versioned committed change events",
+        "description": "At-least-once publish with stable identity and aggregate revision"
+      },
+      "requirementIds": [
+        "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4",
+        "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "calendar_27",
+      "stepNumber": 27,
+      "phase": "Make recurrence and reminders durable",
+      "title": "Add the recurrence expansion worker",
+      "type": "add_component",
+      "content": "Store one recurrence master rule plus exceptions and cancellations rather than writing an unbounded series of independent events. A worker materializes a bounded upcoming window for indexed reads and expands older/farther ranges on demand. Each generated occurrence is unique by series, local occurrence identity, and rule generation.",
+      "component": {
+        "nodeId": "calendar_recurrence",
+        "componentType": "backend-server",
+        "label": "Recurrence Expansion Worker",
+        "description": "Generates bounded occurrence and reminder work",
+        "position": {"x": 1940, "y": 80},
+        "properties": {
+          "componentName": "Recurrence Expansion Worker",
+          "purpose": "Expand versioned recurrence masters into a bounded occurrence horizon; preserve local recurrence identity and IANA timezone; apply exceptions/cancellations; deduplicate by series, occurrence, and generation; enqueue reminders only for the current event revision.",
+          "architecture": "Microservices",
+          "retry": true
+        },
+        "highlightReason": "No dedicated scheduler node is required: the existing Backend Server represents recurrence workers and the existing Queue below carries durable scheduled tasks."
+      },
+      "requirementIds": [
+        "legacy-requirement:2"
+      ]
+    },
+    {
+      "id": "calendar_28",
+      "stepNumber": 28,
+      "phase": "Make recurrence and reminders durable",
+      "title": "Trigger recurrence work from committed changes",
+      "type": "add_connection",
+      "content": "A series create or edit schedules expansion after its new revision commits. The worker ignores events from an older revision and can resume from a durable cursor after restart; a broker message is a wake-up, not the only copy of the schedule.",
+      "connection": {
+        "edgeId": "calendar_broker_recurrence",
+        "sourceNodeId": "calendar_broker",
+        "targetNodeId": "calendar_recurrence",
+        "connectionType": "message-queue",
+        "label": "Series changed + generation",
+        "description": "Durable trigger for version-fenced recurrence expansion"
+      },
+      "requirementIds": [
+        "legacy-requirement:2", "legacy-constraint:1"
+      ]
+    },
+    {
+      "id": "calendar_29",
+      "stepNumber": 29,
+      "phase": "Make recurrence and reminders durable",
+      "title": "Persist generated occurrences by time",
+      "type": "add_connection",
+      "content": "Write generated instances or a bounded occurrence index with a uniqueness guard and source series revision. Upsert retries are safe; a series edit invalidates old-generation future rows and their reminders, while already completed historical instances remain auditable.",
+      "connection": {
+        "edgeId": "calendar_recurrence_store",
+        "sourceNodeId": "calendar_recurrence",
+        "targetNodeId": "calendar_store",
+        "connectionType": "database-connection",
+        "label": "Versioned occurrence materialization",
+        "description": "Unique occurrence identity and indexed UTC start/end range"
+      },
+      "requirementIds": [
+        "legacy-requirement:2", "legacy-requirement:5",
+        "legacy-constraint:1", "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "calendar_30",
+      "stepNumber": 30,
+      "phase": "Make recurrence and reminders durable",
+      "title": "Keep recurrence in local civil time",
+      "type": "decision_point",
+      "content": "For a weekly meeting at 09:00 in America/New_York, store the IANA timezone and local wall-clock rule, then resolve each occurrence to a UTC instant using the timezone database. Store UTC start/end for ordering and range indexes, plus all-day dates without converting them into midnight UTC. Specify a policy for nonexistent or repeated local times at DST boundaries and review how timezone-database updates affect future occurrences; the supplied brief does not choose those policies.",
+      "decision": {
+        "question": "How should recurring events behave across timezone and daylight-saving changes?",
+        "chosen": "Store an IANA timezone and local recurrence rule; materialize UTC occurrences with explicit DST policy and rule generation",
+        "chosenReason": "A fixed UTC offset changes the displayed wall time across DST, while a local rule preserves the meeting intent and still supports UTC indexes.",
+        "alternatives": [
+          {"option": "Store only the first UTC instant and add a fixed duration", "tradeoff": "Later occurrences drift from the user's intended local time after offset changes."},
+          {"option": "Expand every occurrence at creation forever", "tradeoff": "The series is unbounded and future timezone-rule changes require mass rewrites."},
+          {"option": "Let each device expand recurrence independently", "tradeoff": "Different app versions or timezone databases can disagree about the canonical occurrence set."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "calendar_recurrence",
+        "properties": {
+          "purpose": "Expand versioned recurrence masters from local wall-clock rules plus IANA timezone into a bounded UTC occurrence horizon; retain all-day date semantics; apply exceptions, cancellations, and an explicit DST gap/overlap policy; fence stale rule generations and deduplicate occurrence and reminder writes."
+        }
+      },
+      "requirementIds": [
+        "legacy-requirement:2", "legacy-requirement:5",
+        "legacy-constraint:2"
+      ]
+    },
+    {
+      "id": "calendar_31",
+      "stepNumber": 31,
+      "phase": "Make recurrence and reminders durable",
+      "title": "Add a durable reminder queue",
+      "type": "add_component",
+      "content": "Queue due-time jobs keyed by event revision, occurrence, recipient, and reminder offset. A worker rechecks that the event still exists, the recipient remains eligible, and the reminder has not already been sent before dispatch. Queue delays and retry counts are provisional and require a real notification SLO and provider quota.",
+      "component": {
+        "nodeId": "calendar_reminder_queue",
+        "componentType": "queue",
+        "label": "Reminder + Invitation Queue",
+        "description": "Durable due-time and retryable notification tasks",
+        "position": {"x": 2250, "y": 310},
+        "properties": {
+          "componentName": "Reminder + Invitation Queue",
+          "purpose": "Hold due-time reminder and invitation tasks with event revision, occurrence, recipient, and idempotency identity; retry transient failures with backoff, route exhausted work to a reviewable dead-letter queue, and revalidate cancellation before sending.",
+          "visibilityTimeout": 60,
+          "maxRetries": 8,
+          "durable": true,
+          "backoff": "exponential"
+        },
+        "highlightReason": "The existing Queue catalog item supports durable retryable tasks; delay and retry values are provisional operational settings."
+      },
+      "requirementIds": [
+        "legacy-requirement:2", "legacy-requirement:4",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "calendar_32",
+      "stepNumber": 32,
+      "phase": "Make recurrence and reminders durable",
+      "title": "Schedule reminders for the current occurrence",
+      "type": "add_connection",
+      "content": "The recurrence worker schedules reminders from the resolved occurrence instant and user-selected offset, not from a stale client clock. Editing or deleting the series creates a new generation and cancels or supersedes old future jobs; consumers recheck the store before delivery.",
+      "connection": {
+        "edgeId": "calendar_recurrence_queue",
+        "sourceNodeId": "calendar_recurrence",
+        "targetNodeId": "calendar_reminder_queue",
+        "connectionType": "message-queue",
+        "label": "Due-time reminder jobs",
+        "description": "Occurrence- and revision-fenced invitation/reminder work"
+      },
+      "requirementIds": [
+        "legacy-requirement:2", "legacy-requirement:4",
+        "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "calendar_33",
+      "stepNumber": 33,
+      "phase": "Make recurrence and reminders durable",
+      "title": "Add the notification delivery service",
+      "type": "add_component",
+      "content": "Deliver invitations, responses, and reminders through configured push/email channels. Push payloads should be generic and contain no private title, attendee list, or location; devices fetch details after authorization. Provider acceptance is not proof that a person saw a notification.",
+      "component": {
+        "nodeId": "calendar_notifications",
+        "componentType": "notification-service",
+        "label": "Invitation + Reminder Delivery",
+        "description": "Privacy-safe push and email dispatch",
+        "position": {"x": 2550, "y": 310},
+        "properties": {
+          "componentName": "Invitation + Reminder Delivery",
+          "purpose": "Deliver authorized invitation and due-reminder notices over configured push/email channels using a durable idempotency key; keep payloads generic, respect recipient preferences and revocation, record provider outcome, and retry without claiming user receipt.",
+          "channels": "Push + Email",
+          "fanout": true,
+          "batching": true
+        },
+        "highlightReason": "The existing Notification Service supports push/email fan-out and batching without adding a provider-specific component."
+      },
+      "requirementIds": [
+        "legacy-requirement:3", "legacy-requirement:4",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "calendar_34",
+      "stepNumber": 34,
+      "phase": "Make recurrence and reminders durable",
+      "title": "Deliver queued invitations and reminders",
+      "type": "add_connection",
+      "content": "The dispatcher claims a due job, checks current event revision, cancellation, recipient membership, and delivery key, then records the provider result. A transient provider outage leaves retryable work; permanent rejection is visible for support and does not erase the invitation state.",
+      "connection": {
+        "edgeId": "calendar_queue_notifications",
+        "sourceNodeId": "calendar_reminder_queue",
+        "targetNodeId": "calendar_notifications",
+        "connectionType": "message-queue",
+        "label": "Retry-safe notification task",
+        "description": "Rechecks event, recipient, cancellation, and provider result before completion"
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-constraint:1", "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "calendar_35",
+      "stepNumber": 35,
+      "phase": "Make recurrence and reminders durable",
+      "title": "Make notification retries idempotent",
+      "type": "decision_point",
+      "content": "At-least-once queues can redeliver after a worker crash or provider timeout. Persist a unique delivery identity before acknowledging completion, distinguish accepted-by-provider from delivered-to-device, and reconcile ambiguous outcomes with the provider where supported. Never create a second logical invitation because the first response was slow.",
+      "decision": {
+        "question": "How do retries avoid duplicate or stale reminders?",
+        "chosen": "Durable per-recipient delivery key, revision recheck, bounded retry, and dead-letter review",
+        "chosenReason": "This makes duplicate queue delivery safe and prevents reminders for canceled or superseded occurrences from being treated as current.",
+        "alternatives": [
+          {"option": "Assume the queue delivers exactly once", "tradeoff": "A crash after provider acceptance but before queue acknowledgement can still redeliver."},
+          {"option": "Retry forever at a fixed interval", "tradeoff": "Poison tasks consume capacity and can flood a throttled provider."},
+          {"option": "Treat push acceptance as user delivery", "tradeoff": "Provider acceptance cannot prove that a device received or displayed the notice."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "calendar_notifications",
+        "properties": {
+          "purpose": "Deliver authorized invitations and due reminders over configured push/email channels using a durable per-recipient delivery key; recheck event revision, cancellation, membership, and preferences; keep payloads generic; record provider acceptance separately from device delivery; bound retries and expose dead-letter outcomes."
+        }
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-constraint:1", "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "calendar_36",
+      "stepNumber": 36,
+      "phase": "Synchronize devices and operate the system",
+      "title": "Add the cursor-based device sync service",
+      "type": "add_component",
+      "content": "Maintain a durable change cursor per user or calendar subscription. Return bounded pages with opaque next cursors, revisions, and tombstones; authorization is reevaluated while paging so revoked access does not continue leaking event fields. Clients apply a page idempotently before persisting its next cursor.",
+      "component": {
+        "nodeId": "calendar_sync",
+        "componentType": "backend-server",
+        "label": "Calendar Delta Sync Service",
+        "description": "Authorized cursor-based change feeds for devices",
+        "position": {"x": 1940, "y": 540},
+        "properties": {
+          "componentName": "Calendar Delta Sync Service",
+          "purpose": "Serve bounded, authorized change pages with opaque cursors, per-event revisions, and tombstones; bind cursor scope to principal and subscriptions; require clients to apply a page idempotently before advancing their durable cursor.",
+          "architecture": "Microservices",
+          "caching": false
+        },
+        "highlightReason": "The existing Backend Server models a generic delta-feed service; no new sync component type is needed."
+      },
+      "requirementIds": [
+        "legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:8",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "calendar_37",
+      "stepNumber": 37,
+      "phase": "Synchronize devices and operate the system",
+      "title": "Request a bounded sync page",
+      "type": "add_connection",
+      "content": "The gateway authenticates the device and routes its opaque cursor, but the sync service validates cursor ownership and current subscriptions. Expired cursors return a clear resync-required response rather than an incomplete delta presented as current.",
+      "connection": {
+        "edgeId": "calendar_gateway_sync",
+        "sourceNodeId": "calendar_gateway",
+        "targetNodeId": "calendar_sync",
+        "connectionType": "http",
+        "label": "Authorized delta request",
+        "description": "Principal-scoped cursor request with bounded page size"
+      },
+      "requirementIds": [
+        "legacy-requirement:8",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "calendar_38",
+      "stepNumber": 38,
+      "phase": "Synchronize devices and operate the system",
+      "title": "Consume committed changes for sync",
+      "type": "add_connection",
+      "content": "Use the broker as a low-latency wake-up and projection feed, while the durable event/change log remains the recovery source. On a consumer gap or retention expiry, rebuild from the authoritative store and issue a new cursor only after the projection is complete to its stated watermark.",
+      "connection": {
+        "edgeId": "calendar_broker_sync",
+        "sourceNodeId": "calendar_broker",
+        "targetNodeId": "calendar_sync",
+        "connectionType": "message-queue",
+        "label": "Versioned device change feed",
+        "description": "Committed revision and tombstone events; replay or rebuild on a gap"
+      },
+      "requirementIds": [
+        "legacy-requirement:8",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "calendar_39",
+      "stepNumber": 39,
+      "phase": "Synchronize devices and operate the system",
+      "title": "Return authorized changes to web clients",
+      "type": "add_connection",
+      "content": "Web clients merge only newer event revisions and apply tombstones so deletions do not reappear from stale local cache. If a page fails partway through, retry from the prior cursor; deduplication makes the replay safe.",
+      "connection": {
+        "edgeId": "calendar_sync_web",
+        "sourceNodeId": "calendar_sync",
+        "targetNodeId": "calendar_web",
+        "connectionType": "http",
+        "label": "Revisioned delta page",
+        "description": "Authorized changes, tombstones, and next cursor"
+      },
+      "requirementIds": [
+        "legacy-requirement:1", "legacy-requirement:8",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "calendar_40",
+      "stepNumber": 40,
+      "phase": "Synchronize devices and operate the system",
+      "title": "Return authorized changes to mobile clients",
+      "type": "add_connection",
+      "content": "The mobile client persists the new cursor only after applying all page records transactionally to its local store. On reconnect it sends queued mutations with original keys and base revisions, then reconciles server conflicts explicitly instead of silently replacing server state.",
+      "connection": {
+        "edgeId": "calendar_sync_mobile",
+        "sourceNodeId": "calendar_sync",
+        "targetNodeId": "calendar_mobile",
+        "connectionType": "http",
+        "label": "Revisioned delta + reconnect",
+        "description": "Cursor advances after idempotent local page application"
+      },
+      "requirementIds": [
+        "legacy-requirement:1", "legacy-requirement:8",
+        "legacy-constraint:1", "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "calendar_41",
+      "stepNumber": 41,
+      "phase": "Synchronize devices and operate the system",
+      "title": "Send privacy-safe push invalidations",
+      "type": "add_connection",
+      "content": "A push tells a device that new data may exist; it does not carry an authoritative event body or prove delivery. The device fetches the delta through the authenticated sync path and can still converge if push is delayed, collapsed, or lost.",
+      "connection": {
+        "edgeId": "calendar_notifications_mobile",
+        "sourceNodeId": "calendar_notifications",
+        "targetNodeId": "calendar_mobile",
+        "connectionType": "data-flow",
+        "label": "Generic push wake-up",
+        "description": "No private event details; device fetches current authorized state"
+      },
+      "requirementIds": [
+        "legacy-requirement:4", "legacy-requirement:8",
+        "legacy-constraint:3", "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "calendar_42",
+      "stepNumber": 42,
+      "phase": "Synchronize devices and operate the system",
+      "title": "Choose conflict-safe offline convergence",
+      "type": "decision_point",
+      "content": "Use event revisions and explicit conflict resolution for start/end time, recurrence, attendees, invitation state, ownership, and ACL fields because these changes are not safely merged by a generic CRDT. A CRDT may be considered for independently mergeable description text only after product semantics, authorization, tombstones, and retention are specified. Offline commands retain their base revision and idempotency key; replay never converts an old edit into a fresh unconditional overwrite.",
+      "decision": {
+        "question": "Should offline sync use a whole-event CRDT?",
+        "chosen": "Cursor-based revision sync with explicit semantic conflict handling; consider CRDT only for approved merge-safe text fields",
+        "chosenReason": "Event time, recurrence, membership, and attendee changes have domain conflicts that field-level commutativity does not resolve.",
+        "alternatives": [
+          {"option": "Whole-event last-write-wins", "tradeoff": "An old offline device can silently replace a newer schedule or access change."},
+          {"option": "CRDT for every event field", "tradeoff": "Automatic convergence can still produce a semantically invalid time, attendee, or permission combination."},
+          {"option": "Disable offline edits", "tradeoff": "It weakens the device-sync experience even though queued revisioned commands can be reconciled safely."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "calendar_sync",
+        "properties": {
+          "purpose": "Serve authorized bounded deltas with opaque principal-scoped cursors, revisions, and tombstones; apply offline commands using their original idempotency key and base revision; resolve time, recurrence, attendee, invitation, and ACL conflicts explicitly; use CRDT only for separately approved merge-safe fields; recover gaps from the durable change log."
+        }
+      },
+      "requirementIds": [
+        "legacy-requirement:1", "legacy-requirement:8",
+        "legacy-constraint:1", "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "calendar_43",
+      "stepNumber": 43,
+      "phase": "Synchronize devices and operate the system",
+      "title": "Add calendar correctness monitoring",
+      "type": "add_component",
+      "content": "Measure API and range-query latency, event conflict rates, idempotency replays, availability projection watermark, recurrence expansion lag, reminder due-time lag, outbox age, broker partition skew, sync cursor failures, provider outcomes, and restore-test results. Avoid event titles, attendee identities, and private locations in metric labels or traces.",
+      "component": {
+        "nodeId": "calendar_monitoring",
+        "componentType": "monitoring",
+        "label": "Calendar SLO + Pipeline Monitoring",
+        "description": "Correctness, freshness, delivery, and capacity signals",
+        "position": {"x": 1630, "y": 570},
+        "properties": {
+          "componentName": "Calendar SLO + Pipeline Monitoring",
+          "purpose": "Track API and time-range latency, conflict and idempotency outcomes, projection watermark, recurrence/reminder lag, outbox age, broker skew, sync failures, notification provider outcomes, and restore drills; redact event content and principal identifiers from labels.",
+          "stack": "Prometheus + Grafana",
+          "metrics": true,
+          "alerts": true
+        },
+        "highlightReason": "The existing Monitoring item provides metrics and alerts for both correctness and operational lag."
+      },
+      "requirementIds": [
+        "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-requirement:8",
+        "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "calendar_44",
+      "stepNumber": 44,
+      "phase": "Synchronize devices and operate the system",
+      "title": "Observe calendar API correctness",
+      "type": "add_connection",
+      "content": "Emit structured, redacted measurements with request and trace IDs. Alert on error budgets and correctness symptoms such as duplicate-key payload conflicts, rising revision conflicts, failed tombstone propagation, or authorization denials after revocation.",
+      "connection": {
+        "edgeId": "calendar_api_monitoring",
+        "sourceNodeId": "calendar_api",
+        "targetNodeId": "calendar_monitoring",
+        "connectionType": "data-flow",
+        "label": "API latency + revision outcomes",
+        "description": "Redacted traces and counters for event commands and conflicts"
+      },
+      "requirementIds": [
+        "legacy-requirement:1", "legacy-requirement:7",
+        "legacy-constraint:1", "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "calendar_45",
+      "stepNumber": 45,
+      "phase": "Synchronize devices and operate the system",
+      "title": "Observe availability freshness",
+      "type": "add_connection",
+      "content": "Alert when the busy projection watermark trails committed revisions or query latency breaches the product-approved target. During lag, expose the as-of watermark and query the authoritative source or return an explicit stale/unavailable result; never silently report free.",
+      "connection": {
+        "edgeId": "calendar_availability_monitoring",
+        "sourceNodeId": "calendar_availability",
+        "targetNodeId": "calendar_monitoring",
+        "connectionType": "data-flow",
+        "label": "Conflict query latency + watermark",
+        "description": "Detects stale free/busy views and hot time-index partitions"
+      },
+      "requirementIds": [
+        "legacy-requirement:5", "legacy-requirement:7",
+        "legacy-constraint:4", "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "calendar_46",
+      "stepNumber": 46,
+      "phase": "Synchronize devices and operate the system",
+      "title": "Observe the committed change stream",
+      "type": "add_connection",
+      "content": "Track outbox age, publish retries, consumer lag by partition, and dead-letter counts. Trace a committed event revision through recurrence, sync, and notification work without including sensitive event fields.",
+      "connection": {
+        "edgeId": "calendar_broker_monitoring",
+        "sourceNodeId": "calendar_broker",
+        "targetNodeId": "calendar_monitoring",
+        "connectionType": "data-flow",
+        "label": "Outbox + consumer lag",
+        "description": "Per-partition backlog, retry, and dead-letter signals"
+      },
+      "requirementIds": [
+        "legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:8",
+        "legacy-constraint:3", "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "calendar_47",
+      "stepNumber": 47,
+      "phase": "Synchronize devices and operate the system",
+      "title": "Observe reminder and invitation delivery",
+      "type": "add_connection",
+      "content": "Measure oldest due job, delivery delay, retry attempts, provider throttling, and dead-letter volume. Alert separately on queue processing and provider acceptance so downstream push outages are not mistaken for recurrence failures.",
+      "connection": {
+        "edgeId": "calendar_queue_monitoring",
+        "sourceNodeId": "calendar_reminder_queue",
+        "targetNodeId": "calendar_monitoring",
+        "connectionType": "data-flow",
+        "label": "Due-job lag + retry outcomes",
+        "description": "Separates scheduling backlog from external provider delivery health"
+      },
+      "requirementIds": [
+        "legacy-requirement:4", "legacy-requirement:7",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "calendar_48",
+      "stepNumber": 48,
+      "phase": "Synchronize devices and operate the system",
+      "title": "Scale only against measured shard pressure",
+      "type": "scale_trigger",
+      "content": "Millions of users is a stated scale signal, but it is not enough to calculate shard count or a latency SLO. First measure active calendars, events per calendar, peak read/write skew, attendee fan-out, retention, and geographic distribution. Hash partitioning by calendar can distribute normal owner-calendar traffic; hot shared calendars and cross-calendar availability may still concentrate load.",
+      "scaleTrigger": {
+        "metric": "Per-shard p95 read/write latency, hot-key skew, connection-pool saturation, and cross-shard query fan-out",
+        "action": "Benchmark representative calendar and attendee workloads; split or rebalance only hot partitions and keep range indexes local where possible",
+        "impact": "More partitions add capacity but increase rebalancing, cross-calendar fan-out, and operational complexity; target sizing remains unapproved until workload data exists.",
+        "component": {
+          "nodeId": "calendar_store",
+          "componentType": "database",
+          "label": "Calendar OLTP Store",
+          "description": "Measured partition growth and recovery",
+          "position": {"x": 1010, "y": 300},
+          "properties": {
+            "componentName": "Calendar OLTP Store",
+            "purpose": "Authoritative transactional calendars, memberships, event revisions, recurrence masters/exceptions, invitation responses, unique idempotency records, deletion tombstones, per-calendar change sequence, and outbox. Hash partition by calendar as a provisional baseline; add or rebalance shards only from measured hot-key, cross-calendar fan-out, and service-level signals; retain tested backup and restore procedures.",
+            "type": "NewSQL",
+            "engine": "cockroachdb",
+            "workload": "OLTP",
+            "sharding": "Hash-based",
+            "replication": 3,
+            "replicationMode": "Sync",
+            "multiAZ": true,
+            "crossRegion": false,
+            "backups": true,
+            "pitr": true,
+            "encryption": true,
+            "connectionPooling": true,
+            "rbac": true,
+            "auditLog": true
+          },
+          "highlightReason": "The existing Database component exposes hash sharding and recovery controls; actual shard sizing must follow measured workloads."
+        }
+      },
+      "componentUpdate": {
+        "nodeId": "calendar_store",
+        "properties": {
+          "purpose": "Authoritative transactional calendars, memberships, event revisions, recurrence masters/exceptions, invitation responses, unique idempotency records, deletion tombstones, per-calendar change sequence, and outbox. Hash partition by calendar as a provisional baseline; add or rebalance shards only from measured hot-key, cross-calendar fan-out, and service-level signals; retain tested backup and restore procedures."
+        }
+      },
+      "requirementIds": [
+        "legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7",
+        "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "calendar_49",
+      "stepNumber": 49,
+      "phase": "Synchronize devices and operate the system",
+      "title": "Scale asynchronous work without hiding lag",
+      "type": "scale_trigger",
+      "content": "Scale recurrence and reminder consumers when oldest-work age or partition backlog grows beyond the product-approved budget. Preserve per-calendar ordering where required, cap parallelism at database and provider capacity, and keep retry/DLQ volume visible. Do not claim real-time notification until the product defines and measures an end-to-end target.",
+      "scaleTrigger": {
+        "metric": "Oldest unpublished outbox age, broker consumer lag, recurrence horizon deficit, due-reminder delay, and provider throttle rate",
+        "action": "Autoscale bounded consumers, isolate hot partitions, apply backpressure, and pause noncritical fan-out before dropping or reordering durable work",
+        "impact": "More workers reduce backlog only while the database and delivery provider have headroom; excessive concurrency increases contention and throttling.",
+        "component": {
+          "nodeId": "calendar_reminder_queue",
+          "componentType": "queue",
+          "label": "Reminder + Invitation Queue",
+          "description": "Bounded retries and measurable due-time backlog",
+          "position": {"x": 2250, "y": 310},
+          "properties": {
+            "componentName": "Reminder + Invitation Queue",
+            "purpose": "Hold due-time reminder and invitation tasks with event revision, occurrence, recipient, and idempotency identity; scale bounded consumers to measured due-job lag and provider capacity; retry transient failures with backoff, expose dead-letter work, and revalidate cancellation before sending.",
+            "visibilityTimeout": 60,
+            "maxRetries": 8,
+            "durable": true,
+            "backoff": "exponential"
+          },
+          "highlightReason": "The existing Queue item provides durable work and retry settings; concurrency limits are driven by measured downstream capacity."
+        }
+      },
+      "componentUpdate": {
+        "nodeId": "calendar_reminder_queue",
+        "properties": {
+          "purpose": "Hold due-time reminder and invitation tasks with event revision, occurrence, recipient, and idempotency identity; scale bounded consumers to measured due-job lag and provider capacity; retry transient failures with backoff, expose dead-letter work, and revalidate cancellation before sending."
+        }
+      },
+      "requirementIds": [
+        "legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:7",
+        "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "calendar_50",
+      "stepNumber": 50,
+      "phase": "Synchronize devices and operate the system",
+      "title": "Practice failure recovery and resolve open product questions",
+      "type": "explanation",
+      "content": "If the database is unavailable, fail event writes rather than acknowledge uncommitted state; clients retry with the same idempotency key. If the broker is unavailable, the transactional outbox accumulates and relays later. If a worker crashes after sending, the delivery key makes replay safe; exhausted tasks go to a reviewed dead-letter queue. If sync retention expires, perform an authorized full resync with a new cursor and tombstone policy. Test backup restore, outbox replay, consumer rebuild, recurrence-generation replacement, and permission revocation in drills. Before production sizing, ask for peak DAU/QPS and skew, regional placement and residency, read/write latency and availability SLOs, event retention/deletion rules, recurrence horizon and DST gap policy, privacy/default sharing rules, notification delivery target, and whether scheduling means advisory free/busy or exclusive reservation. This draft has not been browser-applied, AI-assessed, or published.",
+      "requirementIds": [
+        "legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4",
+        "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8",
+        "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"
+      ]
+    }
+  ]
+}

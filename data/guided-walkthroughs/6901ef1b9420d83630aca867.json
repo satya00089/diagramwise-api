@@ -1,0 +1,607 @@
+{
+  "problem_id": "6901ef1b9420d83630aca867",
+  "version": "1.0.0-review-draft",
+  "requirementRevision": null,
+  "totalSteps": 24,
+  "phases": [
+    {
+      "name": "Set delivery and durability guarantees",
+      "stepRange": [1, 5],
+      "description": "Treat the supplied brief as fixed, identify the missing numeric SLOs, and choose bounded delivery guarantees that can be implemented and reviewed."
+    },
+    {
+      "name": "Route messages and separate stored data",
+      "stepRange": [6, 12],
+      "description": "Use the broker for routing and replicated message partitions while keeping queue definitions and consumer metadata out of the message payload store."
+    },
+    {
+      "name": "Consume, acknowledge, and recover",
+      "stepRange": [13, 21],
+      "description": "Show pub/sub and competing-consumer paths, commit acknowledgments after work succeeds, retry transient failures, and isolate exhausted messages."
+    },
+    {
+      "name": "Preserve order and scale from evidence",
+      "stepRange": [22, 24],
+      "description": "Make the priority-versus-ordering tradeoff explicit, scale from measured lag and latency, and review the complete connected path without guessing targets."
+    }
+  ],
+  "steps": [
+    {
+      "id": "queue_01_frozen_brief",
+      "stepNumber": 1,
+      "phase": "Set delivery and durability guarantees",
+      "type": "explanation",
+      "title": "Read the frozen problem brief",
+      "content": "Design a Distributed Queue like RabbitMQ. Description: Design a message queue system for reliable asynchronous communication between distributed services. Requirements: Publish and consume messages; Support multiple queues and topics; Message persistence and durability; Dead letter queue for failed messages; Message ordering guarantees; Support different delivery patterns (pub/sub, point-to-point); Handle millions of messages per second; Message acknowledgment and retry logic. Constraints: Low message latency; High throughput; No message loss; Handle consumer failures; Support priority queues. Hints: Separate metadata and message storage; Replication for durability; Consumer groups for load balancing; Message TTL and expiration; Flow control and backpressure. Hints guide design choices; they do not supply numeric service targets.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "queue_02_delivery_contract",
+      "stepNumber": 2,
+      "phase": "Set delivery and durability guarantees",
+      "type": "decision_point",
+      "title": "Choose guarantees that survive failure",
+      "content": "Brief facts: the design must support persistence and durability, no message loss, ordering guarantees, acknowledgments and retries, consumer failures, and a dead-letter queue. The brief does not define exactly-once versus at-least-once delivery, global versus per-key ordering, a replica count, a failure model, or numeric latency/retention/retry targets. Design choices in this walkthrough: use RabbitMQ-like routing concepts (not RabbitMQ wire-protocol compatibility), at-least-once delivery, and FIFO within an ordering key. Confirm a publish only after the configured durable replication quorum commits it; this protects acknowledged messages only within the declared replica and failure-domain model, not against every correlated failure. Duplicates remain possible, so consumers must be idempotent. Replica/quorum settings and numeric SLOs remain deployment decisions.",
+      "decision": {
+        "question": "How should publish confirmation and consumer delivery behave during failures?",
+            "chosen": "Confirm after the configured durable quorum commits; deliver at least once; preserve FIFO within each ordering key, including retries; require idempotent consumers.",
+            "chosenReason": "This scopes the durability promise to acknowledged messages and a stated failure model, and makes duplicates, per-key head-of-line blocking, and quorum write latency explicit. Numeric failure and latency targets must be selected from an agreed SLO and failure model.",
+        "alternatives": [
+          {
+            "option": "Confirm before durable replication completes",
+            "tradeoff": "Lower acknowledgment latency can come at the cost of losing a message already reported as accepted."
+          },
+          {
+            "option": "Promise exactly-once effects across arbitrary consumers",
+            "tradeoff": "The broker cannot atomically commit unrelated consumer side effects; idempotency or an application transaction is still required."
+          }
+        ]
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:3",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "queue_03_publishers",
+      "stepNumber": 3,
+      "phase": "Set delivery and durability guarantees",
+      "type": "add_component",
+      "title": "Add the publishing services",
+      "content": "Applications publish an envelope with a stable message ID, destination or topic, optional ordering key, priority, and expiry policy. Reuse the ID after an uncertain acknowledgment, but do not assume that the broker deduplicates publishes: unless broker-side deduplication is explicitly implemented and its scope/retention chosen, a retry may enqueue a duplicate. Consumer idempotency is still required. Do not report success until the broker confirms its configured durable commit.",
+      "component": {
+        "nodeId": "queue_publishers",
+        "componentType": "backend-server",
+        "label": "Producer Services",
+        "description": "Applications that publish messages to named destinations",
+        "position": {"x": 0, "y": 220},
+        "properties": {
+          "componentName": "Producer Services",
+          "purpose": "Publish messages with stable IDs, destination or topic, optional ordering key and priority, and an expiry policy; reuse the ID after an uncertain response without assuming broker deduplication, and treat only a durable broker confirmation as accepted."
+        },
+        "highlightReason": "The existing Backend Server catalog component represents application producers without introducing a custom component."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:6",
+        "legacy-constraint:1",
+        "legacy-constraint:2"
+      ]
+    },
+    {
+      "id": "queue_04_broker",
+      "stepNumber": 4,
+      "phase": "Set delivery and durability guarantees",
+      "type": "add_component",
+      "title": "Add the replicated broker cluster",
+      "content": "The broker accepts publishes, routes them to queue or topic partitions, tracks delivery state, and appends message payloads to durable replicated logs. The selected write path confirms only after the configured quorum has durably recorded the message; replicas should occupy independent failure domains, and failover must fence a stale leader before it can accept writes. Partition by a stable ordering key so related messages reach the same ordered lane. These are implementation choices, not details supplied by the brief. Replica and quorum counts, storage-sync policy, failure-domain topology, retention, and latency targets remain unspecified; add capacity only after representative load tests.",
+      "component": {
+        "nodeId": "queue_broker",
+        "componentType": "message-broker",
+        "label": "Replicated Message Broker",
+        "description": "Routing, durable partition logs, delivery state, and flow control",
+        "position": {"x": 360, "y": 220},
+        "properties": {
+          "componentName": "Replicated Message Broker",
+          "purpose": "Route named queues and topics; persist payloads in durable replicated partition logs; confirm only after the configured quorum durably records them; fence stale leaders during failover; preserve per-key order; apply bounded flow control. Select partition, replica, retention, and latency values from measured workload and the declared failure model.",
+          "durable": true
+        },
+        "highlightReason": "The existing Message Broker catalog component fits routing and durable messaging; numeric catalog defaults are deliberately not copied into this design."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:5",
+        "legacy-requirement:7",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "queue_05_publish_path",
+      "stepNumber": 5,
+      "phase": "Set delivery and durability guarantees",
+      "type": "add_connection",
+      "title": "Send producer traffic to the broker",
+      "content": "The producer submits a destination, routing metadata, message ID, and payload. The broker returns a publish confirmation only after the selected durability policy is met; backpressure must delay or reject unaccepted work rather than acknowledge a dropped message.",
+      "connection": {
+        "edgeId": "queue_publish_broker",
+        "sourceNodeId": "queue_publishers",
+        "targetNodeId": "queue_broker",
+        "connectionType": "message-queue",
+        "label": "Publish and durable confirmation",
+        "description": "Applications publish to named destinations and receive confirmation after the broker's configured durable commit."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:7",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "queue_06_metadata",
+      "stepNumber": 6,
+      "phase": "Route messages and separate stored data",
+      "type": "add_component",
+      "title": "Keep control metadata separate from payloads",
+      "content": "Store queue and topic definitions, bindings, subscription membership, consumer-group ownership, access policy, and expiry or dead-letter configuration here. Keep message bodies and ordered delivery logs in the broker's replicated partitions. The metadata database is not on every payload append or consumer acknowledgment path; cache read-mostly routing metadata with versioning and invalidate it when control state changes.",
+      "component": {
+        "nodeId": "queue_metadata",
+        "componentType": "database",
+        "label": "Queue and Subscription Metadata",
+        "description": "Control-plane definitions and consumer ownership, not message bodies",
+        "position": {"x": 720, "y": 60},
+        "properties": {
+          "componentName": "Queue and Subscription Metadata",
+          "purpose": "Store queue and topic definitions, routing bindings, subscription membership, consumer-group ownership, access policy, and expiry or dead-letter policy versions; do not store message payloads or put this database on each message append and acknowledgment path."
+        },
+        "highlightReason": "The existing Database catalog component covers control metadata while the broker retains message payloads."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-constraint:1",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "queue_07_metadata_path",
+      "stepNumber": 7,
+      "phase": "Route messages and separate stored data",
+      "type": "add_connection",
+      "title": "Read routing and ownership metadata",
+      "content": "The broker reads versioned control-plane state for destination bindings, subscriptions, and consumer ownership. Payload writes and acknowledgments stay in the broker's durable log path so a metadata lookup does not become a per-message storage dependency.",
+      "connection": {
+        "edgeId": "queue_broker_metadata",
+        "sourceNodeId": "queue_broker",
+        "targetNodeId": "queue_metadata",
+        "connectionType": "database-connection",
+        "label": "Queue, topic, and group metadata",
+        "description": "The broker resolves versioned routing and ownership policy without storing message bodies in the metadata database."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-constraint:1"
+      ]
+    },
+    {
+      "id": "queue_08_topic_subscriptions",
+      "stepNumber": 8,
+      "phase": "Route messages and separate stored data",
+      "type": "add_component",
+      "title": "Add durable pub/sub subscription queues",
+      "content": "A topic routes each matching publish to the durable queue for each subscription. Each subscription advances independently, so one slow consumer does not silently consume another subscriber's copy. This is pub/sub fan-out; the number of topics and subscriptions is configuration, not a fixed count in this draft.",
+      "component": {
+        "nodeId": "queue_topic_subscriptions",
+        "componentType": "queue",
+        "label": "Topic Subscription Queues",
+        "description": "Independent durable backlog per matching subscription",
+        "position": {"x": 720, "y": 220},
+        "properties": {
+          "componentName": "Topic Subscription Queues",
+          "purpose": "Represent pub/sub topics and durable per-subscription queues; fan out each matching publish so subscriptions advance independently, retain ordered partition logs, and apply the configured message-expiry policy.",
+          "durable": true
+        },
+        "highlightReason": "The existing Queue catalog component represents durable subscription backlogs; topic routing remains a broker policy."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:6",
+        "legacy-constraint:1",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "queue_09_topic_path",
+      "stepNumber": 9,
+      "phase": "Route messages and separate stored data",
+      "type": "add_connection",
+      "title": "Fan out topic messages to subscriptions",
+      "content": "The broker applies topic bindings and appends a copy to each matching subscription queue. Each copy is independently persisted and acknowledged by that subscription's consumer group.",
+      "connection": {
+        "edgeId": "queue_broker_topics",
+        "sourceNodeId": "queue_broker",
+        "targetNodeId": "queue_topic_subscriptions",
+        "connectionType": "message-queue",
+        "label": "Topic routing and subscription fan-out",
+        "description": "Matching topic messages enter each subscriber's own durable backlog."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:6",
+        "legacy-constraint:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "queue_10_point_to_point",
+      "stepNumber": 10,
+      "phase": "Route messages and separate stored data",
+      "type": "add_component",
+      "title": "Add a point-to-point priority work queue",
+      "content": "A named work queue distributes each message to one competing consumer in its group. This design chooses FIFO within each ordering key, not a total order across the cluster; the brief requests ordering guarantees but does not define their scope. Keep each key in one ordered lane, including while its head is being retried. Priority selects among eligible heads from different keys; it must not let a later message overtake an earlier one for the same key. Strict priority can starve lower classes, so choose a fairness or aging policy from product needs.",
+      "component": {
+        "nodeId": "queue_point_to_point",
+        "componentType": "queue",
+        "label": "Point-to-Point Priority Work Queue",
+        "description": "Competing consumers, per-key order, and priority-aware dispatch",
+        "position": {"x": 720, "y": 410},
+        "properties": {
+          "componentName": "Point-to-Point Priority Work Queue",
+          "purpose": "Provide a durable named point-to-point queue with competing consumers; keep FIFO within each ordering key, hold that key behind an uncompleted head during retry, and schedule priority among eligible heads for different keys with an explicit fairness policy.",
+          "durable": true
+        },
+        "highlightReason": "The existing Queue catalog component fits point-to-point delivery and priority policy without adding a custom type."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-constraint:3",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "queue_11_point_to_point_path",
+      "stepNumber": 11,
+      "phase": "Route messages and separate stored data",
+      "type": "add_connection",
+      "title": "Route point-to-point work",
+      "content": "A publish addressed to a work queue is appended once and delivered to one available member of its consumer group. Priority dispatch operates only at safe partition heads so it does not contradict the per-key ordering contract.",
+      "connection": {
+        "edgeId": "queue_broker_work",
+        "sourceNodeId": "queue_broker",
+        "targetNodeId": "queue_point_to_point",
+        "connectionType": "message-queue",
+        "label": "Point-to-point queue append",
+        "description": "The broker persists one work item for competing consumers and applies ordering-key and priority policy."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "queue_12_ttl_and_storage_boundary",
+      "stepNumber": 12,
+      "phase": "Route messages and separate stored data",
+      "type": "explanation",
+      "title": "Expire by policy without guessing a retention window",
+      "content": "Attach an expiresAt value when a producer supplies one or when a queue's configured TTL policy requires it. Check expiry before delivery and stop delivering expired messages; route expired items to a dead-letter destination only when that queue's policy says to do so. The brief gives no TTL or retention duration, so none is selected here. Payloads remain in broker partitions while queue and subscription metadata remains in the database.",
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3"
+      ]
+    },
+    {
+      "id": "queue_13_consumers",
+      "stepNumber": 13,
+      "phase": "Consume, acknowledge, and recover",
+      "type": "add_component",
+      "title": "Add consumer groups and bounded workers",
+      "content": "Workers join a consumer group for a topic subscription or work queue. The broker assigns partitions so members share load; adding consumers helps only while there are unassigned partitions and downstream capacity. Bound in-flight deliveries and prefetch to each worker's available capacity to prevent unbounded buffering.",
+      "component": {
+        "nodeId": "queue_consumer_group",
+        "componentType": "processing-worker",
+        "label": "Consumer Group Workers",
+        "description": "Load-balanced consumers with bounded in-flight work",
+        "position": {"x": 1100, "y": 280},
+        "properties": {
+          "componentName": "Consumer Group Workers",
+          "purpose": "Join a queue or topic-subscription consumer group, process assigned partitions, bound prefetch and in-flight work to available capacity, and make side effects idempotent because delivery is at least once."
+        },
+        "highlightReason": "The existing Processing Worker catalog component represents scalable asynchronous consumers."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:6",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "queue_14_topic_consumers",
+      "stepNumber": 14,
+      "phase": "Consume, acknowledge, and recover",
+      "type": "add_connection",
+      "title": "Consume each subscription independently",
+      "content": "Each subscription group reads its own cursor and backlog. A slow or failed subscriber can accumulate lag without consuming another subscriber's messages.",
+      "connection": {
+        "edgeId": "queue_topics_consumers",
+        "sourceNodeId": "queue_topic_subscriptions",
+        "targetNodeId": "queue_consumer_group",
+        "connectionType": "message-queue",
+        "label": "Subscription delivery to consumer group",
+        "description": "Workers consume their assigned partitions from one independent subscription backlog."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:6",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "queue_15_work_consumers",
+      "stepNumber": 15,
+      "phase": "Consume, acknowledge, and recover",
+      "type": "add_connection",
+      "title": "Load-balance point-to-point work",
+      "content": "Members of a work-queue consumer group compete for available messages; only one member owns a delivery at a time. Dispatch the lowest uncompleted sequence for each key. If that head fails, pause later messages for that key while it is retried; independent keys may continue when the partitioning/scheduler permits. A strict partition-wide FIFO implementation can stall other keys behind the same head, so this choice trades some availability and throughput for order. It does not promise a global completion order.",
+      "connection": {
+        "edgeId": "queue_work_consumers",
+        "sourceNodeId": "queue_point_to_point",
+        "targetNodeId": "queue_consumer_group",
+        "connectionType": "message-queue",
+        "label": "Competing-consumer deliveries",
+        "description": "The broker assigns each work item to one available group member while retaining per-key order."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "queue_16_ack_nack",
+      "stepNumber": 16,
+      "phase": "Consume, acknowledge, and recover",
+      "type": "add_connection",
+      "title": "Acknowledge only completed work",
+      "content": "A worker acknowledges only after its business effect commits and the consumer's idempotency record is committed atomically with that effect (or the effect is independently safe to repeat). If the worker crashes after the effect but before acknowledgment, at-least-once delivery can repeat the message; the stable message ID lets the consumer suppress a duplicate effect. On transient failure, negatively acknowledge or let the lease expire; keep that sequence as the key's head. Advance only after success or an explicit terminal disposition, and commit only the highest contiguous safe position within an ordered partition. This is not an exactly-once side-effect promise.",
+      "connection": {
+        "edgeId": "queue_consumers_ack_broker",
+        "sourceNodeId": "queue_consumer_group",
+        "targetNodeId": "queue_broker",
+        "connectionType": "message-queue",
+        "label": "Ack, nack, and ownership progress",
+        "description": "Consumer acknowledgments follow committed effects; unacknowledged deliveries return to broker recovery."
+      },
+      "requirementIds": [
+        "legacy-requirement:8",
+        "legacy-requirement:5",
+        "legacy-constraint:3",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "queue_17_retry_queue",
+      "stepNumber": 17,
+      "phase": "Consume, acknowledge, and recover",
+      "type": "add_component",
+      "title": "Add durable delayed retries",
+      "content": "Retry transient failures with configured exponential backoff and jitter, retaining message ID, original sequence, ordering key, attempt history, and due time. The failed sequence remains the head for its key while delayed; later messages for that key wait, though other keys can progress if the scheduler supports it. Retry budget and delay bounds are per-queue policy and remain unset until failure and latency objectives are agreed; do not retry a permanent poison message forever.",
+      "component": {
+        "nodeId": "queue_retry",
+        "componentType": "queue",
+        "label": "Durable Retry Queue",
+        "description": "Delayed retry state for transient consumer failures",
+        "position": {"x": 1480, "y": 160},
+        "properties": {
+          "componentName": "Durable Retry Queue",
+          "purpose": "Persist retry envelopes with original message ID, sequence, ordering key, attempt history, error class, and due time; preserve the key's head-of-line ordering during backoff; use configured exponential backoff with jitter and a queue-specific retry budget, without assuming numeric limits.",
+          "durable": true,
+          "backoff": "exponential"
+        },
+        "highlightReason": "The existing Queue catalog component supports durable retry work and an exponential backoff policy; no numeric retry default is copied."
+      },
+      "requirementIds": [
+        "legacy-requirement:8",
+        "legacy-constraint:3",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "queue_18_broker_retry_path",
+      "stepNumber": 18,
+      "phase": "Consume, acknowledge, and recover",
+      "type": "add_connection",
+      "title": "Persist retry decisions through the broker",
+      "content": "A negative acknowledgment or expired lease is classified by queue policy. Transient failures enter the durable retry schedule; permanent failures or exhausted retry budgets enter the durable dead-letter path. Persist this state transition before advancing or acknowledging the source delivery; make the transfer replayable/idempotent so a crash can cause a duplicate transition but not silently lose the message. The brief requires retry logic and a DLQ but supplies no classification rules or retry count.",
+      "connection": {
+        "edgeId": "queue_broker_retry",
+        "sourceNodeId": "queue_broker",
+        "targetNodeId": "queue_retry",
+        "connectionType": "message-queue",
+        "label": "Durable retry scheduling",
+        "description": "The broker stores retry state before releasing the failed delivery for a later attempt."
+      },
+      "requirementIds": [
+        "legacy-requirement:8",
+        "legacy-constraint:3",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "queue_19_retry_redelivery",
+      "stepNumber": 19,
+      "phase": "Consume, acknowledge, and recover",
+      "type": "add_connection",
+      "title": "Return due retries to normal delivery",
+      "content": "When a retry becomes due, re-enter the original sequence through broker routing and partition ownership before dispatching a later sequence for the same key. Keep that key blocked until the retried message succeeds or reaches an explicit terminal disposition; other keys need not wait if the scheduler can isolate them. Apply expiry as a durable terminal outcome: follow the configured dead-letter or audited-skip policy rather than silently dropping an expired head. The brief mentions TTL only as a hint and gives no expiry duration.",
+      "connection": {
+        "edgeId": "queue_retry_broker",
+        "sourceNodeId": "queue_retry",
+        "targetNodeId": "queue_broker",
+        "connectionType": "message-queue",
+        "label": "Due retry re-enters broker routing",
+        "description": "The broker rechecks expiry and ordering before making a due retry available to consumers."
+      },
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:8",
+        "legacy-constraint:3",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "queue_20_dead_letter_queue",
+      "stepNumber": 20,
+      "phase": "Consume, acknowledge, and recover",
+      "type": "add_component",
+      "title": "Quarantine exhausted and poison messages",
+      "content": "After the configured retry budget is exhausted, or when policy classifies a failure as permanent, retain the message durably in a dead-letter queue with its original ID, sequence, source destination, failure reason, and attempt history. For the chosen per-key ordering contract, do not release that key's later messages until an operator either redrives this same sequence ahead of them or records an explicit, audited skip. A blind replay at the tail would violate the ordering choice. The retry budget and operator workflow are implementation policies, not values stated by the brief.",
+      "component": {
+        "nodeId": "queue_dead_letter",
+        "componentType": "queue",
+        "label": "Dead Letter Queue",
+        "description": "Durable quarantine for messages that cannot be delivered",
+        "position": {"x": 1480, "y": 380},
+        "properties": {
+          "componentName": "Dead Letter Queue",
+          "purpose": "Retain messages that exhaust a configured retry budget or fail permanently, including original ID, sequence, source destination, failure reason, and attempt history; require explicit ordered redrive or audited skip before that key advances.",
+          "durable": true
+        },
+        "highlightReason": "The existing Queue catalog component represents a durable dead-letter destination; failure policy is defined by the broker."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:8",
+        "legacy-constraint:3",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "queue_21_dead_letter_path",
+      "stepNumber": 21,
+      "phase": "Consume, acknowledge, and recover",
+      "type": "add_connection",
+      "title": "Route terminal failures to the DLQ",
+      "content": "Keep terminal failures out of the hot retry loop. The dead-letter path preserves diagnosis data and makes recovery an operator-visible choice rather than silently dropping a failed message.",
+      "connection": {
+        "edgeId": "queue_broker_dead_letter",
+        "sourceNodeId": "queue_broker",
+        "targetNodeId": "queue_dead_letter",
+        "connectionType": "message-queue",
+        "label": "Exhausted retries and permanent failures",
+        "description": "Terminal failures are durably isolated for inspection and controlled redrive."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:8",
+        "legacy-constraint:3",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "queue_22_order_priority_tradeoff",
+      "stepNumber": 22,
+      "phase": "Preserve order and scale from evidence",
+      "type": "decision_point",
+      "title": "Define ordering without sacrificing all parallelism",
+      "content": "The brief asks for message ordering but leaves its scope open. This design chooses FIFO per ordering key, not a total order across the cluster: only the current sequence for a key is eligible, a transiently failing head blocks later messages for that key through retry, and a terminal DLQ item blocks the key until ordered redrive or audited skip. Priority is evaluated among eligible heads for different keys and cannot bypass an earlier sequence for the same key. Independent keys can progress when the partitioning model permits, but a shared strict-FIFO partition may incur head-of-line blocking. These are explicit implementation tradeoffs, not guarantees stated by the brief.",
+      "decision": {
+        "question": "What does message ordering mean when the service also supports priority and high throughput?",
+            "chosen": "Preserve FIFO per ordering key through retries; block that key on an uncompleted or terminal DLQ head until success, ordered redrive, or audited skip; schedule priority only among eligible heads for different keys.",
+            "chosenReason": "This defines ordering under both normal delivery and failure. It preserves a key's sequence but accepts head-of-line delay for that key (or more keys if the physical partition is strict FIFO); global order and unrestricted priority are not promised.",
+        "alternatives": [
+          {
+            "option": "Require strict global FIFO for all messages",
+            "tradeoff": "A single global order adds coordination and limits horizontal partition scaling."
+          },
+          {
+            "option": "Let high priority overtake any queued message",
+            "tradeoff": "A later message could be observed before an earlier message with the same ordering key."
+          }
+        ]
+      },
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-constraint:2",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "queue_23_scale_and_backpressure",
+      "stepNumber": 23,
+      "phase": "Preserve order and scale from evidence",
+      "type": "scale_trigger",
+      "title": "Scale toward millions per second from measured bottlenecks",
+      "content": "The brief states a goal of millions of messages per second and qualitative low latency/high throughput; it supplies no message-size mix, burst profile, numeric latency objective, or measured capacity. Treat those as acceptance goals to benchmark, not achieved promises. Test representative payloads, replication policy, batching, failures, and acknowledgment behavior before making capacity claims.",
+      "scaleTrigger": {
+        "metric": "Publish-to-durable-ack latency against the agreed SLO, per-partition consumer lag and oldest-message age, broker disk and quorum health, payload bytes per second, and hot-key skew",
+        "action": "Apply bounded producer credits and consumer prefetch. When measured demand breaches an agreed service objective, add broker capacity or partitions where key distribution permits, then scale consumer groups only up to available partition and downstream capacity. When saturated, reject or defer work not yet durably accepted; return a retryable outcome and require the producer to retry with the same message ID. Never acknowledge work merely to shed load.",
+        "impact": "Partitions and batching raise parallel throughput but add replication, rebalancing, and recovery work. Backpressure protects durability and bounded latency under overload; it cannot remove the need to choose and test numeric SLOs."
+      },
+      "requirementIds": [
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "queue_24_review_path",
+      "stepNumber": 24,
+      "phase": "Preserve order and scale from evidence",
+      "type": "explanation",
+      "title": "Review the connected publish-to-recovery path",
+      "content": "Brief facts: publishers and consumers, queues/topics, persistence/durability, DLQ, ordering, pub/sub and point-to-point delivery, acknowledgments/retries, consumer-failure handling, priority, millions of messages per second, qualitative low latency/high throughput, and no message loss. Design choices here: append payloads to replicated broker logs and confirm after configured durable quorum; keep control metadata separate; deliver at least once; make consumer effects idempotent; preserve FIFO per key (not global order), holding a key behind retry or DLQ until success, ordered redrive, or audited skip; apply priority only among eligible heads; use durable, bounded retries and explicit DLQ transitions; and apply backpressure before accepting work. These choices do not establish a numeric replica count, retry budget, TTL/retention, latency/availability SLO, or proven throughput.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    }
+  ]
+}

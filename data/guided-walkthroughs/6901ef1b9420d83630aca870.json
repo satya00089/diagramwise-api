@@ -1,0 +1,779 @@
+{
+  "problem_id": "6901ef1b9420d83630aca870",
+  "version": "1.0.0-review-draft",
+  "requirementRevision": null,
+  "totalSteps": 44,
+  "phases": [
+    {
+      "name": "Define clients, requests, and location",
+      "stepRange": [1, 12],
+      "description": "Start from the frozen brief, separate web and mobile entry points, and resolve locations without assuming a provider or collecting more precise location data than needed."
+    },
+    {
+      "name": "Serve fresh conditions and forecasts",
+      "stepRange": [13, 21],
+      "description": "Use a cache for repeated location queries, retrieve cache misses from a third-party weather provider, and make freshness and provider limits explicit."
+    },
+    {
+      "name": "Refresh data, retain history, and deliver alerts",
+      "stepRange": [22, 36],
+      "description": "Separate provider refresh from user reads, process updates asynchronously, retain historical observations, and route severe-weather notifications to supported clients."
+    },
+    {
+      "name": "Scale, degrade honestly, and operate",
+      "stepRange": [37, 44],
+      "description": "Observe freshness and dependency health, scale from measured demand, support useful offline behavior, and leave unspecified targets as review questions."
+    }
+  ],
+  "steps": [
+    {
+      "id": "weather_01_brief",
+      "stepNumber": 1,
+      "phase": "Define clients, requests, and location",
+      "title": "Separate brief facts from design assumptions",
+      "type": "explanation",
+      "content": "Facts in the frozen brief: show current conditions and a 7-day forecast; provide hourly weather updates, weather alerts and warnings, and location-based weather; support millions of users; retain historical weather data; and provide mobile and web experiences. The constraints call for real-time updates, efficient location queries, third-party API integration, appropriate caching, and offline mode. Proposed design assumptions in this draft are a weather-provider adapter, a geocoding boundary when a user enters a place name, server-side forecast caching, and locally cached last-successful data on mobile. The brief does not specify a provider, traffic distribution, numeric freshness or latency objective, alert subscription semantics, location precision/retention, history retention period, or offline write behavior. In particular, “hourly weather updates” could mean hourly-granularity forecasts or a refresh cadence; this design does not silently turn it into a one-hour service-level guarantee.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "weather_02_mobile",
+      "stepNumber": 2,
+      "phase": "Define clients, requests, and location",
+      "title": "Add the mobile weather app",
+      "type": "add_component",
+      "content": "Represent the mobile client explicitly because offline behavior and push delivery are part of the brief. The app can retain the last successful conditions and forecast with a retrieval time, show their age while offline, and refresh when connectivity returns. This is a proposed client behavior; the brief does not define how stale data may be or whether offline actions beyond viewing are needed.",
+      "component": {
+        "nodeId": "weather_mobile",
+        "componentType": "mobile-app",
+        "label": "Weather Mobile App",
+        "description": "Location-aware forecasts, alerts, and offline last-known view",
+        "position": {"x": 0, "y": 120},
+        "properties": {
+          "componentName": "Weather Mobile App",
+          "purpose": "Request current conditions and forecasts for an authorized location, display alert updates, and retain the last successful response with its retrieval time for an honest offline view.",
+          "offlineSupport": true,
+          "pushNotifications": true
+        },
+        "highlightReason": "The mobile-app catalog node already exposes offline and push-notification properties needed by this brief."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "weather_03_web",
+      "stepNumber": 3,
+      "phase": "Define clients, requests, and location",
+      "title": "Add the web weather app",
+      "type": "add_component",
+      "content": "Keep the web experience as a first-class client of the same API and weather semantics. It should render current conditions, hourly and 7-day forecasts, location selection, and warnings without embedding provider credentials in browser code.",
+      "component": {
+        "nodeId": "weather_web",
+        "componentType": "web-app",
+        "label": "Weather Web App",
+        "description": "Browser experience for conditions, forecasts, locations, and warnings",
+        "position": {"x": 0, "y": 360},
+        "properties": {
+          "componentName": "Weather Web App",
+          "purpose": "Render current conditions, hourly and 7-day forecasts, location selection, and warnings through the product API; keep third-party provider credentials server-side.",
+          "ssl": true
+        },
+        "highlightReason": "The existing web-app catalog node represents the browser client without introducing a problem-specific frontend node."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "weather_04_gateway",
+      "stepNumber": 4,
+      "phase": "Define clients, requests, and location",
+      "title": "Add the shared API boundary",
+      "type": "add_component",
+      "content": "Validate coordinates or place queries, bound request sizes, apply abuse controls, and authenticate only features that need an account, such as saved locations or alert subscriptions. Do not assume all weather reads require sign-in. Keep provider keys and quota enforcement on the server side.",
+      "component": {
+        "nodeId": "weather_gateway",
+        "componentType": "api-gateway",
+        "label": "Weather API Gateway",
+        "description": "Validated client entry point and request protection",
+        "position": {"x": 300, "y": 240},
+        "properties": {
+          "componentName": "Weather API Gateway",
+          "purpose": "Validate coordinate and place-query inputs, route web and mobile requests, apply abuse controls, and keep third-party provider credentials behind the server boundary.",
+          "inputValidation": true,
+          "rateLimiting": true,
+          "tlsTermination": true
+        },
+        "highlightReason": "The API Gateway catalog entry covers the shared client boundary and supports these editable controls."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "weather_05_mobile_gateway",
+      "stepNumber": 5,
+      "phase": "Define clients, requests, and location",
+      "title": "Connect the mobile client to the API",
+      "type": "add_connection",
+      "content": "Send bounded requests over TLS. When location permission is granted, transmit only the precision needed for the selected feature; allow manual place selection when permission is denied.",
+      "connection": {
+        "edgeId": "weather_mobile_gateway",
+        "sourceNodeId": "weather_mobile",
+        "targetNodeId": "weather_gateway",
+        "connectionType": "http",
+        "label": "Forecast, location, and alert requests",
+        "description": "Mobile requests use the shared protected API and can fall back to a manually selected place."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "weather_06_web_gateway",
+      "stepNumber": 6,
+      "phase": "Define clients, requests, and location",
+      "title": "Connect the web client to the API",
+      "type": "add_connection",
+      "content": "Use the same versioned API contract from the browser so validation, caching, provider isolation, and freshness metadata stay consistent across platforms.",
+      "connection": {
+        "edgeId": "weather_web_gateway",
+        "sourceNodeId": "weather_web",
+        "targetNodeId": "weather_gateway",
+        "connectionType": "http",
+        "label": "Web forecast and location requests",
+        "description": "Browser calls share the same API contract and do not call the provider directly."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "weather_07_api",
+      "stepNumber": 7,
+      "phase": "Define clients, requests, and location",
+      "title": "Add the weather application API",
+      "type": "add_component",
+      "content": "Keep the user-facing service stateless where practical so it can scale horizontally as measured demand grows. It owns response composition and freshness metadata, but delegates location resolution, cache access, provider calls, history reads, and asynchronous update work to explicit boundaries.",
+      "component": {
+        "nodeId": "weather_api",
+        "componentType": "backend-server",
+        "label": "Weather Application API",
+        "description": "Current, hourly, weekly, alert, and historical query orchestration",
+        "position": {"x": 620, "y": 240},
+        "properties": {
+          "componentName": "Weather Application API",
+          "purpose": "Serve current conditions, hourly-granularity and 7-day forecasts, warnings, and historical queries; return source and freshness metadata; remain stateless so capacity can scale from measured demand."
+        },
+        "highlightReason": "The existing Backend Server catalog node can represent the application service without a custom component."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1"]
+    },
+    {
+      "id": "weather_08_gateway_api",
+      "stepNumber": 8,
+      "phase": "Define clients, requests, and location",
+      "title": "Route requests to the weather API",
+      "type": "add_connection",
+      "content": "The gateway forwards validated, normalized requests to the application API. The service, not the client, decides whether a cache entry is sufficiently fresh or a provider fetch is required.",
+      "connection": {
+        "edgeId": "weather_gateway_api",
+        "sourceNodeId": "weather_gateway",
+        "targetNodeId": "weather_api",
+        "connectionType": "api-call",
+        "label": "Validated weather API request",
+        "description": "The application API owns query orchestration and freshness decisions."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:2"]
+    },
+    {
+      "id": "weather_09_location",
+      "stepNumber": 9,
+      "phase": "Define clients, requests, and location",
+      "title": "Add location resolution",
+      "type": "add_component",
+      "content": "Resolve a place name into a stable provider-usable location and validate coordinates. Cache geocoding results only under a reviewed privacy policy; do not retain precise device location by default merely because it was received.",
+      "component": {
+        "nodeId": "weather_location",
+        "componentType": "backend-server",
+        "label": "Location Resolver",
+        "description": "Place-name resolution and coordinate normalization",
+        "position": {"x": 920, "y": 80},
+        "properties": {
+          "componentName": "Location Resolver",
+          "purpose": "Validate coordinates, resolve user-entered place names through a provider boundary, normalize to a stable location key, and minimize location precision and retention."
+        },
+        "highlightReason": "The backend-server catalog component fits this internal service; no location-specific node is needed."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "weather_10_api_location",
+      "stepNumber": 10,
+      "phase": "Define clients, requests, and location",
+      "title": "Resolve place queries before fetching weather",
+      "type": "add_connection",
+      "content": "Only place-name requests need geocoding; already valid coordinates can skip that dependency. A canonical location key also provides a consistent key for forecast caching.",
+      "connection": {
+        "edgeId": "weather_api_location",
+        "sourceNodeId": "weather_api",
+        "targetNodeId": "weather_location",
+        "connectionType": "api-call",
+        "label": "Resolve or validate location",
+        "description": "Place queries are resolved to normalized coordinates or a stable location key."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:2"]
+    },
+    {
+      "id": "weather_11_geocoder",
+      "stepNumber": 11,
+      "phase": "Define clients, requests, and location",
+      "title": "Represent the third-party geocoding boundary",
+      "type": "add_component",
+      "content": "The current catalog has no dedicated external-geocoding node. Use its generic custom-component for this outside-system boundary only. Provider choice, terms, quota, accuracy, and whether the weather provider itself supplies geocoding remain review decisions.",
+      "component": {
+        "nodeId": "weather_geocoder",
+        "componentType": "custom-component",
+        "label": "Geocoding Provider",
+        "description": "External place-name to coordinate lookup",
+        "position": {"x": 1220, "y": 80},
+        "properties": {
+          "componentName": "Geocoding Provider",
+          "purpose": "External dependency proposed for resolving user-entered place names to coordinates; provider, quota, accuracy, and data-handling terms are unspecified and require review.",
+          "componentType": "External Geocoding API",
+          "technology": "Third-party API"
+        },
+        "highlightReason": "No dedicated geocoding or external-API catalog ID exists, so the generic catalog custom-component is the narrowest fit."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "weather_12_location_geocoder",
+      "stepNumber": 12,
+      "phase": "Define clients, requests, and location",
+      "title": "Connect location resolution to geocoding",
+      "type": "add_connection",
+      "content": "Make the external lookup an explicit dependency so its latency, failure, and quota behavior can be measured and bounded independently of weather retrieval.",
+      "connection": {
+        "edgeId": "weather_location_geocoder",
+        "sourceNodeId": "weather_location",
+        "targetNodeId": "weather_geocoder",
+        "connectionType": "api-call",
+        "label": "Place-name geocoding request",
+        "description": "The resolver calls the external geocoding dependency only when coordinates are not already available."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "weather_13_cache",
+      "stepNumber": 13,
+      "phase": "Serve fresh conditions and forecasts",
+      "title": "Add a forecast cache",
+      "type": "add_component",
+      "content": "Cache provider responses by normalized location and product/data class. Current conditions, hourly forecasts, weekly forecasts, and alerts can have different freshness needs. The brief asks for appropriate caching but specifies no TTL; derive and validate per-class expiry from provider update cadence and a product freshness objective rather than inventing one here.",
+      "component": {
+        "nodeId": "weather_cache",
+        "componentType": "cache",
+        "label": "Forecast and Alert Cache",
+        "description": "Shared cache for normalized location and forecast data",
+        "position": {"x": 920, "y": 280},
+        "properties": {
+          "componentName": "Forecast and Alert Cache",
+          "purpose": "Cache responses by normalized location and data class with separately reviewed freshness windows; record source update time, expire or revalidate stale entries, and never imply cache age is provider freshness."
+        },
+        "highlightReason": "The cache catalog node represents this requirement directly without choosing an unspecified provider or fixed TTL."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "weather_14_api_cache",
+      "stepNumber": 14,
+      "phase": "Serve fresh conditions and forecasts",
+      "title": "Read normalized forecasts from cache",
+      "type": "add_connection",
+      "content": "Check for a sufficiently fresh response before calling a provider. Include the data class in the key so a current-condition response cannot accidentally satisfy a 7-day or alert query.",
+      "connection": {
+        "edgeId": "weather_api_cache",
+        "sourceNodeId": "weather_api",
+        "targetNodeId": "weather_cache",
+        "connectionType": "data-flow",
+        "label": "Freshness-checked cache lookup",
+        "description": "Lookup uses normalized location plus forecast or alert data class."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:4"]
+    },
+    {
+      "id": "weather_15_provider",
+      "stepNumber": 15,
+      "phase": "Serve fresh conditions and forecasts",
+      "title": "Represent the external weather provider",
+      "type": "add_component",
+      "content": "No dedicated external-weather-provider node exists in the current catalog. Use the generic custom-component solely to make this third-party boundary visible. Provider product coverage, forecast model, commercial terms, quota, outage contract, and update mechanism are unknown and must be selected and reviewed.",
+      "component": {
+        "nodeId": "weather_provider",
+        "componentType": "custom-component",
+        "label": "Third-Party Weather Provider",
+        "description": "External current conditions, forecasts, and warning data",
+        "position": {"x": 1220, "y": 300},
+        "properties": {
+          "componentName": "Third-Party Weather Provider",
+          "purpose": "Proposed external source for current conditions, hourly-granularity and 7-day forecasts, and warning data; provider, model coverage, quota, freshness, update mechanism, and contract remain open decisions.",
+          "componentType": "External Weather API",
+          "technology": "Third-party API"
+        },
+        "highlightReason": "There is no dedicated external-API component ID; this existing generic custom-component is used only for the vendor boundary."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "weather_16_api_provider",
+      "stepNumber": 16,
+      "phase": "Serve fresh conditions and forecasts",
+      "title": "Fetch provider data on a cache miss",
+      "type": "add_connection",
+      "content": "The application API requests only the needed location and data class after a cache miss or revalidation decision. Bound provider calls with deadlines, quota controls, and a reviewed retry policy so a third-party slowdown does not create unbounded user latency.",
+      "connection": {
+        "edgeId": "weather_api_provider",
+        "sourceNodeId": "weather_api",
+        "targetNodeId": "weather_provider",
+        "connectionType": "api-call",
+        "label": "On-demand weather data request",
+        "description": "A cache miss triggers a bounded request to the selected provider."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "weather_17_provider_api",
+      "stepNumber": 17,
+      "phase": "Serve fresh conditions and forecasts",
+      "title": "Return provider data to the application API",
+      "type": "add_connection",
+      "content": "Validate and normalize the provider response, preserve its observation or issue time, and distinguish missing data from a valid empty result before caching or returning it.",
+      "connection": {
+        "edgeId": "weather_provider_api",
+        "sourceNodeId": "weather_provider",
+        "targetNodeId": "weather_api",
+        "connectionType": "data-flow",
+        "label": "Conditions, forecasts, and provider timestamps",
+        "description": "The service validates provider payloads and retains source freshness metadata."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "weather_18_freshness",
+      "stepNumber": 18,
+      "phase": "Serve fresh conditions and forecasts",
+      "title": "Define freshness separately from cache lifetime",
+      "type": "explanation",
+      "content": "A cache TTL is not a promise that the source itself is current. Carry observedAt or issuedAt and fetchedAt through the response, make stale status visible when serving a bounded fallback, and agree on freshness objectives per data class with product and provider owners. The brief supplies no numeric freshness or latency target.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "weather_19_hourly_meaning",
+      "stepNumber": 19,
+      "phase": "Serve fresh conditions and forecasts",
+      "title": "Clarify what hourly updates means",
+      "type": "explanation",
+      "content": "This draft treats hourly updates as forecast data at hourly granularity; it does not assume that every location is re-fetched exactly once per hour. Confirm whether the requirement instead specifies a refresh cadence, a user-visible refresh interval, or both, and then align provider quota, cache policy, and freshness SLO.",
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "weather_20_cache_key",
+      "stepNumber": 20,
+      "phase": "Serve fresh conditions and forecasts",
+      "title": "Keep location and data-class cache keys consistent",
+      "type": "explanation",
+      "content": "Normalize coordinates or place identifiers before cache access, include the requested forecast class and relevant units or locale in the key, and avoid creating unbounded near-duplicate entries from tiny coordinate differences. Choose normalization precision only after location-accuracy and privacy needs are reviewed.",
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "weather_21_provider_limits",
+      "stepNumber": 21,
+      "phase": "Serve fresh conditions and forecasts",
+      "title": "Protect the provider integration",
+      "type": "explanation",
+      "content": "Use bounded concurrency, provider quotas, timeouts, and circuit breaking; retry only safe reads with jitter and a capped budget. During provider failure, serve a cache entry only with its true age and stale marker, or return an explicit temporary-unavailable response. Never present old data as live.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "weather_22_refresh_worker",
+      "stepNumber": 22,
+      "phase": "Refresh data, retain history, and deliver alerts",
+      "title": "Add a provider refresh coordinator",
+      "type": "add_component",
+      "content": "Separate proactive refresh from user reads so provider polling or subscription handling can be tuned independently and update bursts do not block forecast requests. Whether the provider offers webhooks, a feed, or only polling is an assumption to verify before selecting the trigger.",
+      "component": {
+        "nodeId": "weather_refresh",
+        "componentType": "processing-worker",
+        "label": "Provider Refresh Coordinator",
+        "description": "Bounded provider refresh and update normalization",
+        "position": {"x": 620, "y": 620},
+        "properties": {
+          "componentName": "Provider Refresh Coordinator",
+          "purpose": "Use the provider-supported webhook, feed, or polling mechanism after its contract is confirmed; bound refresh work, normalize updates, and publish them asynchronously without blocking user forecast reads.",
+          "autoscale": true
+        },
+        "highlightReason": "The processing-worker catalog entry fits asynchronous provider refresh and supports independent scaling."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "weather_23_refresh_provider",
+      "stepNumber": 23,
+      "phase": "Refresh data, retain history, and deliver alerts",
+      "title": "Request provider refreshes outside the read path",
+      "type": "add_connection",
+      "content": "Use the coordinator for proactive refresh work where the provider contract and freshness objective justify it. Apply a bounded schedule or provider subscription rather than hard-coding an interval that the brief does not provide.",
+      "connection": {
+        "edgeId": "weather_refresh_provider_request",
+        "sourceNodeId": "weather_refresh",
+        "targetNodeId": "weather_provider",
+        "connectionType": "api-call",
+        "label": "Contract-bounded refresh request",
+        "description": "Refresh uses a provider-supported mechanism and an agreed freshness policy."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "weather_24_provider_refresh",
+      "stepNumber": 24,
+      "phase": "Refresh data, retain history, and deliver alerts",
+      "title": "Receive refreshed provider observations",
+      "type": "add_connection",
+      "content": "Treat provider refresh output as untrusted input: validate schema, location, units, issue time, and alert identity before it enters internal processing.",
+      "connection": {
+        "edgeId": "weather_provider_refresh_response",
+        "sourceNodeId": "weather_provider",
+        "targetNodeId": "weather_refresh",
+        "connectionType": "data-flow",
+        "label": "Validated-source update payload",
+        "description": "Provider data enters a bounded normalization path before becoming application state."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "weather_25_update_queue",
+      "stepNumber": 25,
+      "phase": "Refresh data, retain history, and deliver alerts",
+      "title": "Add a durable update queue",
+      "type": "add_component",
+      "content": "Buffer normalized provider updates so bursts, downstream restarts, or alert processing delays do not lose the refresh path. Select retention, ordering key, retry limits, and dead-letter handling from provider behavior and recovery objectives.",
+      "component": {
+        "nodeId": "weather_updates",
+        "componentType": "queue",
+        "label": "Weather Update Queue",
+        "description": "Buffered provider updates for independent processing",
+        "position": {"x": 920, "y": 620},
+        "properties": {
+          "componentName": "Weather Update Queue",
+          "purpose": "Buffer normalized provider observations and warnings for independent consumers; choose durability, ordering, retention, retry, and dead-letter behavior from explicit recovery and freshness objectives.",
+          "durable": true
+        },
+        "highlightReason": "The queue catalog node matches asynchronous buffering and exposes durability without requiring a vendor choice."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "weather_26_refresh_queue",
+      "stepNumber": 26,
+      "phase": "Refresh data, retain history, and deliver alerts",
+      "title": "Publish normalized updates to the queue",
+      "type": "add_connection",
+      "content": "Publish an idempotency key derived from the provider event or stable observation identity so retries do not duplicate historical samples or alert sends.",
+      "connection": {
+        "edgeId": "weather_refresh_updates",
+        "sourceNodeId": "weather_refresh",
+        "targetNodeId": "weather_updates",
+        "connectionType": "message-queue",
+        "label": "Normalized observations and warnings",
+        "description": "The producer publishes retry-safe update events for downstream processing."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "weather_27_processor",
+      "stepNumber": 27,
+      "phase": "Refresh data, retain history, and deliver alerts",
+      "title": "Add a forecast and alert processor",
+      "type": "add_component",
+      "content": "Consume updates idempotently, normalize units and timestamps, retain historical observations according to policy, refresh shared cache entries, and evaluate warning changes for eligible subscriptions. Keep processing independently scalable from request-serving APIs.",
+      "component": {
+        "nodeId": "weather_processor",
+        "componentType": "processing-worker",
+        "label": "Forecast and Alert Processor",
+        "description": "Idempotent update persistence, cache refresh, and warning evaluation",
+        "position": {"x": 1220, "y": 620},
+        "properties": {
+          "componentName": "Forecast and Alert Processor",
+          "purpose": "Idempotently consume provider updates, normalize measurements and timestamps, persist history, refresh cache entries, and evaluate alert changes; scale from measured queue lag and processing cost.",
+          "autoscale": true
+        },
+        "highlightReason": "The existing processing-worker node covers these asynchronous jobs without adding a new component type."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "weather_28_queue_processor",
+      "stepNumber": 28,
+      "phase": "Refresh data, retain history, and deliver alerts",
+      "title": "Connect queued updates to processing",
+      "type": "add_connection",
+      "content": "Use consumer acknowledgments only after the update's durable effects are committed or safely made retryable; define deduplication and poison-message handling.",
+      "connection": {
+        "edgeId": "weather_updates_processor",
+        "sourceNodeId": "weather_updates",
+        "targetNodeId": "weather_processor",
+        "connectionType": "message-queue",
+        "label": "Retryable provider update events",
+        "description": "Consumers process buffered updates with idempotent effects and explicit failure handling."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1"]
+    },
+    {
+      "id": "weather_29_history_store",
+      "stepNumber": 29,
+      "phase": "Refresh data, retain history, and deliver alerts",
+      "title": "Add historical weather storage",
+      "type": "add_component",
+      "content": "Persist observations and the minimum metadata required for time-range queries, including normalized location, source, observed time, and units. The brief does not state how much history to retain, which fields need auditability, or the query volume; select storage layout and retention only after those are clarified.",
+      "component": {
+        "nodeId": "weather_history",
+        "componentType": "database",
+        "label": "Historical Weather Store",
+        "description": "Durable time-indexed observations for historical queries",
+        "position": {"x": 1520, "y": 740},
+        "properties": {
+          "componentName": "Historical Weather Store",
+          "purpose": "Persist normalized observations with location key, observed time, units, and source metadata for historical queries; choose schema, partitioning, backup, and retention policy after access patterns and retention requirements are agreed.",
+          "backups": true,
+          "encryption": true
+        },
+        "highlightReason": "The database catalog component fits durable historical query data; no time-series vendor or retention period is assumed."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:5", "legacy-constraint:2"]
+    },
+    {
+      "id": "weather_30_processor_history",
+      "stepNumber": 30,
+      "phase": "Refresh data, retain history, and deliver alerts",
+      "title": "Persist processed observations",
+      "type": "add_connection",
+      "content": "Write deduplicated observations using a key that reflects source identity and observed time. Define correction handling because providers may revise a previous observation.",
+      "connection": {
+        "edgeId": "weather_processor_history",
+        "sourceNodeId": "weather_processor",
+        "targetNodeId": "weather_history",
+        "connectionType": "database-connection",
+        "label": "Normalized historical observations",
+        "description": "The consumer persists idempotent, time-indexed records for historical reads."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:5", "legacy-constraint:2"]
+    },
+    {
+      "id": "weather_31_api_history",
+      "stepNumber": 31,
+      "phase": "Refresh data, retain history, and deliver alerts",
+      "title": "Serve historical queries from the durable store",
+      "type": "add_connection",
+      "content": "The API applies bounded time ranges and location authorization before querying history. Return units, source, and time semantics so a historical record is not confused with a current observation.",
+      "connection": {
+        "edgeId": "weather_api_history",
+        "sourceNodeId": "weather_api",
+        "targetNodeId": "weather_history",
+        "connectionType": "database-connection",
+        "label": "Bounded historical weather query",
+        "description": "Historical reads use durable records and explicit time and location filters."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:5", "legacy-constraint:2"]
+    },
+    {
+      "id": "weather_32_processor_cache",
+      "stepNumber": 32,
+      "phase": "Refresh data, retain history, and deliver alerts",
+      "title": "Refresh cache entries after provider updates",
+      "type": "add_connection",
+      "content": "Update or invalidate the matching location and data-class key after a processed observation. Prevent an older, delayed event from replacing a newer cached value by comparing source timestamps or versions.",
+      "connection": {
+        "edgeId": "weather_processor_cache",
+        "sourceNodeId": "weather_processor",
+        "targetNodeId": "weather_cache",
+        "connectionType": "data-flow",
+        "label": "Version-aware cache refresh",
+        "description": "Processed updates refresh or invalidate only the matching location and data-class entries."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "weather_33_notifications",
+      "stepNumber": 33,
+      "phase": "Refresh data, retain history, and deliver alerts",
+      "title": "Add alert and update delivery",
+      "type": "add_component",
+      "content": "Send eligible severe-weather warnings and lightweight refresh hints through the channels supported by each platform. Alert subscription rules, geographic scope, deduplication, quiet hours, and delivery guarantees are not in the brief and need product decisions.",
+      "component": {
+        "nodeId": "weather_notifications",
+        "componentType": "notification-service",
+        "label": "Weather Alert Delivery",
+        "description": "Severe-weather warnings and forecast refresh hints",
+        "position": {"x": 1520, "y": 480},
+        "properties": {
+          "componentName": "Weather Alert Delivery",
+          "purpose": "Deliver eligible severe-weather warnings and forecast refresh hints to web and mobile clients; apply reviewed subscription, geographic-scope, deduplication, and channel policies."
+        },
+        "highlightReason": "The notification-service catalog node directly fits alert fanout across clients."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:1"]
+    },
+    {
+      "id": "weather_34_processor_notifications",
+      "stepNumber": 34,
+      "phase": "Refresh data, retain history, and deliver alerts",
+      "title": "Trigger notifications from evaluated updates",
+      "type": "add_connection",
+      "content": "Notify on a meaningful alert transition or configured refresh event, not every repeated provider poll. Deduplicate using provider alert identity and an application delivery key.",
+      "connection": {
+        "edgeId": "weather_processor_notifications",
+        "sourceNodeId": "weather_processor",
+        "targetNodeId": "weather_notifications",
+        "connectionType": "api-call",
+        "label": "Eligible warning and refresh events",
+        "description": "The processor sends deduplicated events after validating and evaluating provider updates."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:3", "legacy-constraint:1"]
+    },
+    {
+      "id": "weather_35_notifications_mobile",
+      "stepNumber": 35,
+      "phase": "Refresh data, retain history, and deliver alerts",
+      "title": "Deliver warnings to mobile devices",
+      "type": "add_connection",
+      "content": "Push delivery is a notification hint, not the authoritative forecast payload; the app fetches current alert details and validates their age when opened.",
+      "connection": {
+        "edgeId": "weather_notifications_mobile",
+        "sourceNodeId": "weather_notifications",
+        "targetNodeId": "weather_mobile",
+        "connectionType": "data-flow",
+        "label": "Mobile warning and refresh hint",
+        "description": "Push messages prompt the app to display or fetch current warning details."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "weather_36_notifications_web",
+      "stepNumber": 36,
+      "phase": "Refresh data, retain history, and deliver alerts",
+      "title": "Deliver warning updates to the web app",
+      "type": "add_connection",
+      "content": "Use the web delivery mechanism selected by the product and browser support policy; the transport remains an implementation choice. Keep the API as the source of current alert details.",
+      "connection": {
+        "edgeId": "weather_notifications_web",
+        "sourceNodeId": "weather_notifications",
+        "targetNodeId": "weather_web",
+        "connectionType": "data-flow",
+        "label": "Web warning and refresh hint",
+        "description": "The notification channel signals the web client to refresh authoritative alert data."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:1"]
+    },
+    {
+      "id": "weather_37_monitoring",
+      "stepNumber": 37,
+      "phase": "Scale, degrade honestly, and operate",
+      "title": "Add service and freshness monitoring",
+      "type": "add_component",
+      "content": "Observe request latency and errors, provider quota and failures, cache hit and stale-serving rates, update age, queue lag, alert delivery outcomes, and historical query load. Define service objectives with owners before setting alert thresholds.",
+      "component": {
+        "nodeId": "weather_monitoring",
+        "componentType": "monitoring",
+        "label": "Weather Service Monitoring",
+        "description": "Provider health, freshness, queue, cache, and client-service signals",
+        "position": {"x": 920, "y": 900},
+        "properties": {
+          "componentName": "Weather Service Monitoring",
+          "purpose": "Track API latency and errors, provider health and quota, cache hit and stale-serving rates, source freshness, queue lag, alert delivery, and historical query load; thresholds await agreed objectives.",
+          "metrics": true,
+          "alerts": true
+        },
+        "highlightReason": "The monitoring catalog node supports operational evidence without inventing SLO numbers."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "weather_38_api_monitoring",
+      "stepNumber": 38,
+      "phase": "Scale, degrade honestly, and operate",
+      "title": "Measure the user-facing service",
+      "type": "add_connection",
+      "content": "Measure by endpoint and data class, distinguishing cache-hit latency, provider-backed latency, historical reads, and explicit stale or unavailable responses.",
+      "connection": {
+        "edgeId": "weather_api_monitoring",
+        "sourceNodeId": "weather_api",
+        "targetNodeId": "weather_monitoring",
+        "connectionType": "data-flow",
+        "label": "Request, freshness, and error metrics",
+        "description": "API telemetry separates response paths and exposes actual freshness."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "weather_39_processor_monitoring",
+      "stepNumber": 39,
+      "phase": "Scale, degrade honestly, and operate",
+      "title": "Measure update processing health",
+      "type": "add_connection",
+      "content": "Track event age and processing lag as freshness signals; a healthy worker count alone does not show whether updates reach users on time.",
+      "connection": {
+        "edgeId": "weather_processor_monitoring",
+        "sourceNodeId": "weather_processor",
+        "targetNodeId": "weather_monitoring",
+        "connectionType": "data-flow",
+        "label": "Update age and processing outcomes",
+        "description": "Worker telemetry reports queue age, failures, deduplication, and processing duration."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "weather_40_queue_monitoring",
+      "stepNumber": 40,
+      "phase": "Scale, degrade honestly, and operate",
+      "title": "Watch queue pressure and recovery",
+      "type": "add_connection",
+      "content": "Alert on growing queue age, repeated delivery failures, and dead-letter volume. Use these signals to scale consumers or reduce refresh load without hiding degraded freshness.",
+      "connection": {
+        "edgeId": "weather_queue_monitoring",
+        "sourceNodeId": "weather_updates",
+        "targetNodeId": "weather_monitoring",
+        "connectionType": "data-flow",
+        "label": "Queue age, backlog, and retry metrics",
+        "description": "Queue telemetry shows whether asynchronous refresh work is keeping up."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "weather_41_scale",
+      "stepNumber": 41,
+      "phase": "Scale, degrade honestly, and operate",
+      "title": "Scale for millions using measured demand",
+      "type": "explanation",
+      "content": "The brief says millions of users but gives no DAU, request rate, geographic distribution, peak-to-average ratio, or concurrency. Scale stateless API instances and consumers independently; use location and time access patterns to choose cache and history partitioning. Load-test realistic regional and seasonal peaks before selecting capacity or numeric thresholds.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "weather_42_offline",
+      "stepNumber": 42,
+      "phase": "Scale, degrade honestly, and operate",
+      "title": "Make offline mode useful without misrepresenting freshness",
+      "type": "explanation",
+      "content": "Retain a bounded last-successful response on mobile with its fetch and source timestamps; show that it is cached and allow refresh when connectivity returns. Define maximum acceptable offline age and storage/privacy rules with product owners. Do not imply that warnings or rapidly changing conditions are current while disconnected.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "weather_43_degradation",
+      "stepNumber": 43,
+      "phase": "Scale, degrade honestly, and operate",
+      "title": "Specify partial failures and recovery",
+      "type": "explanation",
+      "content": "If geocoding fails, retain manual coordinate or saved-place paths. If the weather provider is unavailable, return explicitly marked stale data only within an agreed bound or report temporary unavailability. If notifications lag, preserve the warning in the API response and retry delivery idempotently. If history storage is impaired, isolate its failure from current-condition reads where possible.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "weather_44_open_questions",
+      "stepNumber": 44,
+      "phase": "Scale, degrade honestly, and operate",
+      "title": "Resolve decisions the brief leaves open",
+      "type": "explanation",
+      "content": "Before treating this design as production-ready, clarify: the provider and its update/alert contract; whether hourly updates means data granularity or refresh cadence; freshness and latency objectives per data class; expected DAU, peak requests, and regional distribution; location permission, precision, and retention; warning subscriptions and delivery guarantees; historical retention and query patterns; offline maximum age; and recovery objectives. This draft proposes boundaries, not these missing product or operational requirements.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

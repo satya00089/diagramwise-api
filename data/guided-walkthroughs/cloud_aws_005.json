@@ -1,0 +1,652 @@
+{
+  "problem_id": "cloud_aws_005",
+  "version": "1.0-local-draft",
+  "requirementRevision": null,
+  "totalSteps": 36,
+  "phases": [
+    {
+      "name": "Freeze the brief and set trust boundaries",
+      "stepRange": [1, 5],
+      "description": "Keep the supplied problem text intact, distinguish targets from evidence, and define the public and private parts of the architecture."
+    },
+    {
+      "name": "Build the isolated request and data path",
+      "stepRange": [6, 24],
+      "description": "Use existing catalog nodes to represent the protected web request path, private application and database tiers, encryption, and security telemetry."
+    },
+    {
+      "name": "Protect identities, keys, and security events",
+      "stepRange": [25, 30],
+      "description": "Apply the stated attack protections, least-privilege access, key policy, and complete security-event collection without claiming unverified coverage."
+    },
+    {
+      "name": "Validate scaling, availability, and security outcomes",
+      "stepRange": [31, 36],
+      "description": "Set scaling and availability decisions from measured behavior, then check the design against every supplied target."
+    }
+  ],
+  "steps": [
+    {
+      "id": "secure_01",
+      "stepNumber": 1,
+      "phase": "Freeze the brief and set trust boundaries",
+      "title": "Keep the live problem brief verbatim",
+      "type": "explanation",
+      "content": "Supplied title: Design a Secure Multi-Tier Web Application. Supplied description: Design a secure web application architecture with network isolation, protection against common web attacks, auto-scaling capabilities, and secure database access. Requirements: Implement network isolation; Protect against common web attacks; Auto-scale based on traffic; Secure database access; Encrypt data in transit and at rest; Implement least privilege access; Log all security events; Handle SSL/TLS termination. Constraints: No direct internet access to database; All traffic must be encrypted; Support 99.95% availability; Comply with security best practices; Block SQL injection and XSS attacks. Hints: VPC with public and private subnets; Application Load Balancer for traffic; Auto Scaling Group for web tier; RDS in private subnet with security groups; AWS WAF for web application firewall; KMS for encryption key management. These are the exact supplied facts and targets; they do not prove that the design has met them."
+    },
+    {
+      "id": "secure_02",
+      "stepNumber": 2,
+      "phase": "Freeze the brief and set trust boundaries",
+      "title": "Separate stated targets from sizing assumptions",
+      "type": "explanation",
+      "content": "The brief gives a 99.95% availability target and asks for autoscaling based on traffic, but gives no request rate, peak-to-average profile, user count, latency target, database size, retention period, instance bounds, scaling thresholds, RTO, or RPO. Leave those values open. Gather workload and recovery evidence before sizing capacity or declaring a target achieved."
+    },
+    {
+      "id": "secure_03",
+      "stepNumber": 3,
+      "phase": "Freeze the brief and set trust boundaries",
+      "title": "Choose the public entry and private service boundary",
+      "type": "decision_point",
+      "content": "Use the hinted WAF and Application Load Balancer on the public request path. For this brief, the private web/application tier represents the server-side web and API runtime behind the ALB; it is not a separately exposed API tier. Split web and API into separate private runtimes only if independent deployment or scaling boundaries are later required, and keep both reachable only through explicit tier-to-tier rules. Keep RDS in a private data subnet. The browser has no route to the database, and the database has no direct internet route.",
+      "decision": {
+        "question": "Which tiers may receive public requests, and where does database access begin?",
+        "chosen": "Route requests through AWS WAF and the Application Load Balancer to the private web tier; allow database connections only from the authorized application tier.",
+        "chosenReason": "This makes network isolation and the no-direct-internet database constraint explicit in the request path.",
+        "alternatives": [
+          {
+            "option": "Expose the database endpoint to browser or public-subnet traffic",
+            "tradeoff": "It violates the stated database isolation constraint and expands the reachable attack surface."
+          },
+          {
+            "option": "Place the application and database in the public request tier",
+            "tradeoff": "It removes the trust boundary the brief requires."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "secure_04",
+      "stepNumber": 4,
+      "phase": "Freeze the brief and set trust boundaries",
+      "title": "Treat availability and security as evidence gates",
+      "type": "explanation",
+      "content": "A catalog node or enabled property is a design choice, not proof of availability or security. Validate the end-to-end failure behavior, access policy, encryption paths, and security-event sources against the stated constraints before claiming compliance."
+    },
+    {
+      "id": "secure_05",
+      "stepNumber": 5,
+      "phase": "Freeze the brief and set trust boundaries",
+      "title": "Add the VPC boundary without inventing network ranges",
+      "type": "add_component",
+      "content": "Use the existing VPC/Network group as the visual boundary for public ingress and private application and data subnets. The brief supplies no CIDR ranges, so leave the catalog CIDR field unset and choose ranges only after reviewing the surrounding network plan.",
+      "component": {
+        "nodeId": "secure_vpc",
+        "componentType": "vpc-network",
+        "label": "Application VPC",
+        "description": "Public ingress with private application and database subnets",
+        "position": { "x": 500, "y": 330 },
+        "properties": {
+          "componentName": "Application VPC",
+          "purpose": "Place the public WAF and load-balancer entry separately from private web and database subnets; keep RDS unreachable directly from the internet."
+        },
+        "highlightReason": "VPC/Network is an existing catalog group and supports the isolation boundary without adding an AWS-specific node type."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:1"]
+    },
+    {
+      "id": "secure_06",
+      "stepNumber": 6,
+      "phase": "Build the isolated request and data path",
+      "title": "Add the web client boundary",
+      "type": "add_component",
+      "content": "Represent browser requests as the only user-facing entry in this walkthrough. The client sends HTTPS requests to the protected edge and never receives database credentials or a database endpoint.",
+      "component": {
+        "nodeId": "secure_clients",
+        "componentType": "web-app",
+        "label": "Web Application Clients",
+        "description": "Browser clients using the protected HTTPS entry point",
+        "position": { "x": 0, "y": 180 },
+        "properties": {
+          "componentName": "Web Application Clients",
+          "purpose": "Send application requests over TLS through AWS WAF and the Application Load Balancer; do not connect directly to RDS.",
+          "ssl": true
+        },
+        "highlightReason": "Web App is the existing catalog component for browser-based clients and supports its SSL property."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:2"]
+    },
+    {
+      "id": "secure_07",
+      "stepNumber": 7,
+      "phase": "Build the isolated request and data path",
+      "title": "Add AWS WAF at the web request edge",
+      "type": "add_component",
+      "content": "Use the existing Firewall catalog type as AWS WAF. Apply reviewed managed protections for the SQL injection and cross-site scripting attacks named in the brief, and retain logging so rule matches and false positives can be investigated.",
+      "component": {
+        "nodeId": "secure_waf",
+        "componentType": "firewall",
+        "label": "AWS WAF",
+        "description": "Web application firewall for the public request path",
+        "position": { "x": 280, "y": 180 },
+        "properties": {
+          "componentName": "AWS WAF",
+          "purpose": "Inspect public web requests for SQL injection and XSS; tune protections against the application's observed traffic and log rule outcomes.",
+          "type": "WAF",
+          "logging": true
+        },
+        "highlightReason": "Firewall is an existing catalog type tagged for WAF and exposes a logging property."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "secure_08",
+      "stepNumber": 8,
+      "phase": "Build the isolated request and data path",
+      "title": "Add the Application Load Balancer",
+      "type": "add_component",
+      "content": "Use the existing Load Balancer node for the hinted Application Load Balancer. Enable its supported TLS termination property; the next steps define how encrypted traffic continues to the private targets.",
+      "component": {
+        "nodeId": "secure_alb",
+        "componentType": "loadbalancer",
+        "label": "Application Load Balancer",
+        "description": "Distributes protected requests to the private web tier",
+        "position": { "x": 560, "y": 180 },
+        "properties": {
+          "componentName": "Application Load Balancer",
+          "purpose": "Receive inspected HTTPS requests, terminate the client TLS session, and route requests only to healthy private web-tier targets.",
+          "type": "Layer 7 (Application)",
+          "sslTermination": true
+        },
+        "highlightReason": "Load Balancer is the existing catalog type tagged for ALB and exposes SSL/TLS termination."
+      },
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "secure_09",
+      "stepNumber": 9,
+      "phase": "Build the isolated request and data path",
+      "title": "Add the autoscaling private web tier",
+      "type": "add_component",
+      "content": "Use the existing Web Server node for the private web/application/API runtime and enable its supported autoscale property. This brief does not require a separately deployable API tier; if one is later introduced, keep it private and restrict its ingress to the authorized web tier. The catalog has no separate Auto Scaling Group node. Set scaling bounds and policies only after measuring traffic and application behavior.",
+      "component": {
+        "nodeId": "secure_web_tier",
+        "componentType": "webserver",
+        "label": "Private Web Tier",
+        "description": "Application servers in private subnets with traffic-based scaling",
+        "position": { "x": 850, "y": 180 },
+        "properties": {
+          "componentName": "Private Web Tier",
+          "purpose": "Run the application in private subnets, accept traffic only from the load balancer, and scale based on measured traffic without a fixed instance count in this brief.",
+          "autoscale": true
+        },
+        "highlightReason": "Web Server is the existing compute catalog type and supports autoscale; no dedicated Auto Scaling Group type exists."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3"]
+    },
+    {
+      "id": "secure_10",
+      "stepNumber": 10,
+      "phase": "Build the isolated request and data path",
+      "title": "Add RDS as a private relational database",
+      "type": "add_component",
+      "content": "Use the existing Database catalog type for RDS and identify it as relational. Leave the engine and capacity unspecified because the live brief does not choose either. Multi-AZ is enabled as an availability design choice, not a failover-time or recovery-point guarantee; the brief gives no RTO or RPO. Test failover and end-to-end recovery against the stated availability target.",
+      "component": {
+        "nodeId": "secure_rds",
+        "componentType": "database",
+        "label": "Amazon RDS",
+        "description": "Relational application data in private subnets",
+        "position": { "x": 1140, "y": 180 },
+        "properties": {
+          "componentName": "Amazon RDS",
+          "purpose": "Store application data in private subnets; accept connections only from the authorized web tier and require encrypted database connections.",
+          "type": "RDBMS",
+          "multiAZ": true
+        },
+        "highlightReason": "Database is the existing relational/NoSQL storage type and supports RDBMS and Multi-AZ properties."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "secure_11",
+      "stepNumber": 11,
+      "phase": "Build the isolated request and data path",
+      "title": "Represent KMS key management with the generic catalog node",
+      "type": "add_component",
+      "content": "The catalog has no dedicated AWS KMS component. Use its existing generic custom component to show the key-management role for RDS encryption; do not put key material in the diagram or imply that selecting this node alone enables encryption.",
+      "component": {
+        "nodeId": "secure_kms",
+        "componentType": "custom-component",
+        "label": "AWS KMS Key Management",
+        "description": "Key-management boundary for RDS encryption at rest",
+        "position": { "x": 1140, "y": 420 },
+        "properties": {
+          "componentName": "AWS KMS Key Management",
+          "purpose": "Provide the approved encryption key for RDS storage and enforce key access through reviewed policies and grants; never expose key material to the application.",
+          "componentType": "Key management service",
+          "technology": "AWS KMS"
+        },
+        "highlightReason": "The catalog lacks a KMS-specific type, so this uses only the existing generic custom-component properties."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "secure_12",
+      "stepNumber": 12,
+      "phase": "Build the isolated request and data path",
+      "title": "Add CloudWatch monitoring for security signals",
+      "type": "add_component",
+      "content": "Use the existing Monitoring catalog type with CloudWatch as its stack. Centralize the configured web, WAF, database, and audit signals here, then define alerts from the security and availability behaviors the team needs to detect.",
+      "component": {
+        "nodeId": "secure_cloudwatch",
+        "componentType": "monitoring",
+        "label": "Amazon CloudWatch",
+        "description": "Central monitoring and alerting for security and availability signals",
+        "position": { "x": 850, "y": 500 },
+        "properties": {
+          "componentName": "Amazon CloudWatch Security Monitoring",
+          "purpose": "Collect and alert on configured WAF, application, database, and audit signals; verify that each required security-event source is enabled and delivered.",
+          "stack": "CloudWatch",
+          "metrics": true,
+          "alerts": true
+        },
+        "highlightReason": "Monitoring is an existing catalog type with CloudWatch, metrics, and alerting options."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "secure_13",
+      "stepNumber": 13,
+      "phase": "Build the isolated request and data path",
+      "title": "Represent AWS API auditing with the generic custom node",
+      "type": "add_component",
+      "content": "There is no dedicated CloudTrail catalog type. Use the generic custom component to represent AWS API activity auditing, and send its configured audit events to CloudWatch. CloudTrail does not replace application, WAF, or database logs; validate those sources separately.",
+      "component": {
+        "nodeId": "secure_cloudtrail",
+        "componentType": "custom-component",
+        "label": "AWS CloudTrail Audit Events",
+        "description": "AWS API activity audit source",
+        "position": { "x": 560, "y": 500 },
+        "properties": {
+          "componentName": "AWS CloudTrail Audit Events",
+          "purpose": "Record the AWS API activity required by the security review and deliver configured audit events to central monitoring; application and data-plane events need their own verified sources.",
+          "componentType": "Audit event source",
+          "technology": "AWS CloudTrail"
+        },
+        "highlightReason": "The catalog lacks a CloudTrail-specific type, so this uses the existing generic custom-component schema."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "secure_14",
+      "stepNumber": 14,
+      "phase": "Build the isolated request and data path",
+      "title": "Send browser requests through AWS WAF",
+      "type": "add_connection",
+      "content": "Every public application request reaches WAF before it can reach the load balancer. Do not create a second public route around this inspection point.",
+      "connection": {
+        "edgeId": "clients_to_waf",
+        "sourceNodeId": "secure_clients",
+        "targetNodeId": "secure_waf",
+        "connectionType": "http",
+        "label": "HTTPS web requests",
+        "description": "Public browser requests enter through the WAF-protected path."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "secure_15",
+      "stepNumber": 15,
+      "phase": "Build the isolated request and data path",
+      "title": "Forward inspected requests to the load balancer",
+      "type": "add_connection",
+      "content": "Only requests accepted by WAF continue to the Application Load Balancer. Keep the WAF rules and exceptions reviewable, and use the logged outcomes to catch both attack traffic and false positives.",
+      "connection": {
+        "edgeId": "waf_to_alb",
+        "sourceNodeId": "secure_waf",
+        "targetNodeId": "secure_alb",
+        "connectionType": "http",
+        "label": "Inspected HTTPS requests",
+        "description": "WAF-protected requests continue to the application entry point."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "secure_16",
+      "stepNumber": 16,
+      "phase": "Build the isolated request and data path",
+      "title": "Route to healthy private application targets",
+      "type": "add_connection",
+      "content": "The load balancer sends requests only to healthy web-tier targets in private subnets. Configure target health checks and fail closed when there is no healthy application target.",
+      "connection": {
+        "edgeId": "alb_to_web_tier",
+        "sourceNodeId": "secure_alb",
+        "targetNodeId": "secure_web_tier",
+        "connectionType": "http",
+        "label": "Encrypted request to healthy targets",
+        "description": "The load balancer routes to private web-tier targets over TLS."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "secure_17",
+      "stepNumber": 17,
+      "phase": "Build the isolated request and data path",
+      "title": "Allow database connections from the web tier only",
+      "type": "add_connection",
+      "content": "The only application data path is from the private web/API tier to RDS. Restrict the database security group to the authorized application security group and require database TLS; do not allow a public route or browser connection. A security group controls network reachability, not database authentication, SQL privileges, or end-user authorization; grant the workload only the required database permissions and enforce user authorization in the application.",
+      "connection": {
+        "edgeId": "web_tier_to_rds",
+        "sourceNodeId": "secure_web_tier",
+        "targetNodeId": "secure_rds",
+        "connectionType": "database-connection",
+        "label": "Authorized encrypted database connection",
+        "description": "Only the application tier reaches RDS, using an encrypted database connection."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "secure_18",
+      "stepNumber": 18,
+      "phase": "Build the isolated request and data path",
+      "title": "Associate RDS storage encryption with KMS",
+      "type": "add_connection",
+      "content": "Represent the RDS and KMS relationship as an encryption-key integration, not as application data passing through KMS. Select and validate the key policy and service grants during implementation.",
+      "connection": {
+        "edgeId": "rds_uses_kms_key",
+        "sourceNodeId": "secure_rds",
+        "targetNodeId": "secure_kms",
+        "connectionType": "api-call",
+        "label": "RDS storage encryption key",
+        "description": "RDS uses the approved KMS key for encryption at rest."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "secure_19",
+      "stepNumber": 19,
+      "phase": "Build the isolated request and data path",
+      "title": "Deliver AWS API audit events to CloudWatch",
+      "type": "add_connection",
+      "content": "Configure the audit source to deliver the required AWS API activity events to central monitoring. Confirm that delivery is enabled and that access to the resulting logs is restricted.",
+      "connection": {
+        "edgeId": "cloudtrail_to_cloudwatch",
+        "sourceNodeId": "secure_cloudtrail",
+        "targetNodeId": "secure_cloudwatch",
+        "connectionType": "event-stream",
+        "label": "AWS API audit events",
+        "description": "Configured CloudTrail audit events are delivered to CloudWatch for monitoring."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "secure_20",
+      "stepNumber": 20,
+      "phase": "Build the isolated request and data path",
+      "title": "Send configured WAF security logs to monitoring",
+      "type": "add_connection",
+      "content": "Choose a supported WAF log destination and verify delivery of rule matches and security-relevant request outcomes. The catalog edge represents the relationship; it does not configure the AWS log-delivery integration.",
+      "connection": {
+        "edgeId": "waf_to_cloudwatch",
+        "sourceNodeId": "secure_waf",
+        "targetNodeId": "secure_cloudwatch",
+        "connectionType": "event-stream",
+        "label": "WAF security logs",
+        "description": "Configured WAF logs and rule outcomes feed central security monitoring."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "secure_21",
+      "stepNumber": 21,
+      "phase": "Build the isolated request and data path",
+      "title": "Send application security events to monitoring",
+      "type": "add_connection",
+      "content": "Configure the application to emit security-relevant events without recording credentials, key material, or other secrets. Verify that the selected log path preserves the fields needed for investigation.",
+      "connection": {
+        "edgeId": "web_tier_to_cloudwatch",
+        "sourceNodeId": "secure_web_tier",
+        "targetNodeId": "secure_cloudwatch",
+        "connectionType": "event-stream",
+        "label": "Application security events",
+        "description": "The configured application log path delivers security events to central monitoring."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "secure_22",
+      "stepNumber": 22,
+      "phase": "Build the isolated request and data path",
+      "title": "Verify database security-event delivery",
+      "type": "add_connection",
+      "content": "Select database audit and connection events supported by the chosen RDS engine, then verify their delivery to monitoring. The live brief does not choose an engine, so do not assume a particular audit extension or event format.",
+      "connection": {
+        "edgeId": "rds_to_cloudwatch",
+        "sourceNodeId": "secure_rds",
+        "targetNodeId": "secure_cloudwatch",
+        "connectionType": "event-stream",
+        "label": "Database security and connection events",
+        "description": "Configured RDS security events are delivered to central monitoring."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "secure_23",
+      "stepNumber": 23,
+      "phase": "Build the isolated request and data path",
+      "title": "Make the private RDS access rule explicit",
+      "type": "update_component",
+      "content": "Record the network and connection controls on the database node so the diagram carries the no-direct-internet rule with the data store.",
+      "componentUpdate": {
+        "nodeId": "secure_rds",
+        "properties": {
+          "purpose": "Store relational application data in private subnets. Permit inbound connections only from the authorized web-tier security group, require database TLS, and use Multi-AZ as an availability design choice whose behavior must be tested. No direct internet route is allowed."
+        }
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "secure_24",
+      "stepNumber": 24,
+      "phase": "Build the isolated request and data path",
+      "title": "Record the web-tier transport and permission boundary",
+      "type": "update_component",
+      "content": "The catalog has no dedicated IAM role node. Keep the workload identity as a least-privilege web-tier configuration: grant only required AWS actions and resource access, use scoped workload credentials, and do not store long-lived credentials in application configuration. This IAM role is separate from the database principal and its SQL grants, and neither one replaces end-user authorization in the application.",
+      "componentUpdate": {
+        "nodeId": "secure_web_tier",
+        "properties": {
+          "purpose": "Run in private subnets; accept traffic only from the load balancer over TLS; connect to RDS over TLS; use a least-privilege workload role limited to required application and data access, with no embedded long-lived credentials."
+        }
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "secure_25",
+      "stepNumber": 25,
+      "phase": "Protect identities, keys, and security events",
+      "title": "Tune WAF protections for the named attack classes",
+      "type": "decision_point",
+      "content": "The brief explicitly names SQL injection and XSS. Review the selected WAF rules against the application's real request patterns, log matches and blocks, and tune exceptions through a controlled review so normal requests are not silently rejected.",
+      "decision": {
+        "question": "How should the design block SQL injection and XSS while preserving legitimate requests?",
+        "chosen": "Enable reviewed WAF protections for both attack classes, observe logged outcomes, and adjust only validated false positives through a change review.",
+        "chosenReason": "The brief names both attacks but supplies no rule counts, request samples, or traffic profile from which to set more specific thresholds.",
+        "alternatives": [
+          {
+            "option": "Treat a WAF node in the diagram as proof that the attacks are blocked",
+            "tradeoff": "The node does not configure or validate rules, logging, or application-specific behavior."
+          },
+          {
+            "option": "Disable a rule whenever it blocks a request",
+            "tradeoff": "A broad exception can reopen the attack path instead of correcting a false positive safely."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "secure_26",
+      "stepNumber": 26,
+      "phase": "Protect identities, keys, and security events",
+      "title": "Terminate client TLS and keep backend links encrypted",
+      "type": "decision_point",
+      "content": "The ALB handles the requested client SSL/TLS termination. Termination must not create a cleartext hop: configure TLS from the ALB to the web tier and from the web tier to RDS, and verify certificate and trust configuration for each hop.",
+      "decision": {
+        "question": "Where can TLS terminate without violating the all-traffic-encrypted constraint?",
+        "chosen": "Terminate client TLS at the ALB, then use separately configured TLS connections to the private web targets and database.",
+        "chosenReason": "The design satisfies the termination requirement while preserving encryption on internal service links.",
+        "alternatives": [
+          {
+            "option": "Use cleartext from the ALB to the web tier after client TLS termination",
+            "tradeoff": "It violates the requirement that all traffic be encrypted."
+          },
+          {
+            "option": "Assume database TLS is enabled because the database is private",
+            "tradeoff": "Network isolation does not encrypt the database connection."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:2"]
+    },
+    {
+      "id": "secure_27",
+      "stepNumber": 27,
+      "phase": "Protect identities, keys, and security events",
+      "title": "Review KMS access separately from database access",
+      "type": "decision_point",
+      "content": "RDS storage encryption depends on both the database encryption setting and the KMS key policy or grant. Restrict key use to the required service and administrators, review policy changes, and verify that backup and restore paths retain the intended encryption behavior.",
+      "decision": {
+        "question": "Who should be able to use or administer the RDS encryption key?",
+        "chosen": "Grant only the required RDS service and explicitly authorized operators the actions they need, then audit and test key use and recovery.",
+        "chosenReason": "Encryption at rest and least privilege are separate controls; one does not automatically establish the other.",
+        "alternatives": [
+          {
+            "option": "Allow broad account-wide key use for convenience",
+            "tradeoff": "It expands access beyond the least-privilege goal."
+          },
+          {
+            "option": "Assume the diagram's KMS node encrypts storage by itself",
+            "tradeoff": "The RDS setting, key policy, grants, and restore behavior still need configuration and verification."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "secure_28",
+      "stepNumber": 28,
+      "phase": "Protect identities, keys, and security events",
+      "title": "Scope the web workload role to required actions",
+      "type": "explanation",
+      "content": "Define the web workload's permissions from its actual application and data calls. Separate deployment and operator permissions from runtime permissions, avoid broad wildcard grants where a narrower action and resource scope is available, and review denied actions as well as successful access. The catalog does not provide an IAM-specific node, so this policy is documented on the web-tier node.",
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "secure_29",
+      "stepNumber": 29,
+      "phase": "Protect identities, keys, and security events",
+      "title": "Check that the security-event set is actually complete",
+      "type": "decision_point",
+      "content": "CloudTrail covers configured AWS API activity, while WAF, application, and database events have separate sources and delivery paths. Build a source inventory and verify each source, access policy, delivery, alert, and investigation path. The brief gives no retention period, so leave retention as an explicit operations decision.",
+      "decision": {
+        "question": "What evidence supports the requirement to log all security events?",
+        "chosen": "Inventory control-plane, WAF, application, and database security events; enable and test each source and its delivery to restricted central monitoring.",
+        "chosenReason": "A single AWS API audit source does not prove that application and data-plane events are present.",
+        "alternatives": [
+          {
+            "option": "Treat CloudTrail alone as the complete application security log",
+            "tradeoff": "It omits application and database event sources that must be configured separately."
+          },
+          {
+            "option": "Choose a fixed log-retention period from this walkthrough",
+            "tradeoff": "The live problem does not state a retention requirement."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "secure_30",
+      "stepNumber": 30,
+      "phase": "Protect identities, keys, and security events",
+      "title": "Keep the security path observable and access-controlled",
+      "type": "explanation",
+      "content": "Protect access to audit logs, alert on delivery failures and suspicious activity, and preserve enough context to investigate without logging secrets. Validate the exact AWS delivery integrations against the selected services during implementation; the catalog represents relationships, not deployed configuration.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "secure_31",
+      "stepNumber": 31,
+      "phase": "Validate scaling, availability, and security outcomes",
+      "title": "Scale the web tier from observed demand",
+      "type": "scale_trigger",
+      "content": "The problem requires traffic-based autoscaling but provides no traffic volume or capacity numbers. Measure demand and application behavior before selecting scaling policies.",
+      "scaleTrigger": {
+        "metric": "Observed request load, application latency, healthy target capacity, and downstream database pressure",
+        "action": "When measured demand approaches the validated web-tier capacity, scale the private web tier within tested application and database limits; tune thresholds from representative load tests.",
+        "impact": "Traffic-based scaling can adapt capacity while avoiding unsupported instance counts or unverified performance claims."
+      },
+      "requirementIds": ["legacy-requirement:3"]
+    },
+    {
+      "id": "secure_32",
+      "stepNumber": 32,
+      "phase": "Validate scaling, availability, and security outcomes",
+      "title": "Validate database and application availability together",
+      "type": "decision_point",
+      "content": "Multi-AZ RDS and healthy-target routing are design controls, not an availability result. Test database failover, application recovery, load-balancer health behavior, and dependencies, then measure the end-to-end service against the 99.95% target in the brief.",
+      "decision": {
+        "question": "What evidence is needed before claiming the stated availability target?",
+        "chosen": "Exercise database failover and application-tier recovery, observe user-facing availability, and compare measured results with 99.95%.",
+        "chosenReason": "The target is supplied, but no deployment topology or test evidence proves it has been achieved.",
+        "alternatives": [
+          {
+            "option": "Claim the target from the Multi-AZ property alone",
+            "tradeoff": "A component setting does not cover application behavior, failover time, or dependent services."
+          },
+          {
+            "option": "Infer availability from the number of diagram nodes",
+            "tradeoff": "A diagram does not measure service outcomes."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-constraint:3"]
+    },
+    {
+      "id": "secure_33",
+      "stepNumber": 33,
+      "phase": "Validate scaling, availability, and security outcomes",
+      "title": "Test that private database access survives failure safely",
+      "type": "explanation",
+      "content": "During failover and recovery exercises, confirm that only the web-tier security group can reconnect, the database remains unreachable directly from the internet, TLS remains required, and the application handles connection interruption without weakening its access policy.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "secure_34",
+      "stepNumber": 34,
+      "phase": "Validate scaling, availability, and security outcomes",
+      "title": "Verify SQL injection and XSS protections end to end",
+      "type": "explanation",
+      "content": "Use approved security tests to verify that the WAF and application reject the attack classes named in the brief, that legitimate requests still work, and that the relevant events reach restricted monitoring. Do not treat a configured rule as test evidence.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "secure_35",
+      "stepNumber": 35,
+      "phase": "Validate scaling, availability, and security outcomes",
+      "title": "Review the encryption path from client to stored data",
+      "type": "explanation",
+      "content": "Verify client TLS to the ALB, TLS from the ALB to the private web tier, TLS from the web tier to RDS, and encryption at rest for RDS storage and recovery copies. Review certificate trust, key policy, and restore behavior; no single encryption setting covers every hop.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "secure_36",
+      "stepNumber": 36,
+      "phase": "Validate scaling, availability, and security outcomes",
+      "title": "Close with a requirement-by-requirement evidence review",
+      "type": "explanation",
+      "content": "Before calling the design complete, show the isolated VPC path, WAF protections, traffic-based web-tier scaling, restricted RDS access, transit and at-rest encryption, least-privilege workload access, security-event sources, and TLS termination. Keep 99.95% availability and attack-blocking outcomes as targets until tests and operational evidence demonstrate them."
+    }
+  ]
+}

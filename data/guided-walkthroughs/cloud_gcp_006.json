@@ -1,0 +1,483 @@
+{
+  "problem_id": "cloud_gcp_006",
+  "version": "1.0",
+  "totalSteps": 26,
+  "phases": [
+    {
+      "name": "Buffer and ingest the event stream",
+      "stepRange": [1, 8],
+      "description": "Use Pub/Sub as the durable ingress boundary, validate and process events, then land them in BigQuery with replay and throughput controls."
+    },
+    {
+      "name": "Serve interactive analytics",
+      "stepRange": [9, 13],
+      "description": "Give stakeholders an interactive dashboard over governed BigQuery data, with scoped identity and a measured refresh target."
+    },
+    {
+      "name": "Make freshness, latency, and cost observable",
+      "stepRange": [14, 19],
+      "description": "Instrument the ingest, query, dashboard, and cost signals needed to verify the stated service targets."
+    },
+    {
+      "name": "Schedule refresh work and review the design",
+      "stepRange": [20, 26],
+      "description": "Separate scheduled aggregate refreshes from continuous ingestion and finish with explicit validation criteria."
+    }
+  ],
+  "steps": [
+    {
+      "id": "gcp006_problem_brief",
+      "stepNumber": 1,
+      "phase": "Buffer and ingest the event stream",
+      "title": "Start with the stated problem and targets",
+      "type": "explanation",
+      "content": "Title: Build a Real-time Analytics Dashboard\nDescription: Design a real-time analytics solution that ingests streaming data, runs SQL queries on large datasets, creates interactive dashboards, and refreshes visualizations automatically.\nRequirements:\n1. Stream data into BigQuery\n2. Run real-time SQL queries\n3. Create interactive dashboards\n4. Handle high-volume ingestion\n5. Optimize query performance\n6. Schedule data refreshes\n7. Share dashboards with stakeholders\n8. Monitor query costs\nConstraints:\n1. Query latency under 5 seconds\n2. Ingest 100k+ events per second\n3. Support concurrent users (100+)\n4. Cost-effective query execution\n5. Dashboard refresh under 1 minute\nHints:\n1. BigQuery for analytics warehouse\n2. Pub/Sub for event streaming\n3. Data Studio for visualization\n4. Cloud Functions for data processing\n5. BigQuery streaming inserts\n6. Partitioning and clustering for performance\n\nKeep these supplied targets distinct from implementation assumptions. The throughput, latency, concurrency, and cost goals must be demonstrated with representative load and query tests; the diagram alone does not claim they are already met.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcp006_pubsub",
+      "stepNumber": 2,
+      "phase": "Buffer and ingest the event stream",
+      "title": "Create a durable event-ingress boundary",
+      "type": "add_component",
+      "content": "Use the catalog Pub/Sub component for the incoming event stream. Keep producer ownership outside the stated scope, and size topics, retention, and delivery settings from measured event volume and replay needs.",
+      "component": {
+        "nodeId": "gcp006_pubsub",
+        "componentType": "pubsub",
+        "label": "Google Cloud Pub/Sub",
+        "description": "Durable buffer for analytics events",
+        "position": {"x": 0, "y": 260},
+        "properties": {
+          "componentName": "Google Cloud Pub/Sub",
+          "purpose": "Accept the event stream, absorb short consumer or warehouse slowdowns, and retain messages for bounded retry and replay. Monitor backlog age and configure dead-letter handling for poison events; validate publish and drain capacity against the 100k+ events/second target."
+        },
+        "highlightReason": "Pub/Sub is explicitly named in the problem hints and matches the existing publish-subscribe catalog component."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:2"]
+    },
+    {
+      "id": "gcp006_ingest_function",
+      "stepNumber": 3,
+      "phase": "Buffer and ingest the event stream",
+      "title": "Process events with the hinted function role",
+      "type": "add_component",
+      "content": "Use the existing serverless-function component for the Cloud Functions processing role. Validate schemas, attach stable event identifiers, and make retries safe; scale and concurrency limits must be load-tested rather than inferred from the node label.",
+      "component": {
+        "nodeId": "gcp006_ingest_function",
+        "componentType": "serverless-function",
+        "label": "Cloud Functions Ingestion Handler",
+        "description": "Validates and forwards stream events",
+        "position": {"x": 430, "y": 260},
+        "properties": {
+          "componentName": "Cloud Functions Ingestion Handler",
+          "purpose": "Consume Pub/Sub events, validate the event schema, preserve a stable event_id for deduplication, and batch or stream valid rows into BigQuery. Make processing idempotent across retries, isolate malformed records, and tune concurrency from measured payload size, downstream capacity, and the required 100k+ events/second load test."
+        },
+        "highlightReason": "The catalog's serverless-function type represents the event-driven processing role named in the hints without introducing a new component type."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:2"]
+    },
+    {
+      "id": "gcp006_pubsub_to_ingest",
+      "stepNumber": 4,
+      "phase": "Buffer and ingest the event stream",
+      "title": "Connect delivery to the ingestion handler",
+      "type": "add_connection",
+      "content": "The handler acknowledges an event only after its durable write or retry handoff is confirmed. Preserve idempotency so a redelivery does not silently double-count analytics.",
+      "connection": {
+        "edgeId": "gcp006_pubsub_ingest_edge",
+        "sourceNodeId": "gcp006_pubsub",
+        "targetNodeId": "gcp006_ingest_function",
+        "connectionType": "event-delivery",
+        "label": "Buffered event delivery",
+        "description": "Pub/Sub delivers retryable events; the consumer validates, deduplicates, and reports acknowledgement only after the write path is safe."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:2"]
+    },
+    {
+      "id": "gcp006_buffer_policy",
+      "stepNumber": 5,
+      "phase": "Buffer and ingest the event stream",
+      "title": "Make burst handling and replay explicit",
+      "type": "update_component",
+      "content": "Keep the broker durable and permit fan-out where independent consumers are introduced. Define retention, retry limits, and dead-letter ownership operationally; do not treat buffering as proof that the sustained throughput target is met.",
+      "componentUpdate": {
+        "nodeId": "gcp006_pubsub",
+        "properties": {"durable": true, "fanout": true}
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:2"]
+    },
+    {
+      "id": "gcp006_bigquery",
+      "stepNumber": 6,
+      "phase": "Buffer and ingest the event stream",
+      "title": "Add BigQuery as the analytical system of record",
+      "type": "add_component",
+      "content": "Choose BigQuery from the existing data-warehouse platform options. Keep event facts append-oriented and model analytical tables for the dashboard's actual filters and time ranges; avoid inventing storage volume or retention numbers that the brief does not give.",
+      "component": {
+        "nodeId": "gcp006_bigquery",
+        "componentType": "data-warehouse",
+        "label": "BigQuery Analytics Warehouse",
+        "description": "Partitioned analytical tables for event data",
+        "position": {"x": 850, "y": 260},
+        "properties": {
+          "componentName": "BigQuery Analytics Warehouse",
+          "purpose": "Store append-oriented event facts and derived analytical tables for SQL and dashboards. Keep event time, ingestion time, schema version, and stable event identity available for freshness checks, replay, and deduplication.",
+          "platform": "BigQuery",
+          "partitioning": true,
+          "compression": true
+        },
+        "highlightReason": "BigQuery is explicitly named in the brief hints and is an allowed platform value for the existing data-warehouse component."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "gcp006_ingest_to_bigquery",
+      "stepNumber": 7,
+      "phase": "Buffer and ingest the event stream",
+      "title": "Write validated events into BigQuery",
+      "type": "add_connection",
+      "content": "Use the hinted BigQuery streaming-insert path for low-latency arrival, with bounded batches where the selected API and event size allow. Record insert errors and retry only with stable row identity so retries remain safe.",
+      "connection": {
+        "edgeId": "gcp006_ingest_bigquery_edge",
+        "sourceNodeId": "gcp006_ingest_function",
+        "targetNodeId": "gcp006_bigquery",
+        "connectionType": "streaming-write",
+        "label": "Validated streaming inserts",
+        "description": "The handler writes schema-checked, identifiable event rows and exposes write failures for retry and dead-letter handling."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:2"]
+    },
+    {
+      "id": "gcp006_storage_query_policy",
+      "stepNumber": 8,
+      "phase": "Buffer and ingest the event stream",
+      "title": "Shape tables for bounded, cost-aware queries",
+      "type": "update_component",
+      "content": "Partition by the time column used in common filters and cluster by frequently filtered or grouped dimensions after observing real query patterns. Require partition filters for broad scans where appropriate, cap bytes billed for interactive queries, and test the p95 latency target on representative data and concurrency.",
+      "componentUpdate": {
+        "nodeId": "gcp006_bigquery",
+        "properties": {
+          "purpose": "Store append-oriented event facts and derived tables. Partition by the queried event-time column and cluster by measured high-selectivity dimensions; preserve schema and event identity for replay. Apply query byte caps and workload controls, and validate p95 query latency below five seconds at representative scale rather than promising it from the schema alone.",
+          "partitioning": true,
+          "compression": true
+        }
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "gcp006_dashboard",
+      "stepNumber": 9,
+      "phase": "Serve interactive analytics",
+      "title": "Add an interactive Data Studio dashboard",
+      "type": "add_component",
+      "content": "Use the catalog web-app component to represent the browser-facing dashboard role named by the Data Studio hint. Show query filters, the data freshness watermark, and clear loading or partial-result states so users can distinguish stale data from a current view.",
+      "component": {
+        "nodeId": "gcp006_dashboard",
+        "componentType": "web-app",
+        "label": "Data Studio Analytics Dashboard",
+        "description": "Interactive charts and stakeholder views",
+        "position": {"x": 1370, "y": 160},
+        "properties": {
+          "componentName": "Data Studio Analytics Dashboard",
+          "purpose": "Present interactive, filterable charts over governed BigQuery datasets. Display the latest successful data-refresh time and query state; share only with authorized stakeholder groups and validate the experience with 100+ concurrent users."
+        },
+        "highlightReason": "A dashboard is a browser application, so the existing web-app component models the visualization role without a custom node."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcp006_dashboard_query",
+      "stepNumber": 10,
+      "phase": "Serve interactive analytics",
+      "title": "Connect dashboard interactions to warehouse queries",
+      "type": "add_connection",
+      "content": "Keep dashboard SQL bounded by selected time range and filters. Use only the access path approved for the chosen dashboard integration, and ensure stakeholder permissions are checked at the data boundary as well as in the presentation layer.",
+      "connection": {
+        "edgeId": "gcp006_dashboard_bigquery_edge",
+        "sourceNodeId": "gcp006_dashboard",
+        "targetNodeId": "gcp006_bigquery",
+        "connectionType": "interactive-query",
+        "label": "Filtered SQL and result sets",
+        "description": "Dashboard interactions issue bounded analytical queries against authorized BigQuery tables; query duration, scanned bytes, and freshness are observable."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "gcp006_identity",
+      "stepNumber": 11,
+      "phase": "Serve interactive analytics",
+      "title": "Represent stakeholder identity and authorization",
+      "type": "add_component",
+      "content": "Make identity explicit for dashboard sharing. Bind access to named stakeholder groups and least-privilege dataset permissions; do not rely on an unprotected shared link as authorization.",
+      "component": {
+        "nodeId": "gcp006_identity",
+        "componentType": "auth-service",
+        "label": "Stakeholder Identity & Access",
+        "description": "Scoped access to dashboards and datasets",
+        "position": {"x": 850, "y": -80},
+        "properties": {
+          "componentName": "Stakeholder Identity & Access",
+          "purpose": "Authenticate dashboard viewers and map approved stakeholder groups to least-privilege dashboard and BigQuery dataset access. Audit grants and revocations and avoid embedding broad service credentials in a shared dashboard.",
+          "oauth": true
+        },
+        "highlightReason": "The existing auth-service component represents the access boundary needed for stakeholder sharing."
+      },
+      "requirementIds": ["legacy-requirement:7"]
+    },
+    {
+      "id": "gcp006_identity_dashboard",
+      "stepNumber": 12,
+      "phase": "Serve interactive analytics",
+      "title": "Require scoped identity for dashboard access",
+      "type": "add_connection",
+      "content": "Authenticate each viewer and authorize the dashboard and underlying data access independently. Review how the selected visualization integration forwards user identity before deployment.",
+      "connection": {
+        "edgeId": "gcp006_identity_dashboard_edge",
+        "sourceNodeId": "gcp006_identity",
+        "targetNodeId": "gcp006_dashboard",
+        "connectionType": "authorization",
+        "label": "Authorized stakeholder access",
+        "description": "Scoped identities control dashboard access and are mapped to permitted BigQuery datasets and views."
+      },
+      "requirementIds": ["legacy-requirement:7"]
+    },
+    {
+      "id": "gcp006_dashboard_freshness",
+      "stepNumber": 13,
+      "phase": "Serve interactive analytics",
+      "title": "Set a refresh target with visible freshness",
+      "type": "update_component",
+      "content": "Configure automatic dashboard refresh at a 30-second target to leave room within the stated one-minute limit. Show the latest data watermark and measure end-to-end freshness under concurrent use; a refresh request alone does not prove newly ingested data is queryable.",
+      "componentUpdate": {
+        "nodeId": "gcp006_dashboard",
+        "properties": {
+          "purpose": "Present interactive, filterable charts over governed BigQuery datasets. Target automatic refresh every 30 seconds, display the latest successfully queryable data watermark, and show loading or stale states. Share only with authorized stakeholder groups and validate refresh behavior with 100+ concurrent users."
+        }
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcp006_monitoring",
+      "stepNumber": 14,
+      "phase": "Make freshness, latency, and cost observable",
+      "title": "Add end-to-end analytics observability",
+      "type": "add_component",
+      "content": "Use the existing monitoring component for Cloud Monitoring signals. Measure ingestion lag, backlog age, write failures, query latency, bytes scanned, dashboard freshness, and spend; choose alert thresholds from the stated targets and an agreed budget.",
+      "component": {
+        "nodeId": "gcp006_monitoring",
+        "componentType": "monitoring",
+        "label": "Cloud Monitoring & Cost Signals",
+        "description": "Freshness, throughput, latency, and spend telemetry",
+        "position": {"x": 850, "y": 720},
+        "properties": {
+          "componentName": "Cloud Monitoring & Cost Signals",
+          "purpose": "Collect and alert on Pub/Sub backlog age, event processing and BigQuery write errors, end-to-end ingestion lag, p95 query latency, scanned bytes, dashboard freshness, scheduled refresh outcomes, and cost by workload or tenant."
+        },
+        "highlightReason": "The catalog monitoring component already models metrics and alerting; Cloud Monitoring is specified as the implementation role in the component name and purpose."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcp006_monitor_pubsub",
+      "stepNumber": 15,
+      "phase": "Make freshness, latency, and cost observable",
+      "title": "Measure backlog and event arrival",
+      "type": "add_connection",
+      "content": "Alert on a sustained backlog or growing oldest-message age before it makes the dashboard stale. Compare accepted, retried, dead-lettered, and successfully stored event counts.",
+      "connection": {
+        "edgeId": "gcp006_pubsub_monitoring_edge",
+        "sourceNodeId": "gcp006_pubsub",
+        "targetNodeId": "gcp006_monitoring",
+        "connectionType": "metrics",
+        "label": "Backlog and publish telemetry",
+        "description": "Publish rate, oldest unprocessed event age, redelivery, and dead-letter counts reveal whether ingestion is keeping pace."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcp006_monitor_ingest",
+      "stepNumber": 16,
+      "phase": "Make freshness, latency, and cost observable",
+      "title": "Measure processing and warehouse-write health",
+      "type": "add_connection",
+      "content": "Track consumer concurrency, per-event processing time, retry rate, insert errors, and end-to-end event age. Run a sustained load test at 100k+ events per second and verify the backlog drains after a burst.",
+      "connection": {
+        "edgeId": "gcp006_ingest_monitoring_edge",
+        "sourceNodeId": "gcp006_ingest_function",
+        "targetNodeId": "gcp006_monitoring",
+        "connectionType": "metrics",
+        "label": "Processing and insert telemetry",
+        "description": "Function concurrency, processing latency, retries, row-write failures, and event age are measured against the ingestion objective."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcp006_monitor_bigquery",
+      "stepNumber": 17,
+      "phase": "Make freshness, latency, and cost observable",
+      "title": "Expose query and cost evidence",
+      "type": "add_connection",
+      "content": "Attribute query duration, bytes processed, failed jobs, and scheduled-query spend to a dashboard, tenant, or workload where possible. Alert on budget thresholds and unexpected scan growth.",
+      "connection": {
+        "edgeId": "gcp006_bigquery_monitoring_edge",
+        "sourceNodeId": "gcp006_bigquery",
+        "targetNodeId": "gcp006_monitoring",
+        "connectionType": "metrics",
+        "label": "Query, freshness, and billing metrics",
+        "description": "Warehouse query jobs and table freshness provide the evidence for latency objectives and cost controls."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "gcp006_monitor_dashboard",
+      "stepNumber": 18,
+      "phase": "Make freshness, latency, and cost observable",
+      "title": "Verify what dashboard users actually experience",
+      "type": "add_connection",
+      "content": "Measure the interval from event acceptance through query visibility and dashboard refresh. Report stale or failed refreshes instead of presenting an old result as current.",
+      "connection": {
+        "edgeId": "gcp006_dashboard_monitoring_edge",
+        "sourceNodeId": "gcp006_dashboard",
+        "targetNodeId": "gcp006_monitoring",
+        "connectionType": "metrics",
+        "label": "Viewer latency and freshness",
+        "description": "Dashboard load, refresh completion, and displayed data watermark are compared with the under-one-minute freshness target."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcp006_monitoring_policy",
+      "stepNumber": 19,
+      "phase": "Make freshness, latency, and cost observable",
+      "title": "Turn targets into alerts and budget guardrails",
+      "type": "update_component",
+      "content": "Set service-level indicators for p95 query latency below five seconds, end-to-end dashboard freshness below one minute, and sustained ingestion at the stated event rate. Add budget alerts and investigate bytes scanned per dashboard action; keep alert thresholds and budgets explicitly configurable.",
+      "componentUpdate": {
+        "nodeId": "gcp006_monitoring",
+        "properties": {
+          "purpose": "Collect and alert on Pub/Sub backlog age, processing concurrency and write errors, end-to-end ingestion lag, p95 query latency against the under-five-second objective, scanned bytes and spend by workload, dashboard freshness against the under-one-minute objective, and scheduled refresh outcomes. Validate the 100k+ events/second and 100+ concurrent-user targets with load tests; configure budget thresholds with the service owner."
+        }
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcp006_scheduler",
+      "stepNumber": 20,
+      "phase": "Schedule refresh work and review the design",
+      "title": "Add a scheduled refresh trigger",
+      "type": "add_component",
+      "content": "The catalog has no scheduler-specific component, so use its generic custom component for the Cloud Scheduler role. Keep the cadence configurable: scheduled aggregate refreshes complement continuous event ingestion and should not block the interactive query path.",
+      "component": {
+        "nodeId": "gcp006_scheduler",
+        "componentType": "custom-component",
+        "label": "Cloud Scheduler",
+        "description": "Time-based trigger for derived analytics refreshes",
+        "position": {"x": 0, "y": 720},
+        "properties": {
+          "componentName": "Cloud Scheduler",
+          "subtitle": "Scheduled aggregate refresh trigger",
+          "purpose": "Start configured refresh jobs for derived analytics tables on an owner-approved cadence, using a least-privilege service identity and a non-overlapping job policy. Record the last successful run and failure state.",
+          "componentType": "Scheduled job trigger",
+          "technology": "Google Cloud Scheduler",
+          "notes": "The component catalog has no scheduler-specific node; set the schedule and retry policy from the freshness objective and measured warehouse cost."
+        },
+        "highlightReason": "A timer-driven scheduler is a genuine catalog gap: no existing component type represents scheduled job triggering."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcp006_refresh_function",
+      "stepNumber": 21,
+      "phase": "Schedule refresh work and review the design",
+      "title": "Isolate scheduled aggregate processing",
+      "type": "add_component",
+      "content": "Reuse the serverless-function component for a separate refresh worker. Make each run idempotent, bounded to the target partitions, and safe to retry; keep it independent from per-event ingestion so refresh work cannot consume the entire ingest budget.",
+      "component": {
+        "nodeId": "gcp006_refresh_function",
+        "componentType": "serverless-function",
+        "label": "Analytics Aggregate Refresh Function",
+        "description": "Scheduled, retryable refresh of derived tables",
+        "position": {"x": 430, "y": 720},
+        "properties": {
+          "componentName": "Analytics Aggregate Refresh Function",
+          "purpose": "Refresh only the required derived tables or partitions, record the source watermark and run identifier, and make retries idempotent. Keep this scheduled workload isolated from the continuous event consumer and expose duration, rows changed, and failure status."
+        },
+        "highlightReason": "The existing serverless-function component can represent scheduled processing without adding a second custom compute type."
+      },
+      "requirementIds": ["legacy-requirement:6"]
+    },
+    {
+      "id": "gcp006_scheduler_to_refresh",
+      "stepNumber": 22,
+      "phase": "Schedule refresh work and review the design",
+      "title": "Trigger refresh jobs on the configured cadence",
+      "type": "add_connection",
+      "content": "Use a least-privilege invocation identity, bounded retries, and overlap protection. Choose the schedule from the data freshness and cost requirements; the dashboard's sub-minute view remains supported by continuous ingestion and automatic refresh.",
+      "connection": {
+        "edgeId": "gcp006_scheduler_refresh_edge",
+        "sourceNodeId": "gcp006_scheduler",
+        "targetNodeId": "gcp006_refresh_function",
+        "connectionType": "scheduled-trigger",
+        "label": "Scheduled aggregate refresh",
+        "description": "Cloud Scheduler invokes the isolated refresh worker with a configured cadence, scoped identity, and retry policy."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcp006_refresh_to_bigquery",
+      "stepNumber": 23,
+      "phase": "Schedule refresh work and review the design",
+      "title": "Write refreshed aggregates to BigQuery",
+      "type": "add_connection",
+      "content": "Write derived results to explicitly versioned or partitioned targets, and publish the new watermark only after the refresh succeeds. Do not make dashboard freshness depend on a long-running full-table rebuild.",
+      "connection": {
+        "edgeId": "gcp006_refresh_bigquery_edge",
+        "sourceNodeId": "gcp006_refresh_function",
+        "targetNodeId": "gcp006_bigquery",
+        "connectionType": "scheduled-write",
+        "label": "Idempotent aggregate updates",
+        "description": "The refresh worker updates bounded derived tables or partitions and exposes the completed data watermark to queries and dashboards."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcp006_refresh_worker_policy",
+      "stepNumber": 24,
+      "phase": "Schedule refresh work and review the design",
+      "title": "Make scheduled refreshes safe to repeat",
+      "type": "update_component",
+      "content": "Use deterministic run keys, partition-scoped writes, retry limits, and a success watermark. If a job overlaps or fails, retain the previous complete result and surface the failure rather than exposing a partial refresh.",
+      "componentUpdate": {
+        "nodeId": "gcp006_refresh_function",
+        "properties": {
+          "purpose": "Refresh only required derived tables or partitions using a deterministic run key and idempotent writes. Enforce overlap protection and bounded retries, retain the previous complete result on failure, and publish the new source watermark only after successful completion."
+        }
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcp006_scheduler_policy",
+      "stepNumber": 25,
+      "phase": "Schedule refresh work and review the design",
+      "title": "Choose the refresh cadence from measured freshness and cost",
+      "type": "update_component",
+      "content": "Configure the schedule only after validating how long the refresh takes, how much it scans, and what freshness users need. Continuous event visibility and the dashboard's automatic refresh target remain separate from this scheduled aggregate path.",
+      "componentUpdate": {
+        "nodeId": "gcp006_scheduler",
+        "properties": {
+          "purpose": "Start configured, non-overlapping refresh jobs with least-privilege identity and bounded retries. Set cadence from measured job duration, scanned bytes, budget, and the freshness objective; publish the last successful run so operators can detect stale aggregates."
+        }
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcp006_design_review",
+      "stepNumber": 26,
+      "phase": "Schedule refresh work and review the design",
+      "title": "Validate the targets before calling the design ready",
+      "type": "conclusion",
+      "content": "Before rollout, load-test sustained and burst ingestion at 100k+ events per second, query latency with representative partitions and 100+ concurrent viewers, and dashboard freshness end to end. Verify duplicate handling, dead-letter replay, stakeholder permissions, scheduled-job recovery, bytes billed, and budget alerts. Treat each numeric target as a measured acceptance criterion, not an architectural guarantee.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

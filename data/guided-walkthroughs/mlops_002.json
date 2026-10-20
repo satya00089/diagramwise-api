@@ -1,0 +1,1085 @@
+{
+  "problem_id": "mlops_002",
+  "version": "1.0.0-review-draft",
+  "totalSteps": 44,
+  "phases": [
+    {
+      "name": "Define the feature contract",
+      "stepRange": [
+        1,
+        3
+      ],
+      "description": "Separate prompt targets from feature semantics, freshness, identity, and the service-level definitions that still need owners."
+    },
+    {
+      "name": "Ingest and compute shared features",
+      "stepRange": [
+        4,
+        16
+      ],
+      "description": "Keep streaming and batch sources while executing the same versioned transformation contract on both paths."
+    },
+    {
+      "name": "Materialize dual stores and point-in-time data",
+      "stepRange": [
+        17,
+        28
+      ],
+      "description": "Separate online lookup from offline history and prevent future information from entering training joins."
+    },
+    {
+      "name": "Serve, discover, and monitor",
+      "stepRange": [
+        29,
+        36
+      ],
+      "description": "Connect model consumers and catalog users through governed APIs, with explicit online and offline access paths."
+    },
+    {
+      "name": "Validate scale and consistency",
+      "stepRange": [
+        37,
+        44
+      ],
+      "description": "Measure latency, throughput, skew, data quality, and backfill behavior against owner-defined contracts."
+    }
+  ],
+  "steps": [
+    {
+      "id": "fs_frame_brief",
+      "stepNumber": 1,
+      "phase": "Define the feature contract",
+      "title": "Read the frozen feature-store brief",
+      "type": "explanation",
+      "content": "Design a Feature Store for Machine Learning. Design a feature store that serves features for both training and inference, ensures consistency between offline and online features, handles feature transformations, and provides feature discovery and governance. Functional requirements: Serve features for batch training and online inference; Ensure offline-online feature consistency; Compute features from streaming and batch sources; Support point-in-time correct feature joins; Provide feature discovery and documentation; Track feature lineage and dependencies; Implement feature monitoring and quality checks; Support feature sharing across teams. Non-functional constraints: Online feature serving latency under 10ms; Support 10k+ features across 100+ entities; Handle 100k+ feature requests per second; Zero training-serving skew; Feature backfill within SLA. Hints: Use Feast, Tecton, or custom implementation; Implement dual storage (Redis for online, S3/BigQuery for offline); Use streaming frameworks for real-time feature computation; Implement feature versioning with schema registry; Use materialization jobs for offline-to-online sync; Implement feature statistics monitoring for drift detection. These are supplied workload targets and candidate patterns; they are not evidence that a chosen platform meets them."
+    },
+    {
+      "id": "fs_contract_clarify",
+      "stepNumber": 2,
+      "phase": "Define the feature contract",
+      "title": "Ask what feature freshness means",
+      "type": "explanation",
+      "content": "Clarify entity keys and ownership, event time versus availability time, late-arrival policy, TTL/freshness by feature, null/default behavior, schema evolution, access-control boundaries, online consistency semantics, latency percentile and measurement boundary, peak/burst request shape, and the backfill SLA. The brief gives 10k+ features, 100+ entities, and 100k+ requests/second, but not cardinality per entity, payload size, update rate, or retention. Do not invent those values."
+    },
+    {
+      "id": "fs_decide_shared_transform",
+      "stepNumber": 3,
+      "phase": "Define the feature contract",
+      "title": "Make transformations a shared, versioned contract",
+      "type": "decision_point",
+      "content": "One declarative or compiled transformation definition should be exercised by both streaming and batch execution. Persist its code/schema digest with materialized values and training datasets.",
+      "decision": {
+        "question": "Should online and offline features have separately maintained transformation implementations?",
+        "chosen": "Use one versioned feature definition with compatible streaming and batch execution and parity checks.",
+        "chosenReason": "Independent copies drift silently; a shared contract makes semantic equivalence testable while allowing different compute engines.",
+        "alternatives": [
+          {
+            "option": "Duplicate transformation logic in each pipeline",
+            "tradeoff": "Easy to start, but code paths can diverge and cause training-serving skew."
+          },
+          {
+            "option": "Force one physical engine to serve both batch and online workloads",
+            "tradeoff": "Simplifies code but can compromise either latency, cost, or historical processing needs."
+          }
+        ]
+      }
+    },
+    {
+      "id": "fs_sources",
+      "stepNumber": 4,
+      "phase": "Ingest and compute shared features",
+      "title": "Isolate source-specific ingestion",
+      "type": "add_component",
+      "content": "Use a custom adapter because the catalog does not include a generic feature-source connector. Normalize entity identity, event/availability timestamps, source, schema version, and quality metadata from streaming and batch sources.",
+      "component": {
+        "nodeId": "fs_sources",
+        "componentType": "custom-component",
+        "label": "Feature Source Adapters",
+        "description": "Normalizes streaming and batch source records into governed entity events.",
+        "position": {
+          "x": 80,
+          "y": 240
+        },
+        "properties": {
+          "componentName": "Feature Source Adapters",
+          "componentType": "Data Integration",
+          "technology": "Source-specific connectors",
+          "purpose": "Normalize source, entity key, event time, availability time, schema version, and quality metadata for both streaming events and batch snapshots."
+        },
+        "highlightReason": "The feature store must accept distinct source modes without losing the timestamps needed for freshness and point-in-time correctness."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:8"
+      ]
+    },
+    {
+      "id": "fs_stream_broker",
+      "stepNumber": 5,
+      "phase": "Ingest and compute shared features",
+      "title": "Buffer continuously arriving source events",
+      "type": "add_component",
+      "content": "Use a durable event stream for real-time source updates and replay. Partitioning and retention depend on measured key skew, update rate, and recovery objectives, none of which are specified beyond the request-rate target.",
+      "component": {
+        "nodeId": "fs_stream_broker",
+        "componentType": "message-broker",
+        "label": "Feature Source Event Stream",
+        "description": "Durable asynchronous transport for streaming feature inputs.",
+        "position": {
+          "x": 360,
+          "y": 240
+        },
+        "properties": {
+          "componentName": "Feature Source Event Stream",
+          "purpose": "Buffer source updates for streaming feature computation and replay with entity identity and event-time metadata; size from measured workload."
+        },
+        "highlightReason": "Streaming feature inputs need a replayable boundary decoupled from compute consumers."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "fs_offline_store",
+      "stepNumber": 6,
+      "phase": "Ingest and compute shared features",
+      "title": "Keep versioned source and offline history",
+      "type": "add_component",
+      "content": "Use object storage for immutable source snapshots, offline materializations, and dataset manifests. Keep raw records separate from transformed feature versions by prefix/table and schema, even when they share a storage system.",
+      "component": {
+        "nodeId": "fs_offline_store",
+        "componentType": "object-storage",
+        "label": "Offline Feature and Source Lake",
+        "description": "Versioned batch sources, offline feature values, and training manifests.",
+        "position": {
+          "x": 360,
+          "y": 540
+        },
+        "properties": {
+          "componentName": "Offline Feature and Source Lake",
+          "provider": "S3",
+          "versioning": true,
+          "checksumValidation": true,
+          "purpose": "Retain versioned batch inputs, offline feature materializations, and reproducible training manifests with schema and transformation provenance."
+        },
+        "highlightReason": "Batch training and backfill need durable, large-scale historical values rather than reads from the online cache."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:4",
+        "legacy-requirement:6"
+      ]
+    },
+    {
+      "id": "fs_stream_compute",
+      "stepNumber": 7,
+      "phase": "Ingest and compute shared features",
+      "title": "Compute current features incrementally",
+      "type": "add_component",
+      "content": "Use event-time state, late-data handling, deduplication, and explicit watermark semantics. Reprocessing a record should be safe and should preserve the feature-definition version used.",
+      "component": {
+        "nodeId": "fs_stream_compute",
+        "componentType": "stream-processor",
+        "label": "Streaming Feature Compute",
+        "description": "Evaluates versioned transformations over continuously arriving entity events.",
+        "position": {
+          "x": 650,
+          "y": 240
+        },
+        "properties": {
+          "componentName": "Streaming Feature Compute",
+          "engine": "Apache Flink",
+          "windowing": true,
+          "stateful": true,
+          "purpose": "Apply the shared feature definition to event-time records, handle late/duplicate events, and emit feature values with entity, freshness, and definition-version metadata."
+        },
+        "highlightReason": "Streaming sources need incremental computation while preserving semantics and freshness evidence."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "fs_batch_compute",
+      "stepNumber": 8,
+      "phase": "Ingest and compute shared features",
+      "title": "Compute batch features and backfills",
+      "type": "add_component",
+      "content": "Reuse the same transformation contract for scheduled materialization and correction/backfill runs. Checkpoint by source range and feature version so retries are idempotent and partial backfills are visible.",
+      "component": {
+        "nodeId": "fs_batch_compute",
+        "componentType": "processing-worker",
+        "label": "Batch Materialization and Backfill",
+        "description": "Computes offline features and repairs historical or online materializations.",
+        "position": {
+          "x": 650,
+          "y": 540
+        },
+        "properties": {
+          "componentName": "Batch Materialization and Backfill",
+          "tasks": "Data Processing",
+          "autoscale": true,
+          "purpose": "Run batch feature computation and backfills using the shared definition, with checkpoints, idempotent writes, progress visibility, and owner-defined SLA tracking."
+        },
+        "highlightReason": "Backfill is explicit but no duration is supplied; resumable jobs expose progress against the agreed SLA."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:6",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "fs_transform_contract",
+      "stepNumber": 9,
+      "phase": "Ingest and compute shared features",
+      "title": "Version definitions separately from execution engines",
+      "type": "add_component",
+      "content": "The catalog has no dedicated transform registry, so use a custom logical component for the shared definition and validation contract. Bind entity keys, event-time behavior, units, null handling, schema, and code digest to each feature version.",
+      "component": {
+        "nodeId": "fs_transform_contract",
+        "componentType": "custom-component",
+        "label": "Versioned Feature Definitions",
+        "description": "Governed definitions compiled or interpreted by batch and streaming engines.",
+        "position": {
+          "x": 950,
+          "y": 400
+        },
+        "properties": {
+          "componentName": "Versioned Feature Definitions",
+          "componentType": "Feature Transformation Registry",
+          "technology": "Shared declarative definitions",
+          "purpose": "Version feature schemas, entity keys, units, time semantics, null behavior, code digest, owners, and compatible streaming/batch execution contracts."
+        },
+        "highlightReason": "One shared semantic definition is the main design control for reducing offline-online skew."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "fs_feature_store",
+      "stepNumber": 10,
+      "phase": "Ingest and compute shared features",
+      "title": "Use the catalog Feature Store as the logical boundary",
+      "type": "add_component",
+      "content": "The existing canonical feature-store node represents feature definitions and access behavior, not a guarantee of a particular vendor's dual-store implementation. Feast is a possible implementation from the prompt hints; confirm platform fit, entity model, and operational needs before committing.",
+      "component": {
+        "nodeId": "fs_feature_store",
+        "componentType": "feature-store",
+        "label": "Governed Feature Store",
+        "description": "Logical access and materialization boundary for shared feature definitions.",
+        "position": {
+          "x": 1250,
+          "y": 400
+        },
+        "properties": {
+          "componentName": "Governed Feature Store",
+          "platform": "Feast",
+          "features": 10000,
+          "purpose": "Expose governed feature definitions and retrieval/materialization semantics for the stated 10k+ feature catalog; platform selection is a proposal to validate against 100+ entities and workload."
+        },
+        "highlightReason": "A catalog-native feature-store component exists, so this guide reuses it rather than inventing a duplicate node type."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:5",
+        "legacy-requirement:8",
+        "legacy-constraint:2"
+      ]
+    },
+    {
+      "id": "fs_source_broker",
+      "stepNumber": 11,
+      "phase": "Ingest and compute shared features",
+      "title": "Route only continuously arriving records to the stream",
+      "type": "add_connection",
+      "content": "Keep batch snapshots on the durable lake path and streaming events on the broker path; both carry the same entity and time contract.",
+      "connection": {
+        "edgeId": "fs_sources_to_broker",
+        "sourceNodeId": "fs_sources",
+        "targetNodeId": "fs_stream_broker",
+        "connectionType": "event-stream",
+        "label": "Streaming source updates",
+        "description": "Normalized, replayable entity events with source and event-time metadata."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "fs_source_lake",
+      "stepNumber": 12,
+      "phase": "Ingest and compute shared features",
+      "title": "Capture batch snapshots and source history",
+      "type": "add_connection",
+      "content": "Write source manifests and schema snapshots so a later training dataset can reproduce the values available at a historical time.",
+      "connection": {
+        "edgeId": "fs_sources_to_lake",
+        "sourceNodeId": "fs_sources",
+        "targetNodeId": "fs_offline_store",
+        "connectionType": "data-flow",
+        "label": "Batch snapshots and raw history",
+        "description": "Versioned source inputs and manifests for offline computation and point-in-time datasets."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:4",
+        "legacy-requirement:6"
+      ]
+    },
+    {
+      "id": "fs_broker_stream",
+      "stepNumber": 13,
+      "phase": "Ingest and compute shared features",
+      "title": "Process stream partitions incrementally",
+      "type": "add_connection",
+      "content": "Monitor per-key skew, event age, and consumer recovery time. Request rate alone does not define event volume or the correct partition count.",
+      "connection": {
+        "edgeId": "fs_broker_to_stream",
+        "sourceNodeId": "fs_stream_broker",
+        "targetNodeId": "fs_stream_compute",
+        "connectionType": "event-stream",
+        "label": "Entity-keyed feature inputs",
+        "description": "Continuous records consumed with explicit event-time and replay semantics."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "fs_lake_batch",
+      "stepNumber": 14,
+      "phase": "Ingest and compute shared features",
+      "title": "Read batch ranges for computation and backfill",
+      "type": "add_connection",
+      "content": "Use bounded manifests and checkpoints so a retry resumes the same feature version and source range instead of creating ambiguous duplicate outputs.",
+      "connection": {
+        "edgeId": "fs_lake_to_batch",
+        "sourceNodeId": "fs_offline_store",
+        "targetNodeId": "fs_batch_compute",
+        "connectionType": "data-flow",
+        "label": "Versioned source and backfill ranges",
+        "description": "Manifest-driven batch input for historical compute, correction, and offline materialization."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:6",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "fs_def_stream",
+      "stepNumber": 15,
+      "phase": "Ingest and compute shared features",
+      "title": "Apply the shared contract in streaming",
+      "type": "add_connection",
+      "content": "Pin each running job to a definition digest and expose the deployed version with produced values. Safe rollout should support compatibility checks and rollback.",
+      "connection": {
+        "edgeId": "fs_definitions_to_stream",
+        "sourceNodeId": "fs_transform_contract",
+        "targetNodeId": "fs_stream_compute",
+        "connectionType": "data-flow",
+        "label": "Versioned streaming transform",
+        "description": "Shared feature definitions, schema, units, time semantics, and validation rules for online computation."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "fs_def_batch",
+      "stepNumber": 16,
+      "phase": "Ingest and compute shared features",
+      "title": "Apply the same contract in batch",
+      "type": "add_connection",
+      "content": "Batch and stream engines may differ, but golden-record parity tests must compare values, nulls, units, and event-time boundaries for the same input and definition version.",
+      "connection": {
+        "edgeId": "fs_definitions_to_batch",
+        "sourceNodeId": "fs_transform_contract",
+        "targetNodeId": "fs_batch_compute",
+        "connectionType": "data-flow",
+        "label": "Versioned batch transform",
+        "description": "The identical feature definition and schema executed for batch training, replay, and backfill."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "fs_metadata_db",
+      "stepNumber": 17,
+      "phase": "Materialize dual stores and point-in-time data",
+      "title": "Govern schemas, ownership, and lineage",
+      "type": "add_component",
+      "content": "Store searchable feature metadata: names, descriptions, entities, types, owners, access grants, dependencies, definition digest, lifecycle, and audit events. Keep large feature values in their data stores.",
+      "component": {
+        "nodeId": "fs_metadata_db",
+        "componentType": "database",
+        "label": "Feature Metadata and Lineage Catalog",
+        "description": "Transactional registry for schemas, owners, dependencies, and governance state.",
+        "position": {
+          "x": 1550,
+          "y": 700
+        },
+        "properties": {
+          "componentName": "Feature Metadata and Lineage Catalog",
+          "type": "RDBMS",
+          "workload": "OLTP",
+          "rbac": true,
+          "auditLog": true,
+          "purpose": "Index feature definitions, entity schemas, ownership, documentation, access controls, dependencies, versions, lifecycle, and audit history without storing bulk feature values."
+        },
+        "highlightReason": "Discovery, documentation, sharing, lineage, and governance need a searchable control-plane record."
+      },
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:8",
+        "legacy-constraint:2"
+      ]
+    },
+    {
+      "id": "fs_stream_feature_store",
+      "stepNumber": 18,
+      "phase": "Materialize dual stores and point-in-time data",
+      "title": "Publish streaming values through the feature contract",
+      "type": "add_connection",
+      "content": "Write with feature/entity key, event time, availability time, definition version, and freshness. Define dedupe and late-event corrections before declaring offline and online values equivalent.",
+      "connection": {
+        "edgeId": "fs_stream_to_store",
+        "sourceNodeId": "fs_stream_compute",
+        "targetNodeId": "fs_feature_store",
+        "connectionType": "data-flow",
+        "label": "Fresh computed feature values",
+        "description": "Versioned streaming feature values and timestamps published through the governed store contract."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-constraint:1",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "fs_batch_feature_store",
+      "stepNumber": 19,
+      "phase": "Materialize dual stores and point-in-time data",
+      "title": "Publish batch values and resumable backfills",
+      "type": "add_connection",
+      "content": "Keep run ID, source range, checkpoint, definition version, and destination state visible. Backfill completion time can only be judged after the owner defines the SLA and workload size.",
+      "connection": {
+        "edgeId": "fs_batch_to_store",
+        "sourceNodeId": "fs_batch_compute",
+        "targetNodeId": "fs_feature_store",
+        "connectionType": "data-flow",
+        "label": "Batch materialization and repair",
+        "description": "Offline/backfill values and online refresh requests with checkpoint and version provenance."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:3",
+        "legacy-requirement:6",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "fs_store_metadata",
+      "stepNumber": 20,
+      "phase": "Materialize dual stores and point-in-time data",
+      "title": "Track materializations against definitions",
+      "type": "add_connection",
+      "content": "Update catalog state atomically with definition version, job/run status, lineage edges, and last successful materialization. Avoid documenting a feature as ready while its serving value is stale or absent.",
+      "connection": {
+        "edgeId": "fs_store_to_metadata",
+        "sourceNodeId": "fs_feature_store",
+        "targetNodeId": "fs_metadata_db",
+        "connectionType": "database-connection",
+        "label": "Definition and lineage metadata",
+        "description": "Versioned feature schema, owner, upstream dependencies, lifecycle, and materialization status."
+      },
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:8",
+        "legacy-constraint:2"
+      ]
+    },
+    {
+      "id": "fs_online_cache",
+      "stepNumber": 21,
+      "phase": "Materialize dual stores and point-in-time data",
+      "title": "Add a purpose-built online value store",
+      "type": "add_component",
+      "content": "Use the existing cache component for low-latency online values, keyed by entity and feature with explicit TTL/freshness metadata. Redis is a candidate hinted by the prompt; size, sharding, persistence, and eviction policy require workload measurements.",
+      "component": {
+        "nodeId": "fs_online_cache",
+        "componentType": "cache",
+        "label": "Online Feature Values",
+        "description": "Low-latency entity-keyed feature retrieval for inference.",
+        "position": {
+          "x": 1850,
+          "y": 400
+        },
+        "properties": {
+          "componentName": "Online Feature Values",
+          "engine": "redis",
+          "cacheStrategy": "write-through",
+          "purpose": "Serve versioned online feature values by entity/feature key with freshness and definition metadata; persistence, partitioning, capacity, and TTL are workload decisions."
+        },
+        "highlightReason": "The online lookup path needs a separate low-latency store from large offline training history."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-constraint:1",
+        "legacy-constraint:2"
+      ]
+    },
+    {
+      "id": "fs_feature_cache",
+      "stepNumber": 22,
+      "phase": "Materialize dual stores and point-in-time data",
+      "title": "Materialize current values into the online store",
+      "type": "add_connection",
+      "content": "Publish only complete values for the selected definition version. Define atomic multi-feature read semantics and stale/missing behavior; do not silently substitute a value from an incompatible version.",
+      "connection": {
+        "edgeId": "fs_store_to_cache",
+        "sourceNodeId": "fs_feature_store",
+        "targetNodeId": "fs_online_cache",
+        "connectionType": "data-flow",
+        "label": "Online materialization",
+        "description": "Current feature values with entity key, feature version, event time, and freshness metadata."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-constraint:1",
+        "legacy-constraint:2"
+      ]
+    },
+    {
+      "id": "fs_pit_join",
+      "stepNumber": 23,
+      "phase": "Materialize dual stores and point-in-time data",
+      "title": "Build point-in-time joins explicitly",
+      "type": "add_component",
+      "content": "Use event time and availability time to select only values that were observable at each training prediction timestamp. Enforce entity-key joins and prevent future updates from leaking into historical examples.",
+      "component": {
+        "nodeId": "fs_pit_join",
+        "componentType": "custom-component",
+        "label": "Point-in-Time Training Join",
+        "description": "Produces leakage-resistant training rows from versioned offline feature history.",
+        "position": {
+          "x": 2150,
+          "y": 700
+        },
+        "properties": {
+          "componentName": "Point-in-Time Training Join",
+          "componentType": "Training Data Join",
+          "technology": "Event-time and availability-time joins",
+          "purpose": "Join feature values to prediction examples by entity and as-of timestamp using only values available at that time, with schema and transformation versions recorded."
+        },
+        "highlightReason": "Point-in-time correctness is a named requirement and protects evaluation from future-data leakage."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:1",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "fs_offline_pit",
+      "stepNumber": 24,
+      "phase": "Materialize dual stores and point-in-time data",
+      "title": "Read historical feature versions as of the example time",
+      "type": "add_connection",
+      "content": "Use offline partitions with both event and availability timestamps. If an upstream correction arrives later, preserve when it became known rather than rewriting what a historical model could have seen.",
+      "connection": {
+        "edgeId": "fs_lake_to_pit",
+        "sourceNodeId": "fs_offline_store",
+        "targetNodeId": "fs_pit_join",
+        "connectionType": "data-flow",
+        "label": "Versioned offline history",
+        "description": "Historical feature values and source manifests with event time, availability time, and transformation version."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "fs_metadata_pit",
+      "stepNumber": 25,
+      "phase": "Materialize dual stores and point-in-time data",
+      "title": "Resolve the feature schema used in each join",
+      "type": "add_connection",
+      "content": "Resolve names, entity types, transformations, ownership, and compatible versions from the catalog; reject missing or incompatible metadata instead of creating a best-effort training set.",
+      "connection": {
+        "edgeId": "fs_metadata_to_pit",
+        "sourceNodeId": "fs_metadata_db",
+        "targetNodeId": "fs_pit_join",
+        "connectionType": "database-connection",
+        "label": "Feature schema and version map",
+        "description": "Governed feature definitions and entity schemas resolved for reproducible historical joins."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-requirement:6"
+      ]
+    },
+    {
+      "id": "fs_training",
+      "stepNumber": 26,
+      "phase": "Materialize dual stores and point-in-time data",
+      "title": "Feed reproducible datasets to batch training",
+      "type": "add_component",
+      "content": "Persist the join query, feature versions, time boundary, and output manifest with each model run. Training should not query the mutable online cache for historical examples.",
+      "component": {
+        "nodeId": "fs_training",
+        "componentType": "model-training",
+        "label": "Batch Model Training",
+        "description": "Consumes frozen point-in-time feature datasets.",
+        "position": {
+          "x": 2450,
+          "y": 700
+        },
+        "properties": {
+          "componentName": "Batch Model Training",
+          "purpose": "Train from immutable point-in-time joined datasets and record the feature, schema, transformation, and source snapshot versions used."
+        },
+        "highlightReason": "Batch training needs reproducible historical data, not online cache snapshots that change during an experiment."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:4",
+        "legacy-requirement:6"
+      ]
+    },
+    {
+      "id": "fs_pit_training",
+      "stepNumber": 27,
+      "phase": "Materialize dual stores and point-in-time data",
+      "title": "Use only the frozen point-in-time dataset",
+      "type": "add_connection",
+      "content": "Publish a dataset manifest and quality summary before training starts. Re-running a training job with the same manifest should reproduce the same input data.",
+      "connection": {
+        "edgeId": "fs_pit_to_training",
+        "sourceNodeId": "fs_pit_join",
+        "targetNodeId": "fs_training",
+        "connectionType": "data-flow",
+        "label": "Frozen training examples",
+        "description": "Point-in-time correct feature rows and immutable dataset manifest."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:4",
+        "legacy-requirement:6"
+      ]
+    },
+    {
+      "id": "fs_serving",
+      "stepNumber": 28,
+      "phase": "Materialize dual stores and point-in-time data",
+      "title": "Represent an online inference consumer",
+      "type": "add_component",
+      "content": "Model-serving is the example online consumer; other services can use the same governed API. Requests should batch features where semantics allow and include entity IDs, requested feature versions, and a request timestamp.",
+      "component": {
+        "nodeId": "fs_serving",
+        "componentType": "model-serving",
+        "label": "Online Model Inference",
+        "description": "Consumes fresh online features for prediction requests.",
+        "position": {
+          "x": 2450,
+          "y": 240
+        },
+        "properties": {
+          "componentName": "Online Model Inference",
+          "platform": "Custom API",
+          "purpose": "Request governed online features by entity and feature version, validate response freshness, and record the exact feature values/versions used for inference."
+        },
+        "highlightReason": "A concrete online consumer makes the under-10ms feature path and training-serving parity observable."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:3",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "fs_api_gateway",
+      "stepNumber": 29,
+      "phase": "Serve, discover, and monitor",
+      "title": "Expose governed feature and catalog APIs",
+      "type": "add_component",
+      "content": "Route online retrieval and discovery through authenticated APIs. Apply tenant/team permissions, request validation, bounded batch sizes, rate limits, and feature-level access policy; the API layer does not itself guarantee 100k requests per second.",
+      "component": {
+        "nodeId": "fs_api_gateway",
+        "componentType": "api-gateway",
+        "label": "Feature Retrieval and Catalog API",
+        "description": "Authenticated feature reads and discovery/documentation endpoints.",
+        "position": {
+          "x": 2750,
+          "y": 400
+        },
+        "properties": {
+          "componentName": "Feature Retrieval and Catalog API",
+          "authentication": "JWT",
+          "inputValidation": true,
+          "rateLimiting": true,
+          "requestsPerSecond": 100000,
+          "purpose": "Expose governed online feature reads and catalog/documentation endpoints with authorization, validation, rate control, and observable request latency; 100k+ requests/second is a load-test target, not a proven capacity."
+        },
+        "highlightReason": "Feature sharing requires a controlled API boundary and the brief explicitly states a high request-rate target."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:5",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "fs_catalog_ui",
+      "stepNumber": 30,
+      "phase": "Serve, discover, and monitor",
+      "title": "Give teams a place to find and understand features",
+      "type": "add_component",
+      "content": "Display description, owner, entity, units, freshness, source dependencies, transformation version, quality status, access policy, and usage examples. Do not list a feature as ready without a current materialization and an accountable owner.",
+      "component": {
+        "nodeId": "fs_catalog_ui",
+        "componentType": "web-app",
+        "label": "Feature Discovery Portal",
+        "description": "Searches documented features and exposes ownership and lineage.",
+        "position": {
+          "x": 2450,
+          "y": 980
+        },
+        "properties": {
+          "componentName": "Feature Discovery Portal",
+          "purpose": "Let teams discover and document shared features, review entity/schema/owner/lineage/freshness/quality metadata, and request access through the governed API."
+        },
+        "highlightReason": "Discovery, documentation, and cross-team sharing are explicit requirements, not incidental metadata fields."
+      },
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:8"
+      ]
+    },
+    {
+      "id": "fs_ui_api",
+      "stepNumber": 31,
+      "phase": "Serve, discover, and monitor",
+      "title": "Use the same authorization boundary for discovery",
+      "type": "add_connection",
+      "content": "Apply user/team permissions server-side, not only in the browser. Audit search, access grants, and feature retrieval according to the ownership model.",
+      "connection": {
+        "edgeId": "fs_ui_to_api",
+        "sourceNodeId": "fs_catalog_ui",
+        "targetNodeId": "fs_api_gateway",
+        "connectionType": "http",
+        "label": "Search, docs, and access requests",
+        "description": "Authenticated discovery and feature-access workflows through the governed API."
+      },
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:8"
+      ]
+    },
+    {
+      "id": "fs_serving_api",
+      "stepNumber": 32,
+      "phase": "Serve, discover, and monitor",
+      "title": "Request features through the governed API",
+      "type": "add_connection",
+      "content": "Keep the feature fetch in the model-serving request path measurable and bounded. Cache immutable definitions separately from mutable online values, and include request tracing for end-to-end latency.",
+      "connection": {
+        "edgeId": "fs_serving_to_api",
+        "sourceNodeId": "fs_serving",
+        "targetNodeId": "fs_api_gateway",
+        "connectionType": "api-call",
+        "label": "Online feature request",
+        "description": "Authenticated batch lookup for entity-keyed features and required versions."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "fs_api_store",
+      "stepNumber": 33,
+      "phase": "Serve, discover, and monitor",
+      "title": "Resolve governed feature definitions",
+      "type": "add_connection",
+      "content": "The API resolves an authorized feature contract before reading values. Reject unknown, retired, or incompatible versions with an explicit response rather than silently returning another feature.",
+      "connection": {
+        "edgeId": "fs_api_to_store",
+        "sourceNodeId": "fs_api_gateway",
+        "targetNodeId": "fs_feature_store",
+        "connectionType": "api-call",
+        "label": "Authorized feature lookup",
+        "description": "Feature retrieval and catalog requests evaluated against the governed feature definition."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:5",
+        "legacy-requirement:8",
+        "legacy-constraint:1"
+      ]
+    },
+    {
+      "id": "fs_cache_store",
+      "stepNumber": 34,
+      "phase": "Serve, discover, and monitor",
+      "title": "Return current values with freshness metadata",
+      "type": "add_connection",
+      "content": "A cache miss, stale value, or schema mismatch needs explicit caller behavior. Set fallback/timeout semantics with model owners rather than silently substituting offline data on a latency-critical request.",
+      "connection": {
+        "edgeId": "fs_cache_to_store",
+        "sourceNodeId": "fs_online_cache",
+        "targetNodeId": "fs_feature_store",
+        "connectionType": "data-flow",
+        "label": "Online reads and freshness",
+        "description": "Low-latency values with observed freshness and definition version returned to the feature access layer."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-constraint:1",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "fs_api_metadata",
+      "stepNumber": 35,
+      "phase": "Serve, discover, and monitor",
+      "title": "Resolve owners, docs, lineage, and access policy",
+      "type": "add_connection",
+      "content": "Catalog APIs should support searchable metadata and lineage traversal without scanning the value stores. Record access decisions and dependency changes for audit.",
+      "connection": {
+        "edgeId": "fs_api_to_metadata",
+        "sourceNodeId": "fs_api_gateway",
+        "targetNodeId": "fs_metadata_db",
+        "connectionType": "database-connection",
+        "label": "Catalog and authorization metadata",
+        "description": "Indexed documentation, entity schemas, owners, lineage, lifecycle, and team access policy."
+      },
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:8",
+        "legacy-constraint:2"
+      ]
+    },
+    {
+      "id": "fs_monitoring",
+      "stepNumber": 36,
+      "phase": "Serve, discover, and monitor",
+      "title": "Observe feature quality and serving behavior",
+      "type": "add_component",
+      "content": "Monitor per-feature freshness, missingness, distributions, schema failures, backfill progress, online request latency and rate, cache hit/miss behavior, and parity comparisons between offline and online outputs.",
+      "component": {
+        "nodeId": "fs_monitoring",
+        "componentType": "monitoring",
+        "label": "Feature Quality and Serving Monitor",
+        "description": "Tracks feature freshness, parity, data quality, request load, and materialization health.",
+        "position": {
+          "x": 3050,
+          "y": 700
+        },
+        "properties": {
+          "componentName": "Feature Quality and Serving Monitor",
+          "stack": "Prometheus + Grafana",
+          "metrics": true,
+          "alerts": true,
+          "purpose": "Measure feature freshness and quality, offline-online parity, request rate/latency, cache behavior, schema errors, lineage/materialization status, and backfill SLA progress."
+        },
+        "highlightReason": "Monitoring must detect skew and stale or low-quality features before consumers learn from silent data defects."
+      },
+      "requirementIds": [
+        "legacy-requirement:7",
+        "legacy-constraint:1",
+        "legacy-constraint:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "fs_stream_monitor",
+      "stepNumber": 37,
+      "phase": "Validate scale and consistency",
+      "title": "Measure streaming freshness and data quality",
+      "type": "add_connection",
+      "content": "Emit source-to-feature age, late-event counts, duplicate rate, null/invalid values, and transformation failures with feature and entity dimensions.",
+      "connection": {
+        "edgeId": "fs_stream_to_monitor",
+        "sourceNodeId": "fs_stream_compute",
+        "targetNodeId": "fs_monitoring",
+        "connectionType": "data-flow",
+        "label": "Streaming freshness and quality",
+        "description": "Event lag, event-time lateness, feature freshness, schema errors, and quality distributions."
+      },
+      "requirementIds": [
+        "legacy-requirement:7",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "fs_batch_monitor",
+      "stepNumber": 38,
+      "phase": "Validate scale and consistency",
+      "title": "Expose backfill progress against an agreed SLA",
+      "type": "add_connection",
+      "content": "Report source range completed, checkpoint, retries, failed partitions, destination publication, and estimated completion based on observed throughput. No duration can be judged until the SLA and backfill volume are supplied.",
+      "connection": {
+        "edgeId": "fs_batch_to_monitor",
+        "sourceNodeId": "fs_batch_compute",
+        "targetNodeId": "fs_monitoring",
+        "connectionType": "data-flow",
+        "label": "Materialization and backfill status",
+        "description": "Checkpointed progress, failures, retries, publication state, and measured completion time."
+      },
+      "requirementIds": [
+        "legacy-requirement:7",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "fs_cache_monitor",
+      "stepNumber": 39,
+      "phase": "Validate scale and consistency",
+      "title": "Measure online latency and value freshness",
+      "type": "add_connection",
+      "content": "Measure requested feature count and entity distribution as well as p50/p95/p99 latency at the agreed service boundary. The prompt does not specify a percentile, so do not claim the under-10ms target is passed until one is chosen.",
+      "connection": {
+        "edgeId": "fs_cache_to_monitor",
+        "sourceNodeId": "fs_online_cache",
+        "targetNodeId": "fs_monitoring",
+        "connectionType": "data-flow",
+        "label": "Online store latency and freshness",
+        "description": "Lookup timing, hit/miss, payload size, feature version, and observed staleness."
+      },
+      "requirementIds": [
+        "legacy-requirement:7",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "fs_feature_monitor",
+      "stepNumber": 40,
+      "phase": "Validate scale and consistency",
+      "title": "Test semantic parity using golden records",
+      "type": "add_connection",
+      "content": "For identical versioned inputs, compare batch and stream outputs at boundary timestamps, nulls, late data, and schema changes. A zero-skew objective needs an explicit numeric comparison rule and test corpus.",
+      "connection": {
+        "edgeId": "fs_store_to_monitor",
+        "sourceNodeId": "fs_feature_store",
+        "targetNodeId": "fs_monitoring",
+        "connectionType": "data-flow",
+        "label": "Parity and definition health",
+        "description": "Definition versions, materialization state, offline-online parity samples, and compatibility test results."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:7",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "fs_scale_trigger",
+      "stepNumber": 41,
+      "phase": "Validate scale and consistency",
+      "title": "Load-test the stated feature and request scale",
+      "type": "scale_trigger",
+      "content": "The brief explicitly states 10k+ features across 100+ entities and 100k+ requests per second, but not value sizes, entity cardinalities, read/write ratio, or burstiness. Test skewed hot entities, batched and sparse lookups, cold-cache behavior, and concurrent backfill; capacity is not inferred from component properties.",
+      "scaleTrigger": {
+        "metric": "Online request rate and latency distribution, hot-key skew, feature count/entity cardinality, cache saturation, and backfill contention",
+        "action": "Load-test representative 10k+ feature and 100+ entity catalogs at the 100k+ request/second target; partition or replicate only after measuring bottlenecks and consistency behavior.",
+        "impact": "Validates the supplied scale and under-10ms goals while ensuring backfill does not starve online inference."
+      }
+    },
+    {
+      "id": "fs_zero_skew_review",
+      "stepNumber": 42,
+      "phase": "Validate scale and consistency",
+      "title": "Treat zero skew as a testable invariant",
+      "type": "decision_point",
+      "content": "Shared code alone does not guarantee identical values when timestamps, null handling, engine functions, late data, or defaults differ. Use cross-engine golden tests and compare sampled production values with version identity.",
+      "decision": {
+        "question": "Can the feature store promise zero training-serving skew by using one registry?",
+        "chosen": "Treat zero skew as an invariant to demonstrate for the supported definitions and execution engines, with explicit exceptions and parity monitoring.",
+        "chosenReason": "A shared definition reduces drift but does not erase differences in execution, time semantics, or source availability.",
+        "alternatives": [
+          {
+            "option": "Assume one definition means identical outputs",
+            "tradeoff": "Misses runtime, timestamp, missing-value, and engine-function differences."
+          },
+          {
+            "option": "Allow independent transformations and compare only aggregate metrics",
+            "tradeoff": "Can conceal per-entity or per-feature mismatches that affect model predictions."
+          }
+        ]
+      }
+    },
+    {
+      "id": "fs_offline_materialization",
+      "stepNumber": 43,
+      "phase": "Validate scale and consistency",
+      "title": "Persist offline feature values for training",
+      "type": "add_connection",
+      "content": "Write transformed offline feature values and their source/definition manifests to durable storage. Keep raw inputs and materialized tables logically isolated, and publish a run only when its manifest and quality checks are complete.",
+      "connection": {
+        "edgeId": "fs_store_to_offline",
+        "sourceNodeId": "fs_feature_store",
+        "targetNodeId": "fs_offline_store",
+        "connectionType": "data-flow",
+        "label": "Versioned offline materialization",
+        "description": "Durable feature values and manifests for training, replay, and backfill, separate from raw source snapshots."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:4",
+        "legacy-requirement:6",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "fs_final_review",
+      "stepNumber": 44,
+      "phase": "Validate scale and consistency",
+      "title": "Review access, lineage, and failure behavior",
+      "type": "explanation",
+      "content": "Before rollout, verify team-level feature permissions, ownership and deprecation workflow, complete lineage, offline dataset reproducibility, online stale/missing-value behavior, schema compatibility, backfill recovery, and parity evidence. Agree feature-specific freshness/TTL, backfill completion SLA, late-data correction policy, quality thresholds, latency percentile and measurement boundary, and recovery behavior with platform and model teams. The brief leaves these unspecified; this is an unpublished structural review draft and no AI score, browser persistence, AWS write, or publication is asserted."
+    }
+  ]
+}

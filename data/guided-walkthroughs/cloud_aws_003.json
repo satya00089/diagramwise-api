@@ -1,0 +1,513 @@
+{
+  "problem_id": "cloud_aws_003",
+  "version": "1.0",
+  "totalSteps": 28,
+  "phases": [
+    {
+      "name": "Freeze event volume and delivery semantics",
+      "stepRange": [1, 3],
+      "description": "Resolve the difference between the brief's millions-per-second description and its 100k-events-per-second burst constraint, then define what exactly-once and sub-second mean end to end."
+    },
+    {
+      "name": "Ingest, transform, and preserve replayable events",
+      "stepRange": [4, 23],
+      "description": "Build an AWS-oriented streaming path using existing generic catalog components for producers, Kinesis-style retention, stream processing, archival, replay, and a queryable sink."
+    },
+    {
+      "name": "Serve dashboards and prove operational targets",
+      "stepRange": [24, 28],
+      "description": "Expose processed data to dashboards, observe lag and delivery semantics, and validate throughput, retention, replay, and end-to-end latency under representative load."
+    }
+  ],
+  "steps": [
+    {
+      "id": "streaming_pipeline_brief",
+      "stepNumber": 1,
+      "phase": "Freeze event volume and delivery semantics",
+      "title": "Start from the frozen streaming problem",
+      "type": "explanation",
+      "content": "Problem: Build a Real-time Data Streaming Pipeline (cloud_aws_003; build-a-real-time-data-streaming-pipeline). Category: AWS - Data Streaming; domain: infra; difficulty: Hard; estimated time: 60-90 minutes. Description: Design a real-time data pipeline that can ingest, process, and analyze millions of events per second with sub-second latency. Requirements: Ingest millions of events per second; Process data in real-time; Perform streaming analytics; Store processed data for queries; Visualize real-time dashboards; Handle data transformation; Support replay of events; Monitor pipeline health. Constraints: Sub-second processing latency; Handle burst traffic up to 100k events/sec; Ensure exactly-once processing; Scale horizontally automatically; Support data retention for 7 days. Supplied hints name Kinesis Data Streams, Kinesis Data Analytics, Lambda, Elasticsearch, Kibana, and CloudWatch. Companies named in the frozen row: Amazon, Uber, and Spotify; these are context, not mandatory vendors."
+    },
+    {
+      "id": "streaming_pipeline_assumptions",
+      "stepNumber": 2,
+      "phase": "Freeze event volume and delivery semantics",
+      "title": "Resolve scale and guarantee ambiguity before sizing",
+      "type": "explanation",
+      "content": "The description says millions of events per second, while the explicit burst constraint says up to 100k events per second. Treat both as requirements to reconcile: use 100k events/second as the stated burst test point and do not claim million-event steady-state capacity until peak/average rates, event size, partition-key skew, consumer count, and regional scope are confirmed. Define sub-second measurement boundaries and percentile. Exactly-once must specify source offsets, processor state, and sink effects; a stream processor checkpoint alone does not make an arbitrary external sink exactly-once. Retention of seven days applies to the replayable stream unless the product defines a separate archive period."
+    },
+    {
+      "id": "streaming_pipeline_semantics",
+      "stepNumber": 3,
+      "phase": "Freeze event volume and delivery semantics",
+      "title": "Make replay and exactly-once semantics explicit",
+      "type": "decision_point",
+      "content": "Use durable stream offsets and checkpointed processing, then require idempotent or transactional sink writes keyed by stable event identity. Define how duplicates, late events, poison records, and replayed output are handled before calling the whole pipeline exactly-once.",
+      "decision": {
+        "question": "Can the design claim end-to-end exactly-once merely because the stream processor checkpoints state?",
+        "chosen": "No. Pair source offsets and processor checkpoints with sink-side idempotency or transactions and verify recovery behavior with failure-injection tests.",
+        "chosenReason": "The guarantee crosses ingestion, stateful processing, retries, replay, and storage; any non-idempotent external write can duplicate effects after recovery.",
+        "alternatives": [
+          { "option": "Accept at-least-once and deduplicate downstream", "tradeoff": "Often simpler and robust, but does not satisfy an exactly-once requirement unless deduplication covers all observable sink effects." },
+          { "option": "Use transactions across every component", "tradeoff": "Strong semantics may simplify consumers, but cross-service transactions can reduce throughput and may not be supported by all sinks."
+          }
+        ]
+      }
+    },
+    {
+      "id": "streaming_pipeline_producers",
+      "stepNumber": 4,
+      "phase": "Ingest, transform, and preserve replayable events",
+      "title": "Represent application event producers",
+      "type": "add_component",
+      "content": "Producers publish versioned events with stable event IDs, event timestamps, and a partition key aligned to ordering requirements. Keep payload-size and key-skew distributions in the load-test plan; neither is specified in the brief.",
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:1", "legacy-constraint:2"],
+      "component": {
+        "nodeId": "streaming_pipeline_producers",
+        "componentType": "backend-server",
+        "label": "Application Event Producers",
+        "position": { "x": 40, "y": 320 },
+        "properties": {
+          "componentName": "Application Event Producers",
+          "purpose": "Represent application and service producers that emit versioned events with stable IDs, timestamps, and a partition key suitable for required ordering."
+        },
+        "highlightReason": "Throughput and duplicate handling begin at the producer contract, not only inside the stream platform."
+      }
+    },
+    {
+      "id": "streaming_pipeline_stream",
+      "stepNumber": 5,
+      "phase": "Ingest, transform, and preserve replayable events",
+      "title": "Buffer events in a seven-day replayable stream",
+      "type": "add_component",
+      "content": "Represent Kinesis Data Streams with the existing message-broker catalog type. Configure seven-day retention (168 hours) and select shard/partition strategy from event size, rate, key skew, and consumer requirements; do not invent a fixed shard count.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "streaming_pipeline_stream",
+        "componentType": "message-broker",
+        "label": "Kinesis Data Streams",
+        "position": { "x": 330, "y": 320 },
+        "properties": {
+          "componentName": "Kinesis Data Streams",
+          "purpose": "Durably buffer partitioned events, expose consumer offsets for replay, and retain records for the required seven-day window. Capacity and partition scaling follow measured throughput and key distribution.",
+          "retention": 168
+        },
+        "highlightReason": "This is the durable ingestion and replay boundary; the catalog retention property expresses the stated seven-day constraint."
+      }
+    },
+    {
+      "id": "streaming_pipeline_processor",
+      "stepNumber": 6,
+      "phase": "Ingest, transform, and preserve replayable events",
+      "title": "Transform and aggregate with checkpointed state",
+      "type": "add_component",
+      "content": "Represent Kinesis Data Analytics for Apache Flink using the existing stream-processor type. Perform schema validation, enrichment, windowed analytics, event-time handling, and checkpointed state. Sink idempotency or transaction support remains necessary for end-to-end exactly-once effects.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "streaming_pipeline_processor",
+        "componentType": "stream-processor",
+        "label": "Kinesis Data Analytics (Flink)",
+        "position": { "x": 650, "y": 320 },
+        "properties": {
+          "componentName": "Kinesis Data Analytics (Flink)",
+          "purpose": "Validate and transform events, compute streaming aggregations, checkpoint state and offsets, and autoscale from measured input rate and processing lag.",
+          "engine": "AWS Kinesis"
+        },
+        "highlightReason": "A stateful stream processor makes transformation, analytics, checkpointing, and lag-based scaling explicit."
+      }
+    },
+    {
+      "id": "streaming_pipeline_archive_worker",
+      "stepNumber": 7,
+      "phase": "Ingest, transform, and preserve replayable events",
+      "title": "Archive raw events and support controlled replay",
+      "type": "add_component",
+      "content": "Use the existing worker component to represent an archive/replay consumer, such as a managed delivery integration plus a controlled replay job. Preserve event IDs and schema versions. The archive retention period and lifecycle policy are not specified, so keep them as a follow-up decision.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "streaming_pipeline_archive_worker",
+        "componentType": "processing-worker",
+        "label": "Archive & Replay Worker",
+        "position": { "x": 650, "y": 610 },
+        "properties": {
+          "componentName": "Archive & Replay Worker",
+          "purpose": "Archive immutable raw events with stable IDs and schema versions, and run controlled replays from retained stream offsets or archived objects without mixing replay output into the live archive path."
+        },
+        "highlightReason": "Replay is a separate operational workflow and should preserve event identity while preventing archive/replay loops."
+      }
+    },
+    {
+      "id": "streaming_pipeline_archive",
+      "stepNumber": 8,
+      "phase": "Ingest, transform, and preserve replayable events",
+      "title": "Keep an immutable raw event archive",
+      "type": "add_component",
+      "content": "Represent S3 with the existing object-storage catalog type. Store raw events and schema/version metadata so records can be audited or replayed beyond the live stream window if policy allows. Do not assume a specific archive retention beyond the seven-day stream requirement.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "streaming_pipeline_archive",
+        "componentType": "object-storage",
+        "label": "S3 Raw Event Archive",
+        "position": { "x": 940, "y": 610 },
+        "properties": {
+          "componentName": "S3 Raw Event Archive",
+          "purpose": "Store immutable raw event batches with event IDs, schema versions, and ingestion metadata for audit and policy-controlled replay.",
+          "provider": "S3"
+        },
+        "highlightReason": "A raw archive provides a durable replay source while remaining distinct from the seven-day stream retention setting."
+      }
+    },
+    {
+      "id": "streaming_pipeline_query_store",
+      "stepNumber": 9,
+      "phase": "Ingest, transform, and preserve replayable events",
+      "title": "Store processed records for interactive queries",
+      "type": "add_component",
+      "content": "Represent the hinted Elasticsearch/OpenSearch-style query store with the existing search component. Select mappings, shard/replica layout, and retention from query patterns and measured write/read load; exactly-once behavior must be implemented with stable IDs or verified sink transactions.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:3"],
+      "component": {
+        "nodeId": "streaming_pipeline_query_store",
+        "componentType": "search",
+        "label": "Processed Event Query Store",
+        "position": { "x": 940, "y": 320 },
+        "properties": {
+          "componentName": "Processed Event Query Store",
+          "purpose": "Index transformed events and aggregates for dashboard queries; use stable event/document identities or transactional sink behavior to make retries idempotent."
+        },
+        "highlightReason": "The queryable sink serves dashboards and is also where duplicate side effects must be controlled."
+      }
+    },
+    {
+      "id": "streaming_pipeline_query_api",
+      "stepNumber": 10,
+      "phase": "Ingest, transform, and preserve replayable events",
+      "title": "Provide a bounded query and aggregation API",
+      "type": "add_component",
+      "content": "Expose dashboard queries over processed data, enforce tenant and query limits, and separate interactive reads from heavy analytical scans. No dashboard freshness percentile or query volume is specified; measure these before selecting cache or pre-aggregation policy.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1"],
+      "component": {
+        "nodeId": "streaming_pipeline_query_api",
+        "componentType": "backend-server",
+        "label": "Dashboard Query API",
+        "position": { "x": 1230, "y": 320 },
+        "properties": {
+          "componentName": "Dashboard Query API",
+          "purpose": "Serve bounded dashboard queries and aggregations over processed event data with tenant scope, pagination, and explicit query deadlines."
+        },
+        "highlightReason": "A query API protects the streaming sink from unbounded dashboard scans and provides a clean client contract."
+      }
+    },
+    {
+      "id": "streaming_pipeline_dashboard",
+      "stepNumber": 11,
+      "phase": "Ingest, transform, and preserve replayable events",
+      "title": "Visualize processed data in real time",
+      "type": "add_component",
+      "content": "Show recent event rates, lag/freshness, aggregates, and query results. Clearly distinguish event time from ingestion and processing time so users do not mistake late-arriving data for a pipeline outage.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:8"],
+      "component": {
+        "nodeId": "streaming_pipeline_dashboard",
+        "componentType": "web-app",
+        "label": "Real-Time Operations Dashboard",
+        "position": { "x": 1520, "y": 320 },
+        "properties": {
+          "componentName": "Real-Time Operations Dashboard",
+          "purpose": "Visualize queryable event aggregates, recent activity, data freshness, and pipeline health while distinguishing event time from processing time."
+        },
+        "highlightReason": "Visualization is an explicit functional requirement and should expose freshness, not only charts."
+      }
+    },
+    {
+      "id": "streaming_pipeline_dlq",
+      "stepNumber": 12,
+      "phase": "Ingest, transform, and preserve replayable events",
+      "title": "Isolate poison records and failed writes",
+      "type": "add_component",
+      "content": "Route malformed or repeatedly failing events to a durable dead-letter queue with error class, original event identity, and controlled redrive. Define retry and redrive policy from operational requirements; no retry count is specified.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:3"],
+      "component": {
+        "nodeId": "streaming_pipeline_dlq",
+        "componentType": "queue",
+        "label": "Poison Event & Sink Failure Queue",
+        "position": { "x": 940, "y": 890 },
+        "properties": {
+          "componentName": "Poison Event & Sink Failure Queue",
+          "purpose": "Durably isolate malformed events and repeated sink failures with original identity and error context for controlled inspection and redrive."
+        },
+        "highlightReason": "A bounded failure path protects healthy partitions while preserving failed records for repair and replay."
+      }
+    },
+    {
+      "id": "streaming_pipeline_monitoring",
+      "stepNumber": 13,
+      "phase": "Ingest, transform, and preserve replayable events",
+      "title": "Observe ingestion, processing, and sink health",
+      "type": "add_component",
+      "content": "Represent CloudWatch with the existing monitoring component. Measure accepted/failed events, source and consumer lag, checkpoint/restart behavior, sink write outcomes, duplicate detection, scaling actions, archive completeness, and dashboard freshness.",
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "streaming_pipeline_monitoring",
+        "componentType": "monitoring",
+        "label": "CloudWatch Pipeline Observability",
+        "position": { "x": 1230, "y": 890 },
+        "properties": {
+          "componentName": "CloudWatch Pipeline Observability",
+          "purpose": "Observe event throughput, source/consumer lag, processing latency, checkpoint and restart outcomes, sink idempotency, archive completeness, scaling, and dashboard freshness.",
+          "stack": "CloudWatch"
+        },
+        "highlightReason": "Every scale, latency, retention, monitoring, and processing guarantee needs a runtime signal."
+      }
+    },
+    {
+      "id": "streaming_producer_stream",
+      "stepNumber": 14,
+      "phase": "Ingest, transform, and preserve replayable events",
+      "title": "Publish events with stable identity and partition keys",
+      "type": "add_connection",
+      "content": "Producers attach a stable ID, schema version, event time, and partition key. Measure payload size and hot-key distribution before choosing stream capacity; the problem's millions-versus-100k rate discrepancy remains a sizing decision.",
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:2", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "streaming_producer_stream_edge",
+        "sourceNodeId": "streaming_pipeline_producers",
+        "targetNodeId": "streaming_pipeline_stream",
+        "connectionType": "data-flow",
+        "label": "Versioned events with stable IDs",
+        "description": "Publish partitioned events with stable identity and timestamps for ordered processing, deduplication, and replay."
+      }
+    },
+    {
+      "id": "streaming_stream_processor",
+      "stepNumber": 15,
+      "phase": "Ingest, transform, and preserve replayable events",
+      "title": "Consume continuously with lag-aware capacity",
+      "type": "add_connection",
+      "content": "Consume from durable offsets and scale processing based on measured event rate, backlog, and processing cost. Partitioning and parallelism must be checked against ordering and hot-key constraints, not only aggregate throughput.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "streaming_stream_processor_edge",
+        "sourceNodeId": "streaming_pipeline_stream",
+        "targetNodeId": "streaming_pipeline_processor",
+        "connectionType": "data-flow",
+        "label": "Partitioned events & durable offsets",
+        "description": "Read durable event partitions for transformation and analytics while tracking lag and checkpoint progress."
+      }
+    },
+    {
+      "id": "streaming_stream_archive",
+      "stepNumber": 16,
+      "phase": "Ingest, transform, and preserve replayable events",
+      "title": "Archive raw input independently of derived data",
+      "type": "add_connection",
+      "content": "Deliver raw records and schema metadata to the archive without blocking the interactive processing path. Monitor delivery lag and completeness; the archive lifecycle period remains unspecified by the brief.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "streaming_stream_archive_edge",
+        "sourceNodeId": "streaming_pipeline_stream",
+        "targetNodeId": "streaming_pipeline_archive_worker",
+        "connectionType": "data-flow",
+        "label": "Raw records for archival delivery",
+        "description": "Deliver source events and schema metadata to the archive/replay consumer without coupling archive writes to the low-latency transform path."
+      }
+    },
+    {
+      "id": "streaming_archive_store",
+      "stepNumber": 17,
+      "phase": "Ingest, transform, and preserve replayable events",
+      "title": "Persist immutable raw records",
+      "type": "add_connection",
+      "content": "Write stable event IDs and schema versions with each archived batch. Define lifecycle and access policy separately; the seven-day constraint is already captured on the live stream and does not imply unlimited S3 retention.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "streaming_archive_store_edge",
+        "sourceNodeId": "streaming_pipeline_archive_worker",
+        "targetNodeId": "streaming_pipeline_archive",
+        "connectionType": "data-flow",
+        "label": "Immutable raw event batches",
+        "description": "Persist raw records, stable IDs, schema versions, and ingestion metadata for audit and policy-controlled replay."
+      }
+    },
+    {
+      "id": "streaming_store_replay",
+      "stepNumber": 18,
+      "phase": "Ingest, transform, and preserve replayable events",
+      "title": "Read archived events through a controlled replay job",
+      "type": "add_connection",
+      "content": "Replay jobs select a bounded time range and schema version, preserve event identity, and write to a replay namespace or explicitly isolated processing run. Prevent replay from recursively triggering the live archival path.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "streaming_store_replay_edge",
+        "sourceNodeId": "streaming_pipeline_archive",
+        "targetNodeId": "streaming_pipeline_archive_worker",
+        "connectionType": "data-flow",
+        "label": "Selected archive range for replay",
+        "description": "Fetch a bounded, versioned event range for controlled redrive while preserving IDs and isolating replay from recursive archival."
+      }
+    },
+    {
+      "id": "streaming_replay_processor",
+      "stepNumber": 19,
+      "phase": "Ingest, transform, and preserve replayable events",
+      "title": "Reprocess only into an idempotent replay path",
+      "type": "add_connection",
+      "content": "Replay output through the same versioned transformation logic with an explicit replay-run identity. Sink keys or transactions must make retries safe, and dashboards should distinguish corrected/replayed data from live processing when required.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "streaming_replay_processor_edge",
+        "sourceNodeId": "streaming_pipeline_archive_worker",
+        "targetNodeId": "streaming_pipeline_processor",
+        "connectionType": "data-flow",
+        "label": "Isolated replay run & original event IDs",
+        "description": "Feed selected archived events through versioned transformations with replay identity and idempotent sink behavior."
+      }
+    },
+    {
+      "id": "streaming_processor_store",
+      "stepNumber": 20,
+      "phase": "Ingest, transform, and preserve replayable events",
+      "title": "Write transformed events with deduplication semantics",
+      "type": "add_connection",
+      "content": "Use stable sink document IDs or a transactional write protocol tied to processor checkpoints. Test crash-after-write/before-checkpoint and replay scenarios to detect duplicate visible effects.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "streaming_processor_store_edge",
+        "sourceNodeId": "streaming_pipeline_processor",
+        "targetNodeId": "streaming_pipeline_query_store",
+        "connectionType": "data-flow",
+        "label": "Aggregates & idempotent processed records",
+        "description": "Write queryable transformed results under stable identities or verified sink transactions so retries and recovery do not duplicate effects."
+      }
+    },
+    {
+      "id": "streaming_processor_dlq",
+      "stepNumber": 21,
+      "phase": "Ingest, transform, and preserve replayable events",
+      "title": "Isolate events that cannot be processed safely",
+      "type": "add_connection",
+      "content": "Send poison records and unrecoverable sink failures to a durable failure queue with original IDs, schema, and error metadata. Redrive only after correction and deduplication behavior are understood.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "streaming_processor_dlq_edge",
+        "sourceNodeId": "streaming_pipeline_processor",
+        "targetNodeId": "streaming_pipeline_dlq",
+        "connectionType": "message-queue",
+        "label": "Poison records & failed sink writes",
+        "description": "Preserve failed records and error context for inspection and controlled redrive without blocking healthy partitions indefinitely."
+      }
+    },
+    {
+      "id": "streaming_store_query_api",
+      "stepNumber": 22,
+      "phase": "Ingest, transform, and preserve replayable events",
+      "title": "Query indexed results through a protected API",
+      "type": "add_connection",
+      "content": "The query API reads processed records and aggregates, not raw stream partitions. Add access filters and bounded query cost; maintain dashboard freshness as a measured end-to-end signal.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1"],
+      "connection": {
+        "edgeId": "streaming_store_query_api_edge",
+        "sourceNodeId": "streaming_pipeline_query_api",
+        "targetNodeId": "streaming_pipeline_query_store",
+        "connectionType": "api-call",
+        "label": "Bounded processed-data queries",
+        "description": "Read indexed transformed data and aggregates using tenant-aware filters and query deadlines."
+      }
+    },
+    {
+      "id": "streaming_dashboard_query_api",
+      "stepNumber": 23,
+      "phase": "Ingest, transform, and preserve replayable events",
+      "title": "Render dashboard data with freshness context",
+      "type": "add_connection",
+      "content": "Return recent aggregates, query results, and data-freshness indicators to the dashboard. Keep processing time and event time visible so late data is distinguishable from missing ingestion.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:8"],
+      "connection": {
+        "edgeId": "streaming_dashboard_query_api_edge",
+        "sourceNodeId": "streaming_pipeline_dashboard",
+        "targetNodeId": "streaming_pipeline_query_api",
+        "connectionType": "api-call",
+        "label": "Dashboard query & health requests",
+        "description": "Request bounded visualizations and freshness/health context through the query API."
+      }
+    },
+    {
+      "id": "streaming_stream_monitoring",
+      "stepNumber": 24,
+      "phase": "Serve dashboards and prove operational targets",
+      "title": "Observe ingestion rate and seven-day retention",
+      "type": "add_connection",
+      "content": "Measure accepted and rejected rate, throttling, partition skew, retention configuration, consumer lag, and oldest available offset. Alert before lag threatens the replay window.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "streaming_stream_monitoring_edge",
+        "sourceNodeId": "streaming_pipeline_stream",
+        "targetNodeId": "streaming_pipeline_monitoring",
+        "connectionType": "data-flow",
+        "label": "Rate, throttling, offsets & retention signals",
+        "description": "Export ingestion rate, partition/consumer lag, throttling, and retention-window health for scaling and replay protection."
+      }
+    },
+    {
+      "id": "streaming_processor_monitoring",
+      "stepNumber": 25,
+      "phase": "Serve dashboards and prove operational targets",
+      "title": "Measure end-to-end processing and recovery",
+      "type": "add_connection",
+      "content": "Trace event IDs through processing and sink completion, measuring latency distributions, checkpoint age, restart time, backpressure, autoscaling response, and duplicate effects. Agree the sub-second clock and percentile before treating it as a pass/fail SLO.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "streaming_processor_monitoring_edge",
+        "sourceNodeId": "streaming_pipeline_processor",
+        "targetNodeId": "streaming_pipeline_monitoring",
+        "connectionType": "data-flow",
+        "label": "Latency, checkpoint & scaling telemetry",
+        "description": "Export traceable event latency, throughput, checkpoint/recovery, backpressure, autoscaling, and sink-idempotency signals."
+      }
+    },
+    {
+      "id": "streaming_archive_monitoring",
+      "stepNumber": 26,
+      "phase": "Serve dashboards and prove operational targets",
+      "title": "Verify archive completeness and replay outcomes",
+      "type": "add_connection",
+      "content": "Compare stream input counts and event IDs with archive delivery, track gaps, and record replay run IDs and sink outcomes. Archive retention and completion targets must be agreed separately from the seven-day stream retention.",
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "streaming_archive_monitoring_edge",
+        "sourceNodeId": "streaming_pipeline_archive_worker",
+        "targetNodeId": "streaming_pipeline_monitoring",
+        "connectionType": "data-flow",
+        "label": "Archive completeness & replay audit",
+        "description": "Report archive delivery gaps, replay range/run identity, redrive status, and sink outcomes."
+      }
+    },
+    {
+      "id": "streaming_store_monitoring",
+      "stepNumber": 27,
+      "phase": "Serve dashboards and prove operational targets",
+      "title": "Monitor query sink and dashboard freshness",
+      "type": "add_connection",
+      "content": "Track indexing delay, query errors, duplicate-key conflicts, search saturation, and dashboard freshness. Validate the same signals during replay so a correct archive does not conceal a broken read path.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "streaming_store_monitoring_edge",
+        "sourceNodeId": "streaming_pipeline_query_store",
+        "targetNodeId": "streaming_pipeline_monitoring",
+        "connectionType": "data-flow",
+        "label": "Indexing, query & freshness signals",
+        "description": "Observe processed-data write outcomes, query health, duplicate handling, and end-to-end dashboard freshness."
+      }
+    },
+    {
+      "id": "streaming_pipeline_acceptance",
+      "stepNumber": 28,
+      "phase": "Serve dashboards and prove operational targets",
+      "title": "Prove the guarantees with load and failure tests",
+      "type": "scale_trigger",
+      "content": "Test the explicit 100k-events/second burst, then separately confirm what the description's millions-per-second target means. Exercise hot keys, backpressure, processor restarts, sink failures, seven-day offset replay, duplicate suppression, and dashboard freshness while measuring the agreed sub-second latency boundary.",
+      "scaleTrigger": {
+        "metric": "Accepted event rate, partition skew, end-to-end processing latency, consumer lag, checkpoint/recovery time, sink duplicates, and replay-window age",
+        "action": "Scale stream partitions and processor parallelism from measured bottlenecks; adjust event partitioning or sink design when a hot key or write capacity limits the path.",
+        "impact": "The 100k burst, millions-per-second description, sub-second latency, exactly-once behavior, autoscaling, and seven-day retention remain unverified until representative load and failure-injection tests pass."
+      }
+    }
+  ]
+}

@@ -1,0 +1,784 @@
+{
+  "problem_id": "mlops_009",
+  "version": "1.0.0-review-draft",
+  "totalSteps": 44,
+  "phases": [
+    {
+      "name": "Read the brief and name unknowns",
+      "stepRange": [1, 4],
+      "description": "Keep the supplied requirements and limits explicit; identify missing workload and consistency details as questions rather than invented targets."
+    },
+    {
+      "name": "Place the tracking and storage boundaries",
+      "stepRange": [5, 15],
+      "description": "Add the workspace, framework clients, tracking API and service, durable run and metric stores, artifact storage, query index, and real-time path."
+    },
+    {
+      "name": "Connect logging and query paths",
+      "stepRange": [16, 32],
+      "description": "Connect client submissions, append-only metric events, persistent materialization, artifact transfer, indexed search, comparison reads, and WebSocket updates."
+    },
+    {
+      "name": "Make comparison and reproducibility explicit",
+      "stepRange": [33, 35],
+      "description": "Define useful comparison views and preserve the code and environment identities needed to interpret or reproduce a run."
+    },
+    {
+      "name": "Validate the stated constraints and failure paths",
+      "stepRange": [36, 44],
+      "description": "Test only the stated capacity, latency, artifact size, live streaming, and retention requirements, then record unresolved policies."
+    }
+  ],
+  "steps": [
+    {
+      "id": "mlops009_scope",
+      "stepNumber": 1,
+      "phase": "Read the brief and name unknowns",
+      "title": "Keep the frozen problem scope intact",
+      "type": "explanation",
+      "content": "FACT — The problem is an experiment tracking system for hyperparameters, metrics, artifacts, code, comparison, reproducibility, and team collaboration. Its eight requirements and five constraints are the acceptance scope. MLflow, Weights & Biases, and Neptune are reference products from the hints; the design does not assume that it must implement or integrate every one of them.",
+      "requirementIds": []
+    },
+    {
+      "id": "mlops009_unknowns",
+      "stepNumber": 2,
+      "phase": "Read the brief and name unknowns",
+      "title": "Separate supplied limits from workload questions",
+      "type": "explanation",
+      "content": "FACT — The brief states 10k+ experiments per project, metric logging latency under 50ms, artifact files up to 10GB, real-time metric streaming, and experiment-history retention for 2+ years. ASSUMPTION / OPEN INPUT — It does not state metric event rate or size, metric cardinality, tenant count, total artifact storage, concurrent uploads, broker-log retention, artifact-byte retention, search freshness or query latency, availability, a latency percentile, or the start and end points of the 50ms measurement. Any numeric value proposed for those dimensions is an assumption until confirmed; do not present one as a brief requirement.",
+      "requirementIds": ["legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlops009_run_identity",
+      "stepNumber": 3,
+      "phase": "Read the brief and name unknowns",
+      "title": "Give every run a reproducible identity",
+      "type": "decision_point",
+      "content": "A run needs a project and group, immutable run ID, parameter snapshot, source revision, environment/dependency identity, framework version, status, and artifact references. Store per-metric event identity, step, timestamp, value, and worker identity so distributed logs can be inspected without discarding their origin. Keep credentials out of run metadata; the brief does not define a secret-management policy.",
+      "decision": {
+        "question": "What should a historical run record identify?",
+        "chosen": "Pin the source commit and environment or dependency identity alongside resolved parameters, framework version, run status, metric records, and artifact manifests.",
+        "chosenReason": "A mutable branch, environment label, or latest artifact cannot by itself explain which code and runtime produced a result.",
+        "alternatives": [
+          {
+            "option": "Store only a run name and creation time",
+            "tradeoff": "That is insufficient to connect results to code, environment, parameters, or durable artifacts."
+          },
+          {
+            "option": "Store only aggregated metrics",
+            "tradeoff": "Aggregation can hide worker-level events and makes the original metric history harder to inspect."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:5"]
+    },
+    {
+      "id": "mlops009_boundaries",
+      "stepNumber": 4,
+      "phase": "Read the brief and name unknowns",
+      "title": "Define what each numeric limit measures",
+      "type": "explanation",
+      "content": "Treat under 50ms as the stated metric-logging objective, but confirm its measurement boundary and percentile. This draft measures from accepted SDK submission to durable append acknowledgement as a proposal, not a fact from the brief. Treat 10GB as the maximum stated artifact file size and 2+ years as the stated history horizon; neither defines total project storage or event volume.",
+      "requirementIds": ["legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlops009_workspace_ui",
+      "stepNumber": 5,
+      "phase": "Place the tracking and storage boundaries",
+      "title": "Add the experiment workspace",
+      "type": "add_component",
+      "content": "Use one workspace for project and group navigation, run detail, metric and parameter search, interactive comparisons, visualizations, annotations, and comments. Include parallel-coordinates views for hyperparameter comparison as suggested by the brief. Enforce project access through the API; the exact identity and permission model remains a product decision.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7"],
+      "component": {
+        "nodeId": "mlops009_workspace",
+        "componentType": "web-app",
+        "label": "Experiment Workspace & Compare UI",
+        "description": "Project and group views for run search, interactive comparison, visualizations, annotations, and comments.",
+        "position": {"x": 40, "y": 260},
+        "highlightReason": "The workspace makes experiment comparison and team collaboration visible to users.",
+        "properties": {
+          "componentName": "Experiment Workspace & Compare UI",
+          "purpose": "Browse project and group runs, filter by parameters and metrics, compare selected experiments with interactive and parallel-coordinates visualizations, and view or add team annotations and comments."
+        }
+      }
+    },
+    {
+      "id": "mlops009_framework_clients",
+      "stepNumber": 6,
+      "phase": "Place the tracking and storage boundaries",
+      "title": "Add framework clients for local and distributed runs",
+      "type": "add_component",
+      "content": "Provide a provider-neutral SDK and adapters for PyTorch, TensorFlow, and scikit-learn. Each process or node attaches its events to the same run identity and includes worker identity and event ordering information. At run registration, capture the source revision and environment or dependency identity supplied by the training job; this records provenance, not model quality. Framework adapters should call a shared logging contract so integrations do not create different run semantics.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:8"],
+      "component": {
+        "nodeId": "mlops009_framework_clients",
+        "componentType": "model-training",
+        "label": "Framework SDKs & Distributed Workers",
+        "description": "PyTorch, TensorFlow, and scikit-learn adapters that associate worker events with one experiment run.",
+        "position": {"x": 40, "y": 40},
+        "highlightReason": "The shared SDK contract lets framework and multi-node clients log comparable run data.",
+        "properties": {
+          "componentName": "Framework SDKs & Distributed Workers",
+          "purpose": "Expose one run and metric logging contract through PyTorch, TensorFlow, and scikit-learn adapters; attach worker identity and code/environment context to distributed events.",
+          "computeType": "Framework-neutral; supports distributed and multi-node training clients"
+        }
+      }
+    },
+    {
+      "id": "mlops009_ingestion_api",
+      "stepNumber": 7,
+      "phase": "Place the tracking and storage boundaries",
+      "title": "Add an authenticated tracking API",
+      "type": "add_component",
+      "content": "Expose versioned operations for project and group selection, run creation, parameter, source-revision, and environment registration, metric append, artifact upload setup, search, comparison, comments, and annotations. Validate project/run ownership and payload shape before accepting data. Do not put long artifact transfers or visualization work on the metric acknowledgement path.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3"],
+      "component": {
+        "nodeId": "mlops009_ingestion_api",
+        "componentType": "api-gateway",
+        "label": "Experiment Tracking API",
+        "description": "Authenticated and validated entry for run logging, artifact setup, search, comparison, and collaboration operations.",
+        "position": {"x": 340, "y": 170},
+        "highlightReason": "A shared API contract gives framework clients and the workspace consistent project and run semantics.",
+        "properties": {
+          "componentName": "Experiment Tracking API",
+          "purpose": "Validate caller and project scope, create run identities, accept metric events, issue artifact upload authorization, and route search, comparison, annotation, and comment operations.",
+          "inputValidation": true,
+          "authentication": "Project-scoped authorization"
+        }
+      }
+    },
+    {
+      "id": "mlops009_tracking_service",
+      "stepNumber": 8,
+      "phase": "Place the tracking and storage boundaries",
+      "title": "Add the run and tracking service",
+      "type": "add_component",
+      "content": "Centralize run lifecycle, project/group membership, parameter, source-revision, and environment snapshots, annotation/comment ownership, artifact manifests, and normalized framework logging. Keep the metadata contract provider-neutral so the product can use MLflow, Weights & Biases, or Neptune as references without binding its core model to one vendor.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:7", "legacy-requirement:8"],
+      "component": {
+        "nodeId": "mlops009_tracking_service",
+        "componentType": "experiment-tracking",
+        "label": "Run Tracking & Collaboration Service",
+        "description": "Provider-neutral run lifecycle, framework logging, artifact metadata, and team collaboration semantics.",
+        "position": {"x": 640, "y": 170},
+        "highlightReason": "One service coordinates a run's searchable metadata and its durable metric and artifact paths.",
+        "properties": {
+          "componentName": "Run Tracking & Collaboration Service",
+          "purpose": "Normalize framework submissions and manage project, group, run, parameter, code/environment, artifact manifest, annotation, and comment records.",
+          "platform": "Provider-neutral tracking core"
+        }
+      }
+    },
+    {
+      "id": "mlops009_metadata_store",
+      "stepNumber": 9,
+      "phase": "Place the tracking and storage boundaries",
+      "title": "Persist projects, groups, runs, and collaboration metadata",
+      "type": "add_component",
+      "content": "Keep canonical project, group, run, parameter, source revision, environment reference, artifact manifest, annotation, and comment records in a durable metadata store. Use project and run identity in access and query keys. Retain the history needed for the stated 2+ years; detailed deletion, legal hold, and archival policies are unspecified by the brief.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "mlops009_metadata_store",
+        "componentType": "database",
+        "label": "Project, Run & Collaboration Store",
+        "description": "Canonical records for project/group membership, run lineage, parameters, artifact manifests, annotations, and comments.",
+        "position": {"x": 940, "y": 350},
+        "highlightReason": "Canonical run identity and collaboration records must outlive search projections and live stream buffers.",
+        "properties": {
+          "componentName": "Project, Run & Collaboration Store",
+          "purpose": "Persist canonical project, group, run, parameter, code/environment reference, artifact manifest, annotation, and comment records for the stated history horizon."
+        }
+      }
+    },
+    {
+      "id": "mlops009_metric_log",
+      "stepNumber": 10,
+      "phase": "Place the tracking and storage boundaries",
+      "title": "Append metric events to a durable log",
+      "type": "add_component",
+      "content": "Use a durable append-only event log for metric points and run events. An event carries run ID, metric name, value, step, timestamp, worker identity, and an idempotency identity. Acknowledge a metric only after the chosen durable boundary confirms append; keep retry deduplication from silently replacing distinct worker events. The broker retention period is not specified by the brief.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "mlops009_metric_log",
+        "componentType": "message-broker",
+        "label": "Durable Append-only Metric Event Log",
+        "description": "Ordered durable event stream for metric appends and run updates, partitioned by run identity.",
+        "position": {"x": 940, "y": 40},
+        "highlightReason": "The append acknowledgement forms a measurable durable boundary for the under-50ms logging objective.",
+        "properties": {
+          "componentName": "Durable Append-only Metric Event Log",
+          "purpose": "Append metric and run events durably, preserve run and worker context, and fan out accepted events to materialization and real-time subscribers.",
+          "durable": true,
+          "retention": "Configure for recovery needs; duration is not specified in the brief"
+        }
+      }
+    },
+    {
+      "id": "mlops009_metric_store",
+      "stepNumber": 11,
+      "phase": "Place the tracking and storage boundaries",
+      "title": "Keep queryable metric history as append-only records",
+      "type": "add_component",
+      "content": "Materialize accepted metric events into immutable per-run metric records for history, run detail, and comparison queries. Keep raw worker records distinct from any derived aggregate so aggregation semantics can be selected per metric rather than assumed globally. The store must retain the required experiment history for 2+ years.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "mlops009_metric_store",
+        "componentType": "database",
+        "label": "Append-only Metric History Store",
+        "description": "Queryable immutable metric records keyed by project, run, metric, time, and worker context.",
+        "position": {"x": 1240, "y": 350},
+        "highlightReason": "The materialized store provides durable history for queries without making the broker the long-term system of record.",
+        "properties": {
+          "componentName": "Append-only Metric History Store",
+          "purpose": "Persist immutable metric events and queryable per-run series for comparison and history retention of 2+ years."
+        }
+      }
+    },
+    {
+      "id": "mlops009_artifact_store",
+      "stepNumber": 12,
+      "phase": "Place the tracking and storage boundaries",
+      "title": "Store large artifacts outside the metadata database",
+      "type": "add_component",
+      "content": "Store model files, charts, datasets, and other run artifacts in object storage, with files up to the stated 10GB limit. Use resumable or multipart transfer, checksum verification, and an immutable manifest tied to run identity. Keep artifact bytes off the tracking API and store only references and metadata in the run record. The brief does not say whether artifact bytes share the stated 2+ years of experiment-history retention; treat artifact lifecycle and retention duration as an assumption to confirm, not as a supplied value.",
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:3"],
+      "component": {
+        "nodeId": "mlops009_artifact_store",
+        "componentType": "object-storage",
+        "label": "Run Artifact Object Storage",
+        "description": "Object storage for run files up to 10GB with verified manifests and run-scoped references.",
+        "position": {"x": 940, "y": 570},
+        "highlightReason": "Large artifact bytes belong on a direct object-storage transfer path, not in metric writes or metadata rows.",
+        "properties": {
+          "componentName": "Run Artifact Object Storage",
+          "purpose": "Accept resumable or multipart artifact uploads up to 10GB, verify checksums, and expose immutable object references for run manifests.",
+          "versioning": true,
+          "checksumValidation": true
+        }
+      }
+    },
+    {
+      "id": "mlops009_materializer",
+      "stepNumber": 13,
+      "phase": "Place the tracking and storage boundaries",
+      "title": "Materialize events without blocking metric acknowledgement",
+      "type": "add_component",
+      "content": "Consume the durable event log asynchronously to write metric history and update searchable projections. Make processing idempotent by event identity and expose consumer lag or failed writes so replay can repair projections. This work follows the durable append boundary and does not extend the SDK acknowledgement path.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:2"],
+      "component": {
+        "nodeId": "mlops009_materializer",
+        "componentType": "analytics",
+        "label": "Metric Materializer & Index Projector",
+        "description": "Idempotent consumers that persist metric history and refresh search projections from the durable event log.",
+        "position": {"x": 1240, "y": 40},
+        "highlightReason": "Asynchronous materialization keeps search and historical writes off the logging acknowledgement path.",
+        "properties": {
+          "componentName": "Metric Materializer & Index Projector",
+          "purpose": "Consume durable metric events idempotently, append queryable history, update metric search projections, and expose lag for recovery.",
+          "realTime": true
+        }
+      }
+    },
+    {
+      "id": "mlops009_search_index",
+      "stepNumber": 14,
+      "phase": "Place the tracking and storage boundaries",
+      "title": "Index parameters and metrics for project search",
+      "type": "add_component",
+      "content": "Build a project-scoped search projection over run metadata, hyperparameters, tags, and selected metric values so users can filter 10k+ experiments per project. The index is derived data: record or expose its freshness and fetch canonical run details from the stores. Search freshness and query latency are not stated; any numeric values proposed for them are assumptions to confirm.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1"],
+      "component": {
+        "nodeId": "mlops009_search_index",
+        "componentType": "search-engine",
+        "label": "Project Run & Metric Search Index",
+        "description": "Derived project-scoped index for parameter, tag, and metric filters over experiment runs.",
+        "position": {"x": 1540, "y": 240},
+        "highlightReason": "A purpose-built projection serves metric and parameter filters while canonical history remains durable elsewhere.",
+        "properties": {
+          "componentName": "Project Run & Metric Search Index",
+          "purpose": "Index project and group run metadata, hyperparameters, tags, and selected metric values for search and comparison; make projection freshness visible."
+        }
+      }
+    },
+    {
+      "id": "mlops009_realtime_gateway",
+      "stepNumber": 15,
+      "phase": "Place the tracking and storage boundaries",
+      "title": "Add a WebSocket path for live training updates",
+      "type": "add_component",
+      "content": "Maintain project-authorized WebSocket subscriptions for active run metric updates. Fan out only after the event is accepted at the durable logging boundary; reconnecting clients can resume or refresh from stored history. The brief requires real-time streaming but does not give a separate push-latency target.",
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "mlops009_realtime_gateway",
+        "componentType": "backend-server",
+        "label": "Authorized WebSocket Metrics Gateway",
+        "description": "Project-scoped live metric fan-out to active experiment workspace subscribers.",
+        "position": {"x": 1540, "y": 40},
+        "highlightReason": "A separate push path streams accepted metrics without coupling browser connections to training workers.",
+        "properties": {
+          "componentName": "Authorized WebSocket Metrics Gateway",
+          "purpose": "Authorize project subscriptions and push accepted run metric events to workspace clients over WebSocket; reconnects recover from stored history."
+        }
+      }
+    },
+    {
+      "id": "mlops009_ui_api",
+      "stepNumber": 16,
+      "phase": "Connect logging and query paths",
+      "title": "Route workspace actions through the tracking API",
+      "type": "add_connection",
+      "content": "Send project/group selection, run search, comparison requests, annotations, and comments through the authenticated API. This edge represents client operations; the corresponding results and live updates return on their explicit query and WebSocket paths.",
+      "connection": {
+        "edgeId": "mlops009_ui_to_api",
+        "sourceNodeId": "mlops009_workspace",
+        "targetNodeId": "mlops009_ingestion_api",
+        "connectionType": "api-call",
+        "label": "Search, compare & collaborate requests",
+        "description": "Project-scoped workspace operations for search, comparison, annotations, and comments."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7"]
+    },
+    {
+      "id": "mlops009_sdk_api",
+      "stepNumber": 17,
+      "phase": "Connect logging and query paths",
+      "title": "Send framework logs through the shared contract",
+      "type": "add_connection",
+      "content": "Have PyTorch, TensorFlow, and scikit-learn adapters submit run metadata and metric events using the same API contract. Include project, run, worker, and event identity so multi-node logging can be deduplicated and traced without collapsing worker-level records; include the source revision and environment identity when registering a run so its provenance is recorded.",
+      "connection": {
+        "edgeId": "mlops009_sdk_to_api",
+        "sourceNodeId": "mlops009_framework_clients",
+        "targetNodeId": "mlops009_ingestion_api",
+        "connectionType": "api-call",
+        "label": "Framework logs & run context",
+        "description": "Shared validated contract for local and distributed framework clients."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:8"]
+    },
+    {
+      "id": "mlops009_api_tracking",
+      "stepNumber": 18,
+      "phase": "Connect logging and query paths",
+      "title": "Route validated operations to run tracking",
+      "type": "add_connection",
+      "content": "After authorization and validation, route run creation, parameter and source-revision/environment registration, metric appends, artifact manifests, and collaboration writes to the tracking service. Keep API request handling independent of the duration of model training or artifact transfer.",
+      "connection": {
+        "edgeId": "mlops009_api_to_tracking",
+        "sourceNodeId": "mlops009_ingestion_api",
+        "targetNodeId": "mlops009_tracking_service",
+        "connectionType": "api-call",
+        "label": "Validated run operations",
+        "description": "Authorized run, logging, artifact-manifest, and collaboration requests."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:7"]
+    },
+    {
+      "id": "mlops009_tracking_metadata",
+      "stepNumber": 19,
+      "phase": "Connect logging and query paths",
+      "title": "Persist run lineage and team annotations",
+      "type": "add_connection",
+      "content": "Persist project/group ownership, immutable run identity, parameters, code revision, environment reference, artifact manifest, annotations, and comments in the canonical metadata store. Keep references to credentials rather than secret values. Preserve records for the stated 2+ years.",
+      "connection": {
+        "edgeId": "mlops009_tracking_to_metadata",
+        "sourceNodeId": "mlops009_tracking_service",
+        "targetNodeId": "mlops009_metadata_store",
+        "connectionType": "database-connection",
+        "label": "Run lineage & collaboration records",
+        "description": "Canonical records for projects, groups, run context, artifacts, annotations, and comments."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlops009_tracking_log",
+      "stepNumber": 20,
+      "phase": "Connect logging and query paths",
+      "title": "Append accepted metric events durably",
+      "type": "add_connection",
+      "content": "Append each accepted metric event to the durable log with run, worker, metric, step, timestamp, and event identity. Return the logging acknowledgement only after the durable append succeeds. Measure this path against the brief's under-50ms target; do not claim compliance until its boundary and percentile are agreed and measured.",
+      "connection": {
+        "edgeId": "mlops009_tracking_to_metric_log",
+        "sourceNodeId": "mlops009_tracking_service",
+        "targetNodeId": "mlops009_metric_log",
+        "connectionType": "event-stream",
+        "label": "Durable append-only metric events",
+        "description": "Append acknowledged metric and run events with retry identity and distributed worker context."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "mlops009_log_materializer",
+      "stepNumber": 21,
+      "phase": "Connect logging and query paths",
+      "title": "Fan out durable events for history and live delivery",
+      "type": "add_connection",
+      "content": "Consume from the durable log independently for historical materialization, search projection, and live delivery. Track offsets and failed work so a consumer can replay without changing the already acknowledged append.",
+      "connection": {
+        "edgeId": "mlops009_log_to_materializer",
+        "sourceNodeId": "mlops009_metric_log",
+        "targetNodeId": "mlops009_materializer",
+        "connectionType": "event-stream",
+        "label": "Replayable metric event stream",
+        "description": "Durable events consumed asynchronously for query history and derived views."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "mlops009_materializer_metrics",
+      "stepNumber": 22,
+      "phase": "Connect logging and query paths",
+      "title": "Persist raw metric history idempotently",
+      "type": "add_connection",
+      "content": "Append the original metric event to queryable history using its event identity as the replay deduplication key. Keep derived aggregates separate and retain the raw run and worker association for the full stated history horizon.",
+      "connection": {
+        "edgeId": "mlops009_materializer_to_metrics",
+        "sourceNodeId": "mlops009_materializer",
+        "targetNodeId": "mlops009_metric_store",
+        "connectionType": "database-connection",
+        "label": "Idempotent metric history writes",
+        "description": "Append raw per-run metric events for historical queries and comparison."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlops009_api_artifact_control",
+      "stepNumber": 23,
+      "phase": "Connect logging and query paths",
+      "title": "Create a scoped artifact upload session",
+      "type": "add_connection",
+      "content": "Let the API authorize an upload for a specific project and run, then provide a scoped transfer capability and record the resulting manifest through the tracking service. Keep upload setup separate from the binary transfer so a large artifact does not occupy the metric logging path.",
+      "connection": {
+        "edgeId": "mlops009_api_to_artifacts",
+        "sourceNodeId": "mlops009_ingestion_api",
+        "targetNodeId": "mlops009_artifact_store",
+        "connectionType": "api-call",
+        "label": "Scoped upload session & manifest",
+        "description": "Authorize direct artifact transfer and associate its verified object reference with a run."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "mlops009_sdk_artifacts",
+      "stepNumber": 24,
+      "phase": "Connect logging and query paths",
+      "title": "Transfer artifact bytes directly to object storage",
+      "type": "add_connection",
+      "content": "Upload model and other run files directly from authorized framework clients, including distributed training workers, using a resumable or multipart transfer; verify the completed checksum before marking the manifest available. Enforce the stated maximum file size of 10GB; the brief gives no total project-storage limit.",
+      "connection": {
+        "edgeId": "mlops009_sdk_to_artifacts",
+        "sourceNodeId": "mlops009_framework_clients",
+        "targetNodeId": "mlops009_artifact_store",
+        "connectionType": "data-flow",
+        "label": "Verified run artifact bytes",
+        "description": "Direct resumable transfer of a run artifact up to the stated 10GB file limit."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "mlops009_metadata_search",
+      "stepNumber": 25,
+      "phase": "Connect logging and query paths",
+      "title": "Project run metadata into the search index",
+      "type": "add_connection",
+      "content": "Project searchable parameters, project/group identity, tags, and run metadata into the derived index. Preserve canonical metadata in the database and make index freshness visible because the brief does not promise a specific search consistency delay.",
+      "connection": {
+        "edgeId": "mlops009_metadata_to_search",
+        "sourceNodeId": "mlops009_metadata_store",
+        "targetNodeId": "mlops009_search_index",
+        "connectionType": "data-flow",
+        "label": "Project, group & parameter projection",
+        "description": "Derived searchable fields from canonical experiment run metadata."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "mlops009_metrics_search",
+      "stepNumber": 26,
+      "phase": "Connect logging and query paths",
+      "title": "Index selected metric values for filtering",
+      "type": "add_connection",
+      "content": "Update searchable metric projections from materialized events. Define which metric values and time semantics are filterable with the product; keep the index a query aid rather than the canonical metric history.",
+      "connection": {
+        "edgeId": "mlops009_materializer_to_search",
+        "sourceNodeId": "mlops009_materializer",
+        "targetNodeId": "mlops009_search_index",
+        "connectionType": "data-flow",
+        "label": "Derived metric filter projection",
+        "description": "Selected metric fields for project-scoped search and experiment comparison."
+      },
+      "requirementIds": ["legacy-requirement:6"]
+    },
+    {
+      "id": "mlops009_api_search",
+      "stepNumber": 27,
+      "phase": "Connect logging and query paths",
+      "title": "Query by project, parameter, and metric",
+      "type": "add_connection",
+      "content": "Route project-scoped parameter and metric filters through the search index. Apply authorization before returning results, and fetch canonical run metadata or metric series for selected results. Validate queries against the stated 10k+ experiments per project without inventing a response-time threshold.",
+      "connection": {
+        "edgeId": "mlops009_api_to_search",
+        "sourceNodeId": "mlops009_ingestion_api",
+        "targetNodeId": "mlops009_search_index",
+        "connectionType": "api-call",
+        "label": "Authorized project-scoped filters",
+        "description": "Search by hyperparameters and selected metric values within the caller's project scope."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "mlops009_search_workspace",
+      "stepNumber": 28,
+      "phase": "Connect logging and query paths",
+      "title": "Return comparison candidates to the workspace",
+      "type": "add_connection",
+      "content": "Return filtered run candidates with the fields needed to select experiments and compare them. Load full metric series from canonical history for chosen runs, and label any indexed values whose projection is still catching up.",
+      "connection": {
+        "edgeId": "mlops009_search_to_workspace",
+        "sourceNodeId": "mlops009_search_index",
+        "targetNodeId": "mlops009_workspace",
+        "connectionType": "data-flow",
+        "label": "Filtered runs & comparison candidates",
+        "description": "Search results for interactive project and experiment comparison views."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "mlops009_collaboration_flow",
+      "stepNumber": 29,
+      "phase": "Connect logging and query paths",
+      "title": "Persist annotations and comments with run context",
+      "type": "explanation",
+      "content": "Use the workspace-to-API and API-to-tracking paths for annotations and comments. Store author, project/run scope, content, and creation identity with the canonical run metadata; enforce access at the server boundary. Do not rely on browser-only visibility checks for team collaboration.",
+      "requirementIds": ["legacy-requirement:7"]
+    },
+    {
+      "id": "mlops009_metrics_compare",
+      "stepNumber": 30,
+      "phase": "Connect logging and query paths",
+      "title": "Load exact metric series for selected runs",
+      "type": "add_connection",
+      "content": "Fetch selected experiment time series from the append-only metric history store for charts and direct comparisons. Retain the history needed to compare runs across the full stated 2+ years. Search projections help find candidate runs; they must not silently replace the canonical values used to inspect a selected run.",
+      "connection": {
+        "edgeId": "mlops009_metrics_to_api",
+        "sourceNodeId": "mlops009_metric_store",
+        "targetNodeId": "mlops009_ingestion_api",
+        "connectionType": "database-connection",
+        "label": "Canonical selected-run metric series",
+        "description": "Historical metric values used by run detail and interactive comparison."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlops009_log_realtime",
+      "stepNumber": 31,
+      "phase": "Connect logging and query paths",
+      "title": "Deliver accepted events to live subscribers",
+      "type": "add_connection",
+      "content": "Fan out accepted metric events from the durable log to the WebSocket gateway. Keep subscriber delivery independent of the durable append acknowledgement; a disconnected browser can refresh from persisted history.",
+      "connection": {
+        "edgeId": "mlops009_log_to_realtime",
+        "sourceNodeId": "mlops009_metric_log",
+        "targetNodeId": "mlops009_realtime_gateway",
+        "connectionType": "event-stream",
+        "label": "Accepted live metric events",
+        "description": "Post-append event delivery for active project and run subscriptions."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "mlops009_realtime_workspace",
+      "stepNumber": 32,
+      "phase": "Connect logging and query paths",
+      "title": "Push live metrics into open experiment views",
+      "type": "add_connection",
+      "content": "Push authorized run updates over WebSocket to the workspace. Include run and metric identity so updates reach the right chart; on reconnect, refresh from stored history and resume without treating an unconfirmed browser delivery as a successful durable log.",
+      "connection": {
+        "edgeId": "mlops009_realtime_to_workspace",
+        "sourceNodeId": "mlops009_realtime_gateway",
+        "targetNodeId": "mlops009_workspace",
+        "connectionType": "event-stream",
+        "label": "WebSocket live metric updates",
+        "description": "Project-authorized metric updates for active experiment comparison views."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "mlops009_visualizations",
+      "stepNumber": 33,
+      "phase": "Make comparison and reproducibility explicit",
+      "title": "Compare runs with views that answer different questions",
+      "type": "explanation",
+      "content": "Provide metric-over-step and metric-over-time charts for training behavior, side-by-side metric and parameter tables for direct comparison, and parallel coordinates for exploring hyperparameter combinations. Keep metric definitions, units, and aggregation choices visible; do not compare differently defined values as if they were interchangeable.",
+      "requirementIds": ["legacy-requirement:3"]
+    },
+    {
+      "id": "mlops009_multinode_semantics",
+      "stepNumber": 34,
+      "phase": "Make comparison and reproducibility explicit",
+      "title": "Preserve worker-level events before aggregation",
+      "type": "decision_point",
+      "content": "Distributed workers can report the same metric name at different steps or times. Preserve each event with its worker identity and ordering context, then apply an explicit metric-specific aggregation policy for a run-level chart. The brief requires multi-node logging but does not prescribe whether a metric should be summed, averaged, or selected from one worker.",
+      "decision": {
+        "question": "How should multi-node values with the same metric name be represented?",
+        "chosen": "Persist raw worker events and make any run-level aggregation policy explicit per metric or visualization.",
+        "chosenReason": "Keeping source events allows the team to inspect worker differences and change presentation without rewriting the original log.",
+        "alternatives": [
+          {
+            "option": "Overwrite one shared metric value on every worker report",
+            "tradeoff": "Concurrent reports can race and erase worker context."
+          },
+          {
+            "option": "Apply one global aggregation to every metric",
+            "tradeoff": "Different metrics may have different meanings and require different aggregation semantics."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5"]
+    },
+    {
+      "id": "mlops009_reproducibility",
+      "stepNumber": 35,
+      "phase": "Make comparison and reproducibility explicit",
+      "title": "Pin code and environment references on each run",
+      "type": "decision_point",
+      "content": "Record the source commit, dependency or environment identity, framework version, parameters, and artifact manifest with the run. Prefer immutable references such as commit and image or lockfile digests where the execution environment exposes them. The brief requires code and environment tracking; the exact packaging mechanism is a design choice. This provenance supports inspection and attempted reruns, but does not prove model quality, generalization, statistical validity, or bit-for-bit reproducibility; evaluate model quality separately with an agreed dataset and evaluation protocol.",
+      "decision": {
+        "question": "How can a team identify the code and environment behind a result?",
+        "chosen": "Persist immutable source and environment references as part of the canonical run lineage.",
+        "chosenReason": "The stored references make the result interpretable and provide the inputs needed for a later reproduction attempt.",
+        "alternatives": [
+          {
+            "option": "Record only a branch name and environment label",
+            "tradeoff": "Both can change while retaining the same label."
+          },
+          {
+            "option": "Copy all source and environment files into metadata rows",
+            "tradeoff": "This duplicates large artifacts and mixes identity records with file storage."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2"]
+    },
+    {
+      "id": "mlops009_scale_project",
+      "stepNumber": 36,
+      "phase": "Validate the stated constraints and failure paths",
+      "title": "Validate search at 10k+ experiments per project",
+      "type": "scale_trigger",
+      "content": "The stated scale is 10k+ experiments per project. Exercise project and group filters over that history with realistic parameter and metric cardinality from product measurements. Observe index freshness and query behavior, and partition or reshape the projection only when measured project access patterns require it; the brief supplies no query-latency target.",
+      "scaleTrigger": {
+        "metric": "Search and filter correctness over 10k+ experiments per project",
+        "action": "Measure filter plans, index size, and freshness with representative project data; adjust partitioning and projections if observed workload requires it.",
+        "impact": "Checks the stated per-project scale without inventing an event rate, cardinality, or response-time objective."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "mlops009_scale_latency",
+      "stepNumber": 37,
+      "phase": "Validate the stated constraints and failure paths",
+      "title": "Measure metric logging against under 50ms",
+      "type": "scale_trigger",
+      "content": "Measure SDK submission through durable append acknowledgement against the stated under-50ms objective, then confirm with the interviewer that this is the intended boundary and percentile. Break measurements down by validation, broker append, and client/network contribution. Do not include asynchronous search or browser rendering in the acknowledged write unless the agreed definition says to.",
+      "scaleTrigger": {
+        "metric": "Metric logging latency; brief target is under 50ms, with boundary and percentile to confirm",
+        "action": "Measure the accepted SDK submission to durable append acknowledgement and profile each synchronous stage if it approaches or exceeds the stated target.",
+        "impact": "Keeps metric writes independent of indexing, chart rendering, and artifact transfer while making the stated objective testable."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "mlops009_scale_artifact",
+      "stepNumber": 38,
+      "phase": "Validate the stated constraints and failure paths",
+      "title": "Exercise artifact transfer up to 10GB",
+      "type": "scale_trigger",
+      "content": "Test the largest stated artifact file size, 10GB, through interrupted and resumed upload, checksum verification, manifest completion, and download authorization. Keep artifact transfer separate from metric logging and ask for expected concurrent uploads and aggregate storage before sizing capacity.",
+      "scaleTrigger": {
+        "metric": "Successful verified upload and retrieval of an artifact file up to 10GB",
+        "action": "Exercise resumable transfer and checksum validation at the stated maximum file size; size concurrency after the upload workload is provided.",
+        "impact": "Verifies the explicit per-file requirement while avoiding assumptions about total storage or simultaneous transfer volume."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "mlops009_scale_realtime",
+      "stepNumber": 39,
+      "phase": "Validate the stated constraints and failure paths",
+      "title": "Verify real-time delivery and reconnect recovery",
+      "type": "scale_trigger",
+      "content": "During training, confirm that accepted metrics reach authorized open views through the WebSocket path. Disconnect clients and consumers, then verify reconnect and event replay from the durable log and metric history. The brief gives no separate update-delay objective, so record observed delivery behavior without claiming an unstated bound.",
+      "scaleTrigger": {
+        "metric": "Accepted training metric events delivered to active WebSocket subscribers and recoverable after disconnect",
+        "action": "Exercise live subscriptions, consumer restart, client reconnect, and replay while checking event identity and project authorization.",
+        "impact": "Checks the real-time streaming requirement separately from the under-50ms durable logging acknowledgement."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "mlops009_scale_retention",
+      "stepNumber": 40,
+      "phase": "Validate the stated constraints and failure paths",
+      "title": "Prove experiment history remains available for 2+ years",
+      "type": "scale_trigger",
+      "content": "Validate that run metadata—including source revision and environment identity—and metric history remain queryable for the stated 2+ years. Test artifact references under the separately approved artifact-retention policy. The brief does not state whether artifact bytes share the experiment-history horizon or define deletion and legal-hold behavior; resolve those policies before lifecycle automation.",
+      "scaleTrigger": {
+        "metric": "Availability of experiment history for 2+ years",
+        "action": "Verify configured metadata and metric-history retention and test that historical run references remain readable across the required horizon.",
+        "impact": "Proves the stated experiment-history horizon and surfaces the unresolved artifact and deletion policies."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlops009_failure_replay",
+      "stepNumber": 41,
+      "phase": "Validate the stated constraints and failure paths",
+      "title": "Recover consumers without losing or duplicating metric events",
+      "type": "explanation",
+      "content": "If a materializer or search projector fails after an event is appended, retain the event and retry from its recorded position. Make writes idempotent by event identity, expose consumer lag and failures, and compare the rebuilt history with the durable event log. Browser delivery and index freshness may lag; neither should change whether the metric append was acknowledged.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "mlops009_consistency_decision",
+      "stepNumber": 42,
+      "phase": "Validate the stated constraints and failure paths",
+      "title": "Choose and expose search freshness semantics",
+      "type": "decision_point",
+      "content": "Run and metric writes are durable before derived search projections are necessarily current. The brief requires search and comparison but does not set a freshness or read-after-write guarantee. Make the chosen behavior visible in the product and ask whether a newly logged run must be immediately searchable or whether canonical run detail is enough while indexing catches up.",
+      "decision": {
+        "question": "What should users see when a newly logged run is not yet in the search projection?",
+        "chosen": "Expose projection freshness and allow the canonical run record to be opened while indexing catches up; confirm any stronger freshness promise with product owners.",
+        "chosenReason": "This keeps derived-index delay distinct from durable run creation without inventing a freshness threshold.",
+        "alternatives": [
+          {
+            "option": "Treat the search index as the canonical run store",
+            "tradeoff": "Index rebuild or delay can then obscure the authoritative run history."
+          },
+          {
+            "option": "Promise immediate search visibility without an agreed target",
+            "tradeoff": "That introduces an unstated consistency and latency commitment."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6"]
+    },
+    {
+      "id": "mlops009_acceptance",
+      "stepNumber": 43,
+      "phase": "Validate the stated constraints and failure paths",
+      "title": "Walk representative end-to-end acceptance cases",
+      "type": "explanation",
+      "content": "Create a run from each named framework adapter; log parameters, environment, code identity, and metrics from multiple workers; upload and verify a file at the stated maximum; search and compare runs with metric and parameter filters; add an annotation and comment; and observe live updates. Then replay consumer failures and verify history retention against 2+ years. Report measured results against the exact brief and keep unspecified traffic, freshness, and availability targets as open questions.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlops009_conclusion",
+      "stepNumber": 44,
+      "phase": "Validate the stated constraints and failure paths",
+      "title": "Record the decisions that still need product input",
+      "type": "conclusion",
+      "content": "The design separates fast durable metric append, long-term metric history, derived search, large artifact transfer, and live WebSocket delivery while keeping run identity and team collaboration canonical. Before implementation sizing, confirm the metric latency boundary and percentile, logging event volume and cardinality, search freshness, concurrent artifact transfers, authorization policy, metric aggregation semantics, and artifact retention. These are unresolved inputs; the walkthrough does not claim they are already measured or decided.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

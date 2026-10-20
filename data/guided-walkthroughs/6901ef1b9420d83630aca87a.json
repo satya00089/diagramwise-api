@@ -1,0 +1,250 @@
+{
+  "problem_id": "6901ef1b9420d83630aca87a",
+  "version": "1.0-review",
+  "requirementRevision": null,
+  "totalSteps": 42,
+  "phases": [
+    {"name": "Frame the presence contract", "stepRange": [1, 9], "description": "Restate the brief, label assumptions, and connect the viewer to an authenticated realtime entry point and presence coordinator."},
+    {"name": "Track active viewers and publish counts", "stepRange": [10, 21], "description": "Keep expiring per-page presence in Redis, make transitions idempotent, and distribute count snapshots to connected viewers."},
+    {"name": "Scale pages and observe the service", "stepRange": [22, 28], "description": "Partition independent pages, identify hot-page fanout, and scale from measured capacity while collecting operational signals."},
+    {"name": "Recover from disconnects and delivery failures", "stepRange": [29, 37], "description": "Expire abandoned leases, repair missed notifications, and show bounded stale or unavailable states instead of false zeroes."},
+    {"name": "Review assumptions and validate behavior", "stepRange": [38, 42], "description": "Resolve product contracts, define evidence-based latency and scale targets, and validate churn, recovery, and count quality."}
+  ],
+  "steps": [
+    {
+      "id": "presence_01", "stepNumber": 1, "phase": "Frame the presence contract", "title": "Read the frozen problem brief", "type": "explanation",
+      "content": "The functional requirements are to count active users on a page, update the count in real time, handle joins and leaves, support millions of concurrent pages, allow approximate counts, keep updates low latency, and recover gracefully from dropped connections. The stated constraints are near-real-time updates within seconds, millions of pages, memory-efficient counting, stale-connection handling, and acceptable eventual consistency. The brief gives no traffic distribution, identity contract, exact freshness/error budget, or deployment choice.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_02", "stepNumber": 2, "phase": "Frame the presence contract", "title": "Keep assumptions visible", "type": "explanation",
+      "content": "For this draft, a viewer is one stable, page-scoped user identity; multiple tabs for that identity count once while at least one session remains live. Authenticated identity is preferred, while anonymous pages need a short-lived opaque session identifier. Assume clients can open secure WebSockets and send heartbeats, and that a Redis-compatible clustered store and pub/sub delivery are available. These are design assumptions to confirm, not facts or capacity guarantees from the problem.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_03", "stepNumber": 3, "phase": "Frame the presence contract", "title": "Choose what one viewer means", "type": "decision_point",
+      "content": "The displayed number is a count of distinct active viewer identities for one page, not a count of open sockets. An identity must be scoped to the tenant or public page boundary so one user's presence cannot leak into another page's count.",
+      "decision": {"question": "How should multiple tabs and reconnects affect one user's count?", "chosen": "Use a stable page-scoped viewer identity with an idempotent session reference count; count that identity once until its final live session leaves or its lease expires.", "chosenReason": "This matches the word users, avoids duplicate increments on reconnect, and gives dropped sessions a bounded cleanup path. Identity and anonymous-session rules still need product approval.", "alternatives": [{"option": "Count every WebSocket connection", "tradeoff": "Multiple tabs and reconnect overlap inflate the user count."}, {"option": "Trust a client-supplied user ID without server scoping", "tradeoff": "A client could affect another user's presence or page count."}]},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_04", "stepNumber": 4, "phase": "Frame the presence contract", "title": "Add the page viewer client", "type": "add_component",
+      "content": "The page renders a count with its freshness state, opens a secure WebSocket, and sends join, heartbeat, and leave intent for the current page. It reconnects with jittered backoff and treats the server's snapshot as authoritative; it does not locally increment the displayed total as if that were durable state.",
+      "component": {"nodeId": "presence_client", "componentType": "web-app", "label": "Page Viewer Client", "description": "Displays the active viewer count and maintains page presence", "position": {"x": 0, "y": 240}, "properties": {"componentName": "Page Viewer Client", "purpose": "Render an active-viewer count with freshness metadata; open a secure WebSocket; send page-scoped join, heartbeat, and leave intent; reconnect with jittered backoff; and render server snapshots instead of treating local socket events as authoritative counts."}, "highlightReason": "The existing Web App catalog component represents the browser client without adding a new component type."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_05", "stepNumber": 5, "phase": "Frame the presence contract", "title": "Add the realtime entry point", "type": "add_component",
+      "content": "Terminate secure WebSocket sessions, validate page and identity scope, apply connection and message limits, and route each event to a presence worker. Keep connection ownership and page subscriptions available to every gateway instance that may send a count update.",
+      "component": {"nodeId": "presence_gateway", "componentType": "api-gateway", "label": "Realtime API Gateway", "description": "Secure WebSocket ingress and page-scoped routing", "position": {"x": 320, "y": 240}, "properties": {"componentName": "Realtime API Gateway", "purpose": "Terminate secure WebSocket sessions, validate page and viewer scope, enforce connection and message limits, route presence events to workers, and maintain a distributed mapping from page subscriptions to live gateway sessions."}, "highlightReason": "The existing API Gateway represents the public realtime boundary using supported catalog fields."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_06", "stepNumber": 6, "phase": "Frame the presence contract", "title": "Open a secure presence session", "type": "add_connection",
+      "content": "The client sends page-scoped presence events over WSS. The connection is long-lived, but the gateway must not assume that a TCP/WebSocket close event will always arrive when a viewer disappears.",
+      "connection": {"edgeId": "presence_client_gateway", "sourceNodeId": "presence_client", "targetNodeId": "presence_gateway", "connectionType": "http", "label": "WSS presence session", "description": "Secure WebSocket join, heartbeat, leave, and count-snapshot channel; HTTP catalog type represents the secure web transport."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_07", "stepNumber": 7, "phase": "Frame the presence contract", "title": "Add the presence coordinator", "type": "add_component",
+      "content": "Validate presence events, apply idempotent state transitions, read the active count, and publish versioned page snapshots. Keep workers stateless so a restart does not lose the authoritative presence state held in Redis.",
+      "component": {"nodeId": "presence_service", "componentType": "backend-server", "label": "Presence Service", "description": "Applies viewer leases and produces page count snapshots", "position": {"x": 640, "y": 240}, "properties": {"componentName": "Presence Service", "purpose": "Validate tenant- and page-scoped join, heartbeat, and leave events; apply idempotent viewer-lease transitions; read active counts; publish versioned snapshots; and avoid keeping authoritative presence only in worker memory."}, "highlightReason": "The existing Backend Server represents stateless presence logic using supported catalog fields."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_08", "stepNumber": 8, "phase": "Frame the presence contract", "title": "Route events to presence workers", "type": "add_connection",
+      "content": "Pass validated session events to the coordinator with a stable event or session key. A retry after a gateway timeout must return the same transition result instead of applying a second increment.",
+      "connection": {"edgeId": "presence_gateway_service", "sourceNodeId": "presence_gateway", "targetNodeId": "presence_service", "connectionType": "http", "label": "Validated presence events", "description": "Page-scoped join, heartbeat, and leave events with stable idempotency identity."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_09", "stepNumber": 9, "phase": "Frame the presence contract", "title": "Trace the join-to-display path", "type": "explanation",
+      "content": "A viewer joins a page through the gateway; the service creates or refreshes that viewer's lease; the count is read from shared presence state; and a versioned snapshot is sent to subscribed sessions. Leave, expiry, reconnect, and fanout behavior are part of this same flow, not client-side arithmetic.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_10", "stepNumber": 10, "phase": "Track active viewers and publish counts", "title": "Add the expiring presence store", "type": "add_component",
+      "content": "Store only active page-scoped viewer leases and small per-viewer session references. Redis Cluster is a replaceable implementation assumption; page-key partitioning and TTLs prevent abandoned page state from accumulating forever. The illustrative 15-second TTL is a starting value for validation, not a promised freshness bound.",
+      "component": {"nodeId": "presence_store", "componentType": "cache", "label": "Redis Presence Store", "description": "Sharded active-viewer leases and page counts", "position": {"x": 960, "y": 240}, "properties": {"componentName": "Redis Presence Store", "purpose": "Keep only active page-scoped viewer leases, per-viewer session references, expiry timestamps, and versioned count state; partition by page identity, expire abandoned state, and validate memory and hot-key behavior under measured load.", "engine": "redis", "ttl": 15, "replication": true, "clusterMode": true, "encryption": true}, "highlightReason": "The existing Cache component supports Redis, lease expiry, replication, clustering, and in-transit encryption."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_11", "stepNumber": 11, "phase": "Track active viewers and publish counts", "title": "Read and update shared leases", "type": "add_connection",
+      "content": "The service performs bounded page-local lease transitions and reads the current count from shared state. Keep the Redis key and data model explicit enough to test expiry, user deduplication, and atomicity; do not infer a particular Redis command's guarantees without validating the chosen deployment and version.",
+      "connection": {"edgeId": "presence_service_store", "sourceNodeId": "presence_service", "targetNodeId": "presence_store", "connectionType": "database-connection", "label": "Atomic lease and count operations", "description": "Page-partitioned active viewer state, expiry, idempotent membership transitions, and count reads."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_12", "stepNumber": 12, "phase": "Track active viewers and publish counts", "title": "Model a page-scoped viewer lease", "type": "explanation",
+      "content": "A page state contains distinct viewer identities, their live session references, lease deadlines, and a monotonically increasing version. Join increments the distinct-user count only on the absent-to-present transition; leave decrements only when the final session disappears. Expiry cleanup performs the same transition when a disconnect is lost, and empty page state expires after cleanup.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_13", "stepNumber": 13, "phase": "Track active viewers and publish counts", "title": "Make joins and leaves idempotent", "type": "decision_point",
+      "content": "Apply a join or final-session leave as one atomic state transition keyed by page, viewer, and event identity. Record enough state to ignore duplicate retries and to avoid a negative count if leave is delivered more than once.",
+      "decision": {"question": "How should retries and duplicated leave events affect the count?", "chosen": "Use an atomic absent/present transition with a stable event key; update the distinct-user count only when membership changes, and reconcile the event result on retry.", "chosenReason": "WebSocket and service retries are normal failure behavior. Idempotent membership transitions prevent duplicate increments and decrements from corrupting the count.", "alternatives": [{"option": "Increment and decrement for every event", "tradeoff": "Retries, duplicated close events, or reconnect overlap can drift the count below zero or above reality."}, {"option": "Keep the only count in each worker's memory", "tradeoff": "A worker restart or load-balancer reroute loses or splits authoritative state."}]},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_14", "stepNumber": 14, "phase": "Track active viewers and publish counts", "title": "Deduplicate tabs without hiding active viewers", "type": "explanation",
+      "content": "Track session references under the stable viewer identity. Closing one tab removes only that session; the user leaves the page only when no session remains. A lost tab is eventually removed when its lease expires, even if the browser never reports a clean close.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_15", "stepNumber": 15, "phase": "Track active viewers and publish counts", "title": "Renew presence with heartbeats", "type": "explanation",
+      "content": "Clients renew their lease periodically; the service extends the deadline only for a valid, currently subscribed session. A heartbeat interval and the number of missed renewals must be selected from the seconds-level freshness target and measured network behavior. The 15-second store TTL shown in this draft is illustrative and must be tuned with the heartbeat cadence, churn, and failure tests.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_16", "stepNumber": 16, "phase": "Track active viewers and publish counts", "title": "Use approximation without losing leave semantics", "type": "decision_point",
+      "content": "Approximation is allowed, but the displayed value still represents currently active viewers and must respond to departures. Keep expiring active membership as the baseline design; round or coalesce published counts if that meets the product's accuracy needs. A plain HyperLogLog cannot delete one departed viewer, so it must not be the sole current-presence state unless an expiring-window design proves acceptable staleness and error.",
+      "decision": {"question": "Should the initial live count use a deletion-blind cardinality sketch?", "chosen": "Use expiring, deduplicated active membership for the initial design and allow a rounded display; evaluate a deletion-capable sampled or windowed approximation only with measured error and expiry bounds.", "chosenReason": "This honors the optional approximation while retaining a credible leave and stale-connection path. Exact capacity and memory suitability remain to be demonstrated under the real page distribution.", "alternatives": [{"option": "Use one HyperLogLog per page as the complete active count", "tradeoff": "A departed viewer remains in the estimate until the entire sketch is discarded."}, {"option": "Require exact counts forever", "tradeoff": "May spend unnecessary memory and fanout work when the product explicitly permits approximation."}]},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_17", "stepNumber": 17, "phase": "Track active viewers and publish counts", "title": "Add the count update channel", "type": "add_component",
+      "content": "Publish compact page-scoped count snapshots or deltas with a version, event time, and freshness information. Pub/sub is used for low-latency fanout, not as the authoritative lease store or a promise that every notification is durably replayable.",
+      "component": {"nodeId": "presence_bus", "componentType": "message-broker", "label": "Presence Update Bus", "description": "Distributes versioned page count changes", "position": {"x": 960, "y": 520}, "properties": {"componentName": "Presence Update Bus", "purpose": "Use pub/sub to distribute compact, page-scoped count snapshots or deltas with monotonically increasing versions and event time to subscribed gateways; keep authoritative leases in the presence store and provide a snapshot-resync path after missed notifications."}, "highlightReason": "The existing Message Broker catalog type supports the publish-subscribe role without introducing a new component."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_18", "stepNumber": 18, "phase": "Track active viewers and publish counts", "title": "Publish changed page counts", "type": "add_connection",
+      "content": "The service emits an update only after the membership transition is accepted. Coalesce multiple changes for the same page over a short, measured interval when traffic is high, while keeping the resulting display within the seconds-level target.",
+      "connection": {"edgeId": "presence_service_bus", "sourceNodeId": "presence_service", "targetNodeId": "presence_bus", "connectionType": "message-queue", "label": "Versioned count changes", "description": "Low-latency pub/sub updates emitted after accepted membership transitions; snapshots repair gaps."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_19", "stepNumber": 19, "phase": "Track active viewers and publish counts", "title": "Deliver updates to subscribed gateways", "type": "add_connection",
+      "content": "Gateways subscribe only to pages with local live sessions and route each versioned update to those sessions. Remove subscriptions when their final local session closes, and make subscription changes idempotent across gateway reconnects.",
+      "connection": {"edgeId": "presence_bus_gateway", "sourceNodeId": "presence_bus", "targetNodeId": "presence_gateway", "connectionType": "message-queue", "label": "Page update fanout", "description": "Versioned page snapshots delivered to gateways with active local subscribers."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_20", "stepNumber": 20, "phase": "Track active viewers and publish counts", "title": "Render the newest count snapshot", "type": "add_connection",
+      "content": "The gateway sends the newest accepted page version to connected clients. Clients ignore older versions and display the count with its observation time so delayed delivery is visible rather than mistaken for a fresh result.",
+      "connection": {"edgeId": "presence_gateway_client_updates", "sourceNodeId": "presence_gateway", "targetNodeId": "presence_client", "connectionType": "data-flow", "label": "Count snapshot over WebSocket", "description": "Latest page count, version, and freshness metadata; superseded updates may be coalesced."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_21", "stepNumber": 21, "phase": "Track active viewers and publish counts", "title": "Keep the write path small", "type": "explanation",
+      "content": "A page join or leave updates only that page's membership state and produces a compact event; it does not scan every page or broadcast a full roster. This bounds routine work by the affected page and connected subscribers, while the actual memory and throughput cost still depends on active viewers, churn, and subscription fanout.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_22", "stepNumber": 22, "phase": "Scale pages and observe the service", "title": "Partition by page and measure skew", "type": "scale_trigger",
+      "content": "Shard independent page keys across the presence-store cluster and route updates by the same page identity. Track page-count distribution and per-shard CPU, memory, request latency, and hot-key concentration; millions of page keys alone do not establish a safe capacity number.",
+      "scaleTrigger": {"metric": "Per-shard memory, operation latency, connection churn, or page-key skew approaches an owner-approved capacity envelope", "action": "Add capacity or revise partitioning after measuring the bottleneck; move or stripe hot-page state only with a count aggregation and failure-recovery plan.", "impact": "Scales high-cardinality pages while making the hot-page and rebalancing costs explicit instead of claiming an unsupported page limit."},
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_23", "stepNumber": 23, "phase": "Scale pages and observe the service", "title": "Add presence observability", "type": "add_component",
+      "content": "Measure freshness and correctness as well as infrastructure load. Emit bounded-cardinality metrics for join/leave outcomes, lease expiries, count versions, update age, WebSocket reconnects, broker lag, Redis latency, memory, and fanout drops; never use raw page or user identifiers as metric labels.",
+      "component": {"nodeId": "presence_monitor", "componentType": "monitoring", "label": "Presence Monitoring", "description": "Tracks count freshness, churn, capacity, and recovery", "position": {"x": 640, "y": 520}, "properties": {"componentName": "Presence Monitoring", "purpose": "Observe join/leave outcomes, lease expiries, active page and viewer cardinality, count update age, reconnects, broker lag, Redis latency and memory, fanout drops, and alerts using bounded-cardinality labels that omit raw user and page identifiers.", "metrics": true, "alerts": true}, "highlightReason": "The existing Monitoring component provides the catalog's metrics and alerting controls."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_24", "stepNumber": 24, "phase": "Scale pages and observe the service", "title": "Export service health signals", "type": "add_connection",
+      "content": "Export aggregated service health and presence metrics to monitoring. Keep high-cardinality identifiers in access-controlled diagnostic logs only when needed, with an explicit retention policy.",
+      "connection": {"edgeId": "presence_service_monitor", "sourceNodeId": "presence_service", "targetNodeId": "presence_monitor", "connectionType": "data-flow", "label": "Aggregated health metrics", "description": "Bounded-cardinality latency, churn, lease, count-freshness, and error signals."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_25", "stepNumber": 25, "phase": "Scale pages and observe the service", "title": "Separate many pages from one hot page", "type": "decision_point",
+      "content": "Page-key sharding spreads a large number of independent pages, but a single popular page can still concentrate membership writes and fanout. Escalate that page separately: coalesce updates, keep the count path bounded, and consider striped state only after proving the merged count and expiry behavior.",
+      "decision": {"question": "What should happen when one page dominates load?", "chosen": "Detect hot pages from aggregate metrics, coalesce superseded updates, then evaluate bounded stripes or a dedicated partition with a measured count-merge and failover design.", "chosenReason": "Ordinary page sharding does not split one hot key. Explicitly measuring and treating skew avoids assuming cluster mode alone removes that bottleneck.", "alternatives": [{"option": "Increase every shard uniformly", "tradeoff": "Does not necessarily relieve the one key receiving concentrated traffic."}, {"option": "Split a page key without a merge protocol", "tradeoff": "Can publish partial or double-counted totals during normal operation and recovery."}]},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_26", "stepNumber": 26, "phase": "Scale pages and observe the service", "title": "Bound fanout and client work", "type": "decision_point",
+      "content": "Do not enqueue every intermediate count for a slow client. Keep only the newest version per page, apply bounded send queues and timeouts, and disconnect persistently slow sessions so one subscriber cannot consume unbounded memory or stall other viewers.",
+      "decision": {"question": "How should the gateway handle a client that cannot keep up?", "chosen": "Coalesce pending updates to the latest page version, cap per-session buffering, and close the slow session after the configured delivery policy is exceeded; the client reconnects and requests a snapshot.", "chosenReason": "Counts are replaceable state snapshots, so stale intermediate values do not need durable per-client buffering. The queue cap and timeout must be measured and configured.", "alternatives": [{"option": "Buffer every count event until the client catches up", "tradeoff": "A slow subscriber can consume unbounded memory and delay unrelated updates."}, {"option": "Silently drop updates without resynchronizing", "tradeoff": "The client may display a count that stays stale indefinitely."}]},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_27", "stepNumber": 27, "phase": "Scale pages and observe the service", "title": "Alert on freshness and correctness", "type": "explanation",
+      "content": "Alert on count age beyond the agreed seconds-level budget, lease-expiry spikes, Redis evictions or memory pressure, broker delivery lag, reconnect storms, duplicate-transition rejections, and gateway fanout saturation. Thresholds need owner approval and baseline measurements; no numerical SLO is supplied by the problem.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_28", "stepNumber": 28, "phase": "Scale pages and observe the service", "title": "Scale workers from measured pressure", "type": "scale_trigger",
+      "content": "Scale presence workers on measured CPU, event queue delay, and store latency, while scaling gateway capacity on live sessions, outbound bandwidth, and fanout. Increasing workers cannot fix a saturated Redis shard, a hot page, or an egress limit by itself.",
+      "scaleTrigger": {"metric": "Worker event delay or CPU, store operation latency, gateway session count, or outbound fanout approaches its measured safe range", "action": "Scale or rebalance the constrained tier and verify count freshness, expiry, and duplicate-event behavior during the change.", "impact": "Protects the low-latency path while tying capacity decisions to observed bottlenecks rather than invented concurrency guarantees."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_29", "stepNumber": 29, "phase": "Recover from disconnects and delivery failures", "title": "Expire a dropped connection safely", "type": "explanation",
+      "content": "A clean close removes that session reference immediately. If the gateway or network disappears without a close event, heartbeat renewal stops and the lease expires; cleanup removes the viewer only when no other live session remains. The displayed total can temporarily overcount until expiry, so tune and expose that bound against the seconds-level requirement.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_30", "stepNumber": 30, "phase": "Recover from disconnects and delivery failures", "title": "Do not turn a store outage into zero viewers", "type": "decision_point",
+      "content": "If the presence store cannot answer, the service cannot claim that the page is empty. Preserve a bounded last-known snapshot with its age, retry the shared store, and stop presenting the value as fresh when its configured maximum age is exceeded.",
+      "decision": {"question": "What should users see while authoritative count state is unavailable?", "chosen": "Show the last-known count as stale for a bounded interval, then show count unavailable; recover from shared state before publishing a fresh value.", "chosenReason": "A false zero is misleading and can create a sharp count discontinuity. Explicit freshness communicates the temporary uncertainty without inventing a value.", "alternatives": [{"option": "Return zero whenever Redis times out", "tradeoff": "Conflates an infrastructure failure with a genuinely empty page."}, {"option": "Keep serving an unbounded process-local count", "tradeoff": "The value can diverge across workers and remain stale without a visible limit."}]},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_31", "stepNumber": 31, "phase": "Recover from disconnects and delivery failures", "title": "Repair a missed pub/sub update", "type": "decision_point",
+      "content": "Pub/sub delivery can be missed while a gateway is disconnected or resubscribing. On broker reconnect, the gateway must fetch a fresh snapshot for every page with local subscribers and compare versions before resuming live delivery.",
+      "decision": {"question": "Can the gateway rely on replaying every count event after reconnect?", "chosen": "Treat pub/sub as a low-latency hint and repair gaps with a versioned snapshot read from the authoritative presence state.", "chosenReason": "The brief requires eventual consistency, not a durable event history. Snapshot repair bounds the effect of dropped notifications without turning the update bus into the source of truth.", "alternatives": [{"option": "Assume every pub/sub message is delivered exactly once", "tradeoff": "A disconnect or consumer restart can leave clients stale with no detected gap."}, {"option": "Persist and replay every heartbeat and count delta", "tradeoff": "Adds storage and replay work for events that can be superseded by a newer count snapshot."}]},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_32", "stepNumber": 32, "phase": "Recover from disconnects and delivery failures", "title": "Reconnect and resubscribe with backoff", "type": "explanation",
+      "content": "A reconnecting client resumes with its scoped page identity, receives a new authoritative snapshot, and then resumes heartbeat renewal. Add jitter and a bounded retry policy to avoid a reconnect storm; if realtime transport remains unavailable, an explicitly temporary, rate-limited polling fallback may show a fresh-enough snapshot with its age.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_33", "stepNumber": 33, "phase": "Recover from disconnects and delivery failures", "title": "Ignore stale and duplicate events", "type": "explanation",
+      "content": "Attach a sequence or version to accepted page state and updates. Gateways ignore older snapshots; the service makes event retries idempotent; and reconnecting clients replace local display state from the newest snapshot rather than replaying speculative increments.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_34", "stepNumber": 34, "phase": "Recover from disconnects and delivery failures", "title": "Bound uncertainty during failover", "type": "decision_point",
+      "content": "Store replication and failover can lose or delay a recent write depending on the chosen Redis topology and durability mode. Validate acknowledged-write behavior and recovery semantics; during uncertainty, mark counts stale and reconcile page state instead of silently treating a possibly lost update as a permanent truth.",
+      "decision": {"question": "How should the service behave when failover may have lost recent presence transitions?", "chosen": "Expose the last confirmed version as stale, restore service from the selected store's documented recovery point, and reconcile live sessions through rejoin and lease expiry.", "chosenReason": "The problem accepts eventual consistency but does not specify a recovery-point guarantee. Making uncertainty visible avoids claiming stronger durability than the selected store provides.", "alternatives": [{"option": "Declare every failover result current without reconciliation", "tradeoff": "Recent joins or leaves may be missing while the UI claims freshness."}, {"option": "Keep an unbounded synchronous write log for every heartbeat", "tradeoff": "Raises memory, write, and recovery costs without a stated requirement for that history."}]},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_35", "stepNumber": 35, "phase": "Recover from disconnects and delivery failures", "title": "Avoid presence and identity leaks", "type": "explanation",
+      "content": "Authorize each page subscription and scope viewer identifiers to the correct tenant or public-page policy. Send aggregate counts only, never the viewer roster; avoid raw identities and page keys in metrics; and use the product-approved retention and access controls for diagnostic logs.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_36", "stepNumber": 36, "phase": "Recover from disconnects and delivery failures", "title": "Test churn and recovery paths", "type": "explanation",
+      "content": "Exercise duplicate join and leave delivery, multiple tabs, abrupt browser and gateway loss, delayed heartbeats, Redis timeout and failover, missed pub/sub events, stale snapshots, reconnect storms, and slow consumers. Verify counts eventually converge, no user is decremented twice, memory is reclaimed, and every stale or unavailable response is visibly distinct from a fresh count.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_37", "stepNumber": 37, "phase": "Recover from disconnects and delivery failures", "title": "Keep the polling fallback bounded", "type": "decision_point",
+      "content": "Polling can preserve a count display during a WebSocket outage, but turning every disconnected session into rapid polling may amplify an existing incident. Apply a server-provided retry interval, jitter, per-page coalescing, and a cutoff that changes the UI to unavailable when freshness cannot be met.",
+      "decision": {"question": "When is polling an acceptable realtime fallback?", "chosen": "Enable only a bounded, rate-limited polling mode while the authoritative store is healthy; show freshness and stop polling when its interval cannot meet the approved seconds-level budget.", "chosenReason": "Polling provides a controlled degraded path without promising realtime behavior through a persistent transport or store failure.", "alternatives": [{"option": "Poll aggressively with no shared rate limit", "tradeoff": "A connection incident can become a request surge against the same service."}, {"option": "Keep displaying the last count as fresh indefinitely", "tradeoff": "Hides the duration and uncertainty of a failed update path."}]},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_38", "stepNumber": 38, "phase": "Review assumptions and validate behavior", "title": "Resolve product and capacity unknowns", "type": "explanation",
+      "content": "Before implementation, confirm whether viewers are authenticated users or anonymous sessions, how multiple devices and private pages are counted, the acceptable count error, the precise seconds-level freshness target, expected page and viewer distributions, churn, regional placement, and the meaning of page identity. Select heartbeat, lease expiry, stale-display, retention, and polling values from those answers and load evidence.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_39", "stepNumber": 39, "phase": "Review assumptions and validate behavior", "title": "Define freshness and accuracy evidence", "type": "explanation",
+      "content": "Agree on measurable targets for join-to-visible latency, leave and dropped-connection cleanup, count error if rounding or sampling is adopted, stale-state age, and behavior during store or broker failover. Measure end-to-end percentiles and error under realistic fanout; the brief says within seconds but does not set a percentile, exact duration, or accuracy tolerance.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_40", "stepNumber": 40, "phase": "Review assumptions and validate behavior", "title": "Load-test the real page distribution", "type": "explanation",
+      "content": "Test millions of mostly quiet pages as well as skewed hot pages, realistic user churn, reconnect bursts, heartbeat traffic, subscription fanout, and store failover. Record per-page and per-shard memory, network egress, operation latency, count error, update age, and cleanup lag; do not extrapolate a capacity guarantee from a uniform synthetic workload alone.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_41", "stepNumber": 41, "phase": "Review assumptions and validate behavior", "title": "Tune from measured bottlenecks", "type": "scale_trigger",
+      "content": "Tune shard count, lease storage, heartbeat frequency, count coalescing, and gateway fanout only after a representative load test. Recheck both memory and stale-count behavior after each change; a lower heartbeat rate saves writes but delays dropped-session cleanup.",
+      "scaleTrigger": {"metric": "Measured count age, expiry cleanup lag, memory per active viewer, shard load, or gateway egress approaches an approved limit", "action": "Change one capacity or cadence variable at a time, then repeat churn and failover tests against the accepted accuracy and freshness targets.", "impact": "Makes the memory, latency, and stale-session tradeoff explicit and prevents a tuning change from silently violating the product contract."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "presence_42", "stepNumber": 42, "phase": "Review assumptions and validate behavior", "title": "Summarize the review-draft architecture", "type": "explanation",
+      "content": "Page clients keep secure WebSocket sessions through a gateway; a stateless presence service applies idempotent page-scoped viewer leases in sharded Redis state; expired leases clean up dropped connections; and versioned pub/sub snapshots return through subscribed gateways to clients. Monitoring covers count freshness, churn, store pressure, fanout, and recovery. The design uses a tunable lease as an explicit assumption, distinguishes stale or unavailable from zero, and still needs identity, accuracy, SLO, and capacity decisions plus load and failure validation.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

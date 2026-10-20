@@ -1,0 +1,650 @@
+{
+  "problem_id": "mlops_011",
+  "version": "1.0.0-review-draft",
+  "totalSteps": 44,
+  "phases": [
+    {
+      "name": "Read the frozen brief and surface assumptions",
+      "stepRange": [1, 2],
+      "description": "Keep the exact data-pipeline brief intact and identify workload and policy details that remain unspecified."
+    },
+    {
+      "name": "Place ingestion, contract, and processing components",
+      "stepRange": [3, 17],
+      "description": "Represent heterogeneous sources, orchestration, contracts, validation, versioned outputs, lineage, reporting, alerting, and the gated training consumer with current catalog types."
+    },
+    {
+      "name": "Connect ingestion, validation, and ML-ready outputs",
+      "stepRange": [18, 35],
+      "description": "Build an ordered graph that can be replayed: sources enter durable ingestion, contract-aware processing produces versioned datasets, and only quality-approved outputs reach training."
+    },
+    {
+      "name": "Choose compatibility, versioning, and failure policies",
+      "stepRange": [36, 38],
+      "description": "Make schema evolution, data-version identity, and failure isolation explicit without claiming a specific vendor tool is required."
+    },
+    {
+      "name": "Turn supplied pipeline limits into validation gates",
+      "stepRange": [39, 43],
+      "description": "Measure daily completion, quality-check latency, data volume, compatibility, and reliability against the stated limits."
+    },
+    {
+      "name": "Review the structural draft",
+      "stepRange": [44, 44],
+      "description": "Summarize the graph and evidence needed before browser or live assessment gates."
+    }
+  ],
+  "steps": [
+    {
+      "id": "mlops011_frozen_brief",
+      "stepNumber": 1,
+      "phase": "Read the frozen brief and surface assumptions",
+      "title": "Preserve the exact frozen problem brief",
+      "type": "explanation",
+      "content": "FROZEN BRIEF — ID: mlops_011. Title: ‘Design a Data Pipeline for ML with Data Quality Gates’. Slug: ‘design-a-data-pipeline-for-ml-with-data-quality-gates’. Description: ‘Design a data pipeline that processes raw data into ML-ready datasets with automated data validation, quality gates, schema enforcement, and data versioning.’ Difficulty: Medium. Category: MLOps - Data Pipeline. Domain: aiml. Estimated time: 45-60 minutes. Requirements: ‘Ingest data from multiple sources (databases, APIs, files)’; ‘Validate data quality at each pipeline stage’; ‘Enforce schema consistency and evolution’; ‘Detect data anomalies and completeness issues’; ‘Version datasets for reproducibility’; ‘Transform data into ML-ready feature tables’; ‘Generate data quality reports’; ‘Alert on data quality failures before training’. Constraints: ‘Pipeline completion within 2 hours for daily runs’; ‘Data quality check latency under 5 minutes’; ‘Handle 1TB+ daily data volume’; ‘Support schema evolution without breaking pipelines’; ‘99.9% pipeline reliability’. Hints: ‘Use Great Expectations or Pandera for data validation’; ‘Implement DVC or LakeFS for data versioning’; ‘Use Apache Spark or dbt for data transformations’; ‘Implement circuit breakers for bad data prevention’; ‘Use data contracts between producers and consumers’; ‘Implement data lineage tracking with OpenLineage’. Tags: mlops, data-pipeline, data-quality, data-validation, data-versioning, etl. Companies: Airbnb, Netflix, Uber, Spotify. Hints are candidate techniques, not additional requirements; this structural draft does not claim any target has been achieved.",
+      "requirementIds": []
+    },
+    {
+      "id": "mlops011_assumptions",
+      "stepNumber": 2,
+      "phase": "Read the frozen brief and surface assumptions",
+      "title": "Separate the brief from sizing and policy assumptions",
+      "type": "explanation",
+      "content": "FACT — The brief specifies daily runs completing within two hours, quality checks under five minutes, 1TB+ daily input, schema evolution, and 99.9% pipeline reliability. ASSUMPTION / OPEN QUESTIONS — Confirm source count and change rates, file/object sizes, arrival windows, late data, partition keys, freshness semantics, validation sampling policy, downstream feature-store contract, recovery objectives, and which portion of the daily run is inside the two-hour clock. The diagram is not evidence that these objectives are met; test the full measured workload.",
+      "requirementIds": ["legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlops011_database_source",
+      "stepNumber": 3,
+      "phase": "Place ingestion, contract, and processing components",
+      "title": "Represent database producers",
+      "type": "add_component",
+      "content": "Read database data through bounded snapshots or incremental change capture, using a source cursor or watermark to make retries resumable. The required source-specific consistency model is not stated in the brief.",
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:3"],
+      "component": {
+        "nodeId": "mlops011_database_source",
+        "componentType": "database",
+        "label": "Operational Database Sources",
+        "description": "Structured producer data ingested by snapshot or incremental reads.",
+        "position": {"x": 0, "y": 60},
+        "highlightReason": "The existing Database catalog type represents one of the named source families.",
+        "properties": {
+          "componentName": "Operational Database Sources",
+          "purpose": "Expose structured records through bounded snapshots or incremental extraction with resumable source watermarks."
+        }
+      }
+    },
+    {
+      "id": "mlops011_api_source",
+      "stepNumber": 4,
+      "phase": "Place ingestion, contract, and processing components",
+      "title": "Represent API producers",
+      "type": "add_component",
+      "content": "Use a validated API boundary for producer integrations, pagination, authentication, and source-specific rate handling. A source API error should not silently mark an incomplete daily partition as complete.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:3"],
+      "component": {
+        "nodeId": "mlops011_api_source",
+        "componentType": "api-gateway",
+        "label": "Producer API Connectors",
+        "description": "Validated integration boundary for upstream API data.",
+        "position": {"x": 0, "y": 240},
+        "highlightReason": "The catalog API Gateway supplies a canonical entry point for API producer integration.",
+        "properties": {
+          "componentName": "Producer API Connectors",
+          "purpose": "Authenticate producer integrations, validate payload envelopes, and manage pagination and rate responses for API data ingestion.",
+          "inputValidation": true
+        }
+      }
+    },
+    {
+      "id": "mlops011_file_source",
+      "stepNumber": 5,
+      "phase": "Place ingestion, contract, and processing components",
+      "title": "Represent file producers and landing objects",
+      "type": "add_component",
+      "content": "Land source files with checksums and producer metadata so duplicate delivery and partial upload can be detected before processing.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:3"],
+      "component": {
+        "nodeId": "mlops011_file_source",
+        "componentType": "object-storage",
+        "label": "File Landing Zone",
+        "description": "Incoming file objects with source and integrity metadata.",
+        "position": {"x": 0, "y": 420},
+        "highlightReason": "The existing Object Storage type represents file ingestion and avoids loading large files into API requests.",
+        "properties": {
+          "componentName": "File Landing Zone",
+          "purpose": "Accept incoming source files with checksums, arrival timestamps, source identity, and completeness markers before batch processing.",
+          "provider": "S3",
+          "checksumValidation": true
+        }
+      }
+    },
+    {
+      "id": "mlops011_ingestion_queue",
+      "stepNumber": 6,
+      "phase": "Place ingestion, contract, and processing components",
+      "title": "Add durable ingestion work coordination",
+      "type": "add_component",
+      "content": "Represent source manifests and partitions as durable work items. Retry failed work idempotently and retain a dead-letter or quarantine path for source records that cannot be safely interpreted.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "mlops011_ingestion_queue",
+        "componentType": "queue",
+        "label": "Ingestion Work Queue",
+        "description": "Durable source-partition work and bounded retry coordination.",
+        "position": {"x": 300, "y": 240},
+        "highlightReason": "The catalog Queue type is reusable for scheduled and incremental ingestion work.",
+        "properties": {
+          "componentName": "Ingestion Work Queue",
+          "purpose": "Queue source manifests and partition jobs with idempotent retry, bounded backoff, and a quarantine path for invalid work.",
+          "durable": true,
+          "backoff": "exponential"
+        }
+      }
+    },
+    {
+      "id": "mlops011_orchestrator",
+      "stepNumber": 7,
+      "phase": "Place ingestion, contract, and processing components",
+      "title": "Add daily pipeline orchestration",
+      "type": "add_component",
+      "content": "Coordinate source readiness, partition processing, validation gates, output publication, lineage completion, and failure notifications. Do not publish downstream-ready state until required stages and completeness checks succeed.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "mlops011_orchestrator",
+        "componentType": "mlops-pipeline",
+        "label": "Daily Data Pipeline Orchestrator",
+        "description": "Schedules, coordinates, retries, and gates data pipeline stages.",
+        "position": {"x": 600, "y": 240},
+        "highlightReason": "The MLOps Pipeline catalog type models staged orchestration without adding a new component.",
+        "properties": {
+          "componentName": "Daily Data Pipeline Orchestrator",
+          "purpose": "Coordinate daily and incremental DAG runs, source readiness, idempotent partition retries, quality gates, dataset publication, and training release decisions."
+        }
+      }
+    },
+    {
+      "id": "mlops011_contracts",
+      "stepNumber": 8,
+      "phase": "Place ingestion, contract, and processing components",
+      "title": "Represent versioned producer and consumer contracts",
+      "type": "add_component",
+      "content": "Store schema and semantic contracts with compatibility policy and ownership. Review breaking changes explicitly and allow a controlled migration path rather than silently accepting incompatible columns.",
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "mlops011_contracts",
+        "componentType": "configuration-management",
+        "label": "Data Contracts & Schema Policy",
+        "description": "Versioned producer-consumer schemas and compatibility rules.",
+        "position": {"x": 600, "y": 40},
+        "highlightReason": "Configuration Management is the current catalog type for version-controlled contract policy.",
+        "properties": {
+          "componentName": "Data Contracts & Schema Policy",
+          "purpose": "Version data contracts, field semantics, ownership, and compatibility rules; require reviewed migration for breaking schema evolution.",
+          "versionControl": true
+        }
+      }
+    },
+    {
+      "id": "mlops011_validation_worker",
+      "stepNumber": 9,
+      "phase": "Place ingestion, contract, and processing components",
+      "title": "Add stage-by-stage validation and transforms",
+      "type": "add_component",
+      "content": "Run contract checks, completeness and anomaly checks, transformations, and stage-level quality gates. Great Expectations or Pandera and Spark or dbt are possible implementations from the hints, not required products. Isolate bad partitions so a circuit breaker can stop unsafe publication without discarding good source evidence.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "mlops011_validation_worker",
+        "componentType": "processing-worker",
+        "label": "Validation & Transformation Workers",
+        "description": "Contract-aware processing and quality checks at each pipeline stage.",
+        "position": {"x": 900, "y": 240},
+        "highlightReason": "The existing Processing Worker type covers scalable batch validation and transformation.",
+        "properties": {
+          "componentName": "Validation & Transformation Workers",
+          "purpose": "Apply source and stage contracts, schema compatibility checks, completeness and anomaly tests, and repeatable transformations; quarantine failing partitions before publication."
+        }
+      }
+    },
+    {
+      "id": "mlops011_versioned_store",
+      "stepNumber": 10,
+      "phase": "Place ingestion, contract, and processing components",
+      "title": "Add versioned raw and curated dataset storage",
+      "type": "add_component",
+      "content": "Keep immutable raw inputs and curated dataset snapshots addressable by manifest, source watermark, schema version, and transformation revision. DVC or LakeFS are candidate approaches from the hint list; the design does not require either vendor.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "mlops011_versioned_store",
+        "componentType": "object-storage",
+        "label": "Versioned Raw & Curated Datasets",
+        "description": "Immutable raw partitions and published dataset revisions.",
+        "position": {"x": 1200, "y": 240},
+        "highlightReason": "The existing Object Storage type fits large immutable dataset artifacts and snapshots.",
+        "properties": {
+          "componentName": "Versioned Raw & Curated Datasets",
+          "purpose": "Retain immutable raw inputs and curated snapshots with manifests pinning source watermarks, schema versions, transformation revisions, and checksums.",
+          "provider": "S3",
+          "versioning": true,
+          "checksumValidation": true
+        }
+      }
+    },
+    {
+      "id": "mlops011_lineage_store",
+      "stepNumber": 11,
+      "phase": "Place ingestion, contract, and processing components",
+      "title": "Persist run and lineage metadata",
+      "type": "add_component",
+      "content": "Record pipeline run identity, input partitions, contract revision, code/config version, validation results, output manifest, and lineage events so a dataset can be reproduced and audited.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "mlops011_lineage_store",
+        "componentType": "database",
+        "label": "Pipeline Run & Lineage Metadata",
+        "description": "Queryable run state, validation results, and dataset lineage references.",
+        "position": {"x": 1200, "y": 60},
+        "highlightReason": "The existing Database type stores compact lineage and run metadata separately from bulk data.",
+        "properties": {
+          "componentName": "Pipeline Run & Lineage Metadata",
+          "purpose": "Index pipeline runs, source watermarks, contract revisions, validation outcomes, lineage references, and immutable dataset manifest IDs."
+        }
+      }
+    },
+    {
+      "id": "mlops011_warehouse",
+      "stepNumber": 12,
+      "phase": "Place ingestion, contract, and processing components",
+      "title": "Add quality reporting and analytical tables",
+      "type": "add_component",
+      "content": "Materialize quality summaries and consumer-facing analytical tables separately from immutable raw evidence. Avoid presenting a report as healthy when required source partitions are missing or quarantined.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:3"],
+      "component": {
+        "nodeId": "mlops011_warehouse",
+        "componentType": "data-warehouse",
+        "label": "Quality Reports & Analytical Tables",
+        "description": "Queryable summaries, quality reports, and downstream analytical views.",
+        "position": {"x": 1500, "y": 240},
+        "highlightReason": "The Data Warehouse catalog type supports report queries and analytical consumers.",
+        "properties": {
+          "componentName": "Quality Reports & Analytical Tables",
+          "purpose": "Store stage-level quality summaries, completeness and anomaly reports, and queryable analytical tables with source and dataset revision references."
+        }
+      }
+    },
+    {
+      "id": "mlops011_feature_store",
+      "stepNumber": 13,
+      "phase": "Place ingestion, contract, and processing components",
+      "title": "Publish ML-ready feature tables",
+      "type": "add_component",
+      "content": "Publish feature tables only from validated, versioned output. Keep feature definitions and dataset revision references consistent with the consumer's training contract; online-serving semantics are not specified by this batch-pipeline brief.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:3"],
+      "component": {
+        "nodeId": "mlops011_feature_store",
+        "componentType": "feature-store",
+        "label": "ML Feature Tables",
+        "description": "Validated feature datasets prepared for downstream model training.",
+        "position": {"x": 1500, "y": 420},
+        "highlightReason": "The existing Feature Store type directly represents ML-ready feature tables.",
+        "properties": {
+          "componentName": "ML Feature Tables",
+          "purpose": "Publish training-ready feature tables from quality-approved dataset revisions with reproducible feature and source lineage."
+        }
+      }
+    },
+    {
+      "id": "mlops011_report_workspace",
+      "stepNumber": 14,
+      "phase": "Place ingestion, contract, and processing components",
+      "title": "Add a quality report workspace",
+      "type": "add_component",
+      "content": "Give data and ML consumers a view of run state, source completeness, validation failures, anomalies, quarantined partitions, and published dataset versions.",
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8"],
+      "component": {
+        "nodeId": "mlops011_report_workspace",
+        "componentType": "web-app",
+        "label": "Data Quality Report Workspace",
+        "description": "Run-level and dataset-level quality reports for operators and consumers.",
+        "position": {"x": 1800, "y": 240},
+        "highlightReason": "The catalog Web App type provides an operator-facing report surface.",
+        "properties": {
+          "componentName": "Data Quality Report Workspace",
+          "purpose": "Display pipeline run status, stage validation reports, completeness and anomaly findings, quarantine details, and published dataset revision lineage."
+        }
+      }
+    },
+    {
+      "id": "mlops011_monitoring",
+      "stepNumber": 15,
+      "phase": "Place ingestion, contract, and processing components",
+      "title": "Monitor pipeline health and quality gates",
+      "type": "add_component",
+      "content": "Observe stage duration, end-to-end daily completion, source lag, quality-check duration, retries, quarantines, and failure rate. Treat the reliability objective as an SLO to measure rather than a property guaranteed by the diagram.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "mlops011_monitoring",
+        "componentType": "monitoring",
+        "label": "Pipeline & Data Quality Monitoring",
+        "description": "Stage metrics, reliability SLOs, quality dashboards, and alert signals.",
+        "position": {"x": 900, "y": 460},
+        "highlightReason": "The Monitoring catalog component exposes both pipeline operations and data quality signals.",
+        "properties": {
+          "componentName": "Pipeline & Data Quality Monitoring",
+          "purpose": "Track stage checks, source completeness, anomaly counts, latency, retries, daily pipeline completion, and reliability; expose reports and alert conditions."
+        }
+      }
+    },
+    {
+      "id": "mlops011_notifications",
+      "stepNumber": 16,
+      "phase": "Place ingestion, contract, and processing components",
+      "title": "Alert owners before training consumes bad data",
+      "type": "add_component",
+      "content": "Route actionable quality-gate and pipeline-failure notifications to the responsible producer or data owner. Notification delivery is separate from the publication gate: failed quality must also prevent the dataset-ready signal.",
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "mlops011_notifications",
+        "componentType": "notification-service",
+        "label": "Quality Failure Notifications",
+        "description": "Owner alerts for failed data quality and pipeline stages.",
+        "position": {"x": 1200, "y": 460},
+        "highlightReason": "The existing Notification Service type handles failure alerts without acting as the quality gate itself.",
+        "properties": {
+          "componentName": "Quality Failure Notifications",
+          "purpose": "Notify dataset and source owners about blocking validation failures, incomplete partitions, schema incompatibility, and pipeline failures before downstream training is released."
+        }
+      }
+    },
+    {
+      "id": "mlops011_training_consumer",
+      "stepNumber": 17,
+      "phase": "Place ingestion, contract, and processing components",
+      "title": "Represent the gated training consumer",
+      "type": "add_component",
+      "content": "Training starts only from an explicitly published feature-table revision whose required quality gates passed. Preserve the data and contract versions in training metadata for reproducibility.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "mlops011_training_consumer",
+        "componentType": "model-training",
+        "label": "Downstream Model Training",
+        "description": "Consumes only quality-approved and versioned ML feature tables.",
+        "position": {"x": 1800, "y": 420},
+        "highlightReason": "The catalog Model Training type makes the pre-training quality gate explicit.",
+        "properties": {
+          "componentName": "Downstream Model Training",
+          "purpose": "Start training from a published feature-table revision only after required validation gates pass; retain dataset, contract, and code revision identities."
+        }
+      }
+    },
+    {
+      "id": "mlops011_database_to_queue",
+      "stepNumber": 18,
+      "phase": "Connect ingestion, validation, and ML-ready outputs",
+      "title": "Queue database snapshots or incremental partitions",
+      "type": "add_connection",
+      "content": "Represent each database extraction range as resumable work with a source watermark.",
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:3"],
+      "connection": {"edgeId": "mlops011_db_queue", "sourceNodeId": "mlops011_database_source", "targetNodeId": "mlops011_ingestion_queue", "connectionType": "message-queue", "label": "Database partition manifests", "description": "Resumable extraction work keyed by source and watermark."}
+    },
+    {
+      "id": "mlops011_api_to_queue",
+      "stepNumber": 19,
+      "phase": "Connect ingestion, validation, and ML-ready outputs",
+      "title": "Queue API source pages and partitions",
+      "type": "add_connection",
+      "content": "Keep pagination, source cursors, and retries explicit so rate-limited or incomplete API pulls do not masquerade as complete data.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:3"],
+      "connection": {"edgeId": "mlops011_api_queue", "sourceNodeId": "mlops011_api_source", "targetNodeId": "mlops011_ingestion_queue", "connectionType": "message-queue", "label": "API source work", "description": "Producer page and partition references with source progress metadata."}
+    },
+    {
+      "id": "mlops011_files_to_queue",
+      "stepNumber": 20,
+      "phase": "Connect ingestion, validation, and ML-ready outputs",
+      "title": "Queue verified file arrivals",
+      "type": "add_connection",
+      "content": "Create work only after file arrival metadata and integrity checks identify a complete object.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:3"],
+      "connection": {"edgeId": "mlops011_files_queue", "sourceNodeId": "mlops011_file_source", "targetNodeId": "mlops011_ingestion_queue", "connectionType": "event-stream", "label": "Complete file manifests", "description": "File-arrival events reference verified source objects and producer metadata."}
+    },
+    {
+      "id": "mlops011_contracts_to_pipeline",
+      "stepNumber": 21,
+      "phase": "Connect ingestion, validation, and ML-ready outputs",
+      "title": "Load the contract revision for each run",
+      "type": "add_connection",
+      "content": "Pin the expected schema and compatibility policy at run start so retries use the same contract revision.",
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:4"],
+      "connection": {"edgeId": "mlops011_contract_pipeline", "sourceNodeId": "mlops011_contracts", "targetNodeId": "mlops011_orchestrator", "connectionType": "data-flow", "label": "Pinned contracts and policy", "description": "Versioned schema expectations and compatible migration rules for the run."}
+    },
+    {
+      "id": "mlops011_queue_to_pipeline",
+      "stepNumber": 22,
+      "phase": "Connect ingestion, validation, and ML-ready outputs",
+      "title": "Start stages from durable source work",
+      "type": "add_connection",
+      "content": "The orchestrator claims queued source work and records its run identity before scheduling processing.",
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:1", "legacy-constraint:5"],
+      "connection": {"edgeId": "mlops011_queue_pipeline", "sourceNodeId": "mlops011_ingestion_queue", "targetNodeId": "mlops011_orchestrator", "connectionType": "message-queue", "label": "Ready source partitions", "description": "Durable partition work and retry state consumed by the run orchestrator."}
+    },
+    {
+      "id": "mlops011_pipeline_to_worker",
+      "stepNumber": 23,
+      "phase": "Connect ingestion, validation, and ML-ready outputs",
+      "title": "Schedule contract-aware validation and transforms",
+      "type": "add_connection",
+      "content": "Pass immutable input references, pinned contract revision, and transformation version to workers.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4"],
+      "connection": {"edgeId": "mlops011_pipeline_worker", "sourceNodeId": "mlops011_orchestrator", "targetNodeId": "mlops011_validation_worker", "connectionType": "api-call", "label": "Run plan and pinned contract", "description": "Stage jobs with input manifests, validation rules, and transformation version."}
+    },
+    {
+      "id": "mlops011_worker_to_versioned_store",
+      "stepNumber": 24,
+      "phase": "Connect ingestion, validation, and ML-ready outputs",
+      "title": "Write validated immutable dataset revisions",
+      "type": "add_connection",
+      "content": "Persist outputs as immutable revisioned objects with checksums and a manifest; do not mutate the raw source evidence.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:3", "legacy-constraint:3", "legacy-constraint:4"],
+      "connection": {"edgeId": "mlops011_worker_store", "sourceNodeId": "mlops011_validation_worker", "targetNodeId": "mlops011_versioned_store", "connectionType": "data-flow", "label": "Validated dataset snapshots", "description": "Curated output objects plus immutable schema and transformation manifest references."}
+    },
+    {
+      "id": "mlops011_store_to_worker",
+      "stepNumber": 25,
+      "phase": "Connect ingestion, validation, and ML-ready outputs",
+      "title": "Read raw partitions for replay and reprocessing",
+      "type": "add_connection",
+      "content": "Allow the worker to read pinned raw inputs for validation replay or a new transformation revision without overwriting earlier datasets.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:4"],
+      "connection": {"edgeId": "mlops011_store_worker", "sourceNodeId": "mlops011_versioned_store", "targetNodeId": "mlops011_validation_worker", "connectionType": "data-flow", "label": "Pinned raw input references", "description": "Immutable source partitions selected for replay or a new transform revision."}
+    },
+    {
+      "id": "mlops011_worker_to_lineage",
+      "stepNumber": 26,
+      "phase": "Connect ingestion, validation, and ML-ready outputs",
+      "title": "Record run results and lineage",
+      "type": "add_connection",
+      "content": "Write stage outcomes and OpenLineage-compatible run and dataset references alongside the immutable output manifest.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:4"],
+      "connection": {"edgeId": "mlops011_worker_lineage", "sourceNodeId": "mlops011_validation_worker", "targetNodeId": "mlops011_lineage_store", "connectionType": "database-connection", "label": "Run, check, and lineage metadata", "description": "Queryable stage status, contract revision, lineage events, and versioned dataset manifests."}
+    },
+    {
+      "id": "mlops011_worker_to_warehouse",
+      "stepNumber": 27,
+      "phase": "Connect ingestion, validation, and ML-ready outputs",
+      "title": "Materialize quality reports and analytical tables",
+      "type": "add_connection",
+      "content": "Publish reportable measurements and tables with the source partitions and dataset revision that produced them.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:3"],
+      "connection": {"edgeId": "mlops011_worker_warehouse", "sourceNodeId": "mlops011_validation_worker", "targetNodeId": "mlops011_warehouse", "connectionType": "data-flow", "label": "Quality summaries and tables", "description": "Stage reports, anomaly results, completeness metrics, and analytical output."}
+    },
+    {
+      "id": "mlops011_warehouse_to_reports",
+      "stepNumber": 28,
+      "phase": "Connect ingestion, validation, and ML-ready outputs",
+      "title": "Expose reports to data consumers",
+      "type": "add_connection",
+      "content": "Consumers can inspect stage-level results and distinguish a complete run from partial or quarantined output.",
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8"],
+      "connection": {"edgeId": "mlops011_warehouse_reports", "sourceNodeId": "mlops011_warehouse", "targetNodeId": "mlops011_report_workspace", "connectionType": "api-call", "label": "Quality reports and run status", "description": "Queryable report data linked to pipeline run and dataset revision."}
+    },
+    {
+      "id": "mlops011_worker_to_features",
+      "stepNumber": 29,
+      "phase": "Connect ingestion, validation, and ML-ready outputs",
+      "title": "Publish validated ML-ready feature tables",
+      "type": "add_connection",
+      "content": "Only validated feature definitions and approved dataset revisions are exposed for model consumption.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:3"],
+      "connection": {"edgeId": "mlops011_worker_features", "sourceNodeId": "mlops011_validation_worker", "targetNodeId": "mlops011_feature_store", "connectionType": "data-flow", "label": "Approved feature tables", "description": "ML-ready tables with pinned source and transformation revision metadata."}
+    },
+    {
+      "id": "mlops011_features_to_training",
+      "stepNumber": 30,
+      "phase": "Connect ingestion, validation, and ML-ready outputs",
+      "title": "Make the feature revision available to training",
+      "type": "add_connection",
+      "content": "Training records the exact feature-table revision it consumes for reproducibility.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6"],
+      "connection": {"edgeId": "mlops011_features_training", "sourceNodeId": "mlops011_feature_store", "targetNodeId": "mlops011_training_consumer", "connectionType": "data-flow", "label": "Versioned ML-ready features", "description": "Published features and revision identity for a training run."}
+    },
+    {
+      "id": "mlops011_pipeline_to_training",
+      "stepNumber": 31,
+      "phase": "Connect ingestion, validation, and ML-ready outputs",
+      "title": "Gate training release on quality completion",
+      "type": "add_connection",
+      "content": "The orchestrator emits a release only when required checks pass and all required partitions satisfy the selected completeness policy.",
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:5"],
+      "connection": {"edgeId": "mlops011_pipeline_training_gate", "sourceNodeId": "mlops011_orchestrator", "targetNodeId": "mlops011_training_consumer", "connectionType": "event-stream", "label": "Quality-approved release gate", "description": "Dataset-ready event emitted only after mandatory quality and completeness gates pass."}
+    },
+    {
+      "id": "mlops011_worker_to_monitor",
+      "stepNumber": 32,
+      "phase": "Connect ingestion, validation, and ML-ready outputs",
+      "title": "Export data-quality measurements",
+      "type": "add_connection",
+      "content": "Send stage checks, anomaly counts, completeness results, and check durations for dashboards and SLO evaluation.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:2"],
+      "connection": {"edgeId": "mlops011_worker_monitor", "sourceNodeId": "mlops011_validation_worker", "targetNodeId": "mlops011_monitoring", "connectionType": "data-flow", "label": "Stage quality metrics", "description": "Check outcomes, durations, anomaly counts, and completeness measurements."}
+    },
+    {
+      "id": "mlops011_pipeline_to_monitor",
+      "stepNumber": 33,
+      "phase": "Connect ingestion, validation, and ML-ready outputs",
+      "title": "Export orchestration and reliability signals",
+      "type": "add_connection",
+      "content": "Observe scheduled-run duration, retries, queue backlog, and whether each daily run reaches a terminal state.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"],
+      "connection": {"edgeId": "mlops011_pipeline_monitor", "sourceNodeId": "mlops011_orchestrator", "targetNodeId": "mlops011_monitoring", "connectionType": "data-flow", "label": "Run and reliability metrics", "description": "Stage state, retries, backlog, end-to-end duration, and run completion."}
+    },
+    {
+      "id": "mlops011_monitor_to_alerts",
+      "stepNumber": 34,
+      "phase": "Connect ingestion, validation, and ML-ready outputs",
+      "title": "Notify owners about blocking quality failures",
+      "type": "add_connection",
+      "content": "Alert routing includes the failed check, source owner, run identity, and affected partition so the issue can be acted on before training.",
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:5"],
+      "connection": {"edgeId": "mlops011_monitor_alerts", "sourceNodeId": "mlops011_monitoring", "targetNodeId": "mlops011_notifications", "connectionType": "event-stream", "label": "Actionable quality alerts", "description": "Failure and SLO events routed to the responsible data owners."}
+    },
+    {
+      "id": "mlops011_pipeline_to_alerts",
+      "stepNumber": 35,
+      "phase": "Connect ingestion, validation, and ML-ready outputs",
+      "title": "Notify owners when a run cannot safely publish",
+      "type": "add_connection",
+      "content": "Orchestration emits a separate terminal failure notification while withholding the dataset-ready release.",
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:5"],
+      "connection": {"edgeId": "mlops011_pipeline_alerts", "sourceNodeId": "mlops011_orchestrator", "targetNodeId": "mlops011_notifications", "connectionType": "event-stream", "label": "Blocked run notification", "description": "Run failure and withheld publication status for owner follow-up."}
+    },
+    {
+      "id": "mlops011_schema_decision",
+      "stepNumber": 36,
+      "phase": "Choose compatibility, versioning, and failure policies",
+      "title": "Evolve schemas through reviewed compatibility",
+      "type": "decision_point",
+      "content": "For additive compatible changes, allow a pinned migration and producer-consumer rollout; for breaking changes, quarantine or reject the affected partition until a reviewed migration is available. Compatibility direction, field deprecation windows, and semantic checks remain owner decisions because the brief does not specify them.",
+      "decision": {"question": "How should the pipeline handle a changed source schema?", "chosen": "Validate against a versioned data contract, accept only approved compatible changes, and isolate breaking or unknown changes from publication.", "chosenReason": "This supports evolution without allowing an unexpected field change to silently corrupt downstream ML features.", "alternatives": [{"option": "Coerce every incoming schema to the latest form", "tradeoff": "Implicit coercion can lose semantics and make historical runs irreproducible."}]},
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "mlops011_versioning_decision",
+      "stepNumber": 37,
+      "phase": "Choose compatibility, versioning, and failure policies",
+      "title": "Make dataset versions reproducible",
+      "type": "decision_point",
+      "content": "Identify each published dataset by immutable input manifests, source watermarks, schema/contract revision, transformation code/config, and output checksums. DVC and LakeFS are hinted alternatives, not commitments; choose the mechanism after retention, branching, and access requirements are known.",
+      "decision": {"question": "What must a dataset version pin?", "chosen": "Pin input object revisions, source watermarks, contracts, transform versions, and validation results in a durable manifest.", "chosenReason": "A version label alone cannot reproduce or audit a derived feature table.", "alternatives": [{"option": "Overwrite a latest dataset path", "tradeoff": "This loses the evidence needed to reproduce prior model inputs."}]},
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "mlops011_failure_decision",
+      "stepNumber": 38,
+      "phase": "Choose compatibility, versioning, and failure policies",
+      "title": "Fail closed on quality gates and retry idempotently",
+      "type": "decision_point",
+      "content": "A failed contract, completeness, or anomaly gate blocks publication and training release. Preserve raw inputs and the failed report, retry only replay-safe stages, and use a circuit breaker to stop repeated unsafe processing. The exact quarantine and owner-override policy needs agreement.",
+      "decision": {"question": "Can a partial or failed daily run publish training data?", "chosen": "No; keep outputs in a non-published state until required checks pass or an explicitly governed exception is recorded.", "chosenReason": "The brief requires alerts before training when quality fails, so notification alone is not a sufficient control.", "alternatives": [{"option": "Publish partial output and alert afterward", "tradeoff": "Training could consume known incomplete or invalid data before an owner responds."}]},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlops011_sla_duration",
+      "stepNumber": 39,
+      "phase": "Turn supplied pipeline limits into validation gates",
+      "title": "Validate the daily completion objective",
+      "type": "scale_trigger",
+      "content": "Measure from the agreed daily-run start boundary through all required validation and publication gates, including late source arrivals and retries.",
+      "scaleTrigger": {"metric": "Pipeline completion within 2 hours for daily runs", "action": "Profile source waits, stage critical paths, and partition skew; parallelize or right-size only where measurement identifies a bottleneck.", "impact": "Keeps the stated end-to-end time budget visible without assuming all sources arrive simultaneously."},
+      "requirementIds": ["legacy-constraint:1"]
+    },
+    {
+      "id": "mlops011_sla_validation",
+      "stepNumber": 40,
+      "phase": "Turn supplied pipeline limits into validation gates",
+      "title": "Validate quality-check latency",
+      "type": "scale_trigger",
+      "content": "Define which stage-level check latency the target covers and test at representative data volume and rule complexity; the brief does not state a percentile.",
+      "scaleTrigger": {"metric": "Data quality check latency under 5 minutes", "action": "Measure per-check and per-stage duration, then optimize or partition expensive checks while preserving their validation semantics.", "impact": "Avoids hiding a slow check behind an aggregate pipeline duration."},
+      "requirementIds": ["legacy-constraint:2"]
+    },
+    {
+      "id": "mlops011_sla_volume",
+      "stepNumber": 41,
+      "phase": "Turn supplied pipeline limits into validation gates",
+      "title": "Validate daily data volume behavior",
+      "type": "scale_trigger",
+      "content": "Exercise ingestion, validation, transformation, lineage, and output publication with representative 1TB+ daily volume, including skew and small-file effects.",
+      "scaleTrigger": {"metric": "Handle 1TB+ daily data volume", "action": "Measure storage throughput, partition sizes, shuffle, and validation cost; tune parallelism from observed resource and skew metrics.", "impact": "Tests the whole data path rather than assuming object storage capacity alone proves throughput."},
+      "requirementIds": ["legacy-constraint:3"]
+    },
+    {
+      "id": "mlops011_sla_evolution",
+      "stepNumber": 42,
+      "phase": "Turn supplied pipeline limits into validation gates",
+      "title": "Validate safe schema evolution",
+      "type": "scale_trigger",
+      "content": "Test additive, renamed, removed, and type-changed fields against consumer contracts, historical replay, and the explicit migration policy.",
+      "scaleTrigger": {"metric": "Support schema evolution without breaking pipelines", "action": "Gate deployment on compatibility fixtures and publish a new contract revision only with an approved migration path.", "impact": "Makes compatibility behavior observable across producers, transforms, and consumers."},
+      "requirementIds": ["legacy-constraint:4"]
+    },
+    {
+      "id": "mlops011_sla_reliability",
+      "stepNumber": 43,
+      "phase": "Turn supplied pipeline limits into validation gates",
+      "title": "Measure pipeline reliability",
+      "type": "scale_trigger",
+      "content": "Define the reliability numerator, denominator, evaluation window, and treatment of source outages, late data, and authorized reruns before declaring the target satisfied.",
+      "scaleTrigger": {"metric": "99.9% pipeline reliability", "action": "Track successful eligible runs, recoverable retries, terminal failures, and withheld unsafe publications against the agreed SLO definition.", "impact": "Prevents retrying or skipping quality checks from being counted as reliability success."},
+      "requirementIds": ["legacy-constraint:5"]
+    },
+    {
+      "id": "mlops011_review_summary",
+      "stepNumber": 44,
+      "phase": "Review the structural draft",
+      "title": "Review the architecture and remaining evidence",
+      "type": "explanation",
+      "content": "The graph connects database, API, and file sources to durable work coordination; contract-pinned orchestration and validation; immutable raw and curated dataset versions; lineage and reports; approved feature tables; a pre-training quality gate; and owner alerts. FACTS are the frozen brief and its stated targets. ASSUMPTIONS include the daily-run clock boundary, source arrival patterns, compatibility policy, validation percentile, and reliability definition. Structural tests do not prove browser apply/save/reload or live assessment quality; those gates remain pending.",
+      "requirementIds": []
+    }
+  ]
+}

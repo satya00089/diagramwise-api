@@ -1,0 +1,1535 @@
+{
+  "problem_id": "cloud_multi_001",
+  "version": "1.0.0-review-draft",
+  "totalSteps": 64,
+  "requirementRevision": null,
+  "phases": [
+    {
+      "name": "1. Define ownership, consistency, and the control plane",
+      "stepRange": [1, 12],
+      "description": "Separate supplied targets from workload assumptions, including the decimal-unit 100 TB/five-minute feasibility illustration. Enforce provider-independent sync guarantees in the service and capability-check provider-specific behavior before moving bytes."
+    },
+    {
+      "name": "2. Detect changes and reconcile conflicts",
+      "stepRange": [13, 32],
+      "description": "Use provider events for low-latency triggers and inventory reconciliation for missed events; retain object versions and resolve concurrent updates under an explicit policy."
+    },
+    {
+      "name": "3. Transfer safely across providers",
+      "stepRange": [33, 52],
+      "description": "Schedule bounded resumable work, validate bytes before commit, and make retries, checkpoints, dead letters, credentials, and target writes observable."
+    },
+    {
+      "name": "4. Prove outcomes, cost, and recovery",
+      "stepRange": [53, 64],
+      "description": "Measure end-to-end freshness and cost per provider pair, exercise recovery paths, and treat capacity targets as testable objectives rather than guarantees."
+    }
+  ],
+  "steps": [
+    {
+      "id": "mcs_01_brief",
+      "stepNumber": 1,
+      "phase": "1. Define ownership, consistency, and the control plane",
+      "title": "Freeze the brief and expose the throughput ambiguity",
+      "type": "explanation",
+      "content": "The supplied description is: “Design a data synchronization system that replicates data across multiple cloud providers, detects changes, resolves conflicts, and ensures data consistency.” The exact requirements are: Sync data across three cloud providers; Detect and resolve conflicts; Maintain data consistency; Handle large file transfers; Implement incremental sync; Monitor sync status; Handle network failures; Optimize transfer costs. The exact constraints are: Sync latency under 5 minutes; Support 100TB+ data transfers; Ensure data integrity; Minimize egress costs; Handle concurrent updates. Hints in the problem record are: Use native sync tools (DataSync, AzCopy, gsutil); Implement change detection (checksums, timestamps); Use event notifications for triggers; Consider third-party tools (Rclone); Implement retry and error handling; Use direct cloud-to-cloud transfers. These are supplied targets and suggestions, not proof of achieved performance. Provisional assumptions for this review: three object stores are peers; provider events are hints rather than a complete change log; transfers are object-level and resumable; and convergence is eventual unless a workload requires a stronger per-object contract. Clarify whether “under 5 minutes” applies to changed bytes or a complete 100TB+ copy: moving 100 TB in 300 seconds requires over 333 GB/s (about 2.67 Tb/s) before protocol overhead for just one full copy. This draft makes no such throughput guarantee; geography, change rate, object count/size, write ownership, RPO, and provider quotas are unspecified.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "mcs_02_console",
+      "stepNumber": 2,
+      "phase": "1. Define ownership, consistency, and the control plane",
+      "title": "Add a tenant and operator console",
+      "type": "add_component",
+      "content": "The console configures permitted provider pairs and namespaces, starts or pauses a sync, and shows per-object or per-batch progress with a last-verified cursor. It must not report a sync as complete merely because a job was accepted.",
+      "component": {
+        "nodeId": "mcs_console",
+        "componentType": "web-app",
+        "label": "Tenant & Operator Console",
+        "description": "Configure sync scopes and inspect progress, conflicts, and freshness",
+        "position": { "x": 0, "y": 240 },
+        "properties": {
+          "componentName": "Tenant & Operator Console",
+          "purpose": "Let authorized users configure provider pairs and namespaces, start or pause sync jobs, and inspect verified progress, conflicts, and freshness without treating job acceptance as completion.",
+          "ssl": true
+        },
+        "highlightReason": "A visible verified cursor distinguishes queued work from data actually reconciled at destinations."
+      },
+      "requirementIds": [
+        "legacy-requirement:6"
+      ]
+    },
+    {
+      "id": "mcs_03_gateway",
+      "stepNumber": 3,
+      "phase": "1. Define ownership, consistency, and the control plane",
+      "title": "Put an authenticated API boundary in front of sync commands",
+      "type": "add_component",
+      "content": "Validate bounded job requests, namespace identifiers, provider-pair policy, and idempotency keys here. Authorization must still be checked against each tenant's configured source and destination; a valid user token alone must not grant access to cloud objects.",
+      "component": {
+        "nodeId": "mcs_api",
+        "componentType": "api-gateway",
+        "label": "Sync Control API",
+        "description": "Validated and authenticated sync configuration and job commands",
+        "position": { "x": 300, "y": 240 },
+        "properties": {
+          "componentName": "Sync Control API",
+          "purpose": "Validate bounded sync requests and idempotency keys, authenticate callers, enforce tenant quotas, and route commands; authorize every requested provider account, bucket, and namespace against tenant policy.",
+          "inputValidation": true,
+          "authentication": "OAuth 2.0",
+          "rateLimiting": true,
+          "tlsTermination": true,
+          "deduplication": true,
+          "throttling": true
+        },
+        "highlightReason": "Sync scopes and cloud credentials are security-sensitive control-plane inputs."
+      },
+      "requirementIds": [
+        "legacy-requirement:1"
+      ]
+    },
+    {
+      "id": "mcs_04_identity",
+      "stepNumber": 4,
+      "phase": "1. Define ownership, consistency, and the control plane",
+      "title": "Separate user identity from cloud workload identity",
+      "type": "add_component",
+      "content": "Authenticate console users and authorize tenant actions independently from the worker's provider identity. Prefer short-lived, narrowly scoped provider credentials or federation where supported; never copy a broad administrator key into a job message.",
+      "component": {
+        "nodeId": "mcs_auth",
+        "componentType": "auth-service",
+        "label": "Tenant Identity & Policy",
+        "description": "User authentication and tenant-scoped sync authorization",
+        "position": { "x": 300, "y": 40 },
+        "properties": {
+          "componentName": "Tenant Identity & Policy",
+          "purpose": "Authenticate human and service principals, evaluate tenant-level sync permissions, and keep user authorization separate from short-lived provider workload identities.",
+          "oauth": true,
+          "sessions": "database",
+          "mfa": true
+        },
+        "highlightReason": "The sync service crosses provider trust boundaries and must scope authority to a tenant and namespace."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:6",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "mcs_05_coordinator",
+      "stepNumber": 5,
+      "phase": "1. Define ownership, consistency, and the control plane",
+      "title": "Add a provider-neutral sync coordinator",
+      "type": "add_component",
+      "content": "The coordinator owns job state, provider-pair policy, deduplication, lease assignment, and the accepted-versus-verified status model. Provider-specific SDKs stay behind adapters so one provider's event or retry semantics do not leak into the common contract.",
+      "component": {
+        "nodeId": "mcs_coordinator",
+        "componentType": "backend-server",
+        "label": "Sync Coordinator",
+        "description": "Provider-neutral control plane for scopes, jobs, leases, and policy",
+        "position": { "x": 640, "y": 240 },
+        "properties": {
+          "componentName": "Sync Coordinator",
+          "purpose": "Own tenant sync scopes, idempotent job state, provider-pair policy, leases, checkpoints, and verified completion; delegate provider-specific operations to adapters.",
+          "architecture": "Microservices",
+          "retry": true,
+          "bulkOps": true
+        },
+        "highlightReason": "A provider-neutral control plane makes status and retry semantics consistent across S3, Azure Blob, and GCS."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:3",
+        "legacy-requirement:6",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "mcs_06_metadata",
+      "stepNumber": 6,
+      "phase": "1. Define ownership, consistency, and the control plane",
+      "title": "Persist manifests, versions, and job checkpoints",
+      "type": "add_component",
+      "content": "Store tenant scope, source and target object version identifiers, event or inventory cursor, expected checksum, transfer state, conflict disposition, and verified destination versions. This metadata is the control-plane ledger, not a replacement for object bytes or provider version history.",
+      "component": {
+        "nodeId": "mcs_metadata",
+        "componentType": "database",
+        "label": "Sync Metadata & Manifest Store",
+        "description": "Durable job ledger, object versions, cursors, and verification results",
+        "position": { "x": 980, "y": 240 },
+        "properties": {
+          "componentName": "Sync Metadata & Manifest Store",
+          "purpose": "Persist tenant-scoped sync policy, job state, provider object version IDs, event and scan cursors, checksums, checkpoints, conflict outcomes, and verified destination versions; keep object payloads in provider storage.",
+          "type": "NoSQL",
+          "workload": "OLTP",
+          "multiAZ": true,
+          "encryption": true,
+          "backups": true,
+          "pitr": true,
+          "rbac": true,
+          "auditLog": true
+        },
+        "highlightReason": "A durable ledger lets retries resume from verified state rather than trusting an in-memory worker."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-constraint:3",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "mcs_07_console_api",
+      "stepNumber": 7,
+      "phase": "1. Define ownership, consistency, and the control plane",
+      "title": "Route tenant commands to the control API",
+      "type": "add_connection",
+      "content": "Use TLS and an idempotency key for create, pause, resume, and configuration changes. Return an accepted job identifier separately from its eventual per-destination verified status.",
+      "connection": {
+        "edgeId": "mcs_console_api",
+        "sourceNodeId": "mcs_console",
+        "targetNodeId": "mcs_api",
+        "connectionType": "http",
+        "label": "Authenticated sync commands",
+        "description": "TLS-protected tenant commands with bounded payloads and idempotency keys."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:6",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "mcs_08_api_auth",
+      "stepNumber": 8,
+      "phase": "1. Define ownership, consistency, and the control plane",
+      "title": "Authorize the caller and requested sync scope",
+      "type": "add_connection",
+      "content": "The API asks the identity and policy service to authorize the tenant, provider accounts, buckets, and requested operation; it does not forward user tokens as cloud credentials.",
+      "connection": {
+        "edgeId": "mcs_api_auth",
+        "sourceNodeId": "mcs_api",
+        "targetNodeId": "mcs_auth",
+        "connectionType": "api-call",
+        "label": "Tenant and scope authorization",
+        "description": "Authenticate the user and evaluate resource-level tenant policy before accepting a job."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:6"
+      ]
+    },
+    {
+      "id": "mcs_09_api_coordinator",
+      "stepNumber": 9,
+      "phase": "1. Define ownership, consistency, and the control plane",
+      "title": "Submit an idempotent job to the coordinator",
+      "type": "add_connection",
+      "content": "The coordinator records the requested source, destinations, namespace, policy version, and request ID before scheduling data-plane work. Repeating a request must return the same logical job rather than duplicate a full transfer.",
+      "connection": {
+        "edgeId": "mcs_api_coordinator",
+        "sourceNodeId": "mcs_api",
+        "targetNodeId": "mcs_coordinator",
+        "connectionType": "api-call",
+        "label": "Validated idempotent job request",
+        "description": "Pass an authorized, versioned sync scope and stable request identity to the control plane."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:6",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "mcs_10_coordinator_metadata",
+      "stepNumber": 10,
+      "phase": "1. Define ownership, consistency, and the control plane",
+      "title": "Commit job state and its source cursor",
+      "type": "add_connection",
+      "content": "Persist the job intent and checkpoint before dispatch. A transactional outbox or equivalent atomic state-and-event pattern prevents a committed job from being silently lost between the ledger write and queue publication.",
+      "connection": {
+        "edgeId": "mcs_coordinator_metadata",
+        "sourceNodeId": "mcs_coordinator",
+        "targetNodeId": "mcs_metadata",
+        "connectionType": "database-connection",
+        "label": "Job ledger and checkpoint",
+        "description": "Durably record intent, cursor, idempotency identity, policy version, and dispatch state."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "mcs_11_consistency_decision",
+      "stepNumber": 11,
+      "phase": "1. Define ownership, consistency, and the control plane",
+      "title": "Choose an honest cross-provider consistency contract",
+      "type": "decision_point",
+      "content": "Object stores do not share a distributed transaction; do not label a multi-destination job globally atomic. The provider-independent service contract is to carry opaque provider-local source and target revision tokens, revalidate the target before commit, verify content with a digest known to be comparable, and expose completion independently for each destination. Adapters translate each provider's event, version, checksum, and conditional-write APIs into that contract; do not assume tokens are mutually comparable or that every provider exposes identical guarantees. Define “complete” as all required destination writes verified for the selected source revision. A namespace that needs one authoritative writer should enforce it; multi-writer scopes need explicit conflict policy and may temporarily diverge.",
+      "decision": {
+        "question": "What consistency guarantee can the sync service honestly provide across independent object stores?",
+        "chosen": "Per-object versioned eventual convergence with verified destination checkpoints; single-writer ownership by default until a multi-writer policy is configured.",
+        "chosenReason": "It makes partial progress and divergence visible without claiming an atomic commit across providers. A stronger contract needs a workload-specific protocol and failure testing.",
+        "alternatives": [
+          {
+            "option": "Treat each completed job as a globally atomic multi-cloud commit",
+            "tradeoff": "Not supportable with ordinary independent object-store writes; a crash can leave destinations at different versions."
+          },
+          {
+            "option": "Last timestamp wins everywhere",
+            "tradeoff": "Clock skew, equal timestamps, and delayed events can select the wrong revision or lose a concurrent update."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "mcs_coordinator",
+        "properties": {
+          "purpose": "Own tenant sync scopes, idempotent job state, provider-pair policy, leases, checkpoints, and verified completion; expose per-object eventual convergence and enforce configured single-writer ownership unless a reviewed multi-writer conflict policy applies."
+        }
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:6",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "mcs_12_no_global_commit",
+      "stepNumber": 12,
+      "phase": "1. Define ownership, consistency, and the control plane",
+      "title": "Report partial success instead of hiding divergence",
+      "type": "explanation",
+      "content": "Track a source revision and destination verification independently. If one provider is unavailable after another accepted a write, show partial completion, retain the checkpoint, and resume the missing destination. A global “success” flag is only derived after every configured destination satisfies the chosen verification and conflict policy.",
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-constraint:3",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "mcs_13_s3",
+      "stepNumber": 13,
+      "phase": "2. Detect changes and reconcile conflicts",
+      "title": "Represent the S3 object store",
+      "type": "add_component",
+      "content": "This is the S3 adapter, not a cross-provider guarantee. Use an S3 version ID as a pinned revision only when bucket versioning is enabled; keep it opaque and never compare it with Azure tokens or GCS generations. Keep S3 event identifiers and precondition behavior inside this adapter, and do not assume an ETag is a portable content checksum for every upload mode. Treat the catalog's versioning and checksum settings as deployment requirements to verify, not defaults supplied by the provider.",
+      "component": {
+        "nodeId": "mcs_s3",
+        "componentType": "object-storage",
+        "label": "AWS S3 Object Store",
+        "description": "One of the three independently versioned cloud object stores",
+        "position": { "x": 1440, "y": 70 },
+        "properties": {
+          "componentName": "AWS S3 Object Store",
+          "purpose": "Source or destination for tenant-scoped objects; preserve provider version IDs, use TLS and the configured provider-side encryption policy, and use supported conditional writes and a verified content checksum rather than assuming ETag is always a portable checksum.",
+          "provider": "S3",
+          "versioning": true,
+          "checksumValidation": true
+        },
+        "highlightReason": "Version history and explicit checksums make source revisions and integrity checks observable."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:3",
+        "legacy-constraint:3",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "mcs_14_azure",
+      "stepNumber": 14,
+      "phase": "2. Detect changes and reconcile conflicts",
+      "title": "Represent the Azure Blob object store",
+      "type": "add_component",
+      "content": "This is the Azure Blob adapter, not a cross-provider guarantee. Use a version ID as a pinned historical revision only when the selected account and configuration support and enable version history; treat an ETag as an opaque conditional token, not a portable revision sequence or checksum. Keep Azure event and conditional-write behavior behind this adapter, and verify the required versioning and checksum settings at deployment.",
+      "component": {
+        "nodeId": "mcs_azure",
+        "componentType": "object-storage",
+        "label": "Azure Blob Object Store",
+        "description": "One of the three independently versioned cloud object stores",
+        "position": { "x": 1440, "y": 260 },
+        "properties": {
+          "componentName": "Azure Blob Object Store",
+          "purpose": "Source or destination for tenant-scoped objects; retain Azure revision tokens, use TLS and the configured provider-side encryption policy, and apply provider-supported conditional writes and compatible content checksums.",
+          "provider": "Azure Blob",
+          "versioning": true,
+          "checksumValidation": true
+        },
+        "highlightReason": "Treat provider revision tokens as opaque; portability comes from the common adapter contract, not identical provider semantics."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:3",
+        "legacy-constraint:3",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "mcs_15_gcs",
+      "stepNumber": 15,
+      "phase": "2. Detect changes and reconcile conflicts",
+      "title": "Represent the Google Cloud Storage object store",
+      "type": "add_component",
+      "content": "This is the GCS adapter, not a cross-provider guarantee. Keep generation and metageneration as GCS-local revision metadata; never compare them with S3 version IDs or Azure ETags. Use generation preconditions only through verified supported operations, and separately confirm that the selected retention/versioning configuration keeps a source revision readable for the required retry window.",
+      "component": {
+        "nodeId": "mcs_gcs",
+        "componentType": "object-storage",
+        "label": "Google Cloud Storage Object Store",
+        "description": "One of the three independently versioned cloud object stores",
+        "position": { "x": 1440, "y": 450 },
+        "properties": {
+          "componentName": "Google Cloud Storage Object Store",
+          "purpose": "Source or destination for tenant-scoped objects; retain object generation metadata, use TLS and the configured provider-side encryption policy, and use generation preconditions plus compatible content checksums for safe writes.",
+          "provider": "GCS",
+          "versioning": true,
+          "checksumValidation": true
+        },
+        "highlightReason": "Generation-aware writes prevent a stale retry from replacing a newer object."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:3",
+        "legacy-constraint:3",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "mcs_16_events",
+      "stepNumber": 16,
+      "phase": "2. Detect changes and reconcile conflicts",
+      "title": "Normalize provider change notifications",
+      "type": "add_component",
+      "content": "Provider adapters turn native event notifications into a common envelope: tenant/scope, provider, object key, event ID, provider revision token, event time, and operation type. Deduplicate by provider event identity where available; notifications trigger work but do not prove that every change was observed.",
+      "component": {
+        "nodeId": "mcs_event_adapter",
+        "componentType": "stream-processor",
+        "label": "Provider Event Normalizer",
+        "description": "Provider-specific event adapters emitting a common change envelope",
+        "position": { "x": 1800, "y": 70 },
+        "properties": {
+          "componentName": "Provider Event Normalizer",
+          "purpose": "Normalize S3, Azure Blob, and GCS notifications into tenant-scoped object-change envelopes with provider event identity and revision tokens; deduplicate where possible and tolerate duplicate or delayed delivery.",
+          "stateful": true,
+          "windowing": true
+        },
+        "highlightReason": "A common event envelope isolates provider differences while retaining the source revision evidence."
+      },
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-constraint:1"
+      ]
+    },
+    {
+      "id": "mcs_17_broker",
+      "stepNumber": 17,
+      "phase": "2. Detect changes and reconcile conflicts",
+      "title": "Buffer change work durably",
+      "type": "add_component",
+      "content": "A durable broker decouples provider notification bursts from reconciliation and transfer capacity. Choose retention, partition key, and ordering only after measuring event volume and deciding whether per-object ordering is required; consumers must remain idempotent because redelivery is expected.",
+      "component": {
+        "nodeId": "mcs_event_bus",
+        "componentType": "message-broker",
+        "label": "Change Event Bus",
+        "description": "Durable buffer for normalized provider change events",
+        "position": { "x": 2160, "y": 70 },
+        "properties": {
+          "componentName": "Change Event Bus",
+          "purpose": "Durably buffer normalized object-change events, expose consumer lag, and permit replay within the configured retention window; consumers are idempotent and do not assume global ordering.",
+          "durable": true
+        },
+        "highlightReason": "Durable buffering absorbs event bursts without turning provider event delivery into an unbounded transfer queue."
+      },
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:7"
+      ]
+    },
+    {
+      "id": "mcs_18_scanner",
+      "stepNumber": 18,
+      "phase": "2. Detect changes and reconcile conflicts",
+      "title": "Add inventory reconciliation for missed events",
+      "type": "add_component",
+      "content": "A bounded scanner compares provider listings and saved cursors, then emits only changed object revisions into the same processing path. Use provider inventory or listing capabilities where appropriate; partition by namespace and checkpoint scans so a restart does not require rescanning all objects blindly.",
+      "component": {
+        "nodeId": "mcs_reconciler",
+        "componentType": "backend-server",
+        "label": "Inventory Reconciler",
+        "description": "Checkpointed scans that repair gaps in provider event delivery",
+        "position": { "x": 1800, "y": 520 },
+        "properties": {
+          "componentName": "Inventory Reconciler",
+          "purpose": "Compare provider object inventories and saved cursors, checkpoint bounded namespace scans, and enqueue revision differences through the same idempotent path used by events.",
+          "architecture": "Microservices",
+          "retry": true,
+          "bulkOps": true
+        },
+        "highlightReason": "Periodic reconciliation repairs missed or expired notifications and is the basis for a trustworthy completion cursor."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:5",
+        "legacy-requirement:7"
+      ]
+    },
+    {
+      "id": "mcs_19_s3_events",
+      "stepNumber": 19,
+      "phase": "2. Detect changes and reconcile conflicts",
+      "title": "Connect S3 notifications to the common adapter",
+      "type": "add_connection",
+      "content": "Treat notification delivery as an at-least-once trigger and retain the S3 object version ID or delete marker with the event. A delayed event must not silently replace a newer observed revision.",
+      "connection": {
+        "edgeId": "mcs_s3_events",
+        "sourceNodeId": "mcs_s3",
+        "targetNodeId": "mcs_event_adapter",
+        "connectionType": "event-stream",
+        "label": "S3 object notifications",
+        "description": "Provider change events carry event identity and object revision metadata; gaps are repaired by inventory reconciliation."
+      },
+      "requirementIds": [
+        "legacy-requirement:5"
+      ]
+    },
+    {
+      "id": "mcs_20_azure_events",
+      "stepNumber": 20,
+      "phase": "2. Detect changes and reconcile conflicts",
+      "title": "Connect Azure Blob notifications to the common adapter",
+      "type": "add_connection",
+      "content": "Map Azure event and version metadata into the shared envelope without assuming its event IDs, ordering, or retry behavior match another provider.",
+      "connection": {
+        "edgeId": "mcs_azure_events",
+        "sourceNodeId": "mcs_azure",
+        "targetNodeId": "mcs_event_adapter",
+        "connectionType": "event-stream",
+        "label": "Azure Blob change events",
+        "description": "Normalize provider-native notifications and preserve Azure revision tokens for conditional downstream actions."
+      },
+      "requirementIds": [
+        "legacy-requirement:5"
+      ]
+    },
+    {
+      "id": "mcs_21_gcs_events",
+      "stepNumber": 21,
+      "phase": "2. Detect changes and reconcile conflicts",
+      "title": "Connect GCS notifications to the common adapter",
+      "type": "add_connection",
+      "content": "Retain the object generation and notification identity. Use preconditions at write time as well as event-time comparison; an old event arriving late is not a safe write instruction.",
+      "connection": {
+        "edgeId": "mcs_gcs_events",
+        "sourceNodeId": "mcs_gcs",
+        "targetNodeId": "mcs_event_adapter",
+        "connectionType": "event-stream",
+        "label": "GCS object change events",
+        "description": "Normalize change notifications while retaining object generation and event identity."
+      },
+      "requirementIds": [
+        "legacy-requirement:5"
+      ]
+    },
+    {
+      "id": "mcs_22_events_bus",
+      "stepNumber": 22,
+      "phase": "2. Detect changes and reconcile conflicts",
+      "title": "Publish normalized change envelopes",
+      "type": "add_connection",
+      "content": "Partitioning by a stable object identity can help preserve local ordering for the same key, but it does not create a total order across providers. Keep the original event ID for replay and duplicate diagnosis.",
+      "connection": {
+        "edgeId": "mcs_events_bus",
+        "sourceNodeId": "mcs_event_adapter",
+        "targetNodeId": "mcs_event_bus",
+        "connectionType": "event-stream",
+        "label": "Normalized object revision events",
+        "description": "Durable event buffer keyed by tenant, namespace, and object identity where provider keys permit."
+      },
+      "requirementIds": [
+        "legacy-requirement:5"
+      ]
+    },
+    {
+      "id": "mcs_23_bus_coordinator",
+      "stepNumber": 23,
+      "phase": "2. Detect changes and reconcile conflicts",
+      "title": "Let the coordinator deduplicate and schedule event work",
+      "type": "add_connection",
+      "content": "The consumer records its cursor and deduplication result before acknowledging an event. If processing fails, the event is replayed; idempotency and source revision checks prevent duplicate work from becoming duplicate or stale writes.",
+      "connection": {
+        "edgeId": "mcs_bus_coordinator",
+        "sourceNodeId": "mcs_event_bus",
+        "targetNodeId": "mcs_coordinator",
+        "connectionType": "event-stream",
+        "label": "At-least-once change work",
+        "description": "Consume, deduplicate, checkpoint, and schedule object-level reconciliation without assuming exactly-once delivery."
+      },
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:7",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "mcs_24_s3_scan",
+      "stepNumber": 24,
+      "phase": "2. Detect changes and reconcile conflicts",
+      "title": "Reconcile S3 inventory against its durable cursor",
+      "type": "add_connection",
+      "content": "Use conditional listing or provider inventory snapshots where available; compare keys and version tokens, not only timestamps. A scan checkpoint records what was observed, not that every destination has already converged.",
+      "connection": {
+        "edgeId": "mcs_s3_scan",
+        "sourceNodeId": "mcs_s3",
+        "targetNodeId": "mcs_reconciler",
+        "connectionType": "api-call",
+        "label": "Checkpointed S3 inventory reads",
+        "description": "List or consume an inventory for scoped reconciliation and retain provider version evidence."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:5"
+      ]
+    },
+    {
+      "id": "mcs_25_azure_scan",
+      "stepNumber": 25,
+      "phase": "2. Detect changes and reconcile conflicts",
+      "title": "Reconcile Azure Blob inventory against its cursor",
+      "type": "add_connection",
+      "content": "Resume a bounded scan from its persisted provider cursor and emit changed revisions into the same deduplicated work path as notifications.",
+      "connection": {
+        "edgeId": "mcs_azure_scan",
+        "sourceNodeId": "mcs_azure",
+        "targetNodeId": "mcs_reconciler",
+        "connectionType": "api-call",
+        "label": "Checkpointed Azure inventory reads",
+        "description": "Compare scoped object revisions and repair event gaps without starting an unbounded full rescan."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:5"
+      ]
+    },
+    {
+      "id": "mcs_26_gcs_scan",
+      "stepNumber": 26,
+      "phase": "2. Detect changes and reconcile conflicts",
+      "title": "Reconcile GCS inventory against its cursor",
+      "type": "add_connection",
+      "content": "Use generation-aware inventory comparisons. If a scan races with an update, save the observed generation and reread or retry with a precondition instead of claiming the newer state was copied.",
+      "connection": {
+        "edgeId": "mcs_gcs_scan",
+        "sourceNodeId": "mcs_gcs",
+        "targetNodeId": "mcs_reconciler",
+        "connectionType": "api-call",
+        "label": "Checkpointed GCS inventory reads",
+        "description": "Read scoped object generations and repair notification gaps using resumable reconciliation."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:5",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "mcs_27_scanner_coordinator",
+      "stepNumber": 27,
+      "phase": "2. Detect changes and reconcile conflicts",
+      "title": "Feed inventory differences into the same job state machine",
+      "type": "add_connection",
+      "content": "Events and scans must converge on one idempotent operation keyed by tenant, namespace, object, and source revision. This prevents separate detection mechanisms from racing into independent copies.",
+      "connection": {
+        "edgeId": "mcs_scanner_coordinator",
+        "sourceNodeId": "mcs_reconciler",
+        "targetNodeId": "mcs_coordinator",
+        "connectionType": "api-call",
+        "label": "Reconciled revision candidates",
+        "description": "Submit scan-discovered changes through the common deduplication, conflict, and checkpoint state machine."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:5",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "mcs_28_detection_limits",
+      "stepNumber": 28,
+      "phase": "2. Detect changes and reconcile conflicts",
+      "title": "Treat timestamps as evidence, not a universal ordering",
+      "type": "explanation",
+      "content": "Checksums tell whether bytes match; timestamps and provider version tokens help identify candidate changes but do not establish a cross-cloud total order by themselves. Use provider events for prompt triggers, periodic inventory reconciliation for missed events, and a defined source-of-truth or revision policy for concurrent writes. Represent deletes as versioned tombstones and replicate them through the same conflict-checked path; do not physically remove older copies until configured destinations have acknowledged the tombstone and reconciliation has passed the relevant cursor, then garbage-collect under the agreed retention policy so a delayed event cannot resurrect deleted data.",
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:5",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "mcs_29_conflicts",
+      "stepNumber": 29,
+      "phase": "2. Detect changes and reconcile conflicts",
+      "title": "Add explicit conflict classification",
+      "type": "add_component",
+      "content": "Classify whether the target still matches the revision the job observed. If another writer changed it, preserve both version references and apply only the namespace's configured resolution policy. If the policy is absent or ambiguous, quarantine the conflict for review instead of silently overwriting either revision.",
+      "component": {
+        "nodeId": "mcs_conflict_resolver",
+        "componentType": "backend-server",
+        "label": "Version & Conflict Resolver",
+        "description": "Compare revisions and enforce configured per-namespace conflict policy",
+        "position": { "x": 980, "y": 520 },
+        "properties": {
+          "componentName": "Version & Conflict Resolver",
+          "purpose": "Compare source and destination revision tokens, enforce the configured single-writer or multi-writer policy, preserve conflicting version references, and quarantine ambiguous conflicts rather than silently losing an update.",
+          "architecture": "Microservices",
+          "retry": true
+        },
+        "highlightReason": "Concurrent updates require an explicit policy and a safe outcome when the policy cannot choose."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "mcs_30_coordinator_conflict",
+      "stepNumber": 30,
+      "phase": "2. Detect changes and reconcile conflicts",
+      "title": "Check target revision before scheduling a write",
+      "type": "add_connection",
+      "content": "A job carries the source revision and the destination revision observed when planning. Resolve that pair before dispatch, then use a provider conditional write so a concurrent target update between check and write is still detected.",
+      "connection": {
+        "edgeId": "mcs_coordinator_conflict",
+        "sourceNodeId": "mcs_coordinator",
+        "targetNodeId": "mcs_conflict_resolver",
+        "connectionType": "api-call",
+        "label": "Source/target revision comparison",
+        "description": "Classify the observed object versions against the configured namespace conflict policy before transfer."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "mcs_31_conflict_metadata",
+      "stepNumber": 31,
+      "phase": "2. Detect changes and reconcile conflicts",
+      "title": "Persist conflict decisions and preserved revisions",
+      "type": "add_connection",
+      "content": "Record both provider revisions, the policy version, the decision reason, and whether a human action is needed. Keep original versions immutable or recoverable according to the tenant's retention policy; do not turn a conflict into a destructive overwrite without evidence.",
+      "connection": {
+        "edgeId": "mcs_conflict_metadata",
+        "sourceNodeId": "mcs_conflict_resolver",
+        "targetNodeId": "mcs_metadata",
+        "connectionType": "database-connection",
+        "label": "Conflict evidence and disposition",
+        "description": "Persist competing revision IDs, policy version, resolution reason, and review state in the durable ledger."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:6",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "mcs_32_conflict_decision",
+      "stepNumber": 32,
+      "phase": "2. Detect changes and reconcile conflicts",
+      "title": "Do not make last-writer-wins the hidden default",
+      "type": "decision_point",
+      "content": "Choose policy per namespace and workload. A single authoritative writer is the simplest default for convergence. If concurrent writes are required, define a domain merge or deterministic revision protocol and preserve losing versions; clocks alone are insufficient. An unresolved conflict is a visible state, not a successful sync.",
+      "decision": {
+        "question": "How should two providers' independently updated copies of one object be reconciled?",
+        "chosen": "Enforce one writer per namespace by default; require an explicit multi-writer policy, preserve both revisions, and quarantine cases that the policy cannot safely decide.",
+        "chosenReason": "This avoids silent data loss while allowing a product owner to opt into a merge policy when the data format and semantics support it.",
+        "alternatives": [
+          {
+            "option": "Always select the largest timestamp",
+            "tradeoff": "Clock skew and delayed observations can discard a real concurrent update."
+          },
+          {
+            "option": "Always overwrite the destination from the designated source",
+            "tradeoff": "Simple for one-way replication, but unsafe if the configured source is not authoritative or writes are allowed at both ends."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "mcs_conflict_resolver",
+        "properties": {
+          "purpose": "Compare source and destination revision tokens, enforce a per-namespace single-writer policy by default or an explicitly reviewed multi-writer policy, preserve competing versions, and quarantine ambiguous conflicts rather than silently losing an update."
+        }
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "mcs_33_transfer_queue",
+      "stepNumber": 33,
+      "phase": "3. Transfer safely across providers",
+      "title": "Bound transfer admission with a durable queue",
+      "type": "add_component",
+      "content": "Queue object-level or multipart work descriptors, not large object payloads. Apply per-tenant and per-provider-pair concurrency limits so an event burst cannot exhaust API quotas or create an unexpected egress bill. Make queue retention and visibility deadlines explicit after measuring object duration distributions.",
+      "component": {
+        "nodeId": "mcs_transfer_queue",
+        "componentType": "queue",
+        "label": "Transfer Work Queue",
+        "description": "Durable bounded work descriptors for resumable object and multipart transfers",
+        "position": { "x": 640, "y": 520 },
+        "properties": {
+          "componentName": "Transfer Work Queue",
+          "purpose": "Hold compact, idempotent object-transfer descriptors and checkpoints; enforce tenant and provider-pair concurrency budgets, provider throttling, and bounded retry policy rather than queueing object bytes.",
+          "durable": true,
+          "backoff": "exponential"
+        },
+        "highlightReason": "Backpressure protects provider quotas and cost while allowing large transfers to resume independently."
+      },
+      "requirementIds": [
+        "legacy-requirement:7"
+      ]
+    },
+    {
+      "id": "mcs_34_dead_letter",
+      "stepNumber": 34,
+      "phase": "3. Transfer safely across providers",
+      "title": "Keep exhausted work inspectable and replayable",
+      "type": "add_component",
+      "content": "After a bounded retry budget, move the descriptor and diagnostic context to a dead-letter queue. Do not put credentials or object contents in the message. Replay only after fixing the cause and rechecking the current source and destination revisions.",
+      "component": {
+        "nodeId": "mcs_dead_letter",
+        "componentType": "queue",
+        "label": "Transfer Dead-Letter Queue",
+        "description": "Quarantine for exhausted or policy-blocked transfer work",
+        "position": { "x": 640, "y": 760 },
+        "properties": {
+          "componentName": "Transfer Dead-Letter Queue",
+          "purpose": "Retain exhausted work descriptors, safe error codes, and trace references for operator review; redact credentials and payloads and require revision revalidation before replay.",
+          "durable": true,
+          "backoff": "exponential"
+        },
+        "highlightReason": "A visible quarantine prevents poison objects and persistent authorization failures from retrying forever."
+      },
+      "requirementIds": [
+        "legacy-requirement:6",
+        "legacy-requirement:7"
+      ]
+    },
+    {
+      "id": "mcs_35_transfer_workers",
+      "stepNumber": 35,
+      "phase": "3. Transfer safely across providers",
+      "title": "Add resumable transfer workers",
+      "type": "add_component",
+      "content": "Workers plan provider-native direct copy where supported and authorized; otherwise they stream or multipart-copy bounded chunks with durable part checkpoints. Verify a compatible full-object checksum before marking a destination revision complete. If the provider's metadata checksum is not comparable, read or compute an agreed digest rather than treating a matching size as proof.",
+      "component": {
+        "nodeId": "mcs_transfer_workers",
+        "componentType": "backend-server",
+        "label": "Provider Transfer Workers",
+        "description": "Provider adapters for direct copy, multipart fallback, checksums, and conditional commits",
+        "position": { "x": 980, "y": 760 },
+        "properties": {
+          "componentName": "Provider Transfer Workers",
+          "purpose": "Orchestrate provider-native direct copies when supported; otherwise transfer bounded resumable chunks, persist part checkpoints, verify a comparable content checksum, and conditionally commit only if the target revision still matches the planned precondition.",
+          "architecture": "Microservices",
+          "retry": true,
+          "bulkOps": true
+        },
+        "highlightReason": "Direct copies can avoid a central bandwidth and egress bottleneck; a resumable relay is the compatibility fallback, not an assumed fast path."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:7",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "mcs_36_secrets",
+      "stepNumber": 36,
+      "phase": "3. Transfer safely across providers",
+      "title": "Keep provider credentials outside jobs and logs",
+      "type": "add_component",
+      "content": "Store or broker only the minimum credential material needed for provider adapters. Prefer workload federation and short-lived access; rotate any unavoidable long-lived secret, audit use, and ensure queue messages contain a secret reference rather than the secret itself.",
+      "component": {
+        "nodeId": "mcs_secrets",
+        "componentType": "secrets-manager",
+        "label": "Provider Credential Broker",
+        "description": "Tenant-scoped short-lived provider credentials and audited secret references",
+        "position": { "x": 980, "y": 980 },
+        "properties": {
+          "componentName": "Provider Credential Broker",
+          "purpose": "Broker tenant- and namespace-scoped provider identities or secret references to workers; prefer federation and short-lived credentials, rotate unavoidable secrets, and audit access without placing secrets in jobs or logs.",
+          "rotation": true,
+          "encryption": true,
+          "audit": true
+        },
+        "highlightReason": "Cross-cloud replication increases blast radius unless each worker receives narrow, auditable authority."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:6",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "mcs_37_coordinator_queue",
+      "stepNumber": 37,
+      "phase": "3. Transfer safely across providers",
+      "title": "Dispatch only conflict-checked transfer descriptors",
+      "type": "add_connection",
+      "content": "The descriptor identifies the tenant, object, source revision, destination set, target preconditions, policy version, and checkpoint reference. It contains no object bytes or credentials.",
+      "connection": {
+        "edgeId": "mcs_coordinator_queue",
+        "sourceNodeId": "mcs_coordinator",
+        "targetNodeId": "mcs_transfer_queue",
+        "connectionType": "message-queue",
+        "label": "Authorized object work descriptor",
+        "description": "Durable, idempotent transfer intent with revision and checkpoint references but no payload or credential."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:5",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "mcs_queue_workers",
+      "stepNumber": 38,
+      "phase": "3. Transfer safely across providers",
+      "title": "Lease work with bounded retries and provider-aware backoff",
+      "type": "add_connection",
+      "content": "Workers acknowledge only after checkpoint state is durable. Retry transient network and throttling errors with jitter and bounded exponential backoff; do not retry permanent authorization, policy, or checksum failures as if they were transient.",
+      "connection": {
+        "edgeId": "mcs_queue_workers",
+        "sourceNodeId": "mcs_transfer_queue",
+        "targetNodeId": "mcs_transfer_workers",
+        "connectionType": "message-queue",
+        "label": "Leased resumable transfer work",
+        "description": "Bounded per-tenant/provider concurrency, leases, and classified retry behavior for object work."
+      },
+      "requirementIds": [
+        "legacy-requirement:7"
+      ]
+    },
+    {
+      "id": "mcs_worker_s3",
+      "stepNumber": 39,
+      "phase": "3. Transfer safely across providers",
+      "title": "Use S3 APIs for source reads and conditional destination operations",
+      "type": "add_connection",
+      "content": "The adapter can request source metadata or a version-specific read and issue a destination write with the expected target revision. When S3 is the destination, select a supported conditional or multipart completion path; never let a late retry blindly replace a newer object.",
+      "connection": {
+        "edgeId": "mcs_worker_s3",
+        "sourceNodeId": "mcs_transfer_workers",
+        "targetNodeId": "mcs_s3",
+        "connectionType": "api-call",
+        "label": "S3 versioned read / conditional write",
+        "description": "Provider adapter reads the planned revision or conditionally commits a verified target object."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-constraint:3",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "mcs_worker_azure",
+      "stepNumber": 40,
+      "phase": "3. Transfer safely across providers",
+      "title": "Use Azure Blob version-aware operations",
+      "type": "add_connection",
+      "content": "Use provider-supported revision conditions and resumable block operations. Treat provider tokens as opaque and record which source revision and destination precondition each attempt used.",
+      "connection": {
+        "edgeId": "mcs_worker_azure",
+        "sourceNodeId": "mcs_transfer_workers",
+        "targetNodeId": "mcs_azure",
+        "connectionType": "api-call",
+        "label": "Azure revision-aware read / write",
+        "description": "Provider adapter uses version or ETag conditions and resumable block transfer where supported."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-constraint:3",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "mcs_worker_gcs",
+      "stepNumber": 41,
+      "phase": "3. Transfer safely across providers",
+      "title": "Use GCS generation preconditions for safe writes",
+      "type": "add_connection",
+      "content": "Read the planned generation and use generation-match preconditions at commit. A precondition failure is a concurrency signal: re-read and re-run conflict resolution, not an unconditional-write retry.",
+      "connection": {
+        "edgeId": "mcs_worker_gcs",
+        "sourceNodeId": "mcs_transfer_workers",
+        "targetNodeId": "mcs_gcs",
+        "connectionType": "api-call",
+        "label": "GCS generation-conditional operations",
+        "description": "Provider adapter reads the planned generation and commits with a generation precondition."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-constraint:3",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "mcs_s3_worker_read",
+      "stepNumber": 42,
+      "phase": "3. Transfer safely across providers",
+      "title": "Read a pinned S3 revision or a resumable relay chunk",
+      "type": "add_connection",
+      "content": "For a native provider-to-provider copy, the worker orchestrates the copy and polls the provider job. If direct copy is unavailable, read a version-pinned range and checkpoint the completed part before advancing.",
+      "connection": {
+        "edgeId": "mcs_s3_worker_read",
+        "sourceNodeId": "mcs_s3",
+        "targetNodeId": "mcs_transfer_workers",
+        "connectionType": "data-flow",
+        "label": "Pinned source revision or relay chunk",
+        "description": "Source bytes flow through workers only for the compatibility relay; native direct-copy jobs keep bulk bytes provider-to-provider."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:7",
+        "legacy-constraint:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "mcs_azure_worker_read",
+      "stepNumber": 43,
+      "phase": "3. Transfer safely across providers",
+      "title": "Resume Azure source reads from verified checkpoints",
+      "type": "add_connection",
+      "content": "A retried block transfer resumes only from durably recorded parts for the same source revision. If that source revision disappeared or changed, abort the old attempt and create a new conflict-checked job.",
+      "connection": {
+        "edgeId": "mcs_azure_worker_read",
+        "sourceNodeId": "mcs_azure",
+        "targetNodeId": "mcs_transfer_workers",
+        "connectionType": "data-flow",
+        "label": "Pinned Azure revision / relay chunk",
+        "description": "Resumable fallback reads are tied to a source version and durable part checkpoints."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:7",
+        "legacy-constraint:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "mcs_gcs_worker_read",
+      "stepNumber": 44,
+      "phase": "3. Transfer safely across providers",
+      "title": "Resume GCS source reads from a pinned generation",
+      "type": "add_connection",
+      "content": "A range or multipart retry must remain bound to the original object generation. If the source changes mid-transfer, verify whether the selected snapshot/version remains readable; otherwise stop and reconcile the new generation.",
+      "connection": {
+        "edgeId": "mcs_gcs_worker_read",
+        "sourceNodeId": "mcs_gcs",
+        "targetNodeId": "mcs_transfer_workers",
+        "connectionType": "data-flow",
+        "label": "Pinned GCS generation / relay chunk",
+        "description": "Read a selected generation and resume only from checkpoints validated for that same revision."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:7",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "mcs_worker_metadata",
+      "stepNumber": 45,
+      "phase": "3. Transfer safely across providers",
+      "title": "Persist part checkpoints and verification before acknowledgement",
+      "type": "add_connection",
+      "content": "Write the source revision, completed part identifiers, expected and observed checksum, destination version, and terminal state to the ledger. A checksum mismatch or conditional-write failure keeps the object unverified and routes it to repair or conflict handling.",
+      "connection": {
+        "edgeId": "mcs_worker_metadata",
+        "sourceNodeId": "mcs_transfer_workers",
+        "targetNodeId": "mcs_metadata",
+        "connectionType": "database-connection",
+        "label": "Durable transfer checkpoint and verification",
+        "description": "Persist resumable part state and mark a destination verified only after revision and integrity checks pass."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-constraint:3",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "mcs_worker_conflict",
+      "stepNumber": 46,
+      "phase": "3. Transfer safely across providers",
+      "title": "Recheck the target before commit",
+      "type": "add_connection",
+      "content": "A target can change after initial planning. Revalidate the expected destination revision immediately before commit; if its conditional write fails, stop the stale attempt and send the new observed versions back through conflict classification.",
+      "connection": {
+        "edgeId": "mcs_worker_conflict",
+        "sourceNodeId": "mcs_transfer_workers",
+        "targetNodeId": "mcs_conflict_resolver",
+        "connectionType": "api-call",
+        "label": "Pre-commit revision revalidation",
+        "description": "Validate the destination precondition and route a race to explicit conflict handling rather than overwriting."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "mcs_worker_secrets",
+      "stepNumber": 47,
+      "phase": "3. Transfer safely across providers",
+      "title": "Request narrowly scoped provider credentials",
+      "type": "add_connection",
+      "content": "Issue only the source read and destination write permissions needed for this tenant, namespace, and job. Ensure credentials are short-lived, excluded from logs and checkpoints, and revoked or allowed to expire after the operation.",
+      "connection": {
+        "edgeId": "mcs_worker_secrets",
+        "sourceNodeId": "mcs_transfer_workers",
+        "targetNodeId": "mcs_secrets",
+        "connectionType": "api-call",
+        "label": "Scoped workload identity request",
+        "description": "Obtain a narrowly scoped, auditable provider identity or secret reference for one authorized job."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:6"
+      ]
+    },
+    {
+      "id": "mcs_queue_dlq",
+      "stepNumber": 48,
+      "phase": "3. Transfer safely across providers",
+      "title": "Quarantine work after a bounded retry budget",
+      "type": "add_connection",
+      "content": "Classify network timeouts, provider throttling, checksum mismatches, missing source versions, policy denials, and quota exhaustion separately. Only retry eligible transient failures; send exhausted or operator-action cases to quarantine with redacted evidence.",
+      "connection": {
+        "edgeId": "mcs_queue_dlq",
+        "sourceNodeId": "mcs_transfer_queue",
+        "targetNodeId": "mcs_dead_letter",
+        "connectionType": "message-queue",
+        "label": "Exhausted or policy-blocked work",
+        "description": "Redacted failure context and a revision-bound descriptor move to quarantine after bounded, classified retries."
+      },
+      "requirementIds": [
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "mcs_worker_retry",
+      "stepNumber": 49,
+      "phase": "3. Transfer safely across providers",
+      "title": "Acknowledge or retry only after the durable state transition",
+      "type": "add_connection",
+      "content": "The worker reports a verified commit, a resumable checkpoint, or a classified failure. If it crashes after a provider accepted data but before acknowledgement, replay must inspect the destination version and checksum before repeating the commit.",
+      "connection": {
+        "edgeId": "mcs_worker_retry",
+        "sourceNodeId": "mcs_transfer_workers",
+        "targetNodeId": "mcs_transfer_queue",
+        "connectionType": "message-queue",
+        "label": "Checkpointed completion or retry disposition",
+        "description": "Release a lease only after durable checkpointing; safely re-read provider state after an ambiguous timeout."
+      },
+      "requirementIds": [
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-constraint:3",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "mcs_50_large_transfer",
+      "stepNumber": 50,
+      "phase": "3. Transfer safely across providers",
+      "title": "Scale large objects without inventing a throughput promise",
+      "type": "scale_trigger",
+      "content": "Measure object-size distribution, changed-byte rate, source-to-destination throughput, active multipart work, provider throttling, and oldest backlog age. Determine whether the 100TB+ constraint is retained capacity, a full initial migration, or a recurring changed set before sizing or promising freshness.",
+      "scaleTrigger": {
+        "metric": "Projected completion time from changed bytes, measured effective throughput per provider pair, oldest queued age, and throttling rate",
+        "action": "Increase bounded parallelism only while provider quotas, target preconditions, checksum verification, and the approved egress budget remain healthy; otherwise pace work and expose the forecasted lag.",
+        "impact": "Prevents a large backfill from monopolizing resources or violating cost policy, while making a missed freshness target visible instead of claiming the under-five-minute objective is met."
+      },
+      "componentUpdate": {
+        "nodeId": "mcs_transfer_workers",
+        "properties": {
+          "purpose": "Orchestrate provider-native direct copies where supported; otherwise transfer bounded resumable chunks, persist part checkpoints, verify a comparable content checksum, conditionally commit against the planned target revision, and cap parallelism by measured quotas and egress budget."
+        }
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "mcs_51_resume_protocol",
+      "stepNumber": 51,
+      "phase": "3. Transfer safely across providers",
+      "title": "Resume only when the source revision still exists",
+      "type": "explanation",
+      "content": "On reconnect, load the last durable part checkpoint and confirm it belongs to the same source version, destination, and transfer policy. Reconcile incomplete multipart uploads and orphaned parts under a cleanup policy; never mark an interrupted partial object as verified.",
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:7",
+        "legacy-constraint:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "mcs_52_integrity_gate",
+      "stepNumber": 52,
+      "phase": "3. Transfer safely across providers",
+      "title": "Make integrity verification a commit gate",
+      "type": "explanation",
+      "content": "Compare a well-defined digest over the same object bytes and encoding at source and destination. Provider ETags, multipart identifiers, and metadata checksums are not automatically comparable across services. A mismatch must block verified status, retain diagnostic evidence, and trigger bounded repair or operator review.",
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:6",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "mcs_53_monitoring",
+      "stepNumber": 53,
+      "phase": "4. Prove outcomes, cost, and recovery",
+      "title": "Measure sync freshness and verified completion",
+      "type": "add_component",
+      "content": "Track event-to-verified-destination age by provider pair and tenant, plus bytes attempted/verified, checksum failures, conditional-write conflicts, retry class, queue age, scan cursor lag, and partial job status. Define the latency percentile and sampling window with stakeholders before treating five minutes as an SLO.",
+      "component": {
+        "nodeId": "mcs_monitoring",
+        "componentType": "monitoring",
+        "label": "Sync Freshness & Reliability Monitoring",
+        "description": "Per-provider-pair freshness, integrity, backlog, retry, and partial-success signals",
+        "position": { "x": 1800, "y": 760 },
+        "properties": {
+          "componentName": "Sync Freshness & Reliability Monitoring",
+          "purpose": "Measure event-to-verified-destination age, scan cursor lag, queue age, attempted and verified bytes, checksum failures, precondition conflicts, retries by class, and partial sync status per provider pair and tenant.",
+          "metrics": true,
+          "alerts": true
+        },
+        "highlightReason": "Freshness is measured through verified destination state, not event receipt or queue acceptance."
+      },
+      "requirementIds": [
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-constraint:1",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "mcs_54_cost_analytics",
+      "stepNumber": 54,
+      "phase": "4. Prove outcomes, cost, and recovery",
+      "title": "Attribute transfer and egress cost by provider pair",
+      "type": "add_component",
+      "content": "Aggregate provider-reported transfer bytes, operation counts, estimated or billed egress, failed/retried bytes, and destination fan-out by tenant and sync scope. Clearly label estimates versus finalized billing data; the exact tariff and free-tier rules depend on provider, region, and route.",
+      "component": {
+        "nodeId": "mcs_cost_analytics",
+        "componentType": "analytics",
+        "label": "Transfer Cost Attribution",
+        "description": "Per-scope transfer volume and provider-reported or estimated egress analysis",
+        "position": { "x": 2160, "y": 520 },
+        "properties": {
+          "componentName": "Transfer Cost Attribution",
+          "purpose": "Aggregate attempted and verified bytes, provider-pair fan-out, request counts, retries, and egress estimates or billing exports per tenant and scope; distinguish estimates from finalized provider charges.",
+          "realTime": true
+        },
+        "highlightReason": "Cost optimization needs comparable per-route data and must account for retries and destination fan-out."
+      },
+      "requirementIds": [
+        "legacy-requirement:8",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "mcs_monitor_coordinator",
+      "stepNumber": 55,
+      "phase": "4. Prove outcomes, cost, and recovery",
+      "title": "Observe control-plane state transitions",
+      "type": "add_connection",
+      "content": "Emit structured, tenant-safe status transitions with correlation IDs, not credentials or document contents. Alert on old pending jobs, stuck scans, repeated conflicts, and unverified partial completion.",
+      "connection": {
+        "edgeId": "mcs_monitor_coordinator",
+        "sourceNodeId": "mcs_coordinator",
+        "targetNodeId": "mcs_monitoring",
+        "connectionType": "data-flow",
+        "label": "Job state and verified freshness metrics",
+        "description": "Observe state transitions and completion age with tenant-safe labels and redacted logs."
+      },
+      "requirementIds": [
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-constraint:1"
+      ]
+    },
+    {
+      "id": "mcs_monitor_worker",
+      "stepNumber": 56,
+      "phase": "4. Prove outcomes, cost, and recovery",
+      "title": "Observe bytes, integrity, and retry outcomes",
+      "type": "add_connection",
+      "content": "Separate attempted from verified bytes and label failures by provider pair and cause. Avoid high-cardinality object keys in metrics; keep per-object diagnostics in access-controlled traces or the audit ledger.",
+      "connection": {
+        "edgeId": "mcs_monitor_worker",
+        "sourceNodeId": "mcs_transfer_workers",
+        "targetNodeId": "mcs_monitoring",
+        "connectionType": "data-flow",
+        "label": "Transfer, checksum, and retry telemetry",
+        "description": "Report bounded-cardinality throughput, integrity, precondition, and classified failure signals."
+      },
+      "requirementIds": [
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-constraint:1",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "mcs_monitor_queue",
+      "stepNumber": 57,
+      "phase": "4. Prove outcomes, cost, and recovery",
+      "title": "Alert on work that is aging or repeatedly failing",
+      "type": "add_connection",
+      "content": "Queue depth alone is not enough: include oldest message age, retry counts, lease expirations, dead-letter growth, and estimated drain time. Page only on agreed impact thresholds and keep tenant-facing status available for slower recovery.",
+      "connection": {
+        "edgeId": "mcs_monitor_queue",
+        "sourceNodeId": "mcs_transfer_queue",
+        "targetNodeId": "mcs_monitoring",
+        "connectionType": "data-flow",
+        "label": "Backlog age, retries, and dead letters",
+        "description": "Measure work age and recoverability, not just queue size."
+      },
+      "requirementIds": [
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-constraint:1"
+      ]
+    },
+    {
+      "id": "mcs_monitor_scanner",
+      "stepNumber": 58,
+      "phase": "4. Prove outcomes, cost, and recovery",
+      "title": "Expose inventory cursor lag and scan health",
+      "type": "add_connection",
+      "content": "Show the age and progress of each provider inventory cursor. A scan that is healthy but behind is different from an event subscription that is broken; make the distinction visible for diagnosis and recovery.",
+      "connection": {
+        "edgeId": "mcs_monitor_scanner",
+        "sourceNodeId": "mcs_reconciler",
+        "targetNodeId": "mcs_monitoring",
+        "connectionType": "data-flow",
+        "label": "Provider scan and cursor health",
+        "description": "Observe scan progress and time since each inventory cursor was verified."
+      },
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-constraint:1"
+      ]
+    },
+    {
+      "id": "mcs_monitor_bus",
+      "stepNumber": 59,
+      "phase": "4. Prove outcomes, cost, and recovery",
+      "title": "Monitor event delivery and consumer lag",
+      "type": "add_connection",
+      "content": "Correlate provider notification receipt, normalization, broker publication, and coordinator consumption. Alert on delivery gaps using reconciliation evidence rather than assuming provider event counts are a complete source of truth.",
+      "connection": {
+        "edgeId": "mcs_monitor_bus",
+        "sourceNodeId": "mcs_event_bus",
+        "targetNodeId": "mcs_monitoring",
+        "connectionType": "data-flow",
+        "label": "Event lag and delivery health",
+        "description": "Track normalized event publication, consumer lag, redelivery, and reconciliation coverage."
+      },
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:7"
+      ]
+    },
+    {
+      "id": "mcs_worker_cost",
+      "stepNumber": 60,
+      "phase": "4. Prove outcomes, cost, and recovery",
+      "title": "Send route-level transfer evidence to cost attribution",
+      "type": "add_connection",
+      "content": "Record source and destination provider, bytes, operation class, retries, and whether a native copy or relay path was used. Do not log object contents or credentials; use billing exports to reconcile estimates after the provider's reporting delay.",
+      "connection": {
+        "edgeId": "mcs_worker_cost",
+        "sourceNodeId": "mcs_transfer_workers",
+        "targetNodeId": "mcs_cost_analytics",
+        "connectionType": "data-flow",
+        "label": "Provider-pair bytes and operation costs",
+        "description": "Attribute transfer path, attempted and verified bytes, retries, and provider operation counts to a sync scope."
+      },
+      "requirementIds": [
+        "legacy-requirement:8",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "mcs_cost_monitor",
+      "stepNumber": 61,
+      "phase": "4. Prove outcomes, cost, and recovery",
+      "title": "Alert on cost and freshness tradeoffs together",
+      "type": "add_connection",
+      "content": "A low-cost policy that causes the freshness objective to miss is not silently successful. Present forecasted lag alongside estimated egress and let the tenant or operator choose an approved priority policy; record that choice in the sync scope.",
+      "connection": {
+        "edgeId": "mcs_cost_monitor",
+        "sourceNodeId": "mcs_cost_analytics",
+        "targetNodeId": "mcs_monitoring",
+        "connectionType": "data-flow",
+        "label": "Cost forecast and budget signals",
+        "description": "Correlate estimated or billed egress with freshness and backlog objectives."
+      },
+      "requirementIds": [
+        "legacy-requirement:6",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "mcs_transfer_tradeoff",
+      "stepNumber": 62,
+      "phase": "4. Prove outcomes, cost, and recovery",
+      "title": "Choose direct copy versus relay from measured route support",
+      "type": "decision_point",
+      "content": "Prefer provider-native direct transfer when the exact source/destination pair, authorization model, encryption policy, object size, and conditional-commit semantics support it. Fall back to a bounded resumable relay when they do not. Measure egress and API charges on both paths; “direct” does not automatically mean free, lower-latency, or available for every provider pair.",
+      "decision": {
+        "question": "Should every object pass through the sync workers, or should bytes move directly between provider services?",
+        "chosen": "Select a provider-pair-specific native copy path only after a capability and policy check; otherwise use a resumable relay with explicit egress budget and integrity verification.",
+        "chosenReason": "This can avoid unnecessary central bandwidth without promising native cross-cloud support or ignoring source/destination charges.",
+        "alternatives": [
+          {
+            "option": "Always relay all object bytes through the application workers",
+            "tradeoff": "Uniform behavior, but adds a bandwidth bottleneck, worker cost, and potentially another egress leg."
+          },
+          {
+            "option": "Always request a provider-native copy",
+            "tradeoff": "Some provider pairs, permissions, object classes, or required commit semantics may not support the operation."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "mcs_transfer_workers",
+        "properties": {
+          "purpose": "Select a capability-checked provider-native copy per route; otherwise use bounded resumable chunks, record route-specific egress, verify a comparable checksum, and conditionally commit against the planned destination revision."
+        }
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:8",
+        "legacy-constraint:2",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "mcs_failure_drill",
+      "stepNumber": 63,
+      "phase": "4. Prove outcomes, cost, and recovery",
+      "title": "Exercise outage, throttling, and partial-write recovery",
+      "type": "scale_trigger",
+      "content": "Use fault injection or controlled provider-side failures to verify retry classification, lease recovery, cursor replay, partial destination reporting, and checksum repair. Define the five-minute measure and percentile before interpreting any run as passing.",
+      "scaleTrigger": {
+        "metric": "End-to-end event-to-verified-destination age by provider pair, with outage duration, retry backlog, throttling, and partial-job count",
+        "action": "When the agreed freshness objective is projected to miss, expose degraded status, prioritize by configured policy, and cap retries or fan-out to protect provider quotas and budget; resume from the last verified checkpoint after recovery.",
+        "impact": "Provides a recoverable path through network failures and makes the difference between delayed, partial, conflicting, and verified sync explicit."
+      },
+      "componentUpdate": {
+        "nodeId": "mcs_coordinator",
+        "properties": {
+          "purpose": "Own tenant sync scopes, idempotent job state, provider-pair policy, leases, checkpoints, and verified completion; surface degraded or partial status when projected freshness misses and resume from the last verified checkpoint."
+        }
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-constraint:1",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "mcs_review_close",
+      "stepNumber": 64,
+      "phase": "4. Prove outcomes, cost, and recovery",
+      "title": "Review the assumptions before sizing or promising an SLO",
+      "type": "explanation",
+      "content": "Before turning this review draft into a production architecture, confirm authoritative-writer rules, whether deletes and metadata replicate, object-count and size distributions, initial versus incremental transfer semantics, regions, provider service availability and quotas, retention/version lifecycle, encryption and residency requirements, acceptable conflict workflow, checksum definition, cost model, RPO, latency percentile, and failure recovery objectives. Load-test every provider pair with representative objects and outages. The brief supplies targets; this guide and its architecture do not establish that those targets have been achieved.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    }
+  ]
+}

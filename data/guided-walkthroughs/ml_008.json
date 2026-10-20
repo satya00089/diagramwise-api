@@ -1,0 +1,1076 @@
+{
+  "problem_id": "ml_008",
+  "version": "2026-10-13-review-draft",
+  "totalSteps": 57,
+  "phases": [
+    {
+      "name": "Phase 1: Brief and decision boundaries",
+      "stepRange": [1, 5],
+      "description": "Read the current problem brief, separate its explicit targets from design choices, and identify the source boundaries the catalog cannot represent directly."
+    },
+    {
+      "name": "Phase 2: Online decision path",
+      "stepRange": [6, 13],
+      "description": "Route pricing requests through one decision service that reads reviewed policy, checks candidate prices, records accepted changes, and publishes them."
+    },
+    {
+      "name": "Phase 3: Fresh context and guarded candidates",
+      "stepRange": [14, 32],
+      "description": "Keep demand, competitor, inventory, and segment context flowing into online features; estimate elasticity and apply constraints before publication."
+    },
+    {
+      "name": "Phase 4: Experiments and analytics",
+      "stepRange": [33, 41],
+      "description": "Record experiment exposure and outcomes, provide dashboards, and compare measured results with the static-pricing baseline without claiming unobserved gains."
+    },
+    {
+      "name": "Phase 5: Offline learning and operations",
+      "stepRange": [42, 57],
+      "description": "Keep model development outside the price-update path, register and serve reviewed artifacts, and observe each stage against the supplied brief."
+    }
+  ],
+  "steps": [
+    {
+      "id": "price_01",
+      "stepNumber": 1,
+      "phase": "Phase 1: Brief and decision boundaries",
+      "title": "Start from the live problem brief",
+      "type": "explanation",
+      "content": "Title: Design a Dynamic Pricing Engine\nDescription: Design an ML-driven dynamic pricing engine that optimizes prices in real-time based on demand, competition, inventory levels, and customer segments to maximize revenue.\nRequirements:\n- Predict demand elasticity per product\n- Monitor competitor prices in real-time\n- Optimize prices for revenue or margin targets\n- Segment customers for price personalization\n- Handle inventory-aware pricing\n- Implement price change guardrails and constraints\n- A/B test pricing strategies\n- Provide pricing dashboards and analytics\nConstraints:\n- Price updates within 5 minutes of demand changes\n- Revenue improvement above 5% vs static pricing\n- Respect price change frequency limits\n- Handle 100k+ SKUs\n- Comply with pricing regulations\nHints:\n- Use price elasticity models (log-linear demand curves)\n- Implement contextual bandits for exploration vs exploitation\n- Use causal inference to estimate price sensitivity\n- Implement constraint optimization for business rules\n- Use reinforcement learning for long-term revenue optimization\n- Build competitor price monitoring with web scraping pipelines\n\nThe fields above are copied from the live problem record. The percentages, time window, and SKU count are supplied targets, not results or derived capacity estimates. The architecture below is a design proposal; it adds no traffic volume or tighter latency target.",
+      "requirementIds": []
+    },
+    {
+      "id": "price_02",
+      "stepNumber": 2,
+      "phase": "Phase 1: Brief and decision boundaries",
+      "title": "Make the optimization objective explicit",
+      "type": "decision_point",
+      "content": "Revenue and margin are distinct objectives. The selected objective must be explicit in the policy used for a price decision, so a model score cannot silently switch what the business is optimizing.",
+      "decision": {
+        "question": "How should the engine choose between revenue and margin targets?",
+        "chosen": "Read the selected revenue or margin objective from reviewed pricing policy; when margin is selected, require the domain's authoritative cost basis rather than substituting an assumed value.",
+        "chosenReason": "This preserves both objectives named in the brief and makes the inputs to each decision inspectable.",
+        "alternatives": [
+          {
+            "option": "Optimize revenue only",
+            "tradeoff": "Simpler objective, but it drops the brief's margin-target option."
+          },
+          {
+            "option": "Blend revenue and margin into one score",
+            "tradeoff": "Requires weights and business meaning that the brief does not supply."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3"]
+    },
+    {
+      "id": "price_03",
+      "stepNumber": 3,
+      "phase": "Phase 1: Brief and decision boundaries",
+      "title": "Treat guardrails as eligibility checks",
+      "type": "decision_point",
+      "content": "Keep price-change frequency limits and pricing-regulation rules outside the model's objective. The model can propose a candidate; reviewed rules determine whether that candidate is eligible to publish.",
+      "decision": {
+        "question": "Where should regulatory and price-change restrictions be enforced?",
+        "chosen": "Evaluate reviewed regulatory rules and frequency limits as explicit pre-publication constraints, and retain the policy version and decision evidence.",
+        "chosenReason": "An optimizer should not trade away a stated constraint to improve its objective.",
+        "alternatives": [
+          {
+            "option": "Represent every restriction as a soft penalty in the model",
+            "tradeoff": "A sufficiently attractive objective could still select an ineligible price."
+          },
+          {
+            "option": "Check restrictions only in a dashboard",
+            "tradeoff": "The price publication path would not enforce the stated guardrails."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "price_04",
+      "stepNumber": 4,
+      "phase": "Phase 1: Brief and decision boundaries",
+      "title": "Add the commerce context boundary",
+      "type": "add_component",
+      "content": "This boundary represents the existing commerce-side inputs and price destination: demand or order observations, inventory, customer-segment context, and the channel that accepts an approved price. Confirm the real interfaces and the authoritative source for each field during implementation.",
+      "component": {
+        "nodeId": "price_context_sources",
+        "componentType": "custom-component",
+        "label": "Commerce, Inventory & Customer Context",
+        "description": "Existing commerce-side sources for demand, inventory and customer-segment context, plus the destination that accepts an approved price.",
+        "position": {"x": 0, "y": 0},
+        "properties": {
+          "componentName": "Commerce, Inventory & Customer Context",
+        "purpose": "Represent demand, inventory, and customer-segment inputs plus the commerce interface for approved prices. Resolve each request to an authorized product and reviewed customer segment; do not infer an individual price from unapproved personal attributes."
+        },
+        "highlightReason": "The brief names these domain inputs and price personalization, but the catalog has no commerce or inventory integration component."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5"]
+    },
+    {
+      "id": "price_05",
+      "stepNumber": 5,
+      "phase": "Phase 1: Brief and decision boundaries",
+      "title": "Represent competitor collection explicitly",
+      "type": "add_component",
+      "content": "The brief calls for real-time competitor-price monitoring and names a web-scraping pipeline as a hint. Treat collection as an external integration boundary: source access, permitted collection, parsing, and freshness handling need source-specific review.",
+      "component": {
+        "nodeId": "competitor_price_collection",
+        "componentType": "custom-component",
+        "label": "Competitor Price Collection",
+        "description": "Source-specific collection and normalization boundary for competitor prices; the actual sources and access method are not specified by the brief.",
+        "position": {"x": 0, "y": 230},
+        "properties": {
+          "componentName": "Competitor Price Collection",
+          "purpose": "Collect and normalize competitor-price observations through source-specific integrations, recording enough provenance and observation time to assess freshness without assuming a source list or polling rate."
+        },
+        "highlightReason": "The catalog has no competitor-price feed or web-collection component, so this is a real gap represented with its existing generic custom type."
+      },
+      "requirementIds": ["legacy-requirement:2"]
+    },
+    {
+      "id": "price_06",
+      "stepNumber": 6,
+      "phase": "Phase 2: Online decision path",
+      "title": "Expose a pricing decision entry point",
+      "type": "add_component",
+      "content": "Use the catalog API Gateway as the entry point for price requests and approved-price publication calls. Keep its contract focused on the product, permitted segment context, and decision input needed by the pricing service; validate the actual caller and authorization contract with the commerce system.",
+      "component": {
+        "nodeId": "pricing_api",
+        "componentType": "api-gateway",
+        "label": "Pricing API Gateway",
+        "description": "Entry point for pricing requests and the approved-price interface exposed to the commerce boundary.",
+        "position": {"x": 220, "y": 0},
+        "properties": {
+          "componentName": "Pricing API Gateway",
+          "purpose": "Route pricing-decision requests to the decision service and expose the required approved-price operation to authorized commerce callers."
+        },
+        "highlightReason": "A bounded request and publication interface keeps caller concerns outside pricing policy and model code."
+      },
+      "requirementIds": ["legacy-requirement:3"]
+    },
+    {
+      "id": "price_07",
+      "stepNumber": 7,
+      "phase": "Phase 2: Online decision path",
+      "title": "Add the pricing decision service",
+      "type": "add_component",
+      "content": "This service coordinates context lookup, elasticity inference, objective selection, candidate generation, guardrail evaluation, experiment assignment, and accepted-price persistence. Enforce an end-to-end five-minute freshness objective from demand-change event to effective approved price; if required context is stale or the update deadline is missed, keep the last approved price and alert rather than publish a stale candidate.",
+      "component": {
+        "nodeId": "pricing_decision_service",
+        "componentType": "backend-server",
+        "label": "Pricing Decision Service",
+        "description": "Coordinates current pricing context, elasticity inference, objective-aware optimization, policy checks, experiment assignment, and accepted-price decisions.",
+        "position": {"x": 470, "y": 0},
+        "properties": {
+          "componentName": "Pricing Decision Service",
+        "purpose": "Coordinate context lookup, elasticity inference, and objective-aware price selection by stable SKU and approved customer segment. Before publication, enforce the versioned jurisdiction policy and frequency guardrails; reject stale or ineligible candidates, retain the last approved price on missing policy/context, and record the rule version and decision evidence."
+        },
+        "highlightReason": "The service is the boundary where the brief's model, optimization, personalization, inventory, experiment, and constraint requirements meet."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7"]
+    },
+    {
+      "id": "price_08",
+      "stepNumber": 8,
+      "phase": "Phase 2: Online decision path",
+      "title": "Route requests to the decision service",
+      "type": "add_connection",
+      "content": "Send a pricing request through the gateway to the decision service. The five-minute target is measured from a demand change through publication of the resulting eligible price, so this request edge is only one segment of that clock.",
+      "connection": {
+        "edgeId": "price_api_to_decision",
+        "sourceNodeId": "pricing_api",
+        "targetNodeId": "pricing_decision_service",
+        "connectionType": "api-call",
+        "label": "Pricing decision request",
+        "description": "The gateway validates and routes a pricing request to the service that owns candidate generation and policy evaluation."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:1"]
+    },
+    {
+      "id": "price_09",
+      "stepNumber": 9,
+      "phase": "Phase 2: Online decision path",
+      "title": "Store current prices and reviewed policy",
+      "type": "add_component",
+      "content": "Keep the current accepted price, objective and policy version, price-change history, experiment assignment, and decision evidence in a durable store. The brief does not prescribe a database engine or record-retention duration, so leave both for the product's data and compliance review.",
+      "component": {
+        "nodeId": "pricing_policy_store",
+        "componentType": "database",
+        "label": "Pricing Policy & Price Store",
+        "description": "Durable current-price, reviewed-policy, change-history, experiment-assignment, and decision-record storage.",
+        "position": {"x": 720, "y": 0},
+        "properties": {
+          "componentName": "Pricing Policy & Price Store",
+        "purpose": "Persist current accepted prices by SKU and approved segment, versioned jurisdiction-specific compliance rules and frequency guardrails, experiment assignment, change history, and auditable decision evidence."
+        },
+        "highlightReason": "The service needs authoritative state to enforce price-change limits, retain accepted decisions, and apply reviewed pricing rules."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "price_10",
+      "stepNumber": 10,
+      "phase": "Phase 2: Online decision path",
+      "title": "Read policy and current decision state",
+      "type": "add_connection",
+      "content": "Before generating a candidate, load the selected objective, relevant current price and change history, experiment assignment, and reviewed guardrails. If margin is selected, read the authoritative cost input rather than estimating one inside the model.",
+      "connection": {
+        "edgeId": "price_decision_reads_policy",
+        "sourceNodeId": "pricing_decision_service",
+        "targetNodeId": "pricing_policy_store",
+        "connectionType": "database-connection",
+        "label": "Read current policy and price state",
+        "description": "The decision service loads the policy and current state needed to select an objective and check whether a proposed change is allowed."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "price_11",
+      "stepNumber": 11,
+      "phase": "Phase 2: Online decision path",
+      "title": "Persist accepted changes before publication",
+      "type": "add_connection",
+      "content": "Record an accepted price, the policy version and the decision evidence so retries and later analysis can be reconciled with the same outcome. This is a proposed reliability choice; the brief does not prescribe a particular transaction protocol.",
+      "connection": {
+        "edgeId": "price_decision_persists_price",
+        "sourceNodeId": "pricing_decision_service",
+        "targetNodeId": "pricing_policy_store",
+        "connectionType": "database-connection",
+        "label": "Persist accepted price and decision",
+        "description": "Persist the eligible price and its decision record so publication, frequency checks, and experiment analysis can refer to a durable result."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "price_12",
+      "stepNumber": 12,
+      "phase": "Phase 2: Online decision path",
+      "title": "Publish only an eligible price",
+      "type": "add_connection",
+      "content": "After the decision service accepts and records a candidate, publish it through the existing commerce-side destination. Do not send an unvalidated model output directly to a customer-facing price surface.",
+      "connection": {
+        "edgeId": "price_decision_to_commerce",
+        "sourceNodeId": "pricing_decision_service",
+        "targetNodeId": "price_context_sources",
+        "connectionType": "api-call",
+        "label": "Publish approved price",
+        "description": "Send an eligible, recorded price to the existing commerce interface for application to the relevant product and permitted context."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "price_13",
+      "stepNumber": 13,
+      "phase": "Phase 2: Online decision path",
+      "title": "Make retries safe around frequency limits",
+      "type": "decision_point",
+      "content": "A retry must not count as a second independent price change or bypass the change-frequency rule. Use a stable decision identity and reconcile publication status with the stored accepted decision; the exact key and recovery protocol are implementation choices.",
+      "decision": {
+        "question": "How should the price path handle a retry after an uncertain publication result?",
+        "chosen": "Reconcile the retry against the persisted decision identity and publication status before creating another price change.",
+        "chosenReason": "This protects the stated change-frequency constraint while allowing the integration to recover from an ambiguous response.",
+        "alternatives": [
+          {
+            "option": "Recompute and publish a fresh price on every retry",
+            "tradeoff": "A retry could be counted as another change or produce an inconsistent outcome."
+          },
+          {
+            "option": "Drop every request with an uncertain result",
+            "tradeoff": "This avoids duplicates but can leave a valid accepted decision unapplied."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "price_14",
+      "stepNumber": 14,
+      "phase": "Phase 3: Fresh context and guarded candidates",
+      "title": "Buffer changing market context",
+      "type": "add_component",
+      "content": "Use the existing Message Broker catalog component to decouple incoming observations, price-decision outcomes, and downstream consumers. The broker is an architectural choice for isolating ingestion and analytics work from the online decision request.",
+      "component": {
+        "nodeId": "pricing_event_broker",
+        "componentType": "message-broker",
+        "label": "Pricing Context & Outcome Broker",
+        "description": "Event boundary for demand, inventory, segment context, competitor observations, and recorded pricing outcomes.",
+        "position": {"x": 220, "y": 280},
+        "properties": {
+          "componentName": "Pricing Context & Outcome Broker",
+          "purpose": "Decouple context ingestion and recorded pricing outcomes from feature updates, experiment analytics, and offline model data preparation."
+        },
+        "highlightReason": "The broker lets context refresh and offline consumers proceed without coupling their work to price publication."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1"]
+    },
+    {
+      "id": "price_15",
+      "stepNumber": 15,
+      "phase": "Phase 3: Fresh context and guarded candidates",
+      "title": "Send commerce context changes to ingestion",
+      "type": "add_connection",
+      "content": "Publish demand, inventory, and permitted customer-segment changes to the broker with product identity and source freshness evidence. Keep the exact event contract aligned to the source systems rather than assuming fields they do not expose.",
+      "connection": {
+        "edgeId": "price_commerce_to_broker",
+        "sourceNodeId": "price_context_sources",
+        "targetNodeId": "pricing_event_broker",
+        "connectionType": "event-stream",
+        "label": "Demand, inventory and segment changes",
+        "description": "Deliver commerce context changes for normalization and feature refresh without placing batch work on the price request path."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1"]
+    },
+    {
+      "id": "price_16",
+      "stepNumber": 16,
+      "phase": "Phase 3: Fresh context and guarded candidates",
+      "title": "Ingest competitor observations",
+      "type": "add_connection",
+      "content": "Send normalized competitor-price observations into the same event boundary. Keep source identity and observed-at time so the decision service can distinguish a current observation from delayed collection.",
+      "connection": {
+        "edgeId": "price_competitor_to_broker",
+        "sourceNodeId": "competitor_price_collection",
+        "targetNodeId": "pricing_event_broker",
+        "connectionType": "event-stream",
+        "label": "Competitor price observations",
+        "description": "Carry source-specific competitor observations and freshness metadata into the pricing context pipeline."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:1"]
+    },
+    {
+      "id": "price_17",
+      "stepNumber": 17,
+      "phase": "Phase 3: Fresh context and guarded candidates",
+      "title": "Record decision exposures and outcomes",
+      "type": "add_connection",
+      "content": "Emit the assigned strategy, exposure, accepted price, and later observed outcome as related events. This gives analytics and model development evidence to join without putting those consumers in the synchronous price response.",
+      "connection": {
+        "edgeId": "price_decision_to_broker",
+        "sourceNodeId": "pricing_decision_service",
+        "targetNodeId": "pricing_event_broker",
+        "connectionType": "event-stream",
+        "label": "Price decisions and experiment outcomes",
+        "description": "Publish decision and exposure events for experiment measurement, dashboards, and offline learning."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:2"]
+    },
+    {
+      "id": "price_18",
+      "stepNumber": 18,
+      "phase": "Phase 3: Fresh context and guarded candidates",
+      "title": "Normalize events and update context",
+      "type": "add_component",
+      "content": "Use the catalog Stream Processor to validate source observations, normalize product and segment keys, and produce updated pricing features. Track source event time, processing time, queue age, and effective-price publication time against the five-minute end-to-end objective. Use idempotent replay and bounded retries; derive consumer capacity from peak-load tests, and hold the last approved price if context becomes stale.",
+      "component": {
+        "nodeId": "pricing_context_processor",
+        "componentType": "stream-processor",
+        "label": "Pricing Context Processor",
+        "description": "Validates and normalizes incoming market and commerce observations, then refreshes features used by pricing decisions.",
+        "position": {"x": 470, "y": 280},
+        "properties": {
+          "componentName": "Pricing Context Processor",
+        "purpose": "Validate and normalize demand, competitor, inventory, and segment events; partition work by stable SKU/segment keys and horizontally scale bounded consumers for the 100k+ SKU scope using measured peak load. Track queue age and event-to-effective-price freshness against five minutes; use idempotent replay, bounded retries, backpressure, and stale-input fallback."
+        },
+        "highlightReason": "Streaming context refresh is the part of the design that connects real-time observations to the stated price-update window."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "price_19",
+      "stepNumber": 19,
+      "phase": "Phase 3: Fresh context and guarded candidates",
+      "title": "Process incoming context asynchronously",
+      "type": "add_connection",
+      "content": "The processor consumes the broker stream and updates features independently of batch model training. Preserve ordering or version checks where the source contract needs them; the exact ordering key is a source-specific design decision.",
+      "connection": {
+        "edgeId": "price_broker_to_context_processor",
+        "sourceNodeId": "pricing_event_broker",
+        "targetNodeId": "pricing_context_processor",
+        "connectionType": "event-stream",
+        "label": "Context observations",
+        "description": "Deliver changing commerce and competitor context for validation, normalization, and feature refresh."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "price_20",
+      "stepNumber": 20,
+      "phase": "Phase 3: Fresh context and guarded candidates",
+      "title": "Serve current features by product context",
+      "type": "add_component",
+      "content": "Use the catalog Feature Store for model inputs keyed to the product and permitted customer segment. Keep inventory, demand, competitor, and segment feature freshness visible; do not assume a feature count or a request rate from the brief.",
+      "component": {
+        "nodeId": "pricing_feature_store",
+        "componentType": "feature-store",
+        "label": "Pricing Feature Store",
+        "description": "Online and training-aligned features for product demand, competitor context, inventory, and permitted customer segments.",
+        "position": {"x": 720, "y": 280},
+        "properties": {
+          "componentName": "Pricing Feature Store",
+        "purpose": "Serve indexed, partitioned product and authorized customer-segment features for per-segment elasticity inference across 100k+ SKUs; expose freshness and preserve consistent offline/online definitions."
+        },
+        "highlightReason": "A shared feature definition reduces disagreement between current-price decisions and the data used to evaluate or train the elasticity model."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "price_21",
+      "stepNumber": 21,
+      "phase": "Phase 3: Fresh context and guarded candidates",
+      "title": "Write normalized features",
+      "type": "add_connection",
+      "content": "Write validated updates from the processor to the feature store. Expose freshness and rejected-event reasons to operations rather than silently replacing a newer record with an older observation.",
+      "connection": {
+        "edgeId": "price_processor_to_features",
+        "sourceNodeId": "pricing_context_processor",
+        "targetNodeId": "pricing_feature_store",
+        "connectionType": "data-flow",
+        "label": "Validated product context features",
+        "description": "Refresh the features used by pricing decisions from normalized demand, competition, inventory, and segment observations."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "price_22",
+      "stepNumber": 22,
+      "phase": "Phase 3: Fresh context and guarded candidates",
+      "title": "Read features for the requested decision",
+      "type": "add_connection",
+      "content": "The decision service requests only the product and permitted segment context needed for the current price decision. Avoid turning a request for one decision into an assumed full-catalog scan.",
+      "connection": {
+        "edgeId": "price_decision_reads_features",
+        "sourceNodeId": "pricing_decision_service",
+        "targetNodeId": "pricing_feature_store",
+        "connectionType": "api-call",
+        "label": "Current product and segment features",
+        "description": "Fetch the feature set and freshness needed to estimate elasticity for the requested pricing context."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "price_23",
+      "stepNumber": 23,
+      "phase": "Phase 3: Fresh context and guarded candidates",
+      "title": "Serve elasticity estimates",
+      "type": "add_component",
+      "content": "Use the existing Model Serving component to expose the elasticity model to the decision service. Separate the prediction endpoint from candidate-price selection so changes to business objectives and hard guardrails remain under pricing-service control.",
+      "component": {
+        "nodeId": "elasticity_serving",
+        "componentType": "model-serving",
+        "label": "Elasticity Model Serving",
+        "description": "Inference endpoint for per-product demand elasticity using current pricing context.",
+        "position": {"x": 970, "y": 280},
+        "properties": {
+          "componentName": "Elasticity Model Serving",
+          "purpose": "Serve the approved demand-elasticity model from product and permitted-segment features and return an estimate for the pricing decision service."
+        },
+        "highlightReason": "The model produces elasticity evidence; the pricing service remains responsible for objective selection and policy enforcement."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-constraint:1"]
+    },
+    {
+      "id": "price_24",
+      "stepNumber": 24,
+      "phase": "Phase 3: Fresh context and guarded candidates",
+      "title": "Represent the elasticity model",
+      "type": "add_component",
+      "content": "Use the catalog ML Model component for the per-product elasticity model. A log-linear demand curve is one hint-supported candidate; compare model choices against causal price-sensitivity evidence before selecting one for production.",
+      "component": {
+        "nodeId": "demand_elasticity_model",
+        "componentType": "ml-model",
+        "label": "Per-Product Demand Elasticity Model",
+        "description": "Model artifact estimating how product demand changes with price and the available context.",
+        "position": {"x": 1210, "y": 280},
+        "properties": {
+          "componentName": "Per-Product Demand Elasticity Model",
+          "purpose": "Estimate product demand elasticity from price and supported context; validate the model form and causal interpretation with historical and experiment evidence."
+        },
+        "highlightReason": "This is the model capability explicitly requested; the brief offers log-linear curves as a candidate rather than a measured result."
+      },
+      "requirementIds": ["legacy-requirement:1"]
+    },
+    {
+      "id": "price_25",
+      "stepNumber": 25,
+      "phase": "Phase 3: Fresh context and guarded candidates",
+      "title": "Supply inference with current features",
+      "type": "add_connection",
+      "content": "Send product and permitted-segment features to the serving endpoint. Keep training-time and serving-time feature definitions aligned so an estimate is not based on a different meaning of inventory, demand, or competitor price.",
+      "connection": {
+        "edgeId": "price_features_to_serving",
+        "sourceNodeId": "pricing_feature_store",
+        "targetNodeId": "elasticity_serving",
+        "connectionType": "api-call",
+        "label": "Inference features",
+        "description": "Provide current, validated pricing features for the product and allowed segment context."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1"]
+    },
+    {
+      "id": "price_26",
+      "stepNumber": 26,
+      "phase": "Phase 3: Fresh context and guarded candidates",
+      "title": "Load the approved model artifact",
+      "type": "add_connection",
+      "content": "The serving endpoint uses a versioned model artifact selected through the review and release path. Do not let a training job replace the live model merely because training completed.",
+      "connection": {
+        "edgeId": "price_serving_uses_model",
+        "sourceNodeId": "elasticity_serving",
+        "targetNodeId": "demand_elasticity_model",
+        "connectionType": "data-flow",
+        "label": "Approved elasticity model",
+        "description": "The serving endpoint loads the reviewed model version used to estimate product elasticity."
+      },
+      "requirementIds": ["legacy-requirement:1"]
+    },
+    {
+      "id": "price_27",
+      "stepNumber": 27,
+      "phase": "Phase 3: Fresh context and guarded candidates",
+      "title": "Return elasticity evidence to pricing",
+      "type": "add_connection",
+      "content": "Return the elasticity estimate and model version to the decision service. Keep the result tied to the product and feature context that produced it so a candidate can be explained and evaluated later.",
+      "connection": {
+        "edgeId": "price_serving_to_decision",
+        "sourceNodeId": "elasticity_serving",
+        "targetNodeId": "pricing_decision_service",
+        "connectionType": "api-call",
+        "label": "Elasticity estimate",
+        "description": "Return the estimate and model provenance needed to generate and review candidate prices."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3"]
+    },
+    {
+      "id": "price_28",
+      "stepNumber": 28,
+      "phase": "Phase 3: Fresh context and guarded candidates",
+      "title": "Optimize candidates under explicit constraints",
+      "type": "decision_point",
+      "content": "Use the selected objective and elasticity evidence to generate candidate prices. Apply inventory-aware policy, permitted segment rules, price-change frequency limits, and regulatory constraints before selecting a publishable candidate.",
+      "decision": {
+        "question": "How should elasticity estimates become a publishable price?",
+        "chosen": "Generate candidates for the explicit revenue or margin objective, then use constraint optimization to reject candidates that violate reviewed inventory, frequency, or regulatory rules.",
+        "chosenReason": "The brief asks for objective-based optimization and explicit guardrails; the objective and eligibility checks remain independently inspectable.",
+        "alternatives": [
+          {
+            "option": "Publish the model's unconstrained recommended price",
+            "tradeoff": "A prediction is not proof that a price meets business or regulatory constraints."
+          },
+          {
+            "option": "Use fixed rules without elasticity estimates",
+            "tradeoff": "This omits the requested per-product demand-elasticity input."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "price_29",
+      "stepNumber": 29,
+      "phase": "Phase 3: Fresh context and guarded candidates",
+      "title": "Define behavior for stale or incomplete context",
+      "type": "decision_point",
+      "content": "A delayed competitor observation or missing inventory feature should not silently become a confident recommendation. Surface the missing or stale input; do not publish a newly computed price until the context required by the reviewed policy is valid.",
+      "decision": {
+        "question": "What should the engine do when required pricing context is stale or incomplete?",
+        "chosen": "Return a reasoned no-new-price outcome, retain the currently accepted price, and expose the stale-context reason for operations.",
+        "chosenReason": "This avoids replacing a known accepted value with a candidate built from context the policy considers unusable.",
+        "alternatives": [
+          {
+            "option": "Treat missing features as zero and continue",
+            "tradeoff": "A missing observation becomes an invented business value."
+          },
+          {
+            "option": "Use any available competitor observation regardless of age",
+            "tradeoff": "A delayed observation may distort the current pricing decision."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "price_30",
+      "stepNumber": 30,
+      "phase": "Phase 3: Fresh context and guarded candidates",
+      "title": "Measure the full update window",
+      "type": "scale_trigger",
+      "content": "Measure from observing a demand change to publishing its eligible price. Break that elapsed time into source freshness, broker delay, feature refresh, inference, policy evaluation, persistence, and commerce publication; the brief supplies one end-to-end limit, not per-stage budgets.",
+      "scaleTrigger": {
+        "metric": "Elapsed time from demand-change observation to publication of an eligible price",
+        "action": "Trace source lag, broker age, feature refresh, inference, guardrail evaluation, persistence, and publication; parallelize or partition only the measured stage that threatens the supplied window.",
+        "impact": "Keeps the stated price-update constraint measurable end to end without introducing a tighter SLO."
+      },
+      "requirementIds": ["legacy-constraint:1"]
+    },
+    {
+      "id": "price_31",
+      "stepNumber": 31,
+      "phase": "Phase 3: Fresh context and guarded candidates",
+      "title": "Scale by observed SKU work",
+      "type": "scale_trigger",
+      "content": "The brief says the engine must handle 100k+ SKUs. Measure feature and current-price freshness across that catalog, then locate skew or backlog before selecting a partitioning strategy.",
+      "scaleTrigger": {
+        "metric": "Coverage and freshness of feature and current-price records across the stated 100k+ SKU catalog",
+        "action": "Inspect product-key skew, hot products, and processing backlog; introduce partitioning or parallel work only where observed demand requires it, and keep a single price request scoped to its product context.",
+        "impact": "Addresses the supplied SKU scale without assuming request rates, instance counts, or additional latency thresholds."
+      },
+      "requirementIds": ["legacy-constraint:4"]
+    },
+    {
+      "id": "price_32",
+      "stepNumber": 32,
+      "phase": "Phase 3: Fresh context and guarded candidates",
+      "title": "Choose learning methods with evidence",
+      "type": "explanation",
+      "content": "The brief's log-linear demand curve is one elasticity-model candidate, not a required algorithm. Contextual bandits can explore and exploit, while reinforcement learning can target longer-term revenue; introduce either only with an experiment design, bounded exposure, and the same non-negotiable price guardrails."
+    },
+    {
+      "id": "price_33",
+      "stepNumber": 33,
+      "phase": "Phase 4: Experiments and analytics",
+      "title": "Build the outcome analytics path",
+      "type": "add_component",
+      "content": "Use the existing Analytics component to join assigned strategy and exposure with accepted price, demand, inventory, and observed business outcome. The exact revenue or margin calculation must follow the domain's reviewed definition.",
+      "component": {
+        "nodeId": "pricing_analytics",
+        "componentType": "analytics",
+        "label": "Pricing Experiment Analytics",
+        "description": "Analytics for experiment exposure, observed pricing outcomes, strategy comparisons, and dashboard aggregates.",
+        "position": {"x": 720, "y": 540},
+        "properties": {
+          "componentName": "Pricing Experiment Analytics",
+          "purpose": "Join stable experiment assignments and exposures with accepted prices and observed outcomes; compare against the static-pricing baseline using the domain-reviewed revenue definition and pre-agreed evidence rule. Mark a strategy promotion-eligible only when measured revenue improvement exceeds 5%; otherwise withhold broader rollout."
+        },
+        "highlightReason": "The brief requires A/B testing and pricing dashboards; measured outcomes must be separate from model predictions."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:2"]
+    },
+    {
+      "id": "price_34",
+      "stepNumber": 34,
+      "phase": "Phase 4: Experiments and analytics",
+      "title": "Feed experiment events to analytics",
+      "type": "add_connection",
+      "content": "Consume recorded assignments, exposures, prices, and outcomes from the event path. Preserve the distinction between an assigned strategy and a completed observation so dashboards do not imply that a result is already known.",
+      "connection": {
+        "edgeId": "price_broker_to_analytics",
+        "sourceNodeId": "pricing_event_broker",
+        "targetNodeId": "pricing_analytics",
+        "connectionType": "event-stream",
+        "label": "Experiment exposure and price outcomes",
+        "description": "Supply analytics with related strategy assignments, exposures, accepted prices, and observed outcomes."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:2"]
+    },
+    {
+      "id": "price_35",
+      "stepNumber": 35,
+      "phase": "Phase 4: Experiments and analytics",
+      "title": "Give pricing operators a dashboard",
+      "type": "add_component",
+      "content": "Use the existing Admin Console for strategy status, price-change history, data freshness, guardrail outcomes, and the analytics-backed comparison with static pricing. Block broader rollout unless the reviewed experiment evidence clears the above-5% improvement gate; show the baseline, measured result, evidence status, and any frequency or regulatory rejection.",
+      "component": {
+        "nodeId": "pricing_admin_console",
+        "componentType": "admin-console",
+        "label": "Pricing Operations Console",
+        "description": "Operator view for pricing policy, change history, experiment status, freshness, guardrail decisions, and outcome analytics.",
+        "position": {"x": 970, "y": 0},
+        "properties": {
+          "componentName": "Pricing Operations Console",
+        "purpose": "Present segment-specific prices, reviewed experiment evidence, freshness, and constraint outcomes. Show jurisdiction policy versions and compliance blocks; permit broader rollout only after the reviewed evidence clears the above-5% revenue-improvement gate."
+        },
+        "highlightReason": "The dashboard requirement needs an operator-facing view of measurements and policy state, not only an ML prediction."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "price_36",
+      "stepNumber": 36,
+      "phase": "Phase 4: Experiments and analytics",
+      "title": "Show measured outcomes in the console",
+      "type": "add_connection",
+      "content": "The console reads aggregated experiment and pricing analytics. Show the supplied target and the measured result as separate values, including the observation window and coverage used by the reviewed experiment definition.",
+      "connection": {
+        "edgeId": "price_analytics_to_console",
+        "sourceNodeId": "pricing_analytics",
+        "targetNodeId": "pricing_admin_console",
+        "connectionType": "data-flow",
+        "label": "Pricing metrics and experiment results",
+        "description": "Provide measured, aggregated pricing outcomes and experiment status for operator review."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:2"]
+    },
+    {
+      "id": "price_37",
+      "stepNumber": 37,
+      "phase": "Phase 4: Experiments and analytics",
+      "title": "Manage reviewed policy through the console",
+      "type": "add_connection",
+      "content": "Policy edits and experiment definitions from the console are written to the pricing store with their review and audit context. Do not allow a dashboard preference to bypass the decision service's pre-publication checks.",
+      "connection": {
+        "edgeId": "price_console_to_policy",
+        "sourceNodeId": "pricing_admin_console",
+        "targetNodeId": "pricing_policy_store",
+        "connectionType": "database-connection",
+        "label": "Reviewed policy and experiment configuration",
+        "description": "Persist authorized, reviewed objective, guardrail, and experiment configuration for use by the decision service."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "price_38",
+      "stepNumber": 38,
+      "phase": "Phase 4: Experiments and analytics",
+      "title": "Make the A/B comparison interpretable",
+      "type": "decision_point",
+      "content": "Compare a defined dynamic-pricing strategy with the static-pricing baseline named in the brief. Keep the assignment unit and analysis method explicit, preserve exposure records, and report uncertainty rather than declaring the improvement target met from predictions or before-and-after movement alone. Use available time and context history to assess whether seasonality could confound the comparison, and check whether price changes in one product or segment could spill over to another. Treat these as analysis questions, not automatically controlled effects; if the experiment design or evidence cannot resolve them, report the limitation. Every candidate price must still pass the reviewed frequency and regulatory eligibility gates, with candidate rejections and guardrail outcomes reported separately from revenue lift.",
+      "decision": {
+        "question": "How should the engine test pricing strategies against static pricing?",
+        "chosen": "Run an explicitly configured A/B comparison with a stable assignment and joinable exposure and outcome records. Select the assignment unit and analysis method with the business and compliance owners; use available time/context evidence to assess seasonality and check for cross-product or cross-segment spillover, accounting for either only when the experiment supports it and otherwise reporting the limitation. Keep reviewed frequency and regulatory eligibility checks on every candidate price, and report guardrail outcomes separately from revenue lift.",
+        "chosenReason": "This creates evidence for the stated comparison while avoiding unsupported claims about improvement or an invented experiment split.",
+        "alternatives": [
+          {
+            "option": "Compare only before and after deployment",
+            "tradeoff": "Other demand and inventory changes can be mistaken for a pricing effect."
+          },
+          {
+            "option": "Start exploration with an unconstrained contextual bandit",
+            "tradeoff": "It mixes learning and evaluation and must still obey the same price-change and regulatory limits."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "price_39",
+      "stepNumber": 39,
+      "phase": "Phase 4: Experiments and analytics",
+      "title": "Keep targets separate from results",
+      "type": "explanation",
+      "content": "The brief's revenue improvement above 5% versus static pricing is an acceptance target. Display the measured comparison, its experiment definition, and its evidence; do not describe the target as achieved until the reviewed analysis supports that claim."
+    },
+    {
+      "id": "price_40",
+      "stepNumber": 40,
+      "phase": "Phase 4: Experiments and analytics",
+      "title": "Keep historical evidence for learning",
+      "type": "add_component",
+      "content": "Use the catalog Data Warehouse as the historical input for causal price-sensitivity analysis, model training, and experiment review. Apply the domain's access, retention, and data-use rules rather than assuming a retention period.",
+      "component": {
+        "nodeId": "pricing_history_warehouse",
+        "componentType": "data-warehouse",
+        "label": "Pricing History Warehouse",
+        "description": "Historical pricing, demand, inventory, competitor observations, experiment assignments, and outcomes for analytics and model development.",
+        "position": {"x": 970, "y": 540},
+        "properties": {
+          "componentName": "Pricing History Warehouse",
+          "purpose": "Keep governed historical pricing and context evidence available for experiment analysis, causal price-sensitivity estimation, and offline model development."
+        },
+        "highlightReason": "Historical price and demand evidence supports causal estimation and keeps training separate from current-price decisions."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:2"]
+    },
+    {
+      "id": "price_41",
+      "stepNumber": 41,
+      "phase": "Phase 4: Experiments and analytics",
+      "title": "Persist event history for review",
+      "type": "add_connection",
+      "content": "Send pricing events to governed historical storage for model and experiment analysis. Keep offline scans and transformations away from the synchronous request path.",
+      "connection": {
+        "edgeId": "price_broker_to_warehouse",
+        "sourceNodeId": "pricing_event_broker",
+        "targetNodeId": "pricing_history_warehouse",
+        "connectionType": "data-flow",
+        "label": "Pricing and context history",
+        "description": "Store event history used for experiment analysis and offline price-sensitivity learning."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:2"]
+    },
+    {
+      "id": "price_42",
+      "stepNumber": 42,
+      "phase": "Phase 5: Offline learning and operations",
+      "title": "Orchestrate reviewed model releases",
+      "type": "add_component",
+      "content": "Use the existing MLOps Pipeline to coordinate offline training, validation, registration, and controlled serving updates. The workflow and acceptance gates are proposals to be reviewed; the brief provides no model-release cadence or accuracy threshold.",
+      "component": {
+        "nodeId": "pricing_mlops_pipeline",
+        "componentType": "mlops-pipeline",
+        "label": "Pricing Model Release Pipeline",
+        "description": "Offline workflow coordinating model training, review, registry updates, and controlled serving changes.",
+        "position": {"x": 1210, "y": 540},
+        "properties": {
+          "componentName": "Pricing Model Release Pipeline",
+          "purpose": "Coordinate offline elasticity-model training and review before a version is registered and made available to the online serving endpoint."
+        },
+        "highlightReason": "A distinct release path prevents an in-progress model update from changing live price decisions implicitly."
+      },
+      "requirementIds": ["legacy-requirement:1"]
+    },
+    {
+      "id": "price_43",
+      "stepNumber": 43,
+      "phase": "Phase 5: Offline learning and operations",
+      "title": "Train with causal price evidence",
+      "type": "add_component",
+      "content": "Use the existing Model Training component for offline elasticity work. Use causal inference to estimate price sensitivity where the experiment and observational data support it; compare candidates with the reviewed business objective and do not train on assigned prices as if they were accepted exposures.",
+      "component": {
+        "nodeId": "pricing_model_training",
+        "componentType": "model-training",
+        "label": "Elasticity Model Training",
+        "description": "Offline training and evaluation for per-product demand-elasticity models using governed pricing and outcome history.",
+        "position": {"x": 1450, "y": 540},
+        "properties": {
+          "componentName": "Elasticity Model Training",
+          "purpose": "Train and evaluate elasticity candidates from governed history, using causal price-sensitivity methods when the experiment and observational evidence support them."
+        },
+        "highlightReason": "Causal price-sensitivity estimation is a supplied hint and requires outcome evidence distinct from model predictions."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7"]
+    },
+    {
+      "id": "price_44",
+      "stepNumber": 44,
+      "phase": "Phase 5: Offline learning and operations",
+      "title": "Connect governed history to release review",
+      "type": "add_connection",
+      "content": "The offline workflow reads historical context and outcomes for training and validation. Keep the source and experiment provenance available to reviewers so a model's apparent price effect can be traced to its evidence.",
+      "connection": {
+        "edgeId": "price_warehouse_to_mlops",
+        "sourceNodeId": "pricing_history_warehouse",
+        "targetNodeId": "pricing_mlops_pipeline",
+        "connectionType": "data-flow",
+        "label": "Governed training and experiment history",
+        "description": "Provide historical price, context, assignment, and outcome records to offline validation and model-release work."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7"]
+    },
+    {
+      "id": "price_45",
+      "stepNumber": 45,
+      "phase": "Phase 5: Offline learning and operations",
+      "title": "Run the training stage off the price path",
+      "type": "add_connection",
+      "content": "The release pipeline starts offline training and review; neither training nor batch validation blocks an individual price request. The exact trigger for a new run is a product decision, not specified in the brief.",
+      "connection": {
+        "edgeId": "price_mlops_to_training",
+        "sourceNodeId": "pricing_mlops_pipeline",
+        "targetNodeId": "pricing_model_training",
+        "connectionType": "data-flow",
+        "label": "Offline train and validate",
+        "description": "Coordinate training and validation as offline release stages, separate from the online pricing decision."
+      },
+      "requirementIds": ["legacy-requirement:1"]
+    },
+    {
+      "id": "price_46",
+      "stepNumber": 46,
+      "phase": "Phase 5: Offline learning and operations",
+      "title": "Version reviewed elasticity models",
+      "type": "add_component",
+      "content": "Use the existing Model Registry to identify the model version that passed the agreed review. Registration is not evidence by itself that an elasticity estimate is causally valid or that the revenue target has been met.",
+      "component": {
+        "nodeId": "pricing_model_registry",
+        "componentType": "model-registry",
+        "label": "Pricing Model Registry",
+        "description": "Versioned record of reviewed elasticity models and the evidence used to approve them for serving.",
+        "position": {"x": 1690, "y": 400},
+        "properties": {
+          "componentName": "Pricing Model Registry",
+          "purpose": "Track elasticity model versions and their review status so serving uses an explicitly selected model rather than an unreviewed training output."
+        },
+        "highlightReason": "Model version provenance makes pricing decisions and later experiment analysis auditable."
+      },
+      "requirementIds": ["legacy-requirement:1"]
+    },
+    {
+      "id": "price_47",
+      "stepNumber": 47,
+      "phase": "Phase 5: Offline learning and operations",
+      "title": "Register the reviewed model version",
+      "type": "add_connection",
+      "content": "Register a candidate only after the release workflow's agreed validation and review. Keep the evidence and model identity together for rollback and decision review.",
+      "connection": {
+        "edgeId": "price_training_to_registry",
+        "sourceNodeId": "pricing_model_training",
+        "targetNodeId": "pricing_model_registry",
+        "connectionType": "data-flow",
+        "label": "Reviewed elasticity model version",
+        "description": "Register the version and review provenance for an elasticity model that passed the agreed release checks."
+      },
+      "requirementIds": ["legacy-requirement:1"]
+    },
+    {
+      "id": "price_48",
+      "stepNumber": 48,
+      "phase": "Phase 5: Offline learning and operations",
+      "title": "Store model artifacts separately",
+      "type": "add_component",
+      "content": "Use the existing Object Storage component for model artifacts and their associated training evidence. Leave provider, retention, and capacity choices open because none are in the live brief.",
+      "component": {
+        "nodeId": "pricing_model_artifacts",
+        "componentType": "object-storage",
+        "label": "Pricing Model Artifacts",
+        "description": "Versioned model artifacts and supporting training evidence referenced by the model release path.",
+        "position": {"x": 1690, "y": 650},
+        "properties": {
+          "componentName": "Pricing Model Artifacts",
+          "purpose": "Store model artifacts and supporting evidence for explicit, reviewable model versions without assuming a provider or storage-retention target."
+        },
+        "highlightReason": "Separating artifacts from the online price store supports controlled model release and reproducible review."
+      },
+      "requirementIds": ["legacy-requirement:1"]
+    },
+    {
+      "id": "price_49",
+      "stepNumber": 49,
+      "phase": "Phase 5: Offline learning and operations",
+      "title": "Persist the trained artifact",
+      "type": "add_connection",
+      "content": "Write the model artifact from the offline training workflow to object storage and retain its version link in the registry. Do not infer a storage provider or retention duration from the product brief.",
+      "connection": {
+        "edgeId": "price_training_to_artifacts",
+        "sourceNodeId": "pricing_model_training",
+        "targetNodeId": "pricing_model_artifacts",
+        "connectionType": "data-flow",
+        "label": "Versioned model artifact",
+        "description": "Persist the trained artifact for review and controlled loading by the serving endpoint."
+      },
+      "requirementIds": ["legacy-requirement:1"]
+    },
+    {
+      "id": "price_50",
+      "stepNumber": 50,
+      "phase": "Phase 5: Offline learning and operations",
+      "title": "Select the registered version for serving",
+      "type": "add_connection",
+      "content": "The serving layer resolves an explicitly approved registry version. A registry update must be a reviewed release action, not an automatic side effect of training.",
+      "connection": {
+        "edgeId": "price_registry_to_serving",
+        "sourceNodeId": "pricing_model_registry",
+        "targetNodeId": "elasticity_serving",
+        "connectionType": "data-flow",
+        "label": "Approved model version",
+        "description": "Tell model serving which reviewed elasticity model version is eligible to run."
+      },
+      "requirementIds": ["legacy-requirement:1"]
+    },
+    {
+      "id": "price_51",
+      "stepNumber": 51,
+      "phase": "Phase 5: Offline learning and operations",
+      "title": "Load the versioned artifact",
+      "type": "add_connection",
+      "content": "Model serving loads the artifact associated with the selected registry version. Keep deployment status and model identity visible so a decision can be traced to the version that produced its elasticity estimate.",
+      "connection": {
+        "edgeId": "price_artifacts_to_serving",
+        "sourceNodeId": "pricing_model_artifacts",
+        "targetNodeId": "elasticity_serving",
+        "connectionType": "data-flow",
+        "label": "Selected model artifact",
+        "description": "Load the artifact whose version and review status match the registry selection."
+      },
+      "requirementIds": ["legacy-requirement:1"]
+    },
+    {
+      "id": "price_52",
+      "stepNumber": 52,
+      "phase": "Phase 5: Offline learning and operations",
+      "title": "Observe the end-to-end system",
+      "type": "add_component",
+      "content": "Use the existing Monitoring component to observe source-to-effective-price freshness, queue age, processing lag, inference, publication, model version, and constraint outcomes. Alert before the five-minute objective is breached; exercise peak-load, backlog, retry, and stale-source failure tests. Do not claim the objective is met until measured, and keep the last approved price when inputs are stale.",
+      "component": {
+        "nodeId": "pricing_monitoring",
+        "componentType": "monitoring",
+        "label": "Pricing Pipeline Monitoring",
+        "description": "Operational monitoring for freshness, processing, decision, inference, publication, model-version, and guardrail signals.",
+        "position": {"x": 1450, "y": 0},
+        "properties": {
+          "componentName": "Pricing Pipeline Monitoring",
+        "purpose": "Observe per-SKU/segment source freshness, queue age, processing delay, retries, inference, publication, and jurisdiction-policy outcomes. Alert and trigger bounded replay/escalation when the five-minute objective is at risk; load-test the 100k+ SKU partition plan and retain the last approved price during stale-input recovery."
+        },
+        "highlightReason": "The five-minute target can only be evaluated when freshness and elapsed time are visible across the complete path."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "price_53",
+      "stepNumber": 53,
+      "phase": "Phase 5: Offline learning and operations",
+      "title": "Monitor request entry",
+      "type": "add_connection",
+      "content": "Collect gateway request, error, and timing signals for the end-to-end update view. Set operational alerts from observed service behavior and the supplied constraint, not from an invented traffic model.",
+      "connection": {
+        "edgeId": "price_monitoring_to_api",
+        "sourceNodeId": "pricing_monitoring",
+        "targetNodeId": "pricing_api",
+        "connectionType": "data-flow",
+        "label": "API health and request timing",
+        "description": "Expose gateway health and request timing to the operational view."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:1"]
+    },
+    {
+      "id": "price_54",
+      "stepNumber": 54,
+      "phase": "Phase 5: Offline learning and operations",
+      "title": "Monitor pricing decisions and guardrails",
+      "type": "add_connection",
+      "content": "Observe candidate decisions, rejected candidates, accepted changes, and publication status. Keep operational counts distinct from revenue or margin outcomes, which require experiment analysis.",
+      "connection": {
+        "edgeId": "price_monitoring_to_decision",
+        "sourceNodeId": "pricing_monitoring",
+        "targetNodeId": "pricing_decision_service",
+        "connectionType": "data-flow",
+        "label": "Decision, freshness and policy signals",
+        "description": "Make decision-path timings and guardrail outcomes available to operations."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "price_55",
+      "stepNumber": 55,
+      "phase": "Phase 5: Offline learning and operations",
+      "title": "Monitor event and feature freshness",
+      "type": "add_connection",
+      "content": "Expose source age, processor delay, rejected observations, and feature freshness. These signals identify which stage is limiting the update window without asserting an unprovided per-stage SLO.",
+      "connection": {
+        "edgeId": "price_monitoring_to_processor",
+        "sourceNodeId": "pricing_monitoring",
+        "targetNodeId": "pricing_context_processor",
+        "connectionType": "data-flow",
+        "label": "Ingestion and feature freshness",
+        "description": "Make event processing delay and feature freshness visible for the end-to-end update target."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "price_56",
+      "stepNumber": 56,
+      "phase": "Phase 5: Offline learning and operations",
+      "title": "Monitor inference and model identity",
+      "type": "add_connection",
+      "content": "Track inference health and the selected model version alongside each pricing decision. Escalate model-quality concerns through experiment and review evidence rather than treating a healthy endpoint as proof of a correct price.",
+      "connection": {
+        "edgeId": "price_monitoring_to_serving",
+        "sourceNodeId": "pricing_monitoring",
+        "targetNodeId": "elasticity_serving",
+        "connectionType": "data-flow",
+        "label": "Inference health and model version",
+        "description": "Expose serving health and model provenance for operational review of price decisions."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:8", "legacy-constraint:1"]
+    },
+    {
+      "id": "price_57",
+      "stepNumber": 57,
+      "phase": "Phase 5: Offline learning and operations",
+      "title": "Review open inputs and evidence gates",
+      "type": "explanation",
+      "content": "Before implementation, confirm the authoritative demand, inventory, customer-segment, cost, and competitor sources; the reviewed regulatory and frequency rules; and the A/B assignment and analysis method. Preserve the brief's exact targets. This local draft does not establish that the 5-minute or above-5% target is achieved, and structural tests do not prove browser apply/save/reload or live assessment quality."
+    }
+  ]
+}

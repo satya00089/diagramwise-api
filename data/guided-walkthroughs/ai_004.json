@@ -1,0 +1,1064 @@
+{
+  "problem_id": "ai_004",
+  "version": "1.0-review",
+  "totalSteps": 57,
+  "phases": [
+    {
+      "name": "Set measurable boundaries and establish secure conversations",
+      "stepRange": [1, 13],
+      "description": "Turn the brief into measurable targets, then establish authenticated, tenant-scoped conversations and durable history before designing retrieval."
+    },
+    {
+      "name": "Build context-aware, recall-focused retrieval",
+      "stepRange": [14, 28],
+      "description": "Combine dense and sparse retrieval, permission filters, query embeddings, reranking, caching, and explicit evaluation against recall@10."
+    },
+    {
+      "name": "Generate cited answers and enforce grounding",
+      "stepRange": [29, 37],
+      "description": "Send retrieved evidence and bounded conversation context to the model, validate citations and grounding, and return a safe answer or abstention."
+    },
+    {
+      "name": "Ingest sources asynchronously and operate to target",
+      "stepRange": [38, 57],
+      "description": "Keep source synchronization and indexing off the interactive path, collect feedback and quality signals, and measure the latency, scale, recall, and grounding objectives."
+    }
+  ],
+  "steps": [
+    {
+      "id": "rag_01",
+      "stepNumber": 1,
+      "phase": "Set measurable boundaries and establish secure conversations",
+      "title": "Separate supplied targets from working assumptions",
+      "type": "explanation",
+      "content": "The brief supplies eight functional requirements and five constraints. Preserve all five targets: end-to-end response under 3 seconds, recall@10 above 90%, hallucination below 5%, 100k+ documents, and 1k+ concurrent conversations. For an initial capacity sketch only, assume an average of 20 searchable chunks per document (about 2 million chunks at 100k documents); replace this with measurements from representative corpora. Define the latency SLI precisely with product stakeholders; this design budgets a p95 complete response under 3 seconds for a bounded standard answer, reports time-to-first-token separately, and does not count background indexing as part of a user turn.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "rag_02",
+      "stepNumber": 2,
+      "phase": "Set measurable boundaries and establish secure conversations",
+      "title": "Add the enterprise chat client",
+      "type": "add_component",
+      "component": {
+        "nodeId": "rag_client",
+        "componentType": "web-app",
+        "label": "Enterprise Chat Client",
+        "description": "Conversation UI with source citations and feedback",
+        "position": {"x": 0, "y": 240},
+        "properties": {
+          "componentName": "Enterprise Chat Client",
+          "purpose": "Submit a question with a conversation ID, render a bounded answer with clickable source citations, show an explicit insufficient-evidence response, and collect a rating with optional comments."
+        },
+        "highlightReason": "The user experience must expose evidence and abstention, not just fluent generated text, and must make feedback a first-class action."
+      },
+      "content": "Keep the browser thin: it submits the question, tenant-scoped identity, and optional conversation ID. Render citations using source title and location returned by the service; do not ask the client to reconstruct references from answer text.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:8"]
+    },
+    {
+      "id": "rag_03",
+      "stepNumber": 3,
+      "phase": "Set measurable boundaries and establish secure conversations",
+      "title": "Place a bounded, authenticated API at the edge",
+      "type": "add_component",
+      "component": {
+        "nodeId": "rag_gateway",
+        "componentType": "api-gateway",
+        "label": "Conversational API Gateway",
+        "description": "Identity, quotas, request deadlines, and streaming",
+        "position": {"x": 320, "y": 240},
+        "properties": {
+          "componentName": "Conversational API Gateway",
+          "purpose": "Validate request size and schema, authenticate callers, enforce per-tenant quotas, propagate a strict end-to-end deadline, and route chat and feedback requests.",
+          "inputValidation": true,
+          "authentication": "OAuth 2.0",
+          "rateLimiting": true,
+          "requestsPerSecond": 1200,
+          "tlsTermination": true,
+          "throttling": true
+        },
+        "highlightReason": "A deadline and tenant quota must be established before fan-out so a slow model or overloaded tenant cannot consume the full service budget."
+      },
+      "content": "The 1k-concurrent target is not a request-rate specification. Use per-tenant and global concurrency limits, size connection pools from load tests, and reject or queue excess work predictably rather than allowing unbounded latency.",
+      "requirementIds": ["legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "rag_04",
+      "stepNumber": 4,
+      "phase": "Set measurable boundaries and establish secure conversations",
+      "title": "Connect the client to the gateway",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "rag_client_gateway",
+        "sourceNodeId": "rag_client",
+        "targetNodeId": "rag_gateway",
+        "connectionType": "http",
+        "label": "Question, conversation ID & rating",
+        "description": "Send authenticated turns and feedback over TLS; return answer text, citation records, and an explicit abstention status."
+      },
+      "content": "Keep a stable conversation identifier across turns. The gateway returns structured citations (document, version, chunk, and location) alongside the answer so citations can be validated and rendered reliably.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:8"]
+    },
+    {
+      "id": "rag_05",
+      "stepNumber": 5,
+      "phase": "Set measurable boundaries and establish secure conversations",
+      "title": "Add tenant identity and document authorization",
+      "type": "add_component",
+      "component": {
+        "nodeId": "rag_auth",
+        "componentType": "auth-service",
+        "label": "Identity & Document Access Policy",
+        "description": "SSO identity, tenant claims, and ACL decisions",
+        "position": {"x": 640, "y": -40},
+        "properties": {
+          "componentName": "Identity & Document Access Policy",
+          "purpose": "Resolve user and tenant identity and produce authorized source, folder, and document filters for every retrieval; deny by default when claims or policy are unavailable.",
+          "oauth": true,
+          "mfa": true
+        },
+        "highlightReason": "Authorization must constrain retrieval before snippets reach the model; filtering only the final answer is too late to prevent data leakage."
+      },
+      "content": "Resolve group membership and document policy through trusted identity claims. Carry a policy version so caches and retrieval traces can be invalidated when access changes.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5"]
+    },
+    {
+      "id": "rag_06",
+      "stepNumber": 6,
+      "phase": "Set measurable boundaries and establish secure conversations",
+      "title": "Authenticate and scope every request",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "rag_gateway_auth",
+        "sourceNodeId": "rag_gateway",
+        "targetNodeId": "rag_auth",
+        "connectionType": "api-call",
+        "label": "Identity & tenant claims",
+        "description": "Resolve the caller, tenant, groups, and policy version before reading history or retrieving documents."
+      },
+      "content": "Pass a short-lived, verifiable authorization context downstream. Do not trust a tenant ID supplied only in the request body, and do not use an unscoped cache key.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5"]
+    },
+    {
+      "id": "rag_07",
+      "stepNumber": 7,
+      "phase": "Set measurable boundaries and establish secure conversations",
+      "title": "Add the stateless conversation orchestrator",
+      "type": "add_component",
+      "component": {
+        "nodeId": "rag_orchestrator",
+        "componentType": "ai-orchestrator",
+        "label": "Conversation & RAG Orchestrator",
+        "description": "Deadline-aware turn state machine and retrieval coordination",
+        "position": {"x": 640, "y": 240},
+        "properties": {
+          "componentName": "Conversation & RAG Orchestrator",
+          "purpose": "Load bounded conversation context, resolve follow-ups, run authorized retrieval, build an evidence-only prompt, enforce request deadlines, and return structured answers and citations.",
+          "framework": "LlamaIndex",
+          "steps": "authorize -> load history -> resolve follow-up -> retrieve -> rerank -> ground -> validate citations -> respond"
+        },
+        "highlightReason": "A stateless orchestrator keeps application capacity horizontally scalable while durable conversation state lives separately."
+      },
+      "content": "Keep the orchestration tier horizontally scalable and avoid process-local conversation state. It coordinates bounded calls; durable history, retrieval indexes, and model execution remain separate dependencies.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "rag_08",
+      "stepNumber": 8,
+      "phase": "Set measurable boundaries and establish secure conversations",
+      "title": "Route accepted turns to the orchestrator",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "rag_gateway_orchestrator",
+        "sourceNodeId": "rag_gateway",
+        "targetNodeId": "rag_orchestrator",
+        "connectionType": "api-call",
+        "label": "Deadline-bound conversation turn",
+        "description": "Forward the normalized question, trusted identity claims, conversation ID, and remaining latency budget."
+      },
+      "content": "Propagate one deadline through every downstream call. Retrieval and model generation need explicit timeouts and cancellation; a retry that exceeds the original deadline must not be launched.",
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "rag_09",
+      "stepNumber": 9,
+      "phase": "Set measurable boundaries and establish secure conversations",
+      "title": "Persist conversation turns and compact history",
+      "type": "add_component",
+      "component": {
+        "nodeId": "rag_conversation_db",
+        "componentType": "database",
+        "label": "Conversation & Turn Store",
+        "description": "Tenant-scoped messages, summaries, and retention state",
+        "position": {"x": 960, "y": -40},
+        "properties": {
+          "componentName": "Conversation & Turn Store",
+          "purpose": "Persist ordered user and assistant turns, citation references, compact conversation summaries, retention metadata, and idempotency keys with strict tenant ownership.",
+          "type": "RDBMS",
+          "engine": "postgresql",
+          "workload": "OLTP",
+          "multiAZ": true,
+          "encryption": true,
+          "connectionPooling": true,
+          "rbac": true
+        },
+        "highlightReason": "Conversation history needs ordered writes and predictable per-conversation reads; keep it durable and separate from the searchable document corpus."
+      },
+      "content": "Persist turns with conversation ownership, sequence, timestamps, citations, retention policy, and idempotency data. Keep this transactional history distinct from document chunks and vector metadata.",
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "rag_10",
+      "stepNumber": 10,
+      "phase": "Set measurable boundaries and establish secure conversations",
+      "title": "Load and save bounded conversation context",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "rag_orchestrator_conversation_db",
+        "sourceNodeId": "rag_orchestrator",
+        "targetNodeId": "rag_conversation_db",
+        "connectionType": "database-connection",
+        "label": "Ordered turns & rolling summary",
+        "description": "Read recent authorized turns and a compact summary, then persist the new turn and citations with idempotent writes."
+      },
+      "content": "Do not replay an unbounded transcript into every prompt. Store complete history for product needs, but send a token-budgeted recent window plus a refreshed summary to the model. Define retention and deletion behavior for both turns and summaries.",
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "rag_11",
+      "stepNumber": 11,
+      "phase": "Set measurable boundaries and establish secure conversations",
+      "title": "Add a permission-aware embedding and answer cache",
+      "type": "add_component",
+      "component": {
+        "nodeId": "rag_cache",
+        "componentType": "cache",
+        "label": "Embedding & Query Result Cache",
+        "description": "Versioned, tenant-scoped hot-path cache",
+        "position": {"x": 960, "y": 240},
+        "properties": {
+          "componentName": "Embedding & Query Result Cache",
+          "purpose": "Cache query embeddings and selected frequent results using tenant, authorization-scope hash, normalized query, embedding/model version, and corpus revision in the key; use short TTLs and invalidate on relevant access or content changes.",
+          "engine": "redis",
+          "cacheStrategy": "cache-aside",
+          "ttl": 120,
+          "inMemory": true,
+          "encryption": true
+        },
+        "highlightReason": "Caching can reduce repeated-turn work, but a cache that ignores ACL or index revision can leak revoked content or serve stale answers."
+      },
+      "content": "Use short-lived cache-aside entries only after authorization. Include the tenant, ACL-scope hash, model version, normalized query, and corpus revision in keys, and invalidate derived results after permission or source changes.",
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "rag_12",
+      "stepNumber": 12,
+      "phase": "Set measurable boundaries and establish secure conversations",
+      "title": "Check the cache without bypassing authorization",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "rag_orchestrator_cache",
+        "sourceNodeId": "rag_orchestrator",
+        "targetNodeId": "rag_cache",
+        "connectionType": "api-call",
+        "label": "Scoped embedding/result lookup",
+        "description": "Check only after identity and authorization scope are resolved; cache misses continue through the live retrieval path."
+      },
+      "content": "Authorize before a result-cache hit is returned. Cache cited results only when their ACL and corpus revision remain current; otherwise re-retrieve. Never treat a cache hit as a reason to skip citation or grounding checks.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1"]
+    },
+    {
+      "id": "rag_13",
+      "stepNumber": 13,
+      "phase": "Set measurable boundaries and establish secure conversations",
+      "title": "Choose safe cache and conversation boundaries",
+      "type": "decision_point",
+      "content": "A repeated question is not necessarily reusable across users, ACL changes, or document revisions. Make tenant and authorization scope part of cache identity; expire or invalidate derived entries when source permissions or indexed revisions change. Keep history and cache data subject to tenant retention policy.",
+      "decision": {
+        "question": "What must be true before returning cached retrieval results?",
+        "chosen": "Identity and ACL scope are revalidated; key includes tenant, scope hash, model version, and corpus revision",
+        "chosenReason": "Fresh authorization and versioned keys prevent cross-tenant leakage and stale citations while retaining safe reuse for repeated turns.",
+        "alternatives": [
+          {"option": "Global normalized-query key", "tradeoff": "Higher hit rate but risks exposing one tenant's snippets or citations to another."},
+          {"option": "Never cache retrieval work", "tradeoff": "Simpler invalidation but wastes embedding and search capacity on repeated conversations."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "rag_14",
+      "stepNumber": 14,
+      "phase": "Build context-aware, recall-focused retrieval",
+      "title": "Add a versioned embedding service",
+      "type": "add_component",
+      "component": {
+        "nodeId": "rag_embeddings",
+        "componentType": "embedding-service",
+        "label": "Query & Document Embeddings",
+        "description": "Shared versioned embedding endpoint",
+        "position": {"x": 960, "y": 570},
+        "properties": {
+          "componentName": "Query & Document Embeddings",
+          "purpose": "Embed normalized user queries and indexed document chunks with the same pinned model/version; batch ingestion work and enforce the interactive request deadline for queries.",
+          "model": "text-embedding-3-large",
+          "dimensions": 3072,
+          "batchSize": 64
+        },
+        "highlightReason": "Query and document vectors must share the same model and dimensions; record the model version so re-embedding can be rolled out deliberately."
+      },
+      "content": "The same pinned embedding model and normalization pipeline serve online queries and offline document chunks. Version both the model and dimensions so an index migration never mixes incompatible vectors.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "rag_15",
+      "stepNumber": 15,
+      "phase": "Build context-aware, recall-focused retrieval",
+      "title": "Add dense vector search for semantic matches",
+      "type": "add_component",
+      "component": {
+        "nodeId": "rag_vector_db",
+        "componentType": "vector-database",
+        "label": "Tenant-Filtered Vector Index",
+        "description": "Dense search over versioned document chunks",
+        "position": {"x": 1520, "y": 80},
+        "properties": {
+          "componentName": "Tenant-Filtered Vector Index",
+          "purpose": "Store chunk vectors with tenant, source, document/version, ACL, and provenance metadata; apply authorization filters during nearest-neighbor search.",
+          "engine": "pgvector",
+          "dimensions": 3072,
+          "indexType": "HNSW"
+        },
+        "highlightReason": "Dense retrieval finds semantically related passages but needs metadata filters and a recall benchmark at the actual corpus scale."
+      },
+      "content": "Store stable chunk IDs and source/version/ACL metadata with every vector. Apply tenant and access filters in the nearest-neighbor query, then test recall and tail latency at the expected multi-million-chunk scale.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "rag_16",
+      "stepNumber": 16,
+      "phase": "Build context-aware, recall-focused retrieval",
+      "title": "Add sparse search for exact terms and identifiers",
+      "type": "add_component",
+      "component": {
+        "nodeId": "rag_sparse_search",
+        "componentType": "search-engine",
+        "label": "Sparse BM25 Index",
+        "description": "Keyword search for names, codes, and exact phrases",
+        "position": {"x": 1520, "y": 420},
+        "properties": {
+          "componentName": "Sparse BM25 Index",
+          "purpose": "Index searchable chunk text and metadata for BM25-style lexical retrieval; enforce the same tenant, document ACL, and active-version filters as dense retrieval.",
+          "engine": "elasticsearch",
+          "replicas": 2,
+          "shards": 12
+        },
+        "highlightReason": "Sparse retrieval complements embeddings for exact product names, policy numbers, error codes, and rare terms."
+      },
+      "content": "Keep lexical and vector indexes aligned on document versions, tenant filters, ACLs, and deletion state. BM25 is especially useful when the query contains names, identifiers, or exact policy language.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "rag_17",
+      "stepNumber": 17,
+      "phase": "Build context-aware, recall-focused retrieval",
+      "title": "Add hybrid retrieval, fusion, and reranking",
+      "type": "add_component",
+      "component": {
+        "nodeId": "rag_retrieval",
+        "componentType": "rag-pipeline",
+        "label": "Hybrid Retrieval & Reranking",
+        "description": "Authorized dense+sparse candidate fusion and top-10 selection",
+        "position": {"x": 1200, "y": 240},
+        "properties": {
+          "componentName": "Hybrid Retrieval & Reranking",
+          "purpose": "Run filtered dense and sparse searches in parallel, fuse deduplicated candidates, rerank a bounded candidate set, and return the best ten evidence chunks with source metadata and calibrated relevance signals.",
+          "retriever": "Hybrid",
+          "chunkSize": 450,
+          "topK": 10
+        },
+        "highlightReason": "Parallel hybrid retrieval improves candidate coverage; reranking spends more compute on a bounded set instead of scanning or reranking the full corpus."
+      },
+      "content": "This stage runs the two authorized searches in parallel, fuses and deduplicates candidates, reranks a bounded pool, and returns the final ten chunks together with stable provenance.",
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "rag_18",
+      "stepNumber": 18,
+      "phase": "Build context-aware, recall-focused retrieval",
+      "title": "Send the normalized query to hybrid retrieval",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "rag_orchestrator_retrieval",
+        "sourceNodeId": "rag_orchestrator",
+        "targetNodeId": "rag_retrieval",
+        "connectionType": "api-call",
+        "label": "Query, filters & deadline",
+        "description": "Send the resolved standalone query, authorized tenant/document filters, and remaining time budget for parallel search and reranking."
+      },
+      "content": "The orchestrator attaches the authenticated policy context. The retriever should accept an explicit filter object and deadline rather than independently inferring a tenant from user text.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "rag_19",
+      "stepNumber": 19,
+      "phase": "Build context-aware, recall-focused retrieval",
+      "title": "Apply document authorization inside retrieval",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "rag_auth_retrieval",
+        "sourceNodeId": "rag_auth",
+        "targetNodeId": "rag_retrieval",
+        "connectionType": "api-call",
+        "label": "Tenant, ACL & source filters",
+        "description": "Provide signed policy claims that both dense and sparse branches enforce before returning candidate chunks."
+      },
+      "content": "A shared authorization filter must be applied by both retrieval branches before fusion. Test revoked access, group membership changes, and documents with mixed source permissions; a post-retrieval filter can waste latency and expose content to intermediate services.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:1"]
+    },
+    {
+      "id": "rag_20",
+      "stepNumber": 20,
+      "phase": "Build context-aware, recall-focused retrieval",
+      "title": "Route dense candidates to the vector index",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "rag_retrieval_vector",
+        "sourceNodeId": "rag_retrieval",
+        "targetNodeId": "rag_vector_db",
+        "connectionType": "api-call",
+        "label": "Filtered nearest-neighbor search",
+        "description": "Search active chunk vectors using the tenant and ACL filters and return chunk IDs, similarity, and source-version metadata."
+      },
+      "content": "Keep candidate count configurable and benchmark it. A recall target is an observed property of the corpus, query mix, filters, and index settings, not a value guaranteed by choosing a vector database.",
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "rag_21",
+      "stepNumber": 21,
+      "phase": "Build context-aware, recall-focused retrieval",
+      "title": "Route lexical candidates to the sparse index",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "rag_retrieval_sparse",
+        "sourceNodeId": "rag_retrieval",
+        "targetNodeId": "rag_sparse_search",
+        "connectionType": "api-call",
+        "label": "Filtered BM25 candidate search",
+        "description": "Search exact terms, names, and identifiers under the same active-version and authorization filters."
+      },
+      "content": "Run dense and sparse branches concurrently under one deadline. If one branch fails, record degraded retrieval explicitly and use a policy-approved fallback; do not silently claim the normal recall SLO was met.",
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "rag_22",
+      "stepNumber": 22,
+      "phase": "Build context-aware, recall-focused retrieval",
+      "title": "Embed queries with the same model as indexed chunks",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "rag_orchestrator_embeddings",
+        "sourceNodeId": "rag_orchestrator",
+        "targetNodeId": "rag_embeddings",
+        "connectionType": "api-call",
+        "label": "Versioned query embedding",
+        "description": "Create or retrieve the query vector using the active embedding model version within the interaction deadline."
+      },
+      "content": "Use the embedding cache only for the same model version and normalization rules. When embedding dimensions or model change, reindex through a versioned migration and do not compare incompatible vectors.",
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "rag_23",
+      "stepNumber": 23,
+      "phase": "Build context-aware, recall-focused retrieval",
+      "title": "Measure recall after the final top-10 selection",
+      "type": "explanation",
+      "content": "Define recall@10 over a reviewed query set with relevant evidence labeled at the chunk or passage level. Measure the final reranked top ten, sliced by source, tenant size, query type, and ACL selectivity. A practical starting point is to retrieve a wider bounded pool (for example 40-60 candidates per branch), deduplicate and fuse it, then rerank to ten; tune from latency and recall measurements rather than treating these numbers as guarantees.",
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:2"]
+    },
+    {
+      "id": "rag_24",
+      "stepNumber": 24,
+      "phase": "Build context-aware, recall-focused retrieval",
+      "title": "Choose hybrid search based on complementary failure modes",
+      "type": "decision_point",
+      "content": "Dense search is strong for paraphrase and semantic similarity; BM25 is strong for exact strings and rare identifiers. Fuse the candidate sets (for example with reciprocal-rank fusion), deduplicate by chunk/version, then rerank with a model whose tail latency fits the remaining budget.",
+      "decision": {
+        "question": "How should the system balance semantic and exact-term retrieval?",
+        "chosen": "Run dense and BM25 retrieval in parallel, fuse candidates, and rerank a bounded pool",
+        "chosenReason": "This combines complementary retrieval signals while keeping reranking cost bounded; evaluation determines whether it meets recall@10 and latency targets for the actual corpus.",
+        "alternatives": [
+          {"option": "Dense-only retrieval", "tradeoff": "Simpler, but can miss exact identifiers, policy codes, and uncommon names."},
+          {"option": "Sparse-only retrieval", "tradeoff": "Efficient for exact terms, but can miss paraphrased questions and semantically equivalent wording."},
+          {"option": "Unbounded cross-encoder reranking", "tradeoff": "May improve ordering but can violate the 3-second response budget as candidate count grows."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "rag_25",
+      "stepNumber": 25,
+      "phase": "Build context-aware, recall-focused retrieval",
+      "title": "Set the final evidence count and hybrid mode",
+      "type": "update_component",
+      "componentUpdate": {
+        "nodeId": "rag_retrieval",
+        "properties": {"retriever": "Hybrid", "topK": 10}
+      },
+      "content": "The model receives no more than ten selected chunks by default. Tune the candidate pool and final topK on the labeled evaluation set; if long answers require more evidence, use a measured adaptive policy that still enforces the context and latency budgets.",
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "rag_26",
+      "stepNumber": 26,
+      "phase": "Build context-aware, recall-focused retrieval",
+      "title": "Return ranked evidence with citation provenance",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "rag_retrieval_orchestrator",
+        "sourceNodeId": "rag_retrieval",
+        "targetNodeId": "rag_orchestrator",
+        "connectionType": "data-flow",
+        "label": "Top-10 chunks, scores & source metadata",
+        "description": "Return selected text with immutable document/version/chunk identifiers, source location, ACL decision context, and ranking signals."
+      },
+      "content": "The response path must preserve provenance from indexed chunk through retrieval, prompt, citation validation, and rendered answer. Do not synthesize a citation URL or source title from model-generated prose.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:2"]
+    },
+    {
+      "id": "rag_27",
+      "stepNumber": 27,
+      "phase": "Build context-aware, recall-focused retrieval",
+      "title": "Resolve ambiguous turns before searching",
+      "type": "explanation",
+      "content": "For a follow-up such as “does that policy apply to contractors?”, combine the latest turn with a bounded authorized history summary to create a standalone retrieval query. Preserve the original user question for the answer, keep the rewrite auditable, and ask a clarification question when the missing entity or intent cannot be resolved safely.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "rag_28",
+      "stepNumber": 28,
+      "phase": "Build context-aware, recall-focused retrieval",
+      "title": "Update the turn policy for follow-ups and clarification",
+      "type": "update_component",
+      "componentUpdate": {
+        "nodeId": "rag_orchestrator",
+        "properties": {"steps": "authorize -> load bounded history -> rewrite follow-up or clarify -> hybrid retrieve -> rerank -> ground -> validate citations -> respond"}
+      },
+      "content": "An ambiguous turn must not be guessed into a confident answer. If history and retrieval do not identify the referenced entity with sufficient confidence, ask one focused clarification question and persist it as the next conversation turn.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "rag_29",
+      "stepNumber": 29,
+      "phase": "Generate cited answers and enforce grounding",
+      "title": "Add the model endpoint behind the orchestrator",
+      "type": "add_component",
+      "component": {
+        "nodeId": "rag_llm",
+        "componentType": "llm-api",
+        "label": "Answer Generation Model",
+        "description": "Bounded answer generation from authorized evidence",
+        "position": {"x": 1840, "y": 240},
+        "properties": {
+          "componentName": "Answer Generation Model",
+          "purpose": "Generate concise answers only from the supplied authorized evidence, emit structured claim-to-chunk citation IDs, and support a strict timeout and output-token limit.",
+          "provider": "Azure OpenAI",
+          "model": "gpt-4o-mini",
+          "maxTokens": 700
+        },
+        "highlightReason": "The model is a replaceable generation dependency; correctness controls and citation records remain in the application layer."
+      },
+      "content": "The model receives only the bounded prompt assembled by the orchestrator. Keep provider configuration replaceable, cap output tokens, and enforce the request deadline independently of the provider.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "rag_30",
+      "stepNumber": 30,
+      "phase": "Generate cited answers and enforce grounding",
+      "title": "Send only bounded history and selected evidence to generation",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "rag_orchestrator_llm",
+        "sourceNodeId": "rag_orchestrator",
+        "targetNodeId": "rag_llm",
+        "connectionType": "api-call",
+        "label": "Grounded prompt & deadline",
+        "description": "Send the original question, resolved follow-up, compact authorized history, top evidence chunks with stable IDs, answer schema, and remaining deadline."
+      },
+      "content": "Treat retrieved documents as untrusted data, not instructions. Ask the model for a structured answer with citations referencing only supplied chunk IDs; cap answer length and cancel generation when the propagated deadline expires.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "rag_31",
+      "stepNumber": 31,
+      "phase": "Generate cited answers and enforce grounding",
+      "title": "Add input and output safety checks",
+      "type": "add_component",
+      "component": {
+        "nodeId": "rag_guardrails",
+        "componentType": "ai-guardrails",
+        "label": "Grounding & Safety Validator",
+        "description": "Prompt-injection defense, citation integrity, and abstention",
+        "position": {"x": 2160, "y": 240},
+        "properties": {
+          "componentName": "Grounding & Safety Validator",
+          "purpose": "Screen user and retrieved content as untrusted input; validate output schema, cited chunk IDs, citation-to-claim support, sensitive data policy, and abstention thresholds before returning an answer.",
+          "inputFiltering": true,
+          "outputFiltering": true
+        },
+        "highlightReason": "A prompt instruction alone does not establish a hallucination rate; validate claims and citations and refuse unsupported answers."
+      },
+      "content": "Defense is layered: treat retrieved text as untrusted, require citations to reference this turn's evidence, check claim support and policy, and abstain when validation fails.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "rag_32",
+      "stepNumber": 32,
+      "phase": "Generate cited answers and enforce grounding",
+      "title": "Validate the model response before delivery",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "rag_llm_guardrails",
+        "sourceNodeId": "rag_llm",
+        "targetNodeId": "rag_guardrails",
+        "connectionType": "data-flow",
+        "label": "Draft answer & cited chunk IDs",
+        "description": "Validate response structure, citation IDs, grounding evidence, policy, and confidence before any user-visible delivery."
+      },
+      "content": "Reject citations that do not belong to this turn's retrieved evidence. For factual claims, require support in cited passages; when support is missing, contradictory, stale, or below the calibrated threshold, return a clear abstention or ask for clarification.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "rag_33",
+      "stepNumber": 33,
+      "phase": "Generate cited answers and enforce grounding",
+      "title": "Return only validated answers and citations",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "rag_guardrails_gateway",
+        "sourceNodeId": "rag_guardrails",
+        "targetNodeId": "rag_gateway",
+        "connectionType": "data-flow",
+        "label": "Validated answer, citations or abstention",
+        "description": "Return structured answer and verified source references, or a safe abstention/clarification response."
+      },
+      "content": "The browser receives only validator-approved content. Include enough provenance for users to open the original source subject to current authorization, and avoid exposing snippets after permissions have been revoked.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7"]
+    },
+    {
+      "id": "rag_34",
+      "stepNumber": 34,
+      "phase": "Generate cited answers and enforce grounding",
+      "title": "Define a measurable hallucination budget",
+      "type": "explanation",
+      "content": "Define hallucination rate on a labeled set of factual claims, including citation correctness and unsupported claims; publish the denominator and confidence interval. Track by source type, answer length, and query class. Prompt changes, model upgrades, and retrieval changes need regression evaluation. The below-5% target is an acceptance criterion to demonstrate in evaluation, not something this architecture can guarantee by itself.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "rag_35",
+      "stepNumber": 35,
+      "phase": "Generate cited answers and enforce grounding",
+      "title": "Choose evidence-first abstention over plausible guessing",
+      "type": "decision_point",
+      "content": "If evidence is weak, missing, contradictory, or inaccessible, a fluent answer can still be wrong. Calibrate a support threshold on representative labeled questions, return an abstention with the reason category, and let the user clarify or identify the missing source.",
+      "decision": {
+        "question": "What should happen when retrieved evidence does not support the requested answer?",
+        "chosen": "Do not assert unsupported facts; return a clear abstention or targeted clarification",
+        "chosenReason": "This makes the hallucination objective measurable and protects trust even when it means the system cannot answer every query.",
+        "alternatives": [
+          {"option": "Always return the model's best guess", "tradeoff": "Improves apparent answer rate but makes unsupported claims more likely."},
+          {"option": "Return raw passages without synthesis", "tradeoff": "Reduces generation risk but provides a poor conversational answer and still needs access checks."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "rag_36",
+      "stepNumber": 36,
+      "phase": "Generate cited answers and enforce grounding",
+      "title": "Make citation validation part of the response contract",
+      "type": "explanation",
+      "content": "Return an answer object with claims or paragraphs linked to one or more retrieved chunk IDs. Resolve each ID to the immutable source version and location, verify the user's current access at click time, and preserve the exact evidence used for audit and feedback review.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:7"]
+    },
+    {
+      "id": "rag_37",
+      "stepNumber": 37,
+      "phase": "Generate cited answers and enforce grounding",
+      "title": "Keep interactive work within the three-second budget",
+      "type": "explanation",
+      "content": "Budget the p95 request across auth, history, query rewrite, parallel dense/sparse retrieval, reranking, generation, citation validation, and response serialization. Stream progress or tokens where product semantics allow, but report full-answer latency separately. Apply per-stage timeouts and an evidence-safe fallback; do not let retries or indexing consume the request budget.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "rag_38",
+      "stepNumber": 38,
+      "phase": "Ingest sources asynchronously and operate to target",
+      "title": "Represent connected enterprise sources",
+      "type": "add_component",
+      "component": {
+        "nodeId": "rag_source_connectors",
+        "componentType": "custom-component",
+        "label": "Enterprise Source Connectors",
+        "description": "Change feeds and scoped connectors for enterprise repositories",
+        "position": {"x": 0, "y": 820},
+        "properties": {
+          "componentName": "Enterprise Source Connectors",
+          "subtitle": "SharePoint, Google Drive, Confluence, file repositories",
+          "purpose": "Use least-privilege connectors and source change feeds or cursored polling to discover document creates, updates, deletes, and ACL changes across multiple enterprise knowledge sources.",
+          "componentType": "Source connector service",
+          "technology": "Provider-specific APIs behind a shared connector contract"
+        },
+        "highlightReason": "The palette has no dedicated enterprise knowledge-source connector; this generic custom component is limited to that genuine catalog gap."
+      },
+      "content": "Each connector owns credentials, checkpoints, rate limits, and source-specific pagination, but emits a common versioned document-change event. Preserve source identity and ACL metadata instead of flattening away permissions.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "rag_39",
+      "stepNumber": 39,
+      "phase": "Ingest sources asynchronously and operate to target",
+      "title": "Add a durable ingestion event broker",
+      "type": "add_component",
+      "component": {
+        "nodeId": "rag_ingestion_broker",
+        "componentType": "message-broker",
+        "label": "Document Change Broker",
+        "description": "Durable change events with replay and backpressure",
+        "position": {"x": 320, "y": 820},
+        "properties": {
+          "componentName": "Document Change Broker",
+          "purpose": "Buffer versioned document and ACL-change events, partition by tenant/document for ordering, and isolate source synchronization from parsing and indexing throughput.",
+          "partitions": 24,
+          "replication": 3,
+          "durable": true,
+          "retention": 72
+        },
+        "highlightReason": "Durable events provide replay and absorb bursts without allowing bulk indexing to compete with interactive retrieval."
+      },
+      "content": "The broker decouples source polling and change feeds from parsing and indexing. Retain replayable events long enough to recover from downstream outages and handle bursts.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "rag_40",
+      "stepNumber": 40,
+      "phase": "Ingest sources asynchronously and operate to target",
+      "title": "Add scalable parse, chunk, and index workers",
+      "type": "add_component",
+      "component": {
+        "nodeId": "rag_ingestion_workers",
+        "componentType": "processing-worker",
+        "label": "Parse, Chunk & Index Workers",
+        "description": "Idempotent ingestion with ACL-preserving metadata",
+        "position": {"x": 640, "y": 820},
+        "properties": {
+          "componentName": "Parse, Chunk & Index Workers",
+          "purpose": "Fetch changed source versions, extract text and metadata, preserve ACLs, create versioned overlapping chunks, compute checksums, and upsert dense and sparse indexes idempotently.",
+          "tasks": "fetch -> extract -> normalize -> ACL map -> chunk -> embed -> index -> publish status",
+          "concurrency": 48,
+          "autoscale": true
+        },
+        "highlightReason": "Asynchronous, idempotent workers scale document ingestion independently from the 1k-conversation interactive fleet."
+      },
+      "content": "Workers preserve source ACLs, extract and normalize content, make structure-aware chunks with stable IDs, compute embeddings, and update both indexes. Retry safely by document version.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "rag_41",
+      "stepNumber": 41,
+      "phase": "Ingest sources asynchronously and operate to target",
+      "title": "Publish changes from each knowledge source",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "rag_sources_broker",
+        "sourceNodeId": "rag_source_connectors",
+        "targetNodeId": "rag_ingestion_broker",
+        "connectionType": "event-stream",
+        "label": "Versioned document & ACL changes",
+        "description": "Emit source, tenant, document version, change type, ACL revision, and connector checkpoint for replayable processing."
+      },
+      "content": "Treat deletion and permission revocation as first-class events. A connector checkpoint advances only after its change is durably published, so a worker outage does not silently skip source updates.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "rag_42",
+      "stepNumber": 42,
+      "phase": "Ingest sources asynchronously and operate to target",
+      "title": "Drain the queue with backpressure-aware workers",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "rag_broker_workers",
+        "sourceNodeId": "rag_ingestion_broker",
+        "targetNodeId": "rag_ingestion_workers",
+        "connectionType": "message-queue",
+        "label": "Retryable ordered work",
+        "description": "Workers consume idempotent document-version jobs, retry transient failures with backoff, and dead-letter poison documents."
+      },
+      "content": "Autoscale from queue age/depth and downstream capacity, not just CPU. Bound concurrency against connector quotas and embedding/index throughput; preserve ordering for each document so a late older version cannot overwrite a newer one.",
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "rag_43",
+      "stepNumber": 43,
+      "phase": "Ingest sources asynchronously and operate to target",
+      "title": "Retain checksummed source snapshots and versions",
+      "type": "add_component",
+      "component": {
+        "nodeId": "rag_document_store",
+        "componentType": "object-storage",
+        "label": "Versioned Document Snapshot Store",
+        "description": "Durable source payloads and extraction artifacts",
+        "position": {"x": 960, "y": 1040},
+        "properties": {
+          "componentName": "Versioned Document Snapshot Store",
+          "purpose": "Store permitted source snapshots or extraction artifacts keyed by tenant, source, document, and version; enforce retention, encryption, checksums, and deletion policy.",
+          "provider": "S3",
+          "versioning": true,
+          "checksumValidation": true,
+          "storageGB": 5000
+        },
+        "highlightReason": "Object storage keeps large source artifacts and history out of the hot retrieval indexes; retention must follow enterprise source policy."
+      },
+      "content": "Use object storage for permitted originals or extraction artifacts, not as the online search path. Version and checksum objects so a failed parser can be rerun reproducibly.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "rag_44",
+      "stepNumber": 44,
+      "phase": "Ingest sources asynchronously and operate to target",
+      "title": "Persist source versions before publishing searchable chunks",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "rag_workers_object_store",
+        "sourceNodeId": "rag_ingestion_workers",
+        "targetNodeId": "rag_document_store",
+        "connectionType": "data-flow",
+        "label": "Checksummed source version & extraction",
+        "description": "Write authorized source payloads or extracted artifacts with immutable version IDs and retention metadata."
+      },
+      "content": "Store only data permitted by source agreements. Keep the source-system canonical record authoritative; this copy supports indexing, provenance, and approved reprocessing, not a new source of truth.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5"]
+    },
+    {
+      "id": "rag_45",
+      "stepNumber": 45,
+      "phase": "Ingest sources asynchronously and operate to target",
+      "title": "Create document vectors through the shared embedding model",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "rag_workers_embeddings",
+        "sourceNodeId": "rag_ingestion_workers",
+        "targetNodeId": "rag_embeddings",
+        "connectionType": "api-call",
+        "label": "Batched, version-pinned chunks",
+        "description": "Embed normalized chunks in batches with document version and model-version metadata; retry idempotently."
+      },
+      "content": "Choose chunk size and overlap by document structure and measured retrieval quality. Preserve heading/path context and stable chunk IDs; do not assume a single fixed token count works for every source format.",
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "rag_46",
+      "stepNumber": 46,
+      "phase": "Ingest sources asynchronously and operate to target",
+      "title": "Upsert versioned chunk vectors",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "rag_embeddings_vector",
+        "sourceNodeId": "rag_embeddings",
+        "targetNodeId": "rag_vector_db",
+        "connectionType": "data-flow",
+        "label": "Vectors, chunk IDs & ACL metadata",
+        "description": "Upsert vectors and searchable metadata under stable tenant/document/version/chunk keys; retire superseded versions safely."
+      },
+      "content": "Make retries idempotent and publish a document version as active only when its required index writes are complete. Retain a safe rollback window, and remove or mask stale versions promptly after source deletion or ACL revocation.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "rag_47",
+      "stepNumber": 47,
+      "phase": "Ingest sources asynchronously and operate to target",
+      "title": "Update the sparse index independently",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "rag_workers_sparse_search",
+        "sourceNodeId": "rag_ingestion_workers",
+        "targetNodeId": "rag_sparse_search",
+        "connectionType": "data-flow",
+        "label": "Tokenized text, versions & ACLs",
+        "description": "Upsert normalized chunk text and identical active-version/authorization metadata for lexical retrieval."
+      },
+      "content": "Track dense and sparse indexing watermarks per document version. Do not expose a version as fully searchable if one branch is missing; surface partial-index state to operators and repair it asynchronously.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "rag_48",
+      "stepNumber": 48,
+      "phase": "Ingest sources asynchronously and operate to target",
+      "title": "Collect ratings and structured quality signals",
+      "type": "add_component",
+      "component": {
+        "nodeId": "rag_quality_analytics",
+        "componentType": "analytics",
+        "label": "Feedback & RAG Evaluation Events",
+        "description": "Ratings, retrieval traces, and offline quality metrics",
+        "position": {"x": 2480, "y": 660},
+        "properties": {
+          "componentName": "Feedback & RAG Evaluation Events",
+          "purpose": "Record user ratings and optional reason codes, retrieval/citation traces, and privacy-safe evaluation outcomes; keep raw sensitive prompts under explicit retention and access controls.",
+          "retentionDays": 90,
+          "samplingRate": 100,
+          "realTime": true,
+          "storage": "s3"
+        },
+        "highlightReason": "Feedback is actionable only when joined safely to the answer, citations, retrieval versions, and model/prompt versions that produced it."
+      },
+      "content": "Store ratings, reason codes, and privacy-safe evaluation traces with the retrieval, prompt, model, and corpus versions. Apply retention and access controls to sensitive prompts and evidence.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "rag_49",
+      "stepNumber": 49,
+      "phase": "Ingest sources asynchronously and operate to target",
+      "title": "Record explicit user ratings",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "rag_gateway_analytics",
+        "sourceNodeId": "rag_gateway",
+        "targetNodeId": "rag_quality_analytics",
+        "connectionType": "event-stream",
+        "label": "Rating, reason & answer trace ID",
+        "description": "Persist opt-in feedback with a pseudonymous trace ID and the answer, citation, retrieval, and version identifiers needed for investigation."
+      },
+      "content": "Separate rating submission from the answer critical path. Validate ownership of the referenced turn, avoid logging secrets or unnecessary raw text, and allow users to correct or withdraw feedback according to policy.",
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:1"]
+    },
+    {
+      "id": "rag_50",
+      "stepNumber": 50,
+      "phase": "Ingest sources asynchronously and operate to target",
+      "title": "Evaluate retrieval and grounding offline and in canaries",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "rag_retrieval_analytics",
+        "sourceNodeId": "rag_retrieval",
+        "targetNodeId": "rag_quality_analytics",
+        "connectionType": "event-stream",
+        "label": "Recall, rank & citation provenance",
+        "description": "Emit versioned evaluation traces for labeled recall@10, ranking quality, source coverage, and latency without putting aggregate jobs on the user path."
+      },
+      "content": "Use an offline labeled corpus and a small canary suite on every embedding, chunking, index, reranker, prompt, and model change. Alert on regressions by query/source segment; ratings alone are biased and cannot prove recall or hallucination targets.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "rag_51",
+      "stepNumber": 51,
+      "phase": "Ingest sources asynchronously and operate to target",
+      "title": "Measure latency, saturation, and quality together",
+      "type": "add_component",
+      "component": {
+        "nodeId": "rag_monitoring",
+        "componentType": "monitoring",
+        "label": "RAG SLO Monitoring",
+        "description": "Request tracing, latency budgets, and saturation alerts",
+        "position": {"x": 1840, "y": 820},
+        "properties": {
+          "componentName": "RAG SLO Monitoring",
+          "purpose": "Trace each request stage and index pipeline; report p50/p95/p99 latency, time-to-first-token, concurrency, queue age, retrieval branch health, cache hit rate, citation validation, and measured quality targets.",
+          "stack": "Prometheus + Grafana",
+          "metrics": true,
+          "alerts": true,
+          "retention": 30
+        },
+        "highlightReason": "A single end-to-end score cannot identify whether latency or quality regressed in retrieval, model generation, or ingestion."
+      },
+      "content": "Instrument each stage and both asynchronous indexing and interactive answering. Alert on end-to-end latency, saturation, indexing lag, retrieval branch failures, and measured quality regressions.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "rag_52",
+      "stepNumber": 52,
+      "phase": "Ingest sources asynchronously and operate to target",
+      "title": "Trace interactive gateway SLOs",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "rag_gateway_monitoring",
+        "sourceNodeId": "rag_gateway",
+        "targetNodeId": "rag_monitoring",
+        "connectionType": "data-flow",
+        "label": "Request rate, latency & concurrency",
+        "description": "Export request stage timings, deadline exhaustion, saturation, errors, and active concurrent conversations."
+      },
+      "content": "Measure end-to-end and stage-level percentiles rather than averages. Sample traces safely, redact prompts and tokens by default, and retain enough diagnostic metadata to compare model, prompt, and index versions.",
+      "requirementIds": ["legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "rag_53",
+      "stepNumber": 53,
+      "phase": "Ingest sources asynchronously and operate to target",
+      "title": "Watch retrieval and generation deadline consumption",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "rag_orchestrator_monitoring",
+        "sourceNodeId": "rag_orchestrator",
+        "targetNodeId": "rag_monitoring",
+        "connectionType": "data-flow",
+        "label": "Retrieval, rerank, model & citation timings",
+        "description": "Report stage latency, timeout cause, evidence count, citation validation outcome, and safe abstention rate."
+      },
+      "content": "Break down the 3-second objective into stage budgets and alert before the full SLO burns. A downstream model can dominate latency; cap output tokens and apply deadline-aware fallback without returning an ungrounded answer.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "rag_54",
+      "stepNumber": 54,
+      "phase": "Ingest sources asynchronously and operate to target",
+      "title": "Scale ingestion without starving conversations",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "rag_workers_monitoring",
+        "sourceNodeId": "rag_ingestion_workers",
+        "targetNodeId": "rag_monitoring",
+        "connectionType": "data-flow",
+        "label": "Queue age, throughput & index lag",
+        "description": "Track worker concurrency, source throttling, dead letters, per-index watermarks, and time from source change to searchable version."
+      },
+      "content": "Use separate resource pools, quotas, and autoscaling for online query embeddings and offline bulk embedding/indexing. Backpressure ingestion when shared model or search capacity threatens interactive SLOs.",
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "rag_55",
+      "stepNumber": 55,
+      "phase": "Ingest sources asynchronously and operate to target",
+      "title": "Scale for 100k documents and 1k concurrent turns",
+      "type": "decision_point",
+      "content": "At the provisional 20 chunks per document, 100k documents imply about 2 million chunks, before replicas, versions, or ACL metadata. Size vector and lexical indexes from real chunk-size distributions and tenant skew. Keep the API/orchestrator stateless, partition conversation and document workloads by tenant/document, and use load tests at 1k concurrent conversations to validate connection pools, model quotas, retrieval p95, and queue isolation.",
+      "decision": {
+        "question": "How should interactive conversations coexist with large, bursty document imports?",
+        "chosen": "Isolate online and offline capacity, apply backpressure, and scale each from its own latency/queue signals",
+        "chosenReason": "Independent pools keep indexing bursts from consuming the capacity required for interactive turns while still allowing ingestion throughput to scale.",
+        "alternatives": [
+          {"option": "One shared unbounded worker pool", "tradeoff": "Simple initially, but bulk indexing can exhaust model and database capacity and break the response objective."},
+          {"option": "Synchronous indexing during uploads", "tradeoff": "Easy to reason about for small corpora, but couples source latency and availability to every index and embedding dependency."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "rag_56",
+      "stepNumber": 56,
+      "phase": "Ingest sources asynchronously and operate to target",
+      "title": "Close deletion, ACL-change, and reindex consistency gaps",
+      "type": "explanation",
+      "content": "A source update must invalidate old chunks and cached results, update both dense and sparse indexes, and advance the active version only when policy permits. Deletion and ACL revocation need an urgent tombstone path, not just eventual background cleanup. Reindex with versioned aliases or equivalent cutover so readers see a coherent active corpus and rollback remains possible.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "rag_57",
+      "stepNumber": 57,
+      "phase": "Ingest sources asynchronously and operate to target",
+      "title": "Review the end-to-end trust and evaluation loop",
+      "type": "explanation",
+      "content": "A turn is accepted only after identity and policy checks; bounded history resolves follow-ups; dense and sparse retrieval run with the same ACL filters; candidates are fused and reranked; the model receives only selected evidence; citations are validated before delivery; users can rate answers; and quality, latency, and ingestion health feed evaluation and operations. Before rollout, verify the measured p95 response target, recall@10 above 90%, hallucination below 5%, 100k-document indexing, and 1k-concurrent-turn load with representative tenants and failure cases. These are acceptance tests, not assumed results.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

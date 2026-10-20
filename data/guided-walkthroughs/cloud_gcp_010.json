@@ -1,0 +1,988 @@
+{
+  "problem_id": "cloud_gcp_010",
+  "version": "1.0-review",
+  "totalSteps": 49,
+  "requirementRevision": null,
+  "phases": [
+    {
+      "name": "Freeze the brief and establish a governed upload path",
+      "stepRange": [1, 9],
+      "description": "Keep the supplied targets separate from workload assumptions, then establish tenant identity, upload control, and a direct-to-storage file path."
+    },
+    {
+      "name": "Store originals and dispatch idempotent processing work",
+      "stepRange": [10, 18],
+      "description": "Preserve original bytes, emit durable work notifications, and consume them with bounded workers while keeping queue delay inside the measured latency budget."
+    },
+    {
+      "name": "Classify, extract, validate, and persist results",
+      "stepRange": [19, 26],
+      "description": "Use the managed document processors for OCR and structured extraction, validate values and confidence explicitly, and persist a traceable result record."
+    },
+    {
+      "name": "Route uncertain cases for review and isolate failures",
+      "stepRange": [27, 35],
+      "description": "Keep low-confidence business exceptions distinct from transient failures, support authenticated human correction, and make retries safe."
+    },
+    {
+      "name": "Measure quality, latency, scale, and cost before claiming success",
+      "stepRange": [36, 49],
+      "description": "Build operational and labeled-quality evidence, then turn the brief's targets into load-test and release gates rather than architecture promises."
+    }
+  ],
+  "steps": [
+    {
+      "id": "idp_01_live_brief",
+      "stepNumber": 1,
+      "phase": "Freeze the brief and establish a governed upload path",
+      "title": "Freeze the exact problem brief and mark unknowns",
+      "type": "explanation",
+      "content": "Live brief: Build an Intelligent Document Processing Pipeline. Description: Design a document processing system that extracts text from PDFs and images, classifies documents, extracts structured data, and validates accuracy. Explicit requirements: Extract text from documents; Classify document types; Extract entities and fields; Process invoices and receipts; Validate extracted data; Store structured results; Handle various document formats; Monitor processing accuracy. Explicit constraints: Processing time under 10 seconds per doc; Support 100k+ documents per day; Extraction accuracy above 95%; Handle PDFs, images, and scanned docs; Cost-effective at scale. Supplied hints: Document AI for OCR and extraction; Cloud Functions for orchestration; Cloud Storage for document storage; Firestore for structured data; Vision API for image analysis; AutoML for custom models. Design assumptions to confirm: one tenant-aware upload/status API; the ten-second target is measured from accepted upload to a validated result for a bounded, agreed document envelope; the accuracy target is evaluated against human-labeled examples by document type and field; 100k/day is a daily volume, not a known peak rate. The brief does not specify page/file-size limits, region, burst profile, languages, retention, or the exact accuracy metric. Do not claim these targets are already achieved.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "idp_02_submitter_portal",
+      "stepNumber": 2,
+      "phase": "Freeze the brief and establish a governed upload path",
+      "title": "Give submitters and reviewers one governed workspace",
+      "type": "add_component",
+      "content": "Use a thin web client for upload initiation, job status, and reviewer work. The browser should send document bytes directly to a short-lived signed Cloud Storage URL, not proxy large files through the application tier. Show a durable job ID and an explicit pending, completed, needs-review, or failed state.",
+      "component": {
+        "nodeId": "idp_submitter_portal",
+        "componentType": "web-app",
+        "label": "Submitter & Reviewer Workspace",
+        "description": "Authenticated document upload, status, and human-review UI",
+        "position": {"x": 60, "y": 280},
+        "properties": {
+          "componentName": "Submitter & Reviewer Workspace",
+          "purpose": "Let authorized users initiate uploads, view job status and validated structured results, and correct low-confidence fields through a human-review workflow.",
+          "framework": "React"
+        },
+        "highlightReason": "The user-facing flow is separate from file transfer and background processing, while still exposing review and result states."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7"]
+    },
+    {
+      "id": "idp_03_tenant_identity",
+      "stepNumber": 3,
+      "phase": "Freeze the brief and establish a governed upload path",
+      "title": "Scope every document and result to a tenant",
+      "type": "add_component",
+      "content": "Authenticate submitters, reviewers, and service identities separately. Enforce tenant and role authorization in the API and data access path; never trust a tenant ID supplied only by the browser. Use short-lived service credentials and audit reviewer corrections.",
+      "component": {
+        "nodeId": "idp_identity",
+        "componentType": "auth-service",
+        "label": "Tenant Identity & Access Policy",
+        "description": "Tenant-scoped identity and reviewer authorization",
+        "position": {"x": 360, "y": 70},
+        "properties": {
+          "componentName": "Tenant Identity & Access Policy",
+          "purpose": "Authenticate submitters and reviewers, enforce tenant and role checks server-side, and provide workload identity for service-to-service calls.",
+          "sessions": "database",
+          "tokenTTL": 15
+        },
+        "highlightReason": "Documents and extracted fields can contain sensitive data, so identity and tenant boundaries must be explicit."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "idp_04_api_gateway",
+      "stepNumber": 4,
+      "phase": "Freeze the brief and establish a governed upload path",
+      "title": "Expose a small authenticated control API",
+      "type": "add_component",
+      "content": "The gateway handles upload-intent creation, status/result reads, and reviewer actions. Validate MIME type and declared size at initiation, apply per-tenant quotas, and require an idempotency key so retries cannot create duplicate logical jobs. It returns a short-lived signed upload URL rather than carrying the file body.",
+      "component": {
+        "nodeId": "idp_api_gateway",
+        "componentType": "api-gateway",
+        "label": "Upload, Status & Review API Gateway",
+        "description": "Authenticated control plane for document jobs",
+        "position": {"x": 360, "y": 280},
+        "properties": {
+          "componentName": "Upload, Status & Review API Gateway",
+          "purpose": "Expose tenant-scoped upload-intent, status/result, and reviewer endpoints with request validation, throttling, and idempotency; keep document bytes off this control plane.",
+          "inputValidation": true,
+          "authentication": "JWT",
+          "rateLimiting": true,
+          "deduplication": true,
+          "throttling": true
+        },
+        "highlightReason": "Separating control requests from file transfer protects the API tier and gives retries a stable job identity."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:2"]
+    },
+    {
+      "id": "idp_05_upload_coordinator",
+      "stepNumber": 5,
+      "phase": "Freeze the brief and establish a governed upload path",
+      "title": "Create an upload intent before accepting bytes",
+      "type": "add_component",
+      "content": "Use a small Cloud Functions handler to authorize the tenant, validate the allowed format envelope, create an idempotent job record, and issue a short-lived signed upload URL. Keep this function out of the OCR path; its response should not wait for document processing.",
+      "component": {
+        "nodeId": "idp_upload_coordinator",
+        "componentType": "serverless-function",
+        "label": "Upload Intent & Job Coordinator",
+        "description": "Cloud Functions control handler for upload admission",
+        "position": {"x": 700, "y": 280},
+        "properties": {
+          "componentName": "Upload Intent & Job Coordinator",
+          "purpose": "Create or return an idempotent tenant-scoped job, validate the supported upload envelope, and issue a short-lived signed Cloud Storage upload URL.",
+          "runtime": "Python",
+          "memoryMB": 512,
+          "timeout": 10
+        },
+        "highlightReason": "Cloud Functions is used for lightweight event/control orchestration, not as a proxy for large file uploads."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "idp_06_portal_to_api",
+      "stepNumber": 6,
+      "phase": "Freeze the brief and establish a governed upload path",
+      "title": "Start uploads through the authenticated control plane",
+      "type": "add_connection",
+      "content": "The portal first requests an upload intent and later polls or subscribes to the job status through the authenticated API.",
+      "connection": {
+        "edgeId": "idp_portal_to_api",
+        "sourceNodeId": "idp_submitter_portal",
+        "targetNodeId": "idp_api_gateway",
+        "connectionType": "HTTPS control request",
+        "label": "Create upload intent / read status",
+        "description": "Tenant-authenticated API requests carry metadata and idempotency keys, never the document body."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7"]
+    },
+    {
+      "id": "idp_07_identity_to_api",
+      "stepNumber": 7,
+      "phase": "Freeze the brief and establish a governed upload path",
+      "title": "Authorize the caller before issuing storage access",
+      "type": "add_connection",
+      "content": "The API validates the caller's scoped identity and derives the tenant boundary server-side before creating an upload intent or returning results.",
+      "connection": {
+        "edgeId": "idp_identity_to_api",
+        "sourceNodeId": "idp_identity",
+        "targetNodeId": "idp_api_gateway",
+        "connectionType": "identity and authorization",
+        "label": "Validate identity and tenant scope",
+        "description": "Only authorized roles receive upload, result-read, or reviewer permissions."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "idp_08_api_to_upload_coordinator",
+      "stepNumber": 8,
+      "phase": "Freeze the brief and establish a governed upload path",
+      "title": "Keep upload admission idempotent and bounded",
+      "type": "add_connection",
+      "content": "The gateway calls the coordinator with tenant, declared format, checksum metadata, and an idempotency key. Validate the actual object after upload as well; client-provided MIME and size are not trusted evidence.",
+      "connection": {
+        "edgeId": "idp_api_to_upload_coordinator",
+        "sourceNodeId": "idp_api_gateway",
+        "targetNodeId": "idp_upload_coordinator",
+        "connectionType": "validated control request",
+        "label": "Create or resume upload job",
+        "description": "Admission returns a stable job ID and a narrowly scoped, expiring upload capability."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "idp_09_api_security_decision",
+      "stepNumber": 9,
+      "phase": "Freeze the brief and establish a governed upload path",
+      "title": "Choose safe defaults for the control plane",
+      "type": "decision_point",
+      "content": "Use JWT-authenticated, tenant-scoped requests with server-side MIME/size validation, throttling, and idempotency. Treat direct object upload as a narrowly scoped capability, not a reusable credential.",
+      "decision": {
+        "question": "How should upload and review operations be exposed?",
+        "chosen": "Authenticated API control plane plus short-lived signed object uploads",
+        "chosenReason": "It avoids proxying large files through the API and allows job creation, result reads, and reviewer actions to share one auditable authorization boundary.",
+        "alternatives": [
+          {"option": "Send file bytes through the API gateway", "tradeoff": "Simpler client flow but increases API memory, timeout, and cost pressure."},
+          {"option": "Give clients persistent bucket credentials", "tradeoff": "Avoids signed URL issuance but expands the blast radius and complicates revocation."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "idp_api_gateway",
+        "properties": {"inputValidation": true, "authentication": "JWT", "rateLimiting": true, "deduplication": true}
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "idp_10_raw_storage",
+      "stepNumber": 10,
+      "phase": "Store originals and dispatch idempotent processing work",
+      "title": "Keep immutable source documents in Cloud Storage",
+      "type": "add_component",
+      "content": "Store the original bytes in a tenant-scoped Cloud Storage bucket and retain a checksum, object generation, content type, and upload timestamp with the job. Define retention and lifecycle policy from the product's privacy requirements; do not invent a retention duration from this brief.",
+      "component": {
+        "nodeId": "idp_raw_documents",
+        "componentType": "object-storage",
+        "label": "Cloud Storage: Original Documents",
+        "description": "Durable source files partitioned by tenant and job",
+        "position": {"x": 1020, "y": 150},
+        "properties": {
+          "componentName": "Cloud Storage: Original Documents",
+          "purpose": "Store original PDFs and supported image files under tenant-scoped object paths with checksums, generation IDs, least-privilege access, and a policy-defined lifecycle.",
+          "provider": "GCS",
+          "versioning": true,
+          "checksumValidation": true
+        },
+        "highlightReason": "Original bytes are the durable replay and audit source; extracted fields are derived data and never replace them."
+      },
+      "requirementIds": ["legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "idp_11_coordinator_to_storage",
+      "stepNumber": 11,
+      "phase": "Store originals and dispatch idempotent processing work",
+      "title": "Issue a constrained upload capability",
+      "type": "add_connection",
+      "content": "The coordinator scopes the signed URL to one tenant/job object and a short expiry. The object path and metadata are server-generated; upload completion is verified against the expected checksum and actual content.",
+      "connection": {
+        "edgeId": "idp_coordinator_to_storage",
+        "sourceNodeId": "idp_upload_coordinator",
+        "targetNodeId": "idp_raw_documents",
+        "connectionType": "signed upload authorization",
+        "label": "Issue scoped object upload URL",
+        "description": "The coordinator controls object naming and authorization without receiving the file bytes."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "idp_12_portal_direct_upload",
+      "stepNumber": 12,
+      "phase": "Store originals and dispatch idempotent processing work",
+      "title": "Transfer document bytes directly to the bucket",
+      "type": "add_connection",
+      "content": "The browser uploads directly to the authorized object path and reports the resulting object generation. The backend verifies the object and checksum before marking it eligible for processing.",
+      "connection": {
+        "edgeId": "idp_portal_to_storage",
+        "sourceNodeId": "idp_submitter_portal",
+        "targetNodeId": "idp_raw_documents",
+        "connectionType": "direct signed object upload",
+        "label": "Upload original PDF or image",
+        "description": "Large bodies bypass the application servers while tenant scope, expiry, and object integrity remain enforced."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "idp_13_job_topic",
+      "stepNumber": 13,
+      "phase": "Store originals and dispatch idempotent processing work",
+      "title": "Separate document arrival from processing execution",
+      "type": "add_component",
+      "content": "Publish one job event per verified object generation. Include job ID, tenant ID, object URI/generation, checksum, and an event version—not extracted content or secrets. Consumers must be idempotent because delivery may be repeated.",
+      "component": {
+        "nodeId": "idp_processing_events",
+        "componentType": "pubsub",
+        "label": "Document Processing Events (Pub/Sub)",
+        "description": "Durable event handoff from verified upload to workers",
+        "position": {"x": 1320, "y": 150},
+        "properties": {
+          "componentName": "Document Processing Events (Pub/Sub)",
+          "purpose": "Deliver versioned, idempotent object-ready events to processing workers with durable retention and controlled replay.",
+          "topics": 1,
+          "ordering": false,
+          "durable": true
+        },
+        "highlightReason": "A durable event boundary absorbs arrival bursts and makes retries explicit, but its backlog still counts against the processing-time target."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:2"]
+    },
+    {
+      "id": "idp_14_storage_event",
+      "stepNumber": 14,
+      "phase": "Store originals and dispatch idempotent processing work",
+      "title": "Trigger work only after an object is verified",
+      "type": "add_connection",
+      "content": "A verified Cloud Storage object-created event is converted to the versioned processing message. Ignore duplicate notifications for the same job and object generation.",
+      "connection": {
+        "edgeId": "idp_storage_to_events",
+        "sourceNodeId": "idp_raw_documents",
+        "targetNodeId": "idp_processing_events",
+        "connectionType": "object-created event",
+        "label": "Publish verified document job",
+        "description": "Only accepted objects enter the processing pipeline; event identity supports deduplication."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:2"]
+    },
+    {
+      "id": "idp_15_processing_worker",
+      "stepNumber": 15,
+      "phase": "Store originals and dispatch idempotent processing work",
+      "title": "Consume jobs with bounded Cloud Functions workers",
+      "type": "add_component",
+      "content": "Use an event-triggered Cloud Functions worker to load the object, select the applicable processor, and carry a deadline and trace ID through each call. Keep the worker stateless; persist progress and use idempotency keys so retries do not create duplicate result records.",
+      "component": {
+        "nodeId": "idp_processing_worker",
+        "componentType": "serverless-function",
+        "label": "Document Processing Worker",
+        "description": "Cloud Functions consumer and per-document orchestrator",
+        "position": {"x": 1620, "y": 150},
+        "properties": {
+          "componentName": "Document Processing Worker",
+          "purpose": "Consume verified document events, retrieve the exact object generation, select a processor, enforce a per-job deadline, and persist idempotent progress.",
+          "runtime": "Python",
+          "memoryMB": 1024,
+          "timeout": 30,
+          "concurrency": 5
+        },
+        "highlightReason": "A stateless worker can scale with backlog, while its concurrency must respect Document AI quotas and the latency budget."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "idp_16_events_to_worker",
+      "stepNumber": 16,
+      "phase": "Store originals and dispatch idempotent processing work",
+      "title": "Dispatch each job to a processing consumer",
+      "type": "add_connection",
+      "content": "The consumer acknowledges only after its durable state transition is recorded. Bound retries and use the job ID plus object generation as the idempotency identity.",
+      "connection": {
+        "edgeId": "idp_events_to_worker",
+        "sourceNodeId": "idp_processing_events",
+        "targetNodeId": "idp_processing_worker",
+        "connectionType": "at-least-once job delivery",
+        "label": "Deliver document job",
+        "description": "Workers process duplicate deliveries safely and expose queue age as part of end-to-end latency."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "idp_17_worker_reads_original",
+      "stepNumber": 17,
+      "phase": "Store originals and dispatch idempotent processing work",
+      "title": "Read the exact immutable source generation",
+      "type": "add_connection",
+      "content": "The worker fetches the object generation referenced by the message, verifies the checksum, and records which bytes were processed. This prevents a later overwrite from silently changing the meaning of a retry.",
+      "connection": {
+        "edgeId": "idp_worker_to_storage",
+        "sourceNodeId": "idp_processing_worker",
+        "targetNodeId": "idp_raw_documents",
+        "connectionType": "generation-pinned object read",
+        "label": "Read and verify original bytes",
+        "description": "The original object remains the replayable source of truth for each processing attempt."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "idp_18_queue_and_retry_decision",
+      "stepNumber": 18,
+      "phase": "Store originals and dispatch idempotent processing work",
+      "title": "Make retries durable without hiding queue delay",
+      "type": "decision_point",
+      "content": "Use durable at-least-once delivery and bounded exponential retry for transient provider errors. Include oldest-job age and upload-to-result time in the same SLO view; an unbounded queue does not satisfy the ten-second target.",
+      "decision": {
+        "question": "How should worker retries and bursts be handled?",
+        "chosen": "Durable Pub/Sub events, idempotent workers, bounded retries, and measured backpressure",
+        "chosenReason": "This recovers transient failures without pretending that queueing is free latency or allowing duplicate processing to overwrite a newer result.",
+        "alternatives": [
+          {"option": "Drop work when workers are busy", "tradeoff": "Protects worker latency but loses accepted documents and makes completion unreliable."},
+          {"option": "Retry indefinitely in the hot path", "tradeoff": "Can amplify outages and make per-document completion time unbounded."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "idp_processing_events",
+        "properties": {"durable": true, "ordering": false}
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "idp_19_document_ai",
+      "stepNumber": 19,
+      "phase": "Classify, extract, validate, and persist results",
+      "title": "Use Document AI as the primary document processor",
+      "type": "add_component",
+      "content": "The existing catalog has no Google Document AI processor entry, so this is the one intentional custom node. Use the appropriate processor set: OCR/layout for text, a classifier for document type, Invoice Parser for invoices, and a suitable extractor for receipts and other supported fields. Return source spans, normalized entities, and per-field confidence when available; retain the processor and version IDs with each result.",
+      "component": {
+        "nodeId": "idp_document_ai",
+        "componentType": "custom-component",
+        "label": "Google Document AI: OCR, Classification & Extraction",
+        "description": "Managed OCR, document classification, invoice parsing, and structured field extraction",
+        "position": {"x": 1920, "y": 150},
+        "properties": {
+          "componentName": "Google Document AI: OCR, Classification & Extraction",
+          "purpose": "Process supported PDFs and images with OCR/layout, classify document types, use the Invoice Parser for invoices, and extract configured fields for receipts and other classes while returning traceable processor/version and confidence metadata.",
+          "componentType": "Google-managed document OCR, classifier, invoice parser, and extraction processors (catalog gap)",
+          "technology": "Google Cloud Document AI",
+          "notes": "Use processor-specific format/page limits and a bounded online-processing envelope for the sub-10-second target. Batch processing is not the latency path. Measure field-level accuracy against reviewed labels; low-confidence or invalid results go to human review."
+        },
+        "highlightReason": "Document AI combines document OCR, classification, and entity extraction; no existing catalog component expresses this managed GCP service."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "idp_20_worker_to_document_ai",
+      "stepNumber": 20,
+      "phase": "Classify, extract, validate, and persist results",
+      "title": "Send the verified document to the selected processor",
+      "type": "add_connection",
+      "content": "The worker selects a processor using the verified format and document class, passes only the required object reference/content, and enforces a request deadline and bounded retry policy.",
+      "connection": {
+        "edgeId": "idp_worker_to_document_ai",
+        "sourceNodeId": "idp_processing_worker",
+        "targetNodeId": "idp_document_ai",
+        "connectionType": "authenticated processor request",
+        "label": "Classify and extract document fields",
+        "description": "Processor choice is explicit and versioned for each attempt; no second OCR engine is invoked by default."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "idp_21_validation_function",
+      "stepNumber": 21,
+      "phase": "Classify, extract, validate, and persist results",
+      "title": "Validate extracted fields before they become results",
+      "type": "add_component",
+      "content": "Use a separate Cloud Functions validation step for schema/type checks, required-field rules, normalization, cross-field checks, and business invariants such as totals matching line items. Preserve raw extraction and source evidence; never silently coerce an invalid value into a confident result.",
+      "component": {
+        "nodeId": "idp_validate_results",
+        "componentType": "serverless-function",
+        "label": "Field Validation & Review Router",
+        "description": "Cloud Functions validation and confidence-based routing",
+        "position": {"x": 2220, "y": 150},
+        "properties": {
+          "componentName": "Field Validation & Review Router",
+          "purpose": "Validate extracted schemas, required fields, types, confidence thresholds, and cross-field business rules; route valid outputs to persistence and uncertain cases to human review.",
+          "runtime": "Python",
+          "memoryMB": 512,
+          "timeout": 10
+        },
+        "highlightReason": "OCR output is a candidate result, not a trusted business record until deterministic validation and confidence policy pass."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:3", "legacy-constraint:3"]
+    },
+    {
+      "id": "idp_22_document_ai_to_validation",
+      "stepNumber": 22,
+      "phase": "Classify, extract, validate, and persist results",
+      "title": "Pass structured fields and confidence into validation",
+      "type": "add_connection",
+      "content": "Pass document type, normalized fields, per-field confidence, source spans, processor/version, and job identity to validation. Keep enough provenance to explain and reproduce a disputed extraction.",
+      "connection": {
+        "edgeId": "idp_document_ai_to_validation",
+        "sourceNodeId": "idp_document_ai",
+        "targetNodeId": "idp_validate_results",
+        "connectionType": "structured extraction response",
+        "label": "Fields, confidence and source evidence",
+        "description": "The validator receives both values and evidence rather than treating model output as ground truth."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5"]
+    },
+    {
+      "id": "idp_23_processor_routing_decision",
+      "stepNumber": 23,
+      "phase": "Classify, extract, validate, and persist results",
+      "title": "Route by document type instead of running every model",
+      "type": "decision_point",
+      "content": "Use Document AI classification to select the smallest suitable processor: the invoice parser for invoices, a receipt/custom extractor for receipts, and a configured processor for other supported classes. The hint mentions Cloud Vision and AutoML, but neither should duplicate the default document path: Google recommends Document AI for scanned-document OCR, parsing, and entity extraction. Add Vision for a separately demonstrated image-analysis need; evaluate a separate custom model only when labeled results show a gap that the Document AI processor cannot meet.",
+      "decision": {
+        "question": "Should every document call OCR, Vision, AutoML, and extraction in sequence?",
+        "chosen": "Route to one fit-for-purpose Document AI processor, and add another model only for a measured residual need",
+        "chosenReason": "Serially invoking overlapping models adds latency and cost without guaranteeing higher field accuracy. Document AI already covers the core document OCR/classification/extraction path.",
+        "alternatives": [
+          {"option": "Run Vision OCR and Document AI OCR for every file", "tradeoff": "Duplicates OCR work and increases latency/cost; keep Vision for a distinct image-analysis use case."},
+          {"option": "Add an AutoML classifier before Document AI by default", "tradeoff": "Adds another model call and maintenance surface before evidence shows a classification gap."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "idp_document_ai",
+        "properties": {
+          "notes": "Primary path: Document AI OCR/layout plus type-specific classifier/extractor (Invoice Parser for invoices, suitable receipt/custom extractor for receipts). Cloud Vision or a separate AutoML/Vertex model is an evaluated optional alternative only when it addresses a distinct measured gap; do not serially duplicate OCR by default. Check processor-specific format, size, page, region, and quota limits before choosing the online path."
+        }
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "idp_24_firestore_results",
+      "stepNumber": 24,
+      "phase": "Classify, extract, validate, and persist results",
+      "title": "Persist validated structured output in Firestore",
+      "type": "add_component",
+      "content": "Store one tenant-scoped job/result record keyed by stable job ID and object generation. Persist status, document class, normalized fields, validation outcomes, confidence/evidence references, processor version, timestamps, and correction history. Use conditional/idempotent updates so repeated events cannot move a completed job backward.",
+      "component": {
+        "nodeId": "idp_structured_results",
+        "componentType": "database",
+        "label": "Firestore: Job State & Structured Results",
+        "description": "Tenant-scoped operational records and extracted fields",
+        "position": {"x": 2520, "y": 150},
+        "properties": {
+          "componentName": "Firestore: Job State & Structured Results",
+          "purpose": "Persist tenant-scoped job state, validated structured fields, processor provenance, review status, and correction history with idempotent state transitions.",
+          "type": "NoSQL",
+          "workload": "OLTP",
+          "replicationMode": "Async",
+          "backups": true,
+          "encryption": true,
+          "rbac": true,
+          "auditLog": true
+        },
+        "highlightReason": "Firestore is the operational source for status and structured results; analytical accuracy aggregates belong in BigQuery."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "idp_25_validation_to_firestore",
+      "stepNumber": 25,
+      "phase": "Classify, extract, validate, and persist results",
+      "title": "Commit only validated or explicitly review-pending output",
+      "type": "add_connection",
+      "content": "Write a validated result atomically with its job state, or persist a review-pending state with the reason and evidence references. Use conditional writes or transactions for state transitions; do not report a job as complete before the durable commit succeeds.",
+      "connection": {
+        "edgeId": "idp_validation_to_firestore",
+        "sourceNodeId": "idp_validate_results",
+        "targetNodeId": "idp_structured_results",
+        "connectionType": "idempotent validated-result write",
+        "label": "Commit result and processing state",
+        "description": "The durable record distinguishes validated output from incomplete, rejected, or human-review work."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "idp_26_confidence_decision",
+      "stepNumber": 26,
+      "phase": "Classify, extract, validate, and persist results",
+      "title": "Do not turn model confidence into an accuracy claim",
+      "type": "decision_point",
+      "content": "A confidence threshold is a routing signal, not proof of >95% accuracy. Combine required-field checks, cross-field rules, processor confidence, and document-class policy. Persist the reason for each manual-review route and avoid silently accepting low-confidence values.",
+      "decision": {
+        "question": "What should happen when extraction is incomplete, inconsistent, or low confidence?",
+        "chosen": "Mark the job needs-review and preserve the extracted values with field-level evidence",
+        "chosenReason": "Review preserves useful machine output while preventing uncertain values from being presented as validated business data.",
+        "alternatives": [
+          {"option": "Accept the processor's top guess", "tradeoff": "Improves apparent automation rate but can silently corrupt structured records."},
+          {"option": "Reject every document with one uncertain field", "tradeoff": "Protects correctness but creates avoidable rework; field-aware review can focus human effort."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "idp_validate_results",
+        "properties": {
+          "purpose": "Validate schemas, required fields, types, confidence thresholds, and business invariants; persist valid output, and route uncertain or inconsistent fields to review with values and evidence preserved. Confidence is a routing signal, not measured accuracy."
+        }
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "idp_27_review_queue",
+      "stepNumber": 27,
+      "phase": "Route uncertain cases for review and isolate failures",
+      "title": "Queue business uncertainty for human review",
+      "type": "add_component",
+      "content": "Create a durable reviewer task only for low-confidence, missing, or cross-field-inconsistent cases. Include the job ID, field-level reason, and source location, but avoid copying unnecessary raw document data into queue messages.",
+      "component": {
+        "nodeId": "idp_human_review_queue",
+        "componentType": "queue",
+        "label": "Low-Confidence Human Review Queue",
+        "description": "Durable work queue for uncertain extraction fields",
+        "position": {"x": 2520, "y": 430},
+        "properties": {
+          "componentName": "Low-Confidence Human Review Queue",
+          "purpose": "Hold review tasks for documents with uncertain fields, failed business rules, or unsupported classes until an authorized reviewer resolves them.",
+          "visibilityTimeout": 60,
+          "durable": true,
+          "backoff": "exponential"
+        },
+        "highlightReason": "Human review handles semantic uncertainty; it is separate from retrying a transient service failure."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "idp_28_validation_to_review_queue",
+      "stepNumber": 28,
+      "phase": "Route uncertain cases for review and isolate failures",
+      "title": "Route exceptions without blocking healthy documents",
+      "type": "add_connection",
+      "content": "The validator sends a compact review task when fields fail confidence or business rules. Other documents continue through the normal path; a human decision is not required for every successful extraction.",
+      "connection": {
+        "edgeId": "idp_validation_to_review_queue",
+        "sourceNodeId": "idp_validate_results",
+        "targetNodeId": "idp_human_review_queue",
+        "connectionType": "review task enqueue",
+        "label": "Queue uncertain fields for review",
+        "description": "Review tasks include evidence and reason codes while avoiding an unnecessary copy of document bytes."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8"]
+    },
+    {
+      "id": "idp_29_reviewer_portal",
+      "stepNumber": 29,
+      "phase": "Route uncertain cases for review and isolate failures",
+      "title": "Give reviewers a scoped correction interface",
+      "type": "add_component",
+      "content": "The reviewer sees the source document or a permission-checked preview, extracted value, confidence, and the reason for review. Record who changed what and when. Human corrections become labeled evidence only after reviewer confirmation.",
+      "component": {
+        "nodeId": "idp_reviewer_workspace",
+        "componentType": "web-app",
+        "label": "Document Review Workbench",
+        "description": "Role-scoped source preview and field correction UI",
+        "position": {"x": 2220, "y": 430},
+        "properties": {
+          "componentName": "Document Review Workbench",
+          "purpose": "Let authorized reviewers inspect source evidence, correct uncertain extracted fields, confirm document type, and record an auditable disposition.",
+          "framework": "React"
+        },
+        "highlightReason": "The accuracy feedback loop needs accountable human labels, not unverified auto-generated outcomes."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:4"]
+    },
+    {
+      "id": "idp_30_review_queue_to_portal",
+      "stepNumber": 30,
+      "phase": "Route uncertain cases for review and isolate failures",
+      "title": "Claim review work with a lease",
+      "type": "add_connection",
+      "content": "Review tasks are claimed with a bounded lease so abandoned sessions return to the queue. A claim is not a permanent ownership transfer; reviewer actions are idempotent and tenant-scoped.",
+      "connection": {
+        "edgeId": "idp_review_queue_to_portal",
+        "sourceNodeId": "idp_human_review_queue",
+        "targetNodeId": "idp_reviewer_workspace",
+        "connectionType": "leased review task",
+        "label": "Claim task and load source evidence",
+        "description": "Queue leases prevent abandoned work from disappearing and support concurrent reviewer operation."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8"]
+    },
+    {
+      "id": "idp_31_reviewer_to_api",
+      "stepNumber": 31,
+      "phase": "Route uncertain cases for review and isolate failures",
+      "title": "Submit corrections through the same authorization boundary",
+      "type": "add_connection",
+      "content": "The reviewer workspace submits a field correction and disposition through the control API. Require a revision/version token so two reviewers cannot silently overwrite one another.",
+      "connection": {
+        "edgeId": "idp_reviewer_to_api",
+        "sourceNodeId": "idp_reviewer_workspace",
+        "targetNodeId": "idp_api_gateway",
+        "connectionType": "authenticated correction request",
+        "label": "Submit reviewed fields and disposition",
+        "description": "Reviewer edits use role checks, optimistic concurrency, and an auditable request identity."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8"]
+    },
+    {
+      "id": "idp_32_api_to_validation_correction",
+      "stepNumber": 32,
+      "phase": "Route uncertain cases for review and isolate failures",
+      "title": "Validate reviewer edits before committing them",
+      "type": "add_connection",
+      "content": "The same validation service rechecks corrected fields, verifies the expected record revision, and records reviewer identity and change provenance before updating the result.",
+      "connection": {
+        "edgeId": "idp_api_to_validation_review",
+        "sourceNodeId": "idp_api_gateway",
+        "targetNodeId": "idp_validate_results",
+        "connectionType": "review correction and revalidation",
+        "label": "Revalidate human-confirmed fields",
+        "description": "Human input follows the same schema and business-rule checks as machine output."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6"]
+    },
+    {
+      "id": "idp_33_dead_letter_queue",
+      "stepNumber": 33,
+      "phase": "Route uncertain cases for review and isolate failures",
+      "title": "Separate transient processing failure from review work",
+      "type": "add_component",
+      "content": "Use a separate dead-letter/quarantine queue for exhausted retries, invalid payloads, or persistent provider errors. Store a reason code and safe replay metadata; never mix operational failures with documents that simply need a person to verify a field.",
+      "component": {
+        "nodeId": "idp_failure_queue",
+        "componentType": "queue",
+        "label": "Retry Exhaustion & Dead-Letter Queue",
+        "description": "Quarantine for exhausted or malformed processing jobs",
+        "position": {"x": 1620, "y": 470},
+        "properties": {
+          "componentName": "Retry Exhaustion & Dead-Letter Queue",
+          "purpose": "Quarantine exhausted transient failures and malformed jobs with reason codes, attempt counts, and safe replay metadata for operator investigation.",
+          "visibilityTimeout": 60,
+          "durable": true,
+          "backoff": "exponential"
+        },
+        "highlightReason": "Operational failure recovery is a different workflow from semantic low-confidence review."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "idp_34_validation_to_dlq",
+      "stepNumber": 34,
+      "phase": "Route uncertain cases for review and isolate failures",
+      "title": "Quarantine exhausted failures with replay evidence",
+      "type": "add_connection",
+      "content": "Only retryable or persistent operational failures enter this queue after a bounded policy. Preserve job/object generation, error class, attempt count, and trace ID; redact document contents from diagnostic messages.",
+      "connection": {
+        "edgeId": "idp_validation_to_failure_queue",
+        "sourceNodeId": "idp_validate_results",
+        "targetNodeId": "idp_failure_queue",
+        "connectionType": "bounded retry exhaustion",
+        "label": "Quarantine exhausted processing failure",
+        "description": "A safe replay starts from the immutable original and never skips validation."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "idp_35_dlq_replay",
+      "stepNumber": 35,
+      "phase": "Route uncertain cases for review and isolate failures",
+      "title": "Replay only after an operator resolves the cause",
+      "type": "add_connection",
+      "content": "An authorized operator redrives the safe job envelope to Pub/Sub after the upstream issue is understood. Preserve attempt history and use the same job/object idempotency key; do not automatically loop poison messages.",
+      "connection": {
+        "edgeId": "idp_failure_queue_to_events",
+        "sourceNodeId": "idp_failure_queue",
+        "targetNodeId": "idp_processing_events",
+        "connectionType": "operator-approved redrive",
+        "label": "Replay resolved processing job",
+        "description": "Controlled redrive keeps failure evidence and prevents unbounded poison-message loops."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "idp_36_bigquery_quality",
+      "stepNumber": 36,
+      "phase": "Measure quality, latency, scale, and cost before claiming success",
+      "title": "Build a labeled quality and cost evidence set",
+      "type": "add_component",
+      "content": "Use BigQuery for versioned, access-controlled aggregate processing events and human-reviewed labels. Measure extraction quality by document class and field against a representative held-out set; track exact-match/precision/recall or the agreed metric, sample count, and confidence interval. Never label model confidence as observed accuracy.",
+      "component": {
+        "nodeId": "idp_quality_warehouse",
+        "componentType": "data-warehouse",
+        "label": "BigQuery: Quality & Cost Evidence",
+        "description": "Aggregated processor outcomes, reviewed labels, and cost measures",
+        "position": {"x": 2520, "y": 730},
+        "properties": {
+          "componentName": "BigQuery: Quality & Cost Evidence",
+          "purpose": "Analyze redacted job outcomes and human-reviewed labels by document type, field, processor version, latency, review rate, and estimated cost per successfully validated document.",
+          "platform": "BigQuery",
+          "partitioning": true,
+          "compression": true
+        },
+        "highlightReason": "The >95% target can only be assessed against reviewed ground truth with a defined metric and representative document mix."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "idp_37_validation_to_quality",
+      "stepNumber": 37,
+      "phase": "Measure quality, latency, scale, and cost before claiming success",
+      "title": "Record outcomes and evidence without copying raw files",
+      "type": "add_connection",
+      "content": "Emit redacted metrics and references: document class, field outcome, processor/version, confidence band, validation reason, review result, timing, retry count, and cost dimensions. Keep raw documents and sensitive extracted values under the approved data-access policy rather than duplicating them into analytics events.",
+      "connection": {
+        "edgeId": "idp_validation_to_quality",
+        "sourceNodeId": "idp_validate_results",
+        "targetNodeId": "idp_quality_warehouse",
+        "connectionType": "redacted quality event",
+        "label": "Publish outcome and evidence metadata",
+        "description": "Aggregate operational and labeled quality evidence while minimizing sensitive-data duplication."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "idp_38_monitoring",
+      "stepNumber": 38,
+      "phase": "Measure quality, latency, scale, and cost before claiming success",
+      "title": "Observe the complete processing journey",
+      "type": "add_component",
+      "content": "Instrument upload acceptance, queue age, processor latency/errors, validation outcomes, review backlog, result-commit failures, and cost per validated document. Use trace/job IDs across API, Pub/Sub, functions, Firestore, and Document AI; redact content and tenant secrets from logs.",
+      "component": {
+        "nodeId": "idp_pipeline_monitoring",
+        "componentType": "monitoring",
+        "label": "Pipeline SLO & Accuracy Monitoring",
+        "description": "Operational metrics, alerts, traces, and quality signals",
+        "position": {"x": 1920, "y": 730},
+        "properties": {
+          "componentName": "Pipeline SLO & Accuracy Monitoring",
+          "purpose": "Track accepted-to-result latency, queue age, processor errors, validated/review/rejected counts, per-field accuracy evidence, review backlog, and cost per validated document; alert on SLO risk without logging document contents."
+        },
+        "highlightReason": "A pipeline can be connected and still fail silently; operational SLOs and measured extraction quality are separate signals."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "idp_39_worker_to_monitoring",
+      "stepNumber": 39,
+      "phase": "Measure quality, latency, scale, and cost before claiming success",
+      "title": "Trace worker and processor latency",
+      "type": "add_connection",
+      "content": "Publish queue wait, processor call duration, retry/error class, and end-to-end job duration. Alert before the ten-second objective is breached, not only after the hard failure threshold.",
+      "connection": {
+        "edgeId": "idp_worker_to_monitoring",
+        "sourceNodeId": "idp_processing_worker",
+        "targetNodeId": "idp_pipeline_monitoring",
+        "connectionType": "trace and service metrics",
+        "label": "Queue age, processor latency and errors",
+        "description": "Per-stage spans distinguish service slowness from an arrival burst or downstream quota limit."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "idp_40_review_queue_monitoring",
+      "stepNumber": 40,
+      "phase": "Measure quality, latency, scale, and cost before claiming success",
+      "title": "Alert on aging review work",
+      "type": "add_connection",
+      "content": "Track review queue depth and oldest-task age alongside machine processing time. A high automation rate is not a quality win if uncertain documents wait indefinitely or are incorrectly auto-accepted.",
+      "connection": {
+        "edgeId": "idp_review_queue_to_monitoring",
+        "sourceNodeId": "idp_human_review_queue",
+        "targetNodeId": "idp_pipeline_monitoring",
+        "connectionType": "backlog metrics",
+        "label": "Review depth and oldest task age",
+        "description": "Operational review backlog is visible and can trigger staffing or routing action."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "idp_41_quality_to_monitoring",
+      "stepNumber": 41,
+      "phase": "Measure quality, latency, scale, and cost before claiming success",
+      "title": "Keep observed accuracy distinct from service health",
+      "type": "add_connection",
+      "content": "Publish aggregate labeled-quality results and sample coverage to monitoring only after the evaluation job has enough reviewed examples. Operationally healthy processors can still miss the accuracy target.",
+      "connection": {
+        "edgeId": "idp_quality_to_monitoring",
+        "sourceNodeId": "idp_quality_warehouse",
+        "targetNodeId": "idp_pipeline_monitoring",
+        "connectionType": "quality and cost indicators",
+        "label": "Measured accuracy, coverage and unit cost",
+        "description": "Quality dashboards expose label coverage and evaluation version so percentages cannot be mistaken for unsupported claims."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "idp_42_firestore_to_api",
+      "stepNumber": 42,
+      "phase": "Measure quality, latency, scale, and cost before claiming success",
+      "title": "Read status and results from the durable job record",
+      "type": "add_connection",
+      "content": "The API returns only the tenant-authorized job state and validated fields, with an explicit needs-review state when applicable. Use revision-aware reads so clients do not display stale results after a reviewer correction.",
+      "connection": {
+        "edgeId": "idp_firestore_to_api",
+        "sourceNodeId": "idp_structured_results",
+        "targetNodeId": "idp_api_gateway",
+        "connectionType": "authorized result read",
+        "label": "Load job status and validated fields",
+        "description": "Firestore is the operational read source; analytics queries do not serve user-facing job status."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6"]
+    },
+    {
+      "id": "idp_43_api_to_portal_results",
+      "stepNumber": 43,
+      "phase": "Measure quality, latency, scale, and cost before claiming success",
+      "title": "Show validated output with its actual state",
+      "type": "add_connection",
+      "content": "Return the result, job state, and field-level review indicators to the authorized user. Do not present queued or partial extraction as completed structured output.",
+      "connection": {
+        "edgeId": "idp_api_to_portal_results",
+        "sourceNodeId": "idp_api_gateway",
+        "targetNodeId": "idp_submitter_portal",
+        "connectionType": "job status and result response",
+        "label": "Display result or explicit review state",
+        "description": "The UI distinguishes completed, pending review, rejected, and failed jobs."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "idp_44_latency_contract",
+      "stepNumber": 44,
+      "phase": "Measure quality, latency, scale, and cost before claiming success",
+      "title": "Turn the ten-second target into a testable contract",
+      "type": "decision_point",
+      "content": "The brief says under ten seconds per document but does not define percentile, page count, file size, or whether time ends at extraction or validated result. Provisional acceptance: measure accepted-upload to durable validated-result time for an agreed supported file envelope, include queue wait/retries, and report the full distribution. Do not claim a ten-second guarantee until load tests cover that envelope and actual processor quotas. Keep long-running batch processing off this latency lane.",
+      "decision": {
+        "question": "What does 'under 10 seconds per document' mean operationally?",
+        "chosen": "Use an explicitly agreed end-to-end completion metric and bounded supported-document envelope; keep batch jobs separate",
+        "chosenReason": "A processor-only timing would omit queue and persistence delay, while an unspecified percentile and file envelope make the target impossible to verify honestly.",
+        "alternatives": [
+          {"option": "Measure only the Document AI API call", "tradeoff": "Hides upload, queue, validation, and durable-write latency from the user-visible objective."},
+          {"option": "Send all files to asynchronous batch processing", "tradeoff": "Can handle larger jobs, but batch completion is not a sub-ten-second interactive guarantee."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "idp_processing_worker",
+        "properties": {"purpose": "Consume verified jobs and enforce the measured end-to-end deadline, including queue wait, processor calls, validation, and durable result commit. Use the bounded online processor path for the agreed sub-10-second file envelope; divert out-of-envelope work explicitly and do not count it as meeting the latency target."}
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "idp_45_accuracy_gate",
+      "stepNumber": 45,
+      "phase": "Measure quality, latency, scale, and cost before claiming success",
+      "title": "Make >95% accuracy a labeled release gate",
+      "type": "decision_point",
+      "content": "Define the accuracy measure with product owners—such as exact field match or precision/recall—then maintain a representative human-labeled holdout by document type, language, and scan quality. Track sample counts and confidence intervals; release a processor version only when the agreed metric exceeds 95% and required classes/fields meet their own floors. Continue sampling after release for drift.",
+      "decision": {
+        "question": "How do we know extraction accuracy is above 95%?",
+        "chosen": "Evaluate processor versions against a representative, human-labeled holdout and monitor post-release drift",
+        "chosenReason": "Confidence scores and successful HTTP responses are not labels; only comparison to reviewed ground truth measures extraction correctness.",
+        "alternatives": [
+          {"option": "Use the model's confidence as accuracy", "tradeoff": "Confidence may be miscalibrated and does not show whether the extracted value is correct."},
+          {"option": "Pool all fields into one score", "tradeoff": "Can hide poor performance on receipts, rare classes, or critical fields behind common easy cases."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "idp_quality_warehouse",
+        "properties": {"purpose": "Measure the agreed field-level quality metric on versioned, human-labeled holdout data by document class, language, scan quality, and processor version; publish sample coverage and confidence intervals, and track cost per successfully validated document."}
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "idp_46_capacity_trigger",
+      "stepNumber": 46,
+      "phase": "Measure quality, latency, scale, and cost before claiming success",
+      "title": "Load-test the 100k/day target and the unknown burst",
+      "type": "scale_trigger",
+      "content": "The daily target averages about 1.16 documents/second if arrivals are uniform, but peak burst, pages/document, processor mix, and regional quotas are not supplied. Load-test realistic and burst workloads; verify per-processor Document AI quotas and request increases where needed before increasing consumer concurrency.",
+      "scaleTrigger": {
+        "metric": "Accepted documents/day, peak arrival rate, Pub/Sub oldest-message age, and per-processor quota utilization",
+        "action": "Increase worker concurrency only while processor quotas and the end-to-end latency/error budgets remain healthy; otherwise apply tenant-aware admission control and visible backpressure.",
+        "impact": "Protects the 100k+/day capacity goal without creating quota-throttling retries that break the under-10-second target."
+      },
+      "componentUpdate": {
+        "nodeId": "idp_processing_worker",
+        "properties": {"concurrency": 10}
+      },
+      "requirementIds": ["legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "idp_47_format_and_cost_gate",
+      "stepNumber": 47,
+      "phase": "Measure quality, latency, scale, and cost before claiming success",
+      "title": "Control document envelopes and cost per useful result",
+      "type": "decision_point",
+      "content": "Allowlist formats supported by the selected processor (for example PDF, JPEG, PNG, and TIFF where that processor supports them); validate file signatures, scan quality, page/size limits, and language before processing. Measure cost per successfully validated document, including retries and human review. Apply lifecycle policy to originals only after retention/privacy requirements are agreed. Google recommends Document AI for scanned-document OCR and structured extraction; use Cloud Vision only for a distinct image-analysis need, not as a duplicate OCR hop.",
+      "decision": {
+        "question": "How do we meet broad format support and cost-effective operation without overclaiming?",
+        "chosen": "Publish a processor-specific allowlist, route only necessary processor calls, and measure full unit cost including review",
+        "chosenReason": "Supported file formats and limits differ by processor; an explicit envelope prevents unsupported files and repeated expensive retries from becoming hidden failures.",
+        "alternatives": [
+          {"option": "Accept every file extension and let the processor decide", "tradeoff": "Creates avoidable failures, long retries, and confusing user experience for unsupported inputs."},
+          {"option": "Run every available model on every document", "tradeoff": "Raises latency and spend without evidence that all model outputs are needed."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "idp_raw_documents",
+        "properties": {"purpose": "Store original, signature-verified, processor-supported PDF/image objects with checksums and tenant-scoped access; apply a lifecycle policy only after retention requirements are approved and measure retained storage cost."}
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "idp_48_no_claimed_results",
+      "stepNumber": 48,
+      "phase": "Measure quality, latency, scale, and cost before claiming success",
+      "title": "Keep targets, assumptions, and measured results separate",
+      "type": "explanation",
+      "content": "This architecture is a design proposal, not proof of capacity, latency, cost, or >95% extraction accuracy. Before production claims, freeze the supported document envelope and accuracy definition, test representative invoices/receipts/scans and burst traffic, review quotas and regional/data-residency requirements, and publish the measured results with sample coverage.",
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "idp_49_review_evidence",
+      "stepNumber": 49,
+      "phase": "Measure quality, latency, scale, and cost before claiming success",
+      "title": "Review the complete request and feedback loop",
+      "type": "explanation",
+      "content": "Walk the graph end to end: a tenant-authorized upload intent grants direct, bounded object storage; a verified object emits an idempotent event; a worker selects a Document AI processor; validation either commits a traceable structured result or sends uncertainty to a reviewer; transient failures are isolated for controlled replay; and labeled outcomes feed quality, SLO, capacity, and cost evidence. Confirm supported file limits, burst profile, retention, accuracy metric, and review staffing before treating any supplied target as met.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

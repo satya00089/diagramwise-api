@@ -1,0 +1,601 @@
+{
+  "problem_id": "aiops_004",
+  "version": "1.0.0-review-draft",
+  "totalSteps": 57,
+  "requirementRevision": null,
+  "phases": [
+    {
+      "name": "1. Define the log contract and durable intake",
+      "stepRange": [1, 15],
+      "description": "Separate facts from assumptions, admit heterogeneous logs through a versioned normalization boundary, and make accepted events replayable before downstream analysis."
+    },
+    {
+      "name": "2. Parse templates and detect anomalies in streams",
+      "stepRange": [16, 28],
+      "description": "Use event-time processing, template state, and versioned ML inference while routing unknown patterns and measurable trends without treating model output as truth."
+    },
+    {
+      "name": "3. Correlate, alert, and search with evidence",
+      "stepRange": [29, 47],
+      "description": "Build selective lexical and semantic indexes, correlate log evidence with system events, protect query access, and deliver critical anomalies through a deduplicated path."
+    },
+    {
+      "name": "4. Learn safely and operate against targets",
+      "stepRange": [48, 57],
+      "description": "Observe end-to-end latency and quality, train from bounded samples, promote models reversibly, and scale only from measured backlog and load tests."
+    }
+  ],
+  "steps": [
+    {
+      "id": "log_01",
+      "stepNumber": 1,
+      "phase": "1. Define the log contract and durable intake",
+      "title": "Separate the stated brief from design assumptions",
+      "type": "explanation",
+      "content": "Brief facts: “Design a system that automatically detects anomalies in application logs using ML, identifies new error patterns, clusters similar log messages into templates, and correlates log anomalies with system events.” Functional requirements are: Parse and normalize heterogeneous log formats; Detect anomalous log patterns automatically; Cluster similar log messages into templates; Identify new/unseen error patterns; Correlate log anomalies with metrics and events; Track log volume and pattern trends; Alert on critical log anomalies; Support natural language search over logs. Constraints are: Process 1M+ log lines per second; Detection latency under 30 seconds; Log template accuracy above 95%; Handle 100+ different log formats; Storage-efficient log indexing. These are acceptance targets, not measured outcomes or guarantees. Provisional assumptions for this review draft: multiple tenants, an at-least-once event stream, a canonical envelope that retains a protected raw reference, and an agreed retention policy still to be set with stakeholders. The brief does not specify traffic shape, payload size, retention, regions, availability, or privacy jurisdiction; validate these before sizing or claiming a cost/SLO.",
+      "requirementIds": []
+    },
+    {
+      "id": "log_02",
+      "stepNumber": 2,
+      "phase": "1. Define the log contract and durable intake",
+      "title": "Identify the emitting services",
+      "type": "add_component",
+      "content": "Treat application instances, containers, and platform agents as producers, not as a trusted schema. Preserve source, tenant, service, host/workload, event time, observed time, format hint, and a stable source offset or event ID where available.",
+      "component": {"nodeId": "log_sources", "componentType": "backend-server", "label": "Applications & Log Agents", "description": "Heterogeneous application and platform log producers", "position": {"x": 0, "y": 160}, "properties": {"componentName": "Applications & Log Agents", "purpose": "Emit application and platform logs with source identity, event and observed timestamps, tenant/service context, and an offset or event ID when available; producer schemas are untrusted inputs."}, "highlightReason": "The source estate is heterogeneous, so ingestion must not assume one vendor or one line format."},
+      "requirementIds": []
+    },
+    {
+      "id": "log_03",
+      "stepNumber": 3,
+      "phase": "1. Define the log contract and durable intake",
+      "title": "Add a bounded ingestion boundary",
+      "type": "add_component",
+      "content": "Accept authenticated agent or collector traffic with per-tenant quotas, payload and decompression limits, TLS, and explicit backpressure. Acknowledgement means the event has reached the configured durable boundary; do not acknowledge data that exists only in process memory.",
+      "component": {"nodeId": "log_ingress", "componentType": "api-gateway", "label": "Log Ingestion Gateway", "description": "Authenticated, bounded agent and collector intake", "position": {"x": 320, "y": 160}, "properties": {"componentName": "Log Ingestion Gateway", "purpose": "Authenticate collectors, enforce tenant quotas and payload/decompression limits, validate transport envelopes, and return an acknowledgement only after the configured durable intake boundary accepts the event."}, "highlightReason": "A clear admission boundary protects downstream capacity and makes accepted-versus-rejected volume measurable."},
+      "requirementIds": ["legacy-constraint:1"]
+    },
+    {
+      "id": "log_04",
+      "stepNumber": 4,
+      "phase": "1. Define the log contract and durable intake",
+      "title": "Authenticate producers and apply admission controls",
+      "type": "add_connection",
+      "content": "Use short-lived workload credentials and tenant-bound identities; reject malformed or oversized batches before expensive parsing. Rate-limit noisy producers independently so one customer cannot consume the shared parsing budget.",
+      "connection": {"edgeId": "sources_to_ingress", "sourceNodeId": "log_sources", "targetNodeId": "log_ingress", "connectionType": "http", "label": "TLS log batches", "description": "Authenticated, tenant-scoped producer traffic with bounded size, quotas, and explicit accepted/rejected acknowledgements."},
+      "requirementIds": ["legacy-constraint:1"]
+    },
+    {
+      "id": "log_05",
+      "stepNumber": 5,
+      "phase": "1. Define the log contract and durable intake",
+      "title": "Normalize formats without discarding original evidence",
+      "type": "add_component",
+      "content": "Use versioned adapters for JSON, syslog, common text patterns, and customer formats, with bounded parser time and explicit parse status. Produce a canonical envelope containing normalized timestamp, severity, service, template candidate, typed attributes, parser version, and a protected pointer or checksum for the raw record; redact configured secrets before broad indexing.",
+      "component": {"nodeId": "log_normalizer", "componentType": "log-processing", "label": "Format Adapters & Normalizer", "description": "Versioned parsers and canonical log envelope", "position": {"x": 640, "y": 160}, "properties": {"componentName": "Format Adapters & Normalizer", "purpose": "Parse 100+ heterogeneous formats through versioned, bounded adapters and emit a canonical envelope with event/observed time, tenant/service/source, severity, template candidate, parser version, parse status, and a protected raw-record reference."}, "highlightReason": "This existing log-processing catalog node expresses the core normalization role without inventing a component type."},
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "log_06",
+      "stepNumber": 6,
+      "phase": "1. Define the log contract and durable intake",
+      "title": "Pass bounded batches to the parser",
+      "type": "add_connection",
+      "content": "Keep transport validation and parsing capacity independently observable. If parsing is saturated, return retryable backpressure before acknowledging; if an individual record is invalid, preserve its failure reason for quarantine rather than retrying it forever.",
+      "connection": {"edgeId": "ingress_to_normalizer", "sourceNodeId": "log_ingress", "targetNodeId": "log_normalizer", "connectionType": "api-call", "label": "Validated batches", "description": "Pass tenant-scoped, size-bounded records to versioned format adapters; surface backpressure and per-record parse errors."},
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "log_07",
+      "stepNumber": 7,
+      "phase": "1. Define the log contract and durable intake",
+      "title": "Choose a loss-aware canonical contract",
+      "type": "decision_point",
+      "content": "Do not flatten every value into an unbounded set of indexed fields. Preserve typed allowlisted attributes, a redacted searchable view, parser and schema versions, and a raw reference protected by tenant policy. Unknown fields remain available for controlled reprocessing, not automatically indexed.",
+      "decision": {"question": "How should format adapters handle fields and parse failures?", "chosen": "Emit a versioned canonical envelope, retain a protected raw reference, allowlist typed searchable attributes, and quarantine records that cannot be parsed confidently.", "chosenReason": "This supports new formats and replay while limiting data loss, index cardinality, and accidental exposure of sensitive values.", "alternatives": [{"option": "Discard unrecognized fields during normalization", "tradeoff": "Reduces storage but prevents later parser fixes and forensic investigation."}, {"option": "Index every field from every source", "tradeoff": "Creates high cardinality, unpredictable cost, and a larger sensitive-data surface."}]},
+      "componentUpdate": {"nodeId": "log_normalizer", "properties": {"purpose": "Emit a versioned canonical envelope with typed allowlisted fields, parser status/version, and protected raw reference; redact configured secrets, bound parser work, and route low-confidence or malformed records to quarantine for replay."}},
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "log_08",
+      "stepNumber": 8,
+      "phase": "1. Define the log contract and durable intake",
+      "title": "Buffer accepted envelopes in a replayable stream",
+      "type": "add_component",
+      "content": "Partition by a balanced tenant/service shard plus time or source key rather than a single hot tenant key. Keep enough replicated retention for the agreed recovery window; the required partition count and retention cannot be inferred from lines per second without bytes per record, burst shape, and consumer cost.",
+      "component": {"nodeId": "log_bus", "componentType": "message-broker", "label": "Durable Log Event Stream", "description": "Partitioned, replayable normalized event log", "position": {"x": 960, "y": 160}, "properties": {"componentName": "Durable Log Event Stream", "purpose": "Durably buffer canonical log envelopes and system-event references with tenant-aware balanced partition keys, replication, bounded retention, consumer offsets, and replay; size partitions from measured bytes, skew, and consumer throughput."}, "highlightReason": "A durable stream decouples producers from slower indexing, detection, and archive consumers."},
+      "requirementIds": ["legacy-constraint:1"]
+    },
+    {
+      "id": "log_09",
+      "stepNumber": 9,
+      "phase": "1. Define the log contract and durable intake",
+      "title": "Publish with stable identity and at-least-once recovery",
+      "type": "add_connection",
+      "content": "Use a stable event ID derived from a producer offset or an idempotency key; consumers upsert or checkpoint by event ID and parser version. Assume duplicates can occur after retries and failover. Monitor rejected, accepted, retried, and oldest-unconsumed counts separately.",
+      "connection": {"edgeId": "normalizer_to_bus", "sourceNodeId": "log_normalizer", "targetNodeId": "log_bus", "connectionType": "event-stream", "label": "Versioned canonical events", "description": "Durable at-least-once events with stable IDs, schema/parser versions, tenant/service shard, and replayable consumer offsets."},
+      "requirementIds": []
+    },
+    {
+      "id": "log_10",
+      "stepNumber": 10,
+      "phase": "1. Define the log contract and durable intake",
+      "title": "Retain compressed raw records outside the hot index",
+      "type": "add_component",
+      "content": "Keep immutable, encrypted raw segments for the policy-approved recovery and investigation window, partitioned by tenant and time. Use deterministic object keys or manifests and checksums so retries are idempotent; retention, legal holds, deletion, and residency remain explicit product decisions.",
+      "component": {"nodeId": "log_archive", "componentType": "object-storage", "label": "Compressed Raw Log Archive", "description": "Immutable source evidence with lifecycle retention", "position": {"x": 1280, "y": 430}, "properties": {"componentName": "Compressed Raw Log Archive", "purpose": "Store encrypted, compressed raw segments by tenant and time with deterministic keys, checksums, manifest-based idempotent retries, and policy-driven retention/deletion; keep raw bytes out of the general search index.", "versioning": true, "checksumValidation": true}, "highlightReason": "Low-cost immutable raw retention supports parser repair and forensics without indexing every raw byte."},
+      "requirementIds": []
+    },
+    {
+      "id": "log_11",
+      "stepNumber": 11,
+      "phase": "1. Define the log contract and durable intake",
+      "title": "Archive from the committed stream",
+      "type": "add_connection",
+      "content": "The archive consumer writes only after receiving a committed event and records its source offset/checksum in a manifest. A partial object is not visible as a completed segment; retry the same deterministic key and reconcile manifests before advancing the checkpoint.",
+      "connection": {"edgeId": "bus_to_archive", "sourceNodeId": "log_bus", "targetNodeId": "log_archive", "connectionType": "data-flow", "label": "Committed raw references and segments", "description": "Idempotent archive writes from replayable stream offsets with checksummed manifests and lifecycle policy."},
+      "requirementIds": []
+    },
+    {
+      "id": "log_12",
+      "stepNumber": 12,
+      "phase": "1. Define the log contract and durable intake",
+      "title": "Quarantine unparseable or suspicious records",
+      "type": "add_component",
+      "content": "Keep malformed records, unsupported encodings, parser timeouts, and low-confidence format detection in a bounded tenant-scoped quarantine with reason codes and redacted previews. Apply a retention limit and operator access control; quarantine is not a silent drop or a retry loop.",
+      "component": {"nodeId": "log_quarantine", "componentType": "queue", "label": "Parse Quarantine & Replay Queue", "description": "Bounded, auditable handling for invalid or unknown formats", "position": {"x": 960, "y": 500}, "properties": {"componentName": "Parse Quarantine & Replay Queue", "purpose": "Retain bounded, tenant-scoped malformed or unknown-format records with parse reason, source offset, redacted preview, retry count, and controlled replay; alert before capacity or retention is exhausted."}, "highlightReason": "Unseen patterns and parser errors need a safe review/replay path instead of being misclassified or dropped."},
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "log_13",
+      "stepNumber": 13,
+      "phase": "1. Define the log contract and durable intake",
+      "title": "Route parse failures with evidence",
+      "type": "add_connection",
+      "content": "Attach parser version, source/tenant, stable event ID, confidence, and bounded error details. Replay after an adapter fix uses a new parser version and idempotent event identity, so corrected parsing can supersede derived records without duplicating raw evidence.",
+      "connection": {"edgeId": "normalizer_to_quarantine", "sourceNodeId": "log_normalizer", "targetNodeId": "log_quarantine", "connectionType": "message-queue", "label": "Unknown format / parse failure", "description": "Audited quarantine events with stable IDs, parser version, confidence, reason, and controlled replay metadata."},
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "log_14",
+      "stepNumber": 14,
+      "phase": "1. Define the log contract and durable intake",
+      "title": "Bring in metrics and deployment-event context",
+      "type": "add_component",
+      "content": "Represent metrics, traces, host health, and deployment/configuration events as separate timestamped sources with identity and source-specific permissions. Do not join solely on similar timestamps; carry service, environment, host/workload, trace/request IDs where permitted, and clock-quality metadata.",
+      "component": {"nodeId": "system_event_sources", "componentType": "monitoring", "label": "Metrics & System Event Sources", "description": "Independent telemetry and change-event producers", "position": {"x": 0, "y": 570}, "properties": {"componentName": "Metrics & System Event Sources", "purpose": "Provide time-stamped metrics, host/service signals, traces, and deployment/configuration events with source identity, environment, correlation keys where available, and explicit clock-quality metadata."}, "highlightReason": "Log anomaly correlation requires independent system context and must account for imperfect clocks and missing identifiers."},
+      "requirementIds": ["legacy-requirement:5"]
+    },
+    {
+      "id": "log_15",
+      "stepNumber": 15,
+      "phase": "1. Define the log contract and durable intake",
+      "title": "Join system events through the same replay boundary",
+      "type": "add_connection",
+      "content": "Use event-time windows with bounded lateness and source-specific watermarks. Keep original timestamps and late-event corrections; a delayed deployment event should revise correlation context, not rewrite the underlying log event or produce a duplicate alert.",
+      "connection": {"edgeId": "system_events_to_bus", "sourceNodeId": "system_event_sources", "targetNodeId": "log_bus", "connectionType": "event-stream", "label": "Versioned metrics and change events", "description": "Replayable, source-tagged telemetry events keyed for later event-time correlation with normalized logs."},
+      "requirementIds": ["legacy-requirement:5"]
+    },
+    {
+      "id": "log_16",
+      "stepNumber": 16,
+      "phase": "2. Parse templates and detect anomalies in streams",
+      "title": "Process windows and maintain bounded state",
+      "type": "add_component",
+      "content": "Compute per-service/template rates, baselines, and event-time joins in a checkpointed stream processor. State must be bounded by key, window, and retention; skewed tenants or template IDs need hot-key detection and partition-aware state movement.",
+      "component": {"nodeId": "log_stream", "componentType": "stream-processor", "label": "Event-Time Log Analytics", "description": "Checkpointed template, baseline, and context processing", "position": {"x": 1280, "y": 160}, "properties": {"componentName": "Event-Time Log Analytics", "purpose": "Checkpoint event-time windows for template frequency, volume forecasts, bounded metric/event joins, and anomaly scoring; expose watermarks, late data, keyed-state size, checkpoint health, and hot-key skew."}, "highlightReason": "Streaming keeps the detection path inside the stated sub-30-second target while handling late and out-of-order events explicitly."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "log_17",
+      "stepNumber": 17,
+      "phase": "2. Parse templates and detect anomalies in streams",
+      "title": "Consume with checkpoints and replay",
+      "type": "add_connection",
+      "content": "Commit source offsets only with checkpointed operator state or a recoverable sink protocol. A processor restart may replay events; deterministic event IDs and versioned upserts must prevent duplicate trend counts and repeated alerts.",
+      "connection": {"edgeId": "bus_to_stream", "sourceNodeId": "log_bus", "targetNodeId": "log_stream", "connectionType": "event-stream", "label": "Partitioned log and telemetry events", "description": "Checkpointed consumer offsets, bounded replay, and event-time metadata for recoverable stream processing."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "log_18",
+      "stepNumber": 18,
+      "phase": "2. Parse templates and detect anomalies in streams",
+      "title": "Version discovered log templates",
+      "type": "add_component",
+      "content": "Store a template ID, normalized pattern, parser/algorithm version, example hashes, support count, confidence, first/last seen, and review status. Apply conditional version updates; a concurrent template merge must not silently reassign historical events or erase provenance.",
+      "component": {"nodeId": "log_templates", "componentType": "database", "label": "Template & Pattern Registry", "description": "Versioned templates, support, confidence, and review state", "position": {"x": 1600, "y": 390}, "properties": {"componentName": "Template & Pattern Registry", "purpose": "Persist tenant/service-scoped template IDs, normalized patterns, algorithm/parser version, support counts, confidence, first/last seen, example hashes, and review status with conditional version updates and auditable merge history.", "multiAZ": true, "encryption": true, "backups": true}, "highlightReason": "A durable versioned registry makes template identity and the >95% accuracy target reviewable rather than implicit in a transient model."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:3"]
+    },
+    {
+      "id": "log_19",
+      "stepNumber": 19,
+      "phase": "2. Parse templates and detect anomalies in streams",
+      "title": "Cluster messages into stable templates",
+      "type": "add_connection",
+      "content": "Start with a Drain/LogMine-style parser that masks variable fields and groups by source/schema context; use embeddings as an assist for semantic similarity, not as the sole template identity. Version algorithm changes and evaluate each format separately to avoid a high-volume format hiding poor accuracy elsewhere.",
+      "connection": {"edgeId": "stream_to_templates", "sourceNodeId": "log_stream", "targetNodeId": "log_templates", "connectionType": "database-connection", "label": "Template candidates and versioned support", "description": "Conditional updates for parser-versioned clusters, confidence, examples, support counts, and review state."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "log_20",
+      "stepNumber": 20,
+      "phase": "2. Parse templates and detect anomalies in streams",
+      "title": "Score patterns with versioned model inference",
+      "type": "add_component",
+      "content": "Use an autoencoder or other validated unsupervised detector over template frequency, sequence, and selected contextual features. Keep model/version, score, feature window, and confidence with each result; rule-based limits remain available when inference is unhealthy.",
+      "component": {"nodeId": "log_detector", "componentType": "model-serving", "label": "Log Anomaly Inference", "description": "Versioned anomaly scoring with a transparent fallback", "position": {"x": 1600, "y": 110}, "properties": {"componentName": "Log Anomaly Inference", "purpose": "Serve versioned autoencoder or validated anomaly models over template frequency, sequence, and bounded context features; return score, model version, feature-window reference, and confidence, with a monitored rule-based fallback."}, "highlightReason": "The ML hint is represented by the existing model-serving catalog node, with version and fallback behavior made explicit."},
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:2"]
+    },
+    {
+      "id": "log_21",
+      "stepNumber": 21,
+      "phase": "2. Parse templates and detect anomalies in streams",
+      "title": "Evaluate anomaly scores without blocking the stream indefinitely",
+      "type": "add_connection",
+      "content": "Use bounded-time inference and a circuit breaker. On timeout, continue safe rules and mark model evidence unavailable; preserve the event for replay rather than claiming a normal score. Include queue wait and inference time in end-to-end detection latency.",
+      "connection": {"edgeId": "stream_to_detector", "sourceNodeId": "log_stream", "targetNodeId": "log_detector", "connectionType": "api-call", "label": "Windowed template features", "description": "Bounded inference request with stable window ID, feature/model versions, timeout, and explicit unavailable/fallback status."},
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "log_22",
+      "stepNumber": 22,
+      "phase": "2. Parse templates and detect anomalies in streams",
+      "title": "Keep unseen patterns separate from confirmed anomalies",
+      "type": "add_component",
+      "content": "Persist anomaly candidates with their evidence and lifecycle state: new template, novel but low severity, probable regression, or confirmed critical issue. Candidate creation is idempotent by tenant, template/version, time window, and model version; human review can accept, split, merge, or dismiss with an audit reason.",
+      "component": {"nodeId": "log_anomaly_events", "componentType": "queue", "label": "Anomaly Candidate Stream", "description": "Deduplicated, reviewable anomaly and new-pattern events", "position": {"x": 1920, "y": 110}, "properties": {"componentName": "Anomaly Candidate Stream", "purpose": "Durably carry deduplicated anomaly and unseen-template candidates with tenant, template/model version, time window, confidence, evidence references, severity, and review lifecycle state."}, "highlightReason": "Novel pattern discovery needs a reviewable candidate lifecycle and should not equate novelty with incident severity."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:7"]
+    },
+    {
+      "id": "log_23",
+      "stepNumber": 23,
+      "phase": "2. Parse templates and detect anomalies in streams",
+      "title": "Emit candidates with deterministic alert identity",
+      "type": "add_connection",
+      "content": "Derive an idempotency key from tenant, service, template version, event-time window, and detector version. Replays update the same candidate and increment evidence counts; they must not page repeatedly for the same condition.",
+      "connection": {"edgeId": "detector_to_anomalies", "sourceNodeId": "log_detector", "targetNodeId": "log_anomaly_events", "connectionType": "event-stream", "label": "Scored anomaly candidates", "description": "Versioned candidate events with evidence references and deterministic deduplication keys for replay-safe downstream consumers."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:2"]
+    },
+    {
+      "id": "log_24",
+      "stepNumber": 24,
+      "phase": "2. Parse templates and detect anomalies in streams",
+      "title": "Gate template promotion on measured accuracy",
+      "type": "decision_point",
+      "content": "The brief's above-95% template accuracy is a target to demonstrate against a labeled, representative holdout, not a score to assert from clustering confidence. Report precision/recall and merge/split error by format and tenant cohort; keep low-confidence and unseen templates in review until accepted.",
+      "decision": {"question": "When may a newly clustered pattern become a trusted template?", "chosen": "Promote versioned candidates only after format-stratified holdout evaluation, confidence checks, and review for high-impact or unseen patterns; retain rollback to the previous parser/model version.", "chosenReason": "An aggregate accuracy dominated by common formats can conceal systematic failures on rare formats and critical errors.", "alternatives": [{"option": "Auto-promote every nearest cluster", "tradeoff": "A single bad merge can contaminate alerts and search across many services."}, {"option": "Require manual review of every line", "tradeoff": "It cannot sustain the stated throughput and delays routine template updates."}]},
+      "componentUpdate": {"nodeId": "log_detector", "properties": {"purpose": "Return versioned anomaly evidence and confidence; never treat model score as truth. Promote parser/model versions only after format-stratified labeled holdouts and review gates, with explicit fallback and rollback."}},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "log_25",
+      "stepNumber": 25,
+      "phase": "2. Parse templates and detect anomalies in streams",
+      "title": "Scale against end-to-end detection age",
+      "type": "scale_trigger",
+      "content": "Measure detection latency from accepted event time at intake to durable anomaly-candidate creation, including broker wait, event-time lateness, model timeout, and downstream backlog. Measure candidate-to-notification acknowledgement separately; confirm with stakeholders whether alert receipt belongs inside the <30-second detection objective. Test the agreed boundary at an agreed percentile and burst profile; the brief does not define either.",
+      "scaleTrigger": {"metric": "Oldest accepted-but-unprocessed event age or ingest-to-candidate latency at the agreed measurement percentile consumes the 30-second detection budget; partition skew or checkpoint duration is rising", "action": "Add stream consumers/partitions only after checking hot keys and state movement; shed optional enrichment first, preserve critical rules, and apply producer backpressure before accepted-event loss", "impact": "Protects detection latency and recovery without assuming a line size or uniform traffic; verify sustained and burst capacity with representative load tests."},
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "log_26",
+      "stepNumber": 26,
+      "phase": "2. Parse templates and detect anomalies in streams",
+      "title": "Maintain trend aggregates separately from raw search",
+      "type": "add_component",
+      "content": "Aggregate counts by tenant, service, template, severity, and time bucket; store forecast inputs and anomaly markers rather than duplicating every raw line. Use idempotent window IDs and corrections for late events so replay does not inflate trends.",
+      "component": {"nodeId": "log_trends", "componentType": "analytics", "label": "Log Volume & Pattern Trends", "description": "Windowed counts, forecasts, and pattern-change summaries", "position": {"x": 2240, "y": 390}, "properties": {"componentName": "Log Volume & Pattern Trends", "purpose": "Maintain tenant/service/template/severity time-bucket aggregates, log-volume forecasts, late-event corrections, and pattern-change summaries; store rebuildable summaries rather than another copy of raw logs."}, "highlightReason": "Trend queries need compact aggregates and must not scan the raw archive for every dashboard request."},
+      "requirementIds": ["legacy-requirement:6"]
+    },
+    {
+      "id": "log_27",
+      "stepNumber": 27,
+      "phase": "2. Parse templates and detect anomalies in streams",
+      "title": "Update trends with replay-safe windows",
+      "type": "add_connection",
+      "content": "Use a deterministic tenant/window key and upsert corrected bucket versions after late data. A forecast is an indicator, not a critical-alert suppressor; surface baseline version and confidence alongside volume deviations.",
+      "connection": {"edgeId": "stream_to_trends", "sourceNodeId": "log_stream", "targetNodeId": "log_trends", "connectionType": "data-flow", "label": "Volume and pattern windows", "description": "Replay-safe, versioned aggregates and forecast features keyed by tenant, service, template, severity, and event-time bucket."},
+      "requirementIds": ["legacy-requirement:6"]
+    },
+    {
+      "id": "log_28",
+      "stepNumber": 28,
+      "phase": "2. Parse templates and detect anomalies in streams",
+      "title": "Include anomaly counts in trend views",
+      "type": "add_connection",
+      "content": "Link candidate IDs and model versions to aggregate trend points so an operator can inspect why a volume spike was flagged. Keep anomaly candidate state authoritative in its event lifecycle, not in a lossy dashboard aggregate.",
+      "connection": {"edgeId": "anomalies_to_trends", "sourceNodeId": "log_anomaly_events", "targetNodeId": "log_trends", "connectionType": "event-stream", "label": "Candidate and pattern-change counts", "description": "Idempotently update trend summaries with candidate references, severity, and detector version."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6"]
+    },
+    {
+      "id": "log_29",
+      "stepNumber": 29,
+      "phase": "3. Correlate, alert, and search with evidence",
+      "title": "Create a selective inverted search index",
+      "type": "add_component",
+      "content": "Index normalized message text, template ID, tenant/service, severity, and approved attributes with time-based shards and lifecycle tiers. Avoid indexing every raw field or large payload; index references and bounded snippets, and propagate deletion/retention policy to all derived indexes.",
+      "component": {"nodeId": "log_search", "componentType": "search-engine", "label": "Inverted Log Search Index", "description": "Time-partitioned lexical search over approved fields", "position": {"x": 2240, "y": 100}, "properties": {"componentName": "Inverted Log Search Index", "purpose": "Provide time-bounded inverted search over normalized text, template ID, tenant/service, severity, and allowlisted attributes; store bounded snippets/references, enforce retention, and expose freshness and deletion progress."}, "highlightReason": "An inverted index matches exact token, field, and time filters without making the index the raw-log authority."},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "log_30",
+      "stepNumber": 30,
+      "phase": "3. Correlate, alert, and search with evidence",
+      "title": "Index normalized evidence asynchronously",
+      "type": "add_connection",
+      "content": "Index using deterministic document IDs and source versions; retryable writes replace the same version instead of multiplying results. Show the indexed-through watermark so users can distinguish an empty result from an index that is still catching up.",
+      "connection": {"edgeId": "stream_to_search", "sourceNodeId": "log_stream", "targetNodeId": "log_search", "connectionType": "data-flow", "label": "Allowlisted searchable log documents", "description": "Asynchronous deterministic upserts with source version, tenant ACL fields, retention metadata, and index freshness watermark."},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "log_31",
+      "stepNumber": 31,
+      "phase": "3. Correlate, alert, and search with evidence",
+      "title": "Add semantic query embeddings",
+      "type": "add_component",
+      "content": "Embed deduplicated templates or sampled representative messages rather than all 1M+ lines per second. Keep model/version and tenant scope with each vector; the raw searchable text remains available through the lexical index for exact evidence and citations.",
+      "component": {"nodeId": "log_embeddings", "componentType": "embedding-service", "label": "Template & Query Embeddings", "description": "Versioned semantic representations for natural-language retrieval", "position": {"x": 2560, "y": 100}, "properties": {"componentName": "Template & Query Embeddings", "purpose": "Create versioned embeddings for deduplicated templates and natural-language queries; scope vectors by tenant, retain source/template references, and avoid embedding every raw high-volume log line."}, "highlightReason": "The existing embedding service supports semantic retrieval without replacing exact inverted search."},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "log_32",
+      "stepNumber": 32,
+      "phase": "3. Correlate, alert, and search with evidence",
+      "title": "Embed templates and approved representative records",
+      "type": "add_connection",
+      "content": "Deduplicate by template and content hash before embedding, rate-limit backfills, and checkpoint by source version. A model change creates a separate embedding version and an explicit rebuild/cutover plan; never mix incompatible dimensions silently.",
+      "connection": {"edgeId": "stream_to_embeddings", "sourceNodeId": "log_stream", "targetNodeId": "log_embeddings", "connectionType": "api-call", "label": "Deduplicated template text", "description": "Versioned, rate-bounded embedding requests keyed by tenant, template/content hash, and source version."},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "log_33",
+      "stepNumber": 33,
+      "phase": "3. Correlate, alert, and search with evidence",
+      "title": "Store tenant-scoped semantic vectors",
+      "type": "add_component",
+      "content": "Keep vectors as a derived, rebuildable index containing only tenant ID, template or document reference, model version, and approved metadata. Apply the same retention and deletion propagation as the lexical index; do not expose cross-tenant nearest neighbors.",
+      "component": {"nodeId": "log_vectors", "componentType": "vector-database", "label": "Semantic Log Index", "description": "Tenant-isolated vectors for template and query similarity", "position": {"x": 2880, "y": 100}, "properties": {"componentName": "Semantic Log Index", "purpose": "Store rebuildable tenant-isolated vectors for deduplicated template references with embedding version, retention, and deletion metadata; filter authorization before nearest-neighbor search."}, "highlightReason": "The vector database complements lexical search for paraphrases while preserving a tenant and version boundary."},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "log_34",
+      "stepNumber": 34,
+      "phase": "3. Correlate, alert, and search with evidence",
+      "title": "Persist vectors with source provenance",
+      "type": "add_connection",
+      "content": "Upsert on tenant/template/model-version identity. If vector indexing is delayed or unavailable, keep lexical queries working and report semantic-index freshness rather than returning an unexplained empty set.",
+      "connection": {"edgeId": "embeddings_to_vectors", "sourceNodeId": "log_embeddings", "targetNodeId": "log_vectors", "connectionType": "data-flow", "label": "Versioned template vectors", "description": "Idempotent vector upserts with tenant scope, template reference, embedding version, and deletion metadata."},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "log_35",
+      "stepNumber": 35,
+      "phase": "3. Correlate, alert, and search with evidence",
+      "title": "Give analysts a natural-language search surface",
+      "type": "add_component",
+      "content": "Let an analyst ask for a concept such as “show new database timeout patterns after yesterday’s deployment.” The UI should translate this into visible time, tenant, service, severity, and semantic filters, then show matching records, template IDs, timestamps, and source links rather than presenting a generated summary as evidence.",
+      "component": {"nodeId": "log_console", "componentType": "web-app", "label": "Log Investigation Console", "description": "Natural-language search, evidence, and trend exploration", "position": {"x": 3200, "y": 160}, "properties": {"componentName": "Log Investigation Console", "purpose": "Provide natural-language and structured search with visible time/tenant/service filters, trend charts, template/anomaly context, source timestamps, and links to permission-checked log evidence."}, "highlightReason": "The product experience should explain why results matched and show source evidence, not just a semantic score."},
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "log_36",
+      "stepNumber": 36,
+      "phase": "3. Correlate, alert, and search with evidence",
+      "title": "Resolve queries through a scoped search API",
+      "type": "add_component",
+      "content": "Parse natural-language intent into a constrained query plan: time range, authorized tenant, known field filters, lexical terms, and optional semantic retrieval. Reject or clarify ambiguous time ranges; cap result count, query cost, and scan window, and return index freshness plus source references.",
+      "component": {"nodeId": "log_query_api", "componentType": "backend-server", "label": "Search & Correlation API", "description": "Authorized query planning over lexical, semantic, and trend stores", "position": {"x": 3520, "y": 160}, "properties": {"componentName": "Search & Correlation API", "purpose": "Convert natural-language and structured input into a bounded query plan with explicit time/tenant/field filters; enforce authorization, cost limits, and result caps, and return evidence references plus index freshness."}, "highlightReason": "A server-side query boundary is needed to enforce data scope and keep expensive searches bounded."},
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "log_37",
+      "stepNumber": 37,
+      "phase": "3. Correlate, alert, and search with evidence",
+      "title": "Submit bounded analyst queries",
+      "type": "add_connection",
+      "content": "Send the query text, user-selected filters, and request identity over TLS. The browser never receives index credentials or constructs unrestricted backend queries; pagination uses a stable snapshot or cursor to avoid duplicate/missing rows while indexing changes.",
+      "connection": {"edgeId": "console_to_query_api", "sourceNodeId": "log_console", "targetNodeId": "log_query_api", "connectionType": "http", "label": "Authenticated search request", "description": "TLS query request with explicit filters, bounded page size, user identity, and stable pagination cursor."},
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "log_38",
+      "stepNumber": 38,
+      "phase": "3. Correlate, alert, and search with evidence",
+      "title": "Resolve tenant and role permissions",
+      "type": "add_component",
+      "content": "Authorize every search, export, alert detail, and raw-record fetch at the API. Apply tenant filters before lexical or vector retrieval, audit sensitive queries and exports, redact secrets/PII at ingestion where policy requires, and encrypt data and credentials in transit and at rest.",
+      "component": {"nodeId": "log_identity", "componentType": "auth-service", "label": "Tenant Identity & Policy", "description": "Tenant-scoped roles, query permissions, and audit decisions", "position": {"x": 3520, "y": 430}, "properties": {"componentName": "Tenant Identity & Policy", "purpose": "Authenticate analysts and collectors and authorize tenant-, environment-, service-, and field-scoped log reads, exports, and alert actions; provide auditable decisions and least-privilege credentials."}, "highlightReason": "Logs often contain credentials or personal data, so access control must be enforced server-side across every derived index."},
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "log_39",
+      "stepNumber": 39,
+      "phase": "3. Correlate, alert, and search with evidence",
+      "title": "Authorize before querying any index",
+      "type": "add_connection",
+      "content": "Resolve user, tenant, environment, and field grants before constructing retrieval requests. Re-check permission on evidence links and exports; do not rely on front-end filtering or filter results after cross-tenant retrieval.",
+      "connection": {"edgeId": "query_api_to_identity", "sourceNodeId": "log_query_api", "targetNodeId": "log_identity", "connectionType": "api-call", "label": "Scoped identity and policy decision", "description": "Server-side authorization before lexical, vector, trend, or raw-record access, with audit context."},
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "log_40",
+      "stepNumber": 40,
+      "phase": "3. Correlate, alert, and search with evidence",
+      "title": "Use hybrid search with visible evidence",
+      "type": "decision_point",
+      "content": "Natural-language search should combine deterministic filters and inverted-index terms with optional vector similarity. Present the parsed query and let analysts narrow it; retrieve exact log records and source timestamps for evidence. If semantic search is down or stale, degrade to lexical search instead of failing all investigations.",
+      "decision": {"question": "How should natural-language searches retrieve log evidence?", "chosen": "Use a constrained hybrid plan: mandatory authorization/time filters, lexical inverted search, optional tenant-filtered vector similarity, and source-record verification.", "chosenReason": "Hybrid retrieval finds paraphrases while exact indexed fields and source evidence limit opaque or cross-scope matches.", "alternatives": [{"option": "Use vector similarity as the only search path", "tradeoff": "Exact error codes, timestamps, and identifiers may be missed, and relevance is harder to explain."}, {"option": "Send the full raw archive to a generative model for every query", "tradeoff": "Unbounded cost, privacy exposure, latency, and unverifiable answers."}]},
+      "componentUpdate": {"nodeId": "log_query_api", "properties": {"purpose": "Build bounded, explainable hybrid plans with mandatory authorization/time filters, inverted lexical search, optional tenant-filtered vector similarity, visible parsed filters, and source-record verification; fall back to lexical retrieval if vectors are unhealthy."}},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "log_41",
+      "stepNumber": 41,
+      "phase": "3. Correlate, alert, and search with evidence",
+      "title": "Run exact and fielded searches",
+      "type": "add_connection",
+      "content": "Apply the authorized time range and tenant filter to every query, use lexical terms for error codes and exact phrases, and fetch bounded snippets by stable document ID. Index refresh is eventually consistent; return a watermark rather than promise read-after-write consistency.",
+      "connection": {"edgeId": "query_api_to_search", "sourceNodeId": "log_query_api", "targetNodeId": "log_search", "connectionType": "api-call", "label": "Scoped lexical and field query", "description": "Authorized time-bounded inverted-index query with stable result references and explicit refresh watermark."},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "log_42",
+      "stepNumber": 42,
+      "phase": "3. Correlate, alert, and search with evidence",
+      "title": "Add semantic matches as a complementary result set",
+      "type": "add_connection",
+      "content": "Search vectors only after applying tenant and retention scope; fuse/rank results with the lexical set and expose the match reason. If model or vector versions differ, avoid mixing scores until a calibrated ranking policy exists.",
+      "connection": {"edgeId": "query_api_to_vectors", "sourceNodeId": "log_query_api", "targetNodeId": "log_vectors", "connectionType": "api-call", "label": "Tenant-filtered semantic retrieval", "description": "Optional vector query with embedding-version compatibility, authorization filter, and source/template references."},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "log_43",
+      "stepNumber": 43,
+      "phase": "3. Correlate, alert, and search with evidence",
+      "title": "Show trend and volume context",
+      "type": "add_connection",
+      "content": "Return counts, baseline version, forecast interval, and aggregation freshness beside search results. Trend summaries are eventually consistent and must not be presented as raw event counts more current than their watermark.",
+      "connection": {"edgeId": "query_api_to_trends", "sourceNodeId": "log_query_api", "targetNodeId": "log_trends", "connectionType": "api-call", "label": "Authorized trend summaries", "description": "Bounded tenant/time trend query with forecast provenance and late-event freshness."},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8"]
+    },
+    {
+      "id": "log_44",
+      "stepNumber": 44,
+      "phase": "3. Correlate, alert, and search with evidence",
+      "title": "Resolve template history and correlation context",
+      "type": "add_connection",
+      "content": "Join by stable template ID, service, environment, event-time interval, and available trace/deployment references. Show the template/model version and any late-event correction; missing context is explicit rather than guessed from time proximity alone.",
+      "connection": {"edgeId": "query_api_to_templates", "sourceNodeId": "log_query_api", "targetNodeId": "log_templates", "connectionType": "database-connection", "label": "Template versions and review history", "description": "Authorized lookups for template definition, confidence, provenance, and versioned review state."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:8"]
+    },
+    {
+      "id": "log_45",
+      "stepNumber": 45,
+      "phase": "3. Correlate, alert, and search with evidence",
+      "title": "Deliver critical anomaly notifications",
+      "type": "add_component",
+      "content": "Route critical candidates with severity, tenant/service, event-time window, confidence, model/template version, and links to authorized evidence. Deduplicate by stable incident key and track delivery acknowledgement; notification failure must leave the candidate durable and retryable.",
+      "component": {"nodeId": "log_alert_delivery", "componentType": "notification-service", "label": "Critical Anomaly Alerting", "description": "Deduplicated, acknowledged operator notifications", "position": {"x": 2560, "y": 500}, "properties": {"componentName": "Critical Anomaly Alerting", "purpose": "Deliver severity-qualified anomaly candidates with stable incident keys, evidence/version references, tenant routing, retry state, and delivery acknowledgement; preserve the durable candidate when a channel is unavailable."}, "highlightReason": "Critical anomaly alerts need an independently observable delivery lifecycle, not just a score on a dashboard."},
+      "requirementIds": ["legacy-requirement:7"]
+    },
+    {
+      "id": "log_46",
+      "stepNumber": 46,
+      "phase": "3. Correlate, alert, and search with evidence",
+      "title": "Page from durable candidates without unsafe suppression",
+      "type": "add_connection",
+      "content": "Critical actionable candidates bypass learned noise suppression unless an explicit, audited policy says otherwise; no model may silently suppress them. Retry delivery with the incident key and reconcile candidate-to-acknowledgement state after outages to avoid both lost pages and duplicate pages.",
+      "connection": {"edgeId": "anomalies_to_alerts", "sourceNodeId": "log_anomaly_events", "targetNodeId": "log_alert_delivery", "connectionType": "message-queue", "label": "Critical candidate and retry state", "description": "Durable, idempotent notifications with critical-path protection, acknowledgement, and outage reconciliation."},
+      "requirementIds": ["legacy-requirement:7"]
+    },
+    {
+      "id": "log_47",
+      "stepNumber": 47,
+      "phase": "3. Correlate, alert, and search with evidence",
+      "title": "Keep novelty, anomaly, and incident decisions distinct",
+      "type": "explanation",
+      "content": "A previously unseen template is a discovery signal, not automatically an outage; an anomaly score is evidence, not a diagnosis; and an incident is an operator-facing grouping with its own lifecycle. Preserve the original log and system-event evidence, expose confidence and missing context, and make merge, mute, resolve, or escalation decisions versioned and auditable. Correlation uses event-time windows and known identity links; do not infer causality from temporal proximity alone.",
+      "requirementIds": []
+    },
+    {
+      "id": "log_48",
+      "stepNumber": 48,
+      "phase": "4. Learn safely and operate against targets",
+      "title": "Observe latency, quality, safety, and cost end to end",
+      "type": "add_component",
+      "content": "Track accepted/rejected lines per second, bytes per line, broker age and skew, parser coverage/errors, template merge/split quality by format, ingest-to-candidate detection latency separately from candidate-to-acknowledged-notification delivery latency, critical delivery failures, index freshness, archive lag, query cost, and model fallback/drift. Slice by tenant/service while avoiding raw sensitive log labels in metrics.",
+      "component": {"nodeId": "log_observability", "componentType": "monitoring", "label": "Log Pipeline SLO & Quality Monitoring", "description": "Capacity, detection, template, indexing, privacy, and alert health", "position": {"x": 2240, "y": 700}, "properties": {"componentName": "Log Pipeline SLO & Quality Monitoring", "purpose": "Measure accepted/rejected rate and bytes, queue age/skew, parser coverage, format-stratified template precision/recall, ingest-to-candidate detection latency separately from candidate-to-acknowledged-notification delivery latency, critical delivery failures, index freshness, archive freshness, model fallback/drift, privacy errors, and cost by bounded tenant/service labels.", "metrics": true, "alerts": true}, "highlightReason": "The numerical constraints are not meaningful unless the complete ingest-to-detection and quality path is measured."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "log_49",
+      "stepNumber": 49,
+      "phase": "4. Learn safely and operate against targets",
+      "title": "Export processing and event-time health",
+      "type": "add_connection",
+      "content": "Alert on oldest accepted-event age, checkpoint duration, late-data rate, key skew, watermark stalls, and anomaly-candidate backlog against the under-30-second detection objective. Track notification-delivery backlog and acknowledgement separately; compare accepted input with indexed, archived, and evaluated outputs to expose silent gaps.",
+      "connection": {"edgeId": "stream_to_observability", "sourceNodeId": "log_stream", "targetNodeId": "log_observability", "connectionType": "data-flow", "label": "Window, checkpoint, and detection SLOs", "description": "Bounded-cardinality metrics for stream lag, state/checkpoint health, candidate quality, and end-to-end age."},
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:2"]
+    },
+    {
+      "id": "log_50",
+      "stepNumber": 50,
+      "phase": "4. Learn safely and operate against targets",
+      "title": "Reconcile intake, parse, and archive outcomes",
+      "type": "add_connection",
+      "content": "Count accepted, rejected, retried, quarantined, and archived events by parser version and source class. Do not put tenant IDs, message text, or unbounded template IDs into metric labels; use access-controlled logs/traces for sampled diagnosis.",
+      "connection": {"edgeId": "ingress_to_observability", "sourceNodeId": "log_ingress", "targetNodeId": "log_observability", "connectionType": "data-flow", "label": "Admission and format coverage", "description": "Measure admitted/rejected rate, parser coverage, quarantine, retries, redaction failures, and archive reconciliation."},
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "log_51",
+      "stepNumber": 51,
+      "phase": "4. Learn safely and operate against targets",
+      "title": "Train and evaluate models off the detection hot path",
+      "type": "add_component",
+      "content": "Build datasets from deduplicated templates and policy-approved samples, with tenant/privacy controls, time-based holdouts, format-stratified labels, and explicit drift checks. Sampling must preserve rare critical patterns; record inclusion probabilities and never use sampled volume to claim a production detection guarantee.",
+      "component": {"nodeId": "log_model_training", "componentType": "model-training", "label": "Offline Template & Anomaly Evaluation", "description": "Versioned training, holdout validation, and drift analysis", "position": {"x": 2560, "y": 700}, "properties": {"componentName": "Offline Template & Anomaly Evaluation", "purpose": "Train and compare parser, embedding, forecast, and anomaly candidates from deduplicated, policy-approved records; preserve rare critical examples, tenant boundaries, time-based holdouts, format-stratified metrics, drift checks, and reproducible dataset lineage."}, "highlightReason": "Offline evaluation reduces production coupling and makes the accuracy target independently auditable."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "log_52",
+      "stepNumber": 52,
+      "phase": "4. Learn safely and operate against targets",
+      "title": "Read only policy-approved archived samples",
+      "type": "add_connection",
+      "content": "Replay by immutable segment manifest and source offsets, enforce retention/consent and redaction before dataset creation, and checkpoint training input. A training outage must never slow live detection or block critical alert delivery.",
+      "connection": {"edgeId": "archive_to_training", "sourceNodeId": "log_archive", "targetNodeId": "log_model_training", "connectionType": "data-flow", "label": "Approved, versioned training samples", "description": "Offline replay from checksummed archive manifests with policy, redaction, sampling, and dataset lineage controls."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4"]
+    },
+    {
+      "id": "log_53",
+      "stepNumber": 53,
+      "phase": "4. Learn safely and operate against targets",
+      "title": "Record model and parser provenance",
+      "type": "add_component",
+      "content": "Store immutable artifact version, code/config digest, training-data lineage, format-level evaluation, approval, rollout state, and rollback pointer. Keep candidate, canary, active, and retired versions distinguishable so a failed release can be reversed without rebuilding evidence.",
+      "component": {"nodeId": "log_model_registry", "componentType": "model-registry", "label": "Parser & Model Registry", "description": "Signed, evaluated releases and rollback pointers", "position": {"x": 2880, "y": 700}, "properties": {"componentName": "Parser & Model Registry", "purpose": "Track immutable parser/model artifacts, code/config and dataset digests, format-level evaluation, approval, canary/active/retired state, and a rollback pointer for reproducible, auditable promotion."}, "highlightReason": "Versioned registry state is needed to explain every production score and safely restore a previous detector."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "log_54",
+      "stepNumber": 54,
+      "phase": "4. Learn safely and operate against targets",
+      "title": "Promote only reviewed candidates",
+      "type": "add_connection",
+      "content": "Require holdout performance by format, critical-pattern recall, false-positive burden, drift comparison, security review, and canary rollback tests before activation. A candidate below the above-95% template-accuracy acceptance target remains unpublished; the design itself does not prove that target.",
+      "connection": {"edgeId": "training_to_registry", "sourceNodeId": "log_model_training", "targetNodeId": "log_model_registry", "connectionType": "data-flow", "label": "Evaluated candidate and lineage", "description": "Candidate artifact with immutable data/code digest, format-stratified results, reviewer decision, and rollback metadata."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "log_55",
+      "stepNumber": 55,
+      "phase": "4. Learn safely and operate against targets",
+      "title": "Canary a version and preserve fast rollback",
+      "type": "add_connection",
+      "content": "Roll out by a bounded tenant/service cohort with shadow comparison first; monitor per-format template errors, critical recall, latency, and alert volume. On regression, route to the prior version and keep in-flight candidate evidence for investigation.",
+      "connection": {"edgeId": "registry_to_detector", "sourceNodeId": "log_model_registry", "targetNodeId": "log_detector", "connectionType": "api-call", "label": "Approved version / rollback", "description": "Signed, reviewed detector version activated by canary with explicit prior-version rollback and provenance."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "log_56",
+      "stepNumber": 56,
+      "phase": "4. Learn safely and operate against targets",
+      "title": "Measure notification acknowledgement and recovery",
+      "type": "add_connection",
+      "content": "Reconcile durable critical candidates to acknowledged deliveries and record retries, deduplication, provider errors, and time to operator receipt. Alert on unacknowledged critical events; do not let notification-provider health appear as model health.",
+      "connection": {"edgeId": "alerts_to_observability", "sourceNodeId": "log_alert_delivery", "targetNodeId": "log_observability", "connectionType": "data-flow", "label": "Critical alert delivery SLOs", "description": "Measure candidate-to-acknowledgement latency, retries, duplicate suppression, channel health, and unresolved critical events."},
+      "requirementIds": ["legacy-requirement:7"]
+    },
+    {
+      "id": "log_57",
+      "stepNumber": 57,
+      "phase": "4. Learn safely and operate against targets",
+      "title": "Validate scale and storage targets with production-shaped tests",
+      "type": "scale_trigger",
+      "content": "Before calling the design ready, load-test sustained 1M+ lines/second and realistic bursts using measured line-size distributions, 100+ representative format adapters, malformed and unseen patterns, skewed tenants, late events, model timeouts, broker failover, search rebuilds, and notification outages. Define template accuracy (>95%) with a labeled, format-stratified set; define the detection-latency percentile and start/end timestamps; verify critical recall and archive/index cost independently. None of these targets is established by this draft alone.",
+      "scaleTrigger": {"metric": "Sustained or burst load approaches the 1M+ lines/second admission target, event age approaches 30 seconds, index/archive lag grows, or per-format accuracy/critical recall regresses", "action": "Capacity-plan partitions and consumers from measured bytes, skew, state and sink throughput; apply bounded backpressure, preserve critical rules, scale index tiers selectively, and stop model promotion when quality gates fail", "impact": "Tests throughput, detection, accuracy, format breadth, and storage efficiency as separate acceptance dimensions; avoids claiming capacity or quality from component count."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

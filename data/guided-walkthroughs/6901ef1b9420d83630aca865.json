@@ -1,0 +1,650 @@
+{
+  "problem_id": "6901ef1b9420d83630aca865",
+  "version": "1.0.0-review-draft",
+  "requirementRevision": null,
+  "totalSteps": 24,
+  "phases": [
+    {
+      "name": "Frame the mobile, query, and privacy contract",
+      "stepRange": [
+        1,
+        9
+      ],
+      "description": "Keep the supplied brief visible, distinguish assumptions, and add catalog components for clients, canonical writes, search, presence, and asynchronous updates."
+    },
+    {
+      "name": "Connect place search and live-presence paths",
+      "stepRange": [
+        10,
+        19
+      ],
+      "description": "Connect the request path, replayable outbox and location events, geospatial search, expiring presence, and privacy-safe live refresh."
+    },
+    {
+      "name": "Review geospatial, cache, privacy, and regional tradeoffs",
+      "stepRange": [
+        20,
+        24
+      ],
+      "description": "Choose candidate generation and cache semantics, make friend visibility revocable, scale by geography from observed load, and trace the complete query and update paths."
+    }
+  ],
+  "steps": [
+    {
+      "id": "nearby_01",
+      "stepNumber": 1,
+      "phase": "Frame the mobile, query, and privacy contract",
+      "type": "explanation",
+      "title": "Read the frozen brief and separate facts from assumptions",
+      "content": "The frozen problem is Design Yelp or Nearby Friends. Description: Design a location-based service to find nearby places or friends based on geographical location. Requirements: Find nearby places/friends within radius; Search by location, category, rating; Real-time location updates; Support millions of places/users; Provide ratings and reviews; Handle high query volume; Support different search filters; Mobile-first design. Constraints: Low latency for location queries; Efficient geospatial indexing; Handle frequent location updates; Support complex queries (distance + rating + price); Scale globally. Hints: Geospatial indexing (Quadtree, Geohash); Separate read and write paths; Cache popular locations; Redis geospatial features; Sharding by geographical region. Hints are options, not requirements. Assume one product can expose place discovery and an opt-in nearby-friends mode; if the product is only one of these, omit the other domain path. The brief gives no radius defaults, request or update rates, latency SLO, freshness window, retention policy, region list, availability target, or consistency promise. Keep these as decisions for product and operations review; do not turn them into numeric service promises. Treat place records, ratings, and reviews as durable canonical data. Treat a person's current location as ephemeral presence, not a location-history product: accept it only while the person has opted in, expire it under a product-approved freshness policy, and honor opt-out or audience changes before returning a friend result. The API checks current visibility even when a spatial index or cache is behind. Do not put raw coordinates or friend identities in logs, metrics, cache keys, or push payloads. Return freshness metadata so clients can distinguish a current result from a delayed projection. Radius limits, exact-versus-coarse sharing defaults, location retention, and the maximum acceptable index lag need explicit product decisions.",
+      "requirementIds": []
+    },
+    {
+      "id": "nearby_03",
+      "stepNumber": 2,
+      "phase": "Frame the mobile, query, and privacy contract",
+      "type": "add_component",
+      "title": "Add the mobile-first discovery client",
+      "content": "The mobile client requests location permission in context, lets a person choose whether and with whom to share, and submits location updates only while sharing is enabled. It renders nearby place results and friend freshness or stale state without implying that a delayed result is live; exact or coarse sharing defaults remain a product decision.",
+      "component": {
+        "nodeId": "nearby_mobile",
+        "componentType": "mobile-app",
+        "label": "Nearby Mobile App",
+        "description": "Location-aware place discovery and opt-in friend presence",
+        "position": {
+          "x": 0,
+          "y": 280
+        },
+        "properties": {
+          "componentName": "Nearby Mobile App",
+          "purpose": "Provide mobile-first place search and an explicit nearby-friends mode. Request operating-system location permission in context, show the active audience and sharing state, submit updates only while opted in, and label stale results using returned freshness metadata.",
+          "stack": "Swift/Kotlin",
+          "pushNotifications": true
+        },
+        "highlightReason": "The existing Mobile App catalog item directly represents the required mobile client; no location-specific custom component is needed."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:8",
+        "legacy-requirement:3"
+      ]
+    },
+    {
+      "id": "nearby_04",
+      "stepNumber": 3,
+      "phase": "Frame the mobile, query, and privacy contract",
+      "type": "add_component",
+      "title": "Add the authenticated API boundary",
+      "content": "Validate coordinates, requested radius, filters, and update sequence at the API boundary. Authenticate the person, apply quotas and input bounds chosen by policy owners, and pass an authorization context to the service rather than trusting client-supplied friend visibility.",
+      "component": {
+        "nodeId": "nearby_gateway",
+        "componentType": "api-gateway",
+        "label": "Nearby API Gateway",
+        "description": "Authenticated, validated entry point for discovery and location updates",
+        "position": {
+          "x": 300,
+          "y": 280
+        },
+        "properties": {
+          "componentName": "Nearby API Gateway",
+          "purpose": "Terminate TLS, authenticate the caller, validate bounded coordinate and filter payloads, apply configured quotas, and route place-search, review, consent, and location-update operations. The service enforces resource and friend-audience authorization.",
+          "inputValidation": true,
+          "authentication": "JWT",
+          "rateLimiting": true,
+          "tlsTermination": true
+        },
+        "highlightReason": "The existing API Gateway exposes the needed authentication, TLS, validation, and rate-limit controls."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:7",
+        "legacy-constraint:1"
+      ]
+    },
+    {
+      "id": "nearby_05",
+      "stepNumber": 4,
+      "phase": "Frame the mobile, query, and privacy contract",
+      "type": "add_component",
+      "title": "Add the location and discovery service",
+      "content": "Use one service boundary to validate product filters, select the relevant geographic region, query the place index or live friend-presence store, apply exact-distance and visibility checks, and assemble a bounded response. Keep result ordering and filter semantics explicit rather than hiding them in a cache.",
+      "component": {
+        "nodeId": "nearby_api",
+        "componentType": "backend-server",
+        "label": "Nearby Discovery Service",
+        "description": "Authorization-aware query planning, location updates, and response assembly",
+        "position": {
+          "x": 620,
+          "y": 280
+        },
+        "properties": {
+          "componentName": "Nearby Discovery Service",
+          "purpose": "Validate radius and category, rating, and price filters; route place queries to the geographic search index and friend queries to current opted-in presence; apply exact-distance checks and current audience authorization before returning candidates. Write canonical place, review, and consent changes durably. Accept versioned location updates into ephemeral presence, emit refresh events, and avoid retaining a continuous precise-location history. The service writes a transactional outbox beside canonical changes and runs a separate retry-safe publisher loop within this backend component."
+        },
+        "highlightReason": "The existing Backend Server represents the application and query-planning role without inventing a product-specific service type."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:7",
+        "legacy-constraint:1",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "nearby_06",
+      "stepNumber": 5,
+      "phase": "Frame the mobile, query, and privacy contract",
+      "type": "add_component",
+      "title": "Keep place, review, and consent records canonical",
+      "content": "Persist place details, review records, account preferences, sharing consent, and consent versions in the authoritative store. A review write is durable before it is acknowledged; search documents and caches are rebuildable projections. Keep precise current location out of this durable history unless a separately reviewed product requirement and retention policy require otherwise.",
+      "component": {
+        "nodeId": "nearby_primary",
+        "componentType": "database",
+        "label": "Places, Reviews & Consent Store",
+        "description": "Canonical durable business records and current privacy policy state",
+        "position": {
+          "x": 960,
+          "y": 80
+        },
+        "properties": {
+          "componentName": "Places, Reviews & Consent Store",
+          "purpose": "Store canonical place data, user and friend-audience preferences, consent versions, and durable ratings and reviews. Treat the search index as a rebuildable projection. Keep continuous precise-location history out of this store unless retention is explicitly approved.",
+          "type": "RDBMS",
+          "engine": "postgresql",
+          "sharding": "None",
+          "crossRegion": false,
+          "replicationMode": "Async"
+        },
+        "highlightReason": "The catalog Database supports durable place, review, and consent records; geographic partitioning is introduced as an explicit later scale decision."
+      },
+      "requirementIds": [
+        "legacy-requirement:5"
+      ]
+    },
+    {
+      "id": "nearby_08",
+      "stepNumber": 6,
+      "phase": "Frame the mobile, query, and privacy contract",
+      "type": "add_component",
+      "title": "Index places for geospatial and structured retrieval",
+      "content": "Build a place-search projection with geographic cells plus category, rating, and price fields. Candidate-cell coverage must be a superset of the requested radius, including cell boundaries and relevant antimeridian or polar cases; then calculate exact distance using one documented coordinate and distance model and retain only points within the requested radius. Do not truncate candidates before exact-distance and structured-filter checks in a way that creates false negatives. Keep index generation and freshness visible to the response path.",
+      "component": {
+        "nodeId": "nearby_geo",
+        "componentType": "search-engine",
+        "label": "Geospatial Place Search Index",
+        "description": "Geohash-cell candidate retrieval with structured place filters",
+        "position": {
+          "x": 960,
+          "y": 280
+        },
+        "properties": {
+          "componentName": "Geospatial Place Search Index",
+          "purpose": "Index place coordinates into geohash or equivalent geographic cells and index category, rating, and price fields for combined filtering. Retrieve a bounded candidate set, let the service perform exact-distance and radius checks, and expose projection freshness. This index is rebuildable from canonical place and review data; it does not authorize friend visibility.",
+          "engine": "opensearch"
+        },
+        "highlightReason": "The existing Search Engine supports structured indexing and retrieval; geospatial fields and cell-cover semantics are expressed in its purpose rather than a fabricated catalog property."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:4",
+        "legacy-requirement:7",
+        "legacy-constraint:2",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "nearby_09",
+      "stepNumber": 7,
+      "phase": "Frame the mobile, query, and privacy contract",
+      "type": "add_component",
+      "title": "Use Redis for hot results and expiring friend presence",
+      "content": "Keep two logically separate Redis namespaces: cache-aside entries for public place cells or filter combinations, and the latest opted-in friend locations for geospatial candidate lookup. Restrict presence access to the authorized location-service path, expire it under the product-approved freshness/privacy policy, and never let cached candidates bypass current consent, freshness, or exact-distance checks.",
+      "component": {
+        "nodeId": "nearby_cache",
+        "componentType": "cache",
+        "label": "Redis Geo & Hot-Query Cache",
+        "description": "Expiring live presence and cache-aside popular place results",
+        "position": {
+          "x": 960,
+          "y": 500
+        },
+        "properties": {
+          "componentName": "Redis Geo & Hot-Query Cache",
+          "purpose": "Use Redis geospatial features for the latest opted-in friend locations with policy-controlled expiry, and a separate cache-aside namespace for popular place-cell queries. Version or invalidate entries on relevant changes. Cache contents are candidates only: recheck exact distance and current friend authorization before response; never cache a private location as a globally reusable place result.",
+          "engine": "redis",
+          "cacheStrategy": "cache-aside",
+          "inMemory": true
+        },
+        "highlightReason": "The existing Redis-backed Cache catalog fits both geospatial presence and hot-query caching; separate key spaces and access rules keep the roles understandable."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:3",
+        "legacy-requirement:6",
+        "legacy-constraint:1",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "nearby_10",
+      "stepNumber": 8,
+      "phase": "Frame the mobile, query, and privacy contract",
+      "type": "add_component",
+      "title": "Carry location and outbox events asynchronously",
+      "content": "Separate ephemeral location refresh events from durable place and review outbox events by event type and consumer policy. Partition by the entity whose order matters, carry a version or sequence, and expect retries. A location event carries only a scoped opaque subject reference, sequence, and consent version needed to trigger a fresh authorized read—never coordinates or a friend list. Restrict event access and retention under the approved privacy policy.",
+      "component": {
+        "nodeId": "nearby_events",
+        "componentType": "message-broker",
+        "label": "Location & Place Event Stream",
+        "description": "Versioned updates for index maintenance and privacy-safe refresh",
+        "position": {
+          "x": 1560,
+          "y": 300
+        },
+        "properties": {
+          "componentName": "Location & Place Event Stream",
+          "purpose": "Carry versioned ephemeral location-change signals and replayable place/review outbox events to independent consumers. Partition using the entity ordering requirement, make duplicate delivery safe, avoid coordinates in broker diagnostics, and keep friend notification payloads as refresh hints rather than location disclosure."
+        },
+        "highlightReason": "The existing Message Broker catalog represents asynchronous event distribution without a custom event-stream node."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "nearby_11",
+      "stepNumber": 9,
+      "phase": "Frame the mobile, query, and privacy contract",
+      "type": "add_component",
+      "title": "Maintain rebuildable projections and refresh work",
+      "content": "Consume events idempotently by entity version. Apply place and review changes to the search index, keep derived cache entries fresh or invalidated, and turn eligible friend-presence changes into refresh work only after checking the current sharing policy. A lagging consumer must be observable and replayable.",
+      "component": {
+        "nodeId": "nearby_indexer",
+        "componentType": "stream-processor",
+        "label": "Geo Projection & Refresh Workers",
+        "description": "Idempotent index updates, cache invalidation, and eligible refresh signals",
+        "position": {
+          "x": 1880,
+          "y": 300
+        },
+        "properties": {
+          "componentName": "Geo Projection & Refresh Workers",
+          "purpose": "Consume versioned place, review, and ephemeral presence events idempotently. Update the rebuildable place index, invalidate affected hot-query keys, reject older entity versions, and request a friend refresh only for currently authorized audiences. Checkpoint after durable projection effects and expose consumer lag for recovery."
+        },
+        "highlightReason": "The existing Stream Processor represents ordered event consumption and projection maintenance; no geo-specific catalog item is required."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:5",
+        "legacy-constraint:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "nearby_14",
+      "stepNumber": 10,
+      "phase": "Connect place search and live-presence paths",
+      "type": "add_connection",
+      "title": "Connect the mobile client to the gateway",
+      "content": "Send authenticated search, review, consent, and location-update requests over TLS. The client sends an update only while the user has opted in and includes a monotonic per-user sequence so delayed retries cannot replace newer presence.",
+      "connection": {
+        "edgeId": "nearby_mobile_gateway",
+        "sourceNodeId": "nearby_mobile",
+        "targetNodeId": "nearby_gateway",
+        "connectionType": "http",
+        "label": "Search, consent & location API",
+        "description": "Authenticated mobile requests; location updates are consent-gated and sequence-versioned"
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:8",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "nearby_15",
+      "stepNumber": 11,
+      "phase": "Connect place search and live-presence paths",
+      "type": "add_connection",
+      "title": "Route validated requests to the discovery service",
+      "content": "Pass the authenticated principal, validated coordinates, bounded filters, and request correlation metadata. The service—not the gateway or client—makes the final place and friend-visibility decisions.",
+      "connection": {
+        "edgeId": "nearby_gateway_api",
+        "sourceNodeId": "nearby_gateway",
+        "targetNodeId": "nearby_api",
+        "connectionType": "api-call",
+        "label": "Authorized discovery commands",
+        "description": "Validated query, review, consent, and versioned location operations"
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:7",
+        "legacy-constraint:1"
+      ]
+    },
+    {
+      "id": "nearby_16",
+      "stepNumber": 12,
+      "phase": "Connect place search and live-presence paths",
+      "type": "add_connection",
+      "title": "Persist canonical place, review, and consent changes",
+      "content": "Commit place edits, ratings, reviews, and sharing-policy changes to the authoritative store. Write the matching outbox record in the same transaction; acknowledge a durable change only after the canonical commit succeeds.",
+      "connection": {
+        "edgeId": "nearby_api_primary",
+        "sourceNodeId": "nearby_api",
+        "targetNodeId": "nearby_primary",
+        "connectionType": "database-connection",
+        "label": "Canonical records + transactional outbox",
+        "description": "Durable place, review, consent, and versioned outbox writes"
+      },
+      "requirementIds": [
+        "legacy-requirement:5"
+      ]
+    },
+    {
+      "id": "nearby_19",
+      "stepNumber": 13,
+      "phase": "Connect place search and live-presence paths",
+      "type": "add_connection",
+      "title": "Write current opted-in presence to Redis",
+      "content": "After validating current consent and a strictly newer per-user sequence, replace only the user's latest presence in the Redis GEO set. Record server-accepted time and consent version with it; do not trust device wall-clock time for ordering or freshness. Set expiry from the product-approved freshness/privacy policy, never append every coordinate to durable history, and remove presence on opt-out.",
+      "connection": {
+        "edgeId": "nearby_api_cache",
+        "sourceNodeId": "nearby_api",
+        "targetNodeId": "nearby_cache",
+        "connectionType": "database-connection",
+        "label": "Redis GEO presence + hot place cache",
+        "description": "Versioned latest location with expiry; separate cache-aside place result namespace"
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:3",
+        "legacy-requirement:6",
+        "legacy-constraint:1",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "nearby_20",
+      "stepNumber": 14,
+      "phase": "Connect place search and live-presence paths",
+      "type": "add_connection",
+      "title": "Publish an ephemeral location-change signal",
+      "content": "Emit a minimal, versioned refresh event after accepting a current location update. It carries only a scoped opaque subject reference, sequence, and consent version—not coordinates or a friend identity/audience list. It is neither durable location history nor an authorization grant. Delayed delivery is visible through privacy-reviewed freshness metadata; clients fetch current state through the authenticated service.",
+      "connection": {
+        "edgeId": "nearby_api_events",
+        "sourceNodeId": "nearby_api",
+        "targetNodeId": "nearby_events",
+        "connectionType": "message-queue",
+        "label": "Ephemeral presence refresh event",
+        "description": "Versioned signal for downstream refresh; payload excludes unnecessary private coordinates"
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "nearby_21",
+      "stepNumber": 15,
+      "phase": "Connect place search and live-presence paths",
+      "type": "add_connection",
+      "title": "Query place candidates and combined filters",
+      "content": "Send a cell cover guaranteed to include the full requested radius, plus category, rating, and price filters, to the place index. Treat index hits as candidates: the service applies the same documented distance model and requested-radius boundary, then the requested structured-filter semantics, before returning results. Never report a spatial-cell match alone as proof of proximity. For friends, also discard presence outside the product-approved freshness window and recheck current consent/audience; do not return stale coordinates as current. Friend search uses the Redis presence path, not the place index.",
+      "connection": {
+        "edgeId": "nearby_api_geo",
+        "sourceNodeId": "nearby_api",
+        "targetNodeId": "nearby_geo",
+        "connectionType": "api-call",
+        "label": "Geospatial place candidates + facets",
+        "description": "Cell-based retrieval with category/rating/price filters and service-side exact-radius verification"
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:7",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "nearby_22",
+      "stepNumber": 16,
+      "phase": "Connect place search and live-presence paths",
+      "type": "add_connection",
+      "title": "Consume versioned changes independently of requests",
+      "content": "The consumer processes place/review events and ephemeral refresh events by type. Deduplicate durable projection updates, reject stale entity versions, keep presence expiry policy separate from the event retention policy, and expose lag so asynchronous freshness is not mistaken for query latency.",
+      "connection": {
+        "edgeId": "nearby_events_indexer",
+        "sourceNodeId": "nearby_events",
+        "targetNodeId": "nearby_indexer",
+        "connectionType": "message-queue",
+        "label": "Place, review & presence events",
+        "description": "Independent consumers apply idempotent projections and privacy-scoped refresh work"
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:5",
+        "legacy-constraint:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "nearby_23",
+      "stepNumber": 17,
+      "phase": "Connect place search and live-presence paths",
+      "type": "add_connection",
+      "title": "Refresh the place index from durable events",
+      "content": "Apply place and review versions idempotently to searchable fields, including category, rating, and price. Rebuild or repair the projection from canonical data and make freshness visible when an acknowledged write has not reached search yet.",
+      "connection": {
+        "edgeId": "nearby_indexer_geo",
+        "sourceNodeId": "nearby_indexer",
+        "targetNodeId": "nearby_geo",
+        "connectionType": "data-flow",
+        "label": "Idempotent place/review projection",
+        "description": "Version-checked index updates and rebuildable category, rating, price, and geo fields"
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-requirement:7",
+        "legacy-constraint:2",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "nearby_24",
+      "stepNumber": 18,
+      "phase": "Connect place search and live-presence paths",
+      "type": "add_connection",
+      "title": "Invalidate or refresh cached place candidates",
+      "content": "Use committed versions to invalidate affected place-cell/filter cache keys. A cache miss falls back to the index, and a hit still receives service-side exact-distance checks. Keep private friend results out of the shared place-result namespace; any friend-presence candidate must independently pass freshness and current-consent/audience checks, even while invalidation is catching up.",
+      "connection": {
+        "edgeId": "nearby_indexer_cache",
+        "sourceNodeId": "nearby_indexer",
+        "targetNodeId": "nearby_cache",
+        "connectionType": "data-flow",
+        "label": "Versioned invalidation + presence expiry",
+        "description": "Refresh popular place keys without making cache state authoritative for friend visibility"
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:6",
+        "legacy-constraint:1",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "nearby_25",
+      "stepNumber": 19,
+      "phase": "Connect place search and live-presence paths",
+      "type": "add_connection",
+      "title": "Deliver a privacy-safe refresh over the authorized client channel",
+      "content": "The processor sends a generic refresh hint to the gateway's authenticated live channel. The hint carries no coordinates; the recipient fetches current presence through the API, which rechecks audience permission and expiry.",
+      "connection": {
+        "edgeId": "nearby_indexer_gateway",
+        "sourceNodeId": "nearby_indexer",
+        "targetNodeId": "nearby_gateway",
+        "connectionType": "data-flow",
+        "label": "Authorized live refresh hint",
+        "description": "Generic refresh signal over an authenticated client channel; current presence is fetched through the API"
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "nearby_28",
+      "stepNumber": 20,
+      "phase": "Review geospatial, cache, privacy, and regional tradeoffs",
+      "type": "decision_point",
+      "title": "Use geographic cells for candidates and exact distance for truth",
+      "content": "Choose a spatial candidate index that can be partitioned and queried alongside structured fields. Geohash cells are one reasonable starting representation from the brief; tune cell cover and candidate bounds from measured selectivity, and always verify exact distance against the requested radius.",
+      "decision": {
+        "question": "How should place search combine a radius with category, rating, and price filters?",
+        "chosen": "Use geohash or equivalent cells to retrieve bounded candidates, apply structured filters in the search index, then verify exact distance in the service.",
+        "chosenReason": "Cell indexing reduces the geographic search space while exact-distance filtering handles cell-boundary false positives. Keeping filter fields in the same rebuildable projection avoids a full scan of canonical records.",
+        "alternatives": [
+          {
+            "option": "Use one global unpartitioned scan",
+            "tradeoff": "Simple to explain but query work grows with the complete place corpus and makes regional load isolation difficult."
+          },
+          {
+            "option": "Treat geohash-cell membership as the final radius test",
+            "tradeoff": "Cell boundaries do not match arbitrary circles and can include places outside the requested radius."
+          },
+          {
+            "option": "Use Redis GEO as the only place and review query store",
+            "tradeoff": "It can serve nearby candidates, but combining durable place attributes, review projections, and richer filter semantics may require additional indexes and consistency handling."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "nearby_geo",
+        "properties": {
+          "purpose": "Index place coordinates into geohash or equivalent geographic cells and index category, rating, and price fields for combined filtering. Retrieve bounded candidates and let the service verify exact distance and requested radius. Rebuild from canonical place/review data, expose projection freshness, and keep friend visibility authorization outside this index."
+        }
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:7",
+        "legacy-constraint:2",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "nearby_29",
+      "stepNumber": 21,
+      "phase": "Review geospatial, cache, privacy, and regional tradeoffs",
+      "type": "decision_point",
+      "title": "Keep cache acceleration separate from authority",
+      "content": "Use cache-aside for hot public place queries and Redis GEO for latest opted-in friend positions, with separate keys, expiry, and invalidation rules. Include location cell, radius, filter values, and projection generation in place-result cache identity; never let a cache hit skip exact-distance or current-consent checks.",
+      "decision": {
+        "question": "What should be cached when location queries are frequent?",
+        "chosen": "Cache popular place-cell/filter results and keep latest friend presence in a separate expiring Redis GEO namespace; treat both as candidates only.",
+        "chosenReason": "This uses the Redis and hot-location hints while limiting stale or private data from becoming authoritative. Product owners still need to choose cache and presence freshness policies from workload and privacy requirements.",
+        "alternatives": [
+          {
+            "option": "Cache every exact friend result for broad reuse",
+            "tradeoff": "Audience-specific data can outlive a permission change or cross an authorization boundary."
+          },
+          {
+            "option": "Skip caching all popular place queries",
+            "tradeoff": "This simplifies invalidation but can send repeated hot queries to the full search path and increase tail load."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "nearby_cache",
+        "properties": {
+          "purpose": "Use separate Redis GEO presence and cache-aside place-query namespaces. Presence expires under the approved freshness/privacy policy; popular place results are versioned or invalidated on relevant changes. Neither namespace is authoritative: verify exact distance, freshness, and current friend consent before returning results."
+        }
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:3",
+        "legacy-requirement:6",
+        "legacy-constraint:1",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "nearby_30",
+      "stepNumber": 22,
+      "phase": "Review geospatial, cache, privacy, and regional tradeoffs",
+      "type": "decision_point",
+      "title": "Make friend visibility opt-in, scoped, and revocable",
+      "content": "Store the current sharing audience and consent version canonically. On opt-out or audience reduction, remove Redis presence and invalidate friend candidates, but make the service fail closed against the current policy/version even while downstream cleanup catches up. A location past its approved freshness window is omitted rather than returned as current. Use a generic push refresh hint and require a fresh authorized fetch for any location; do not disclose exact fix time unless product/privacy owners approve it.",
+      "decision": {
+        "question": "How should the service protect precise friend locations while supporting nearby discovery?",
+        "chosen": "Require explicit opt-in and an allowed audience, retain only expiring current presence, and recheck canonical consent on every friend-result read.",
+        "chosenReason": "Spatial indexes and caches are eventually updated projections; read-time authorization and versioned revocation prevent stale index state from granting access.",
+        "alternatives": [
+          {
+            "option": "Share precise location with all contacts by default",
+            "tradeoff": "Broad default visibility exceeds the scope implied by nearby-friends discovery and weakens user control."
+          },
+          {
+            "option": "Trust cached visibility until asynchronous invalidation finishes",
+            "tradeoff": "A revoked or narrowed audience could continue seeing stale presence during projection lag."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "nearby_api",
+        "properties": {
+          "purpose": "Validate radius and category, rating, and price filters; route place queries to the geographic search index and friend queries to current opted-in presence; apply exact-distance checks and current audience authorization before returning candidates. Require explicit opt-in and an allowed audience for friend presence, expire current location under the approved policy, and enforce consent-version revocation at read time. Write canonical place, review, and consent changes durably; do not retain a continuous precise-location history."
+        }
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:3",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "nearby_31",
+      "stepNumber": 23,
+      "phase": "Review geospatial, cache, privacy, and regional tradeoffs",
+      "type": "scale_trigger",
+      "title": "Partition and replicate by geography when measurements require it",
+      "content": "The brief requires global scale but gives no region count, traffic distribution, or replication lag objective. Start with an explicit geographic ownership model and add regional partitions or replicas when measured query fan-out, index size, update volume, or cross-region access shows the need. Keep one authoritative owner for mutable records; expose replica freshness and define failover and conflict handling before enabling regional writes.",
+      "scaleTrigger": {
+        "metric": "Per-region query latency and volume, index size and fan-out, location-update rate, cache pressure, replication freshness, and consumer lag",
+        "action": "Partition place and search data by geographic region as observed load requires; route queries to relevant owners, add regional read capacity where measured, and retain a clear authoritative write region with a reviewed failover procedure.",
+        "impact": "Limits unrelated-region query work and supports global growth while making asynchronous cross-region freshness and ownership tradeoffs explicit."
+      },
+      "componentUpdate": {
+        "nodeId": "nearby_primary",
+        "properties": {
+          "sharding": "Geographic",
+          "crossRegion": true,
+          "replicationMode": "Async"
+        }
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "nearby_32",
+      "stepNumber": 24,
+      "phase": "Review geospatial, cache, privacy, and regional tradeoffs",
+      "type": "explanation",
+      "title": "Trace the read, write, and privacy boundaries",
+      "content": "Place read: mobile client -> gateway -> discovery service -> cache or geographic place index -> candidate-complete radius query -> exact-distance and structured-filter verification -> response with projection freshness. Friend read: mobile client -> gateway -> service -> Redis GEO candidates -> approved freshness check -> current canonical consent/audience check -> response; stale presence is omitted, and a push is only a refresh hint. Place/review write: service -> canonical store plus transactional outbox -> publisher -> event stream -> idempotent search projection. Location update: opt-in/consent and monotonic sequence check -> replace expiring Redis presence with server-accepted time -> emit coordinate-free versioned refresh event -> authorized refresh work; no permanent coordinate history is implied. The brief does not specify radius defaults, latency/availability SLOs, freshness or retention thresholds, regional ownership, or cross-region consistency; owners must decide these without presenting them as achieved targets.",
+      "requirementIds": []
+    }
+  ]
+}

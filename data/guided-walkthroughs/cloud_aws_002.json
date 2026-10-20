@@ -1,0 +1,1009 @@
+{
+  "problem_id": "cloud_aws_002",
+  "version": "1.0-review",
+  "totalSteps": 54,
+  "phases": [
+    {
+      "name": "Frame the recovery contract",
+      "stepRange": [1, 6],
+      "description": "Separate the frozen requirements from assumptions, clarify the RPO/RTO tradeoff, and choose a cost-aware recovery posture."
+    },
+    {
+      "name": "Build the primary-region request path",
+      "stepRange": [7, 16],
+      "description": "Create the normal single-writer serving path and make the DNS health-check boundary explicit."
+    },
+    {
+      "name": "Add the standby region and data replication",
+      "stepRange": [17, 29],
+      "description": "Provision warm standby capacity, replicate database and object data, and define when standby data is safe to serve."
+    },
+    {
+      "name": "Observe health and orchestrate failover",
+      "stepRange": [30, 42],
+      "description": "Measure regional health and replica lag, then gate promotion, application readiness, and DNS failover on an ordered recovery workflow."
+    },
+    {
+      "name": "Provision, protect, and prove recovery",
+      "stepRange": [43, 54],
+      "description": "Manage both regions as code, keep independent recovery points, and rehearse restore, failover, and controlled failback."
+    }
+  ],
+  "steps": [
+    {
+      "id": "dr_01",
+      "stepNumber": 1,
+      "phase": "Frame the recovery contract",
+      "title": "Keep the frozen brief as the source of truth",
+      "type": "explanation",
+      "content": "Problem: Design a Multi-Region Disaster Recovery Solution (design-a-multi-region-disaster-recovery-solution). Description: Design a disaster recovery architecture that ensures business continuity across multiple geographic regions with automatic failover. Difficulty: Hard; category: AWS - High Availability; domain: infra; estimated time: 60-90 minutes. Functional requirements: Ensure business continuity during outages; Replicate data across multiple regions; Automatic failover within minutes; Maintain data consistency; Regular backup and restore testing; Monitor system health across regions; Define RPO and RTO targets; Automate infrastructure provisioning. Constraints: RPO (Recovery Point Objective) < 5 minutes; RTO (Recovery Time Objective) < 15 minutes; Handle regional failures gracefully; Minimize data loss during failover; Cost-effective replication strategy. Hints: Use Route 53 health checks for failover; RDS Multi-AZ for database HA; S3 Cross-Region Replication for objects; CloudFormation for infrastructure as code; Aurora Global Database for low-latency reads; DynamoDB Global Tables for multi-region. Tags: aws, disaster-recovery, route53, rds, s3, cloudformation, multi-region. Example companies: Amazon, Capital One, Netflix. The frozen fixture says has_guided_walkthrough=false. This is a local review draft; it does not change that availability flag or claim that any target is already met."
+    },
+    {
+      "id": "dr_02",
+      "stepNumber": 2,
+      "phase": "Frame the recovery contract",
+      "title": "Ask for the workload and recovery details the brief omits",
+      "type": "explanation",
+      "content": "Clarify the primary and recovery regions, traffic and write rates, database engine and size, object volume, acceptable read staleness, dependency inventory, recovery-account boundaries, and the business event that starts each RPO/RTO clock. Ask whether the recovery region must handle full peak load immediately or may scale from warm capacity. The brief gives no named AWS regions, throughput, retention period, DNS TTL, restore schedule, or cost budget; do not invent those values."
+    },
+    {
+      "id": "dr_03",
+      "stepNumber": 3,
+      "phase": "Frame the recovery contract",
+      "title": "Choose warm standby as the cost-and-recovery starting point",
+      "type": "decision_point",
+      "content": "Design assumption to validate: keep a reduced but continuously running application and database replica in a second region, then scale it during recovery. This is a warm-standby proposal, not a supplied requirement or proof of the RTO. It avoids paying for two full active stacks while avoiding the rebuild delay of a cold site.",
+      "decision": {
+        "question": "How should the second region trade ongoing cost for recovery time?",
+        "chosen": "Use warm standby with measured scale-up headroom and continuously replicated data; prove that promotion, readiness, and traffic shift fit the target.",
+        "chosenReason": "The brief asks for cost-effective replication and recovery within minutes, so a tested warm standby is a reasonable starting point without assuming full active-active spend.",
+        "alternatives": [
+          {
+            "option": "Cold standby that is created only after an outage",
+            "tradeoff": "Lower idle cost, but provisioning, restore, and validation may exceed the 15-minute RTO target."
+          },
+          {
+            "option": "Two fully active write regions",
+            "tradeoff": "Can reduce regional serving dependence but adds conflict resolution, split-brain risk, and higher operating cost that the brief does not justify."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-constraint:5"]
+    },
+    {
+      "id": "dr_04",
+      "stepNumber": 4,
+      "phase": "Frame the recovery contract",
+      "title": "Treat RPO and RTO as measured acceptance targets",
+      "type": "explanation",
+      "content": "The supplied limits are RPO < 5 minutes and RTO < 15 minutes. Define the RPO clock from the last acknowledged durable write to the latest recoverable state, and the RTO clock from declared regional failure to successful, representative user traffic in the recovery region. Test both clocks under the agreed failure scenarios; configuration alone does not prove either target."
+    },
+    {
+      "id": "dr_05",
+      "stepNumber": 5,
+      "phase": "Frame the recovery contract",
+      "title": "Keep one database writer and name the asynchronous boundary",
+      "type": "decision_point",
+      "content": "Use a single-writer database topology: the primary region accepts writes and the second-region database remains read-only until promotion. Aurora Global Database is one supplied hint for cross-region reads and replication; RDS Multi-AZ is a separate within-region availability concern. Cross-region replication is asynchronous in this proposal, so replication lag is real data-loss exposure, not a consistency guarantee.",
+      "decision": {
+        "question": "What consistency rule prevents two regions from accepting conflicting writes?",
+        "chosen": "Route writes to one authoritative regional writer; fence the old writer before promoting the secondary, and allow only explicitly stale-tolerant reads from a replica.",
+        "chosenReason": "Single-writer ownership is easier to reason about during partitions and failover; the RPO target bounds acceptable recovery-point loss but does not make asynchronous replication synchronous.",
+        "alternatives": [
+          {
+            "option": "Allow both regions to write during a partition",
+            "tradeoff": "Concurrent updates can diverge and require conflict resolution that is not specified in the brief."
+          },
+          {
+            "option": "Describe the secondary as strongly consistent without a synchronous protocol",
+            "tradeoff": "That would overstate what the proposed asynchronous replication path proves."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:4"]
+    },
+    {
+      "id": "dr_06",
+      "stepNumber": 6,
+      "phase": "Frame the recovery contract",
+      "title": "Separate regional disaster recovery from Availability Zone recovery",
+      "type": "explanation",
+      "content": "RDS Multi-AZ and load-balancer health checks address failures inside a region; they do not replace a second-region recovery path. A regional incident must be detected from independent application and dependency signals, not a single host ping. Define the failure declaration and manual override policy before enabling automatic promotion, especially for partial network partitions."
+    },
+    {
+      "id": "dr_07",
+      "stepNumber": 7,
+      "phase": "Build the primary-region request path",
+      "title": "Add the Route 53 health-checked failover record",
+      "type": "add_component",
+      "content": "Use the existing Authoritative Nameserver palette component to represent Route 53. Health checks should reflect whether the regional service can safely serve requests, not merely whether an endpoint responds. DNS changes affect new resolutions only; resolver and client caching can delay traffic movement, so include that delay in the measured RTO.",
+      "component": {
+        "nodeId": "dr_route53",
+        "componentType": "authoritative-nameserver",
+        "label": "Amazon Route 53 Failover",
+        "description": "Health-checked DNS routing between the primary and recovery regions",
+        "position": {"x": 0, "y": 0},
+        "properties": {
+          "componentName": "Amazon Route 53 Failover",
+          "purpose": "Route new DNS resolutions to the primary regional endpoint while healthy; permit recovery-region routing only after its application and promoted data are ready. Account for resolver and client caching in the RTO test."
+        },
+        "highlightReason": "This reuses the catalog's existing DNS component; Route 53 is identified in the component name and purpose without inventing a palette type."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "dr_08",
+      "stepNumber": 8,
+      "phase": "Build the primary-region request path",
+      "title": "Add the primary-region application load balancer",
+      "type": "add_component",
+      "content": "The primary regional load balancer terminates and routes application traffic within its region. Its regional health endpoint must fail when critical dependencies make the service unable to serve, while avoiding a local transient that would incorrectly declare a regional disaster.",
+      "component": {
+        "nodeId": "dr_primary_alb",
+        "componentType": "loadbalancer",
+        "label": "Application Load Balancer - Primary Region",
+        "description": "Regional ingress for the normal serving path",
+        "position": {"x": 360, "y": -180},
+        "properties": {
+          "componentName": "Primary Region Application Load Balancer",
+          "purpose": "Distribute HTTPS application traffic to healthy primary-region service instances; expose a dependency-aware regional readiness signal to Route 53.",
+          "type": "Layer 7 (Application)",
+          "sslTermination": true
+        },
+        "highlightReason": "The existing Load Balancer catalog type represents the regional ingress; no new AWS-specific component is introduced."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "dr_09",
+      "stepNumber": 9,
+      "phase": "Build the primary-region request path",
+      "title": "Add the primary application service",
+      "type": "add_component",
+      "content": "Keep application compute stateless where practical so a recovery-region service can resume from replicated state rather than copying local disks. The brief does not select ECS, EKS, EC2, or an application framework; keep the node technology-neutral until those choices are confirmed.",
+      "component": {
+        "nodeId": "dr_primary_app",
+        "componentType": "backend-server",
+        "label": "Application Service - Primary Region",
+        "description": "Normal regional API and business logic",
+        "position": {"x": 720, "y": -180},
+        "properties": {
+          "componentName": "Primary Region Application Service",
+          "purpose": "Serve the normal user workload and direct all writes to the single primary database writer; keep local instance state disposable and make retried operations idempotent."
+        },
+        "highlightReason": "The catalog's Backend Server type represents application logic without assuming an unprovided compute platform or capacity."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:3"]
+    },
+    {
+      "id": "dr_10",
+      "stepNumber": 10,
+      "phase": "Build the primary-region request path",
+      "title": "Add the authoritative primary database",
+      "type": "add_component",
+      "content": "Represent the primary as an RDS/Aurora relational writer with regional Multi-AZ protection. Keep the specific engine and sizing open; the hints mention RDS Multi-AZ and Aurora Global Database, but the frozen brief does not choose an engine. Regional HA and cross-region DR remain separate failure domains.",
+      "component": {
+        "nodeId": "dr_primary_db",
+        "componentType": "database",
+        "label": "Aurora Global Database - Primary Writer",
+        "description": "Authoritative relational writer in the primary region",
+        "position": {"x": 1080, "y": -300},
+        "properties": {
+          "componentName": "Primary Aurora Global Database Cluster",
+          "purpose": "Accept the single authoritative write stream; use regional Multi-AZ protection and asynchronously replicate to the recovery-region cluster. Engine compatibility, workload sizing, and the failover policy require workload validation.",
+          "type": "RDBMS",
+          "workload": "OLTP",
+          "replicationMode": "Async",
+          "multiAZ": true,
+          "crossRegion": true,
+          "backups": true,
+          "pitr": true,
+          "encryption": true
+        },
+        "highlightReason": "The existing Database catalog type exposes relational, Multi-AZ, cross-region, and backup semantics used by this proposal."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "dr_11",
+      "stepNumber": 11,
+      "phase": "Build the primary-region request path",
+      "title": "Add versioned primary object storage",
+      "type": "add_component",
+      "content": "Use S3 as the primary object store, with versioning and checksum validation enabled. The brief gives no object size or retention period, so leave capacity and lifecycle values unset. Cross-Region Replication is a separate asynchronous path added after the recovery bucket exists.",
+      "component": {
+        "nodeId": "dr_primary_s3",
+        "componentType": "object-storage",
+        "label": "Amazon S3 - Primary Region",
+        "description": "Primary durable object and document storage",
+        "position": {"x": 1080, "y": -40},
+        "properties": {
+          "componentName": "Primary Region S3 Bucket",
+          "purpose": "Store primary-region objects with versioning and checksums; replicate required object versions to the recovery region and keep object lifecycle policy separate from the database writer.",
+          "provider": "S3",
+          "versioning": true,
+          "checksumValidation": true
+        },
+        "highlightReason": "The existing Object Storage catalog type supports S3, versioning, and checksum validation without inventing a storage component."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:4"]
+    },
+    {
+      "id": "dr_12",
+      "stepNumber": 12,
+      "phase": "Build the primary-region request path",
+      "title": "Route normal DNS resolutions to the primary endpoint",
+      "type": "add_connection",
+      "content": "The primary is the preferred endpoint while its dependency-aware health check passes. This edge describes user traffic routing, not synchronous replication or an immediate DNS-cache flush.",
+      "connection": {
+        "edgeId": "route53_to_primary_alb",
+        "sourceNodeId": "dr_route53",
+        "targetNodeId": "dr_primary_alb",
+        "connectionType": "http",
+        "label": "Healthy primary DNS target",
+        "description": "Route new resolutions to the primary regional application endpoint while the complete serving path is healthy."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "dr_13",
+      "stepNumber": 13,
+      "phase": "Build the primary-region request path",
+      "title": "Connect primary ingress to the application service",
+      "type": "add_connection",
+      "content": "Keep the application fleet behind the regional load balancer so its readiness check can remove unhealthy instances without conflating a single instance failure with a regional outage.",
+      "connection": {
+        "edgeId": "primary_alb_to_app",
+        "sourceNodeId": "dr_primary_alb",
+        "targetNodeId": "dr_primary_app",
+        "connectionType": "http",
+        "label": "Regional HTTPS requests",
+        "description": "Forward requests to healthy application instances in the primary region."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "dr_14",
+      "stepNumber": 14,
+      "phase": "Build the primary-region request path",
+      "title": "Connect application writes to the sole database writer",
+      "type": "add_connection",
+      "content": "The application commits transactional metadata in the primary database and uses stable request identifiers so a client retry after a failover does not create a second logical operation. Reads that require read-after-write consistency stay on the primary writer path.",
+      "connection": {
+        "edgeId": "primary_app_to_db",
+        "sourceNodeId": "dr_primary_app",
+        "targetNodeId": "dr_primary_db",
+        "connectionType": "database-connection",
+        "label": "Single-writer transactions",
+        "description": "Commit authoritative application state in the primary database; use idempotent operation IDs and preserve read-after-write behavior."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:4"]
+    },
+    {
+      "id": "dr_15",
+      "stepNumber": 15,
+      "phase": "Build the primary-region request path",
+      "title": "Connect application object reads and writes to S3",
+      "type": "add_connection",
+      "content": "Use stable object keys and checksums. Do not expose a database record as fully recoverable merely because its local S3 upload succeeded; define how object replication state is reconciled before the record is served in the recovery region.",
+      "connection": {
+        "edgeId": "primary_app_to_s3",
+        "sourceNodeId": "dr_primary_app",
+        "targetNodeId": "dr_primary_s3",
+        "connectionType": "data-flow",
+        "label": "Primary object access",
+        "description": "Read and write versioned objects by stable key; preserve checksums and a recoverable relationship between object state and database metadata."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:4"]
+    },
+    {
+      "id": "dr_16",
+      "stepNumber": 16,
+      "phase": "Build the primary-region request path",
+      "title": "Do not claim cross-service atomicity from two durable stores",
+      "type": "explanation",
+      "content": "The database and S3 do not share one transaction. For workflows that require both, use a stable object ID, checksum, and explicit metadata state such as PENDING then AVAILABLE; reconcile incomplete writes and verify the required object version exists in the recovery region before making it authoritative there. Agree whether the caller waits for replication confirmation or receives an explicitly pending result."
+    },
+    {
+      "id": "dr_17",
+      "stepNumber": 17,
+      "phase": "Add the standby region and data replication",
+      "title": "Add the recovery-region load balancer",
+      "type": "add_component",
+      "content": "Create a separately addressable regional endpoint in Region B. Keep its health response false for user traffic until the database is promoted and the application passes readiness; an idle but reachable load balancer is not evidence of a usable recovery site.",
+      "component": {
+        "nodeId": "dr_standby_alb",
+        "componentType": "loadbalancer",
+        "label": "Application Load Balancer - Recovery Region",
+        "description": "Warm-standby ingress that remains gated until recovery is ready",
+        "position": {"x": 360, "y": 260},
+        "properties": {
+          "componentName": "Recovery Region Application Load Balancer",
+          "purpose": "Provide a regional endpoint for warm-standby capacity; report ready for Route 53 only after the promoted database and application dependencies pass recovery checks.",
+          "type": "Layer 7 (Application)",
+          "sslTermination": true
+        },
+        "highlightReason": "The same existing Load Balancer palette type models the second region; the distinct label and readiness purpose show its role."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "dr_18",
+      "stepNumber": 18,
+      "phase": "Add the standby region and data replication",
+      "title": "Add warm-standby application capacity",
+      "type": "add_component",
+      "content": "Keep the same deployable application version and configuration in the recovery region, but do not invent an instance count or standby percentage. Measure how quickly its tested scale-up reaches the required representative load within the RTO.",
+      "component": {
+        "nodeId": "dr_standby_app",
+        "componentType": "backend-server",
+        "label": "Application Service - Warm Standby",
+        "description": "Reduced regional capacity that can scale during recovery",
+        "position": {"x": 720, "y": 260},
+        "properties": {
+          "componentName": "Recovery Region Application Service",
+          "purpose": "Run the same validated release and configuration at warm-standby capacity; scale to the agreed recovery load and remain gated until database promotion and dependency checks succeed."
+        },
+        "highlightReason": "The existing Backend Server catalog type represents standby application logic without adding a custom node type or guessed capacity."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "dr_19",
+      "stepNumber": 19,
+      "phase": "Add the standby region and data replication",
+      "title": "Add the read-only recovery database cluster",
+      "type": "add_component",
+      "content": "Use the supported global-database replica as the recovery copy. It serves only reads whose staleness is explicitly acceptable before promotion; after promotion, it becomes the single writer and the old writer must remain fenced.",
+      "component": {
+        "nodeId": "dr_standby_db",
+        "componentType": "database",
+        "label": "Aurora Global Database - Recovery Cluster",
+        "description": "Cross-region replica, read-only until an approved promotion",
+        "position": {"x": 1080, "y": 160},
+        "properties": {
+          "componentName": "Recovery Region Aurora Global Database Cluster",
+          "purpose": "Receive asynchronous cross-region replication; remain read-only until promotion is authorized, the old writer is fenced, and the recoverable position is checked against the RPO policy.",
+          "type": "RDBMS",
+          "workload": "OLTP",
+          "replicationMode": "Async",
+          "multiAZ": true,
+          "crossRegion": true,
+          "backups": true,
+          "pitr": true,
+          "encryption": true
+        },
+        "highlightReason": "This reuses the Database catalog type for the second regional endpoint and represents Aurora Global Database through supported fields."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "dr_20",
+      "stepNumber": 20,
+      "phase": "Add the standby region and data replication",
+      "title": "Add the recovery-region S3 replica",
+      "type": "add_component",
+      "content": "Create the destination bucket with compatible versioning and checksum validation. Confirm replication permissions, encryption-key access, object ownership, and lifecycle rules in both regions; the brief does not specify bucket names or data volume.",
+      "component": {
+        "nodeId": "dr_standby_s3",
+        "componentType": "object-storage",
+        "label": "Amazon S3 - Recovery Region",
+        "description": "Cross-Region Replication destination for required object versions",
+        "position": {"x": 1080, "y": 420},
+        "properties": {
+          "componentName": "Recovery Region S3 Bucket",
+          "purpose": "Receive required object versions from the primary bucket; keep versioning, encryption access, checksum verification, and lifecycle behavior compatible with restore and failover procedures.",
+          "provider": "S3",
+          "versioning": true,
+          "checksumValidation": true
+        },
+        "highlightReason": "The existing Object Storage type models the S3 destination and its supported versioning/checksum fields."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "dr_21",
+      "stepNumber": 21,
+      "phase": "Add the standby region and data replication",
+      "title": "Register the recovery endpoint without making it active early",
+      "type": "add_connection",
+      "content": "Configure the recovery endpoint as the failover destination, but gate health on application readiness and promoted-data checks. Route 53 health checks alone do not promote the database or prove object completeness.",
+      "connection": {
+        "edgeId": "route53_to_standby_alb",
+        "sourceNodeId": "dr_route53",
+        "targetNodeId": "dr_standby_alb",
+        "connectionType": "http",
+        "label": "Recovery target after readiness",
+        "description": "Allow failover DNS routing only after the recovery region has a writable database and a verified serving path."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "dr_22",
+      "stepNumber": 22,
+      "phase": "Add the standby region and data replication",
+      "title": "Connect recovery ingress to the warm application",
+      "type": "add_connection",
+      "content": "The recovery load balancer should exercise the same request and dependency checks used in production, while withholding user traffic until recovery gates pass.",
+      "connection": {
+        "edgeId": "standby_alb_to_app",
+        "sourceNodeId": "dr_standby_alb",
+        "targetNodeId": "dr_standby_app",
+        "connectionType": "http",
+        "label": "Recovery-region requests",
+        "description": "Forward requests only to the validated warm-standby application deployment."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "dr_23",
+      "stepNumber": 23,
+      "phase": "Add the standby region and data replication",
+      "title": "Keep standby reads and writes behind promotion state",
+      "type": "add_connection",
+      "content": "The recovery application may use the replica only for explicitly stale-tolerant reads before failover. Its write path stays disabled until the replica is promoted and the old primary writer is fenced; after promotion, all writes go to this one writer.",
+      "connection": {
+        "edgeId": "standby_app_to_db",
+        "sourceNodeId": "dr_standby_app",
+        "targetNodeId": "dr_standby_db",
+        "connectionType": "database-connection",
+        "label": "Gated recovery database access",
+        "description": "Allow approved stale-tolerant reads before failover; enable writes only after safe promotion establishes this cluster as the sole writer."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:4"]
+    },
+    {
+      "id": "dr_24",
+      "stepNumber": 24,
+      "phase": "Add the standby region and data replication",
+      "title": "Connect the recovery application to replicated objects",
+      "type": "add_connection",
+      "content": "Resolve object keys in the recovery bucket after promotion and verify the expected version/checksum for data that must be consistent with database metadata. Do not silently fall back to an incomplete primary-region bucket during a regional outage.",
+      "connection": {
+        "edgeId": "standby_app_to_s3",
+        "sourceNodeId": "dr_standby_app",
+        "targetNodeId": "dr_standby_s3",
+        "connectionType": "data-flow",
+        "label": "Recovery-region object access",
+        "description": "Serve verified replicated object versions from the recovery bucket after the database and object recovery states are reconciled."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:4"]
+    },
+    {
+      "id": "dr_25",
+      "stepNumber": 25,
+      "phase": "Add the standby region and data replication",
+      "title": "Replicate database changes asynchronously across regions",
+      "type": "add_connection",
+      "content": "Aurora Global Database is a supplied hint for this path. Measure the actual replica lag continuously and treat the stated five-minute RPO as a pass/fail recovery bound, not a service guarantee. If lag exceeds the approved bound, the failover policy must surface the data-loss decision rather than claim the target passed.",
+      "connection": {
+        "edgeId": "primary_db_to_standby_db",
+        "sourceNodeId": "dr_primary_db",
+        "targetNodeId": "dr_standby_db",
+        "connectionType": "data-flow",
+        "label": "Asynchronous cross-region replication",
+        "description": "Continuously replicate the single-writer database stream; record recoverable position and lag for RPO gating."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "dr_26",
+      "stepNumber": 26,
+      "phase": "Add the standby region and data replication",
+      "title": "Replicate versioned S3 objects to the recovery region",
+      "type": "add_connection",
+      "content": "Enable S3 Cross-Region Replication for the required object scope and versions. Observe replication status and age, and explicitly decide how deletes, delete markers, encryption keys, and already-existing objects are handled; database replication lag alone does not describe object recoverability.",
+      "connection": {
+        "edgeId": "primary_s3_to_standby_s3",
+        "sourceNodeId": "dr_primary_s3",
+        "targetNodeId": "dr_standby_s3",
+        "connectionType": "data-flow",
+        "label": "S3 Cross-Region Replication",
+        "description": "Copy required versioned objects and expose replication status so the recovery point can be evaluated independently from database lag."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "dr_27",
+      "stepNumber": 27,
+      "phase": "Add the standby region and data replication",
+      "title": "Make object-backed records safe to recover",
+      "type": "update_component",
+      "content": "Record the object workflow in the primary application contract: use stable IDs and checksums, mark cross-store writes pending until the recovery requirements are satisfied, and reconcile incomplete uploads or copies after promotion. This is an application consistency rule, not a transaction guarantee supplied by S3 CRR.",
+      "componentUpdate": {
+        "nodeId": "dr_primary_app",
+        "properties": {
+          "purpose": "Serve the normal user workload and direct writes to the single primary database writer. For object-backed records, use stable object IDs and checksums, track PENDING versus AVAILABLE state, and reconcile replication before exposing the recovery copy as authoritative; make client retries idempotent."
+        }
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:4"]
+    },
+    {
+      "id": "dr_28",
+      "stepNumber": 28,
+      "phase": "Add the standby region and data replication",
+      "title": "Keep the secondary read-only until the writer handoff is safe",
+      "type": "decision_point",
+      "content": "The secondary is not a second independent writer. During normal operation, any secondary reads must declare their staleness tolerance. During promotion, fence the original writer and prevent stale DNS clients from reaching a writable old primary; use idempotency and write retries so clients can recover safely.",
+      "decision": {
+        "question": "When may the recovery-region application accept writes?",
+        "chosen": "Only after the old writer is fenced and the recovery cluster is promoted as the sole authoritative writer.",
+        "chosenReason": "A single-writer rule avoids split-brain updates; the promotion record and client retry contract make the handoff auditable.",
+        "alternatives": [
+          {
+            "option": "Enable writes in both regions and reconcile later",
+            "tradeoff": "Creates conflicting histories and data loss semantics not specified by the brief."
+          },
+          {
+            "option": "Allow all reads from the asynchronous secondary without disclosure",
+            "tradeoff": "Can violate read-after-write expectations even when no failover is occurring."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:4"]
+    },
+    {
+      "id": "dr_29",
+      "stepNumber": 29,
+      "phase": "Add the standby region and data replication",
+      "title": "Measure each replica class against the RPO boundary",
+      "type": "explanation",
+      "content": "Track database replay lag and S3 replication status/age separately, plus the object-to-metadata reconciliation backlog. Use the most conservative recoverable point for the affected user operation. The brief does not supply a warning threshold or workload-specific grace period; establish those from the five-minute objective and measured behavior."
+    },
+    {
+      "id": "dr_30",
+      "stepNumber": 30,
+      "phase": "Observe health and orchestrate failover",
+      "title": "Add cross-region CloudWatch monitoring",
+      "type": "add_component",
+      "content": "Use the existing Monitoring catalog type with CloudWatch as the selected stack. Centralize regional health, replica lag, object replication, recovery workflow, and restore-test signals; maintain monitoring visibility when the primary region is unavailable.",
+      "component": {
+        "nodeId": "dr_monitoring",
+        "componentType": "monitoring",
+        "label": "Amazon CloudWatch - Cross-Region DR",
+        "description": "Regional health, replication, backup, and recovery-time signals",
+        "position": {"x": 1500, "y": 20},
+        "properties": {
+          "componentName": "Cross-Region Disaster Recovery Monitoring",
+          "purpose": "Collect health from both regions; track database replica lag, S3 replication status/age, recovery readiness, backup/restore outcomes, and measured RPO/RTO; alert independently of the primary application stack.",
+          "stack": "CloudWatch",
+          "metrics": true,
+          "alerts": true
+        },
+        "highlightReason": "The existing Monitoring catalog type supports CloudWatch metrics and alerts for both regional health and recovery objectives."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "dr_31",
+      "stepNumber": 31,
+      "phase": "Observe health and orchestrate failover",
+      "title": "Send primary ingress health to the recovery dashboard",
+      "type": "add_connection",
+      "content": "Capture both regional load-balancer health and representative end-to-end synthetic checks. A failed dependency check should be distinguishable from a single unhealthy target or a monitoring-path failure.",
+      "connection": {
+        "edgeId": "primary_alb_to_monitoring",
+        "sourceNodeId": "dr_primary_alb",
+        "targetNodeId": "dr_monitoring",
+        "connectionType": "data-flow",
+        "label": "Primary serving health",
+        "description": "Publish regional target health and dependency-aware synthetic results to cross-region monitoring."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "dr_32",
+      "stepNumber": 32,
+      "phase": "Observe health and orchestrate failover",
+      "title": "Observe recovery-region readiness before and during failover",
+      "type": "add_connection",
+      "content": "Keep the standby endpoint's readiness and scale state visible even while it receives no user traffic. This detects a standby that has silently drifted or cannot meet the recovery load.",
+      "connection": {
+        "edgeId": "standby_alb_to_monitoring",
+        "sourceNodeId": "dr_standby_alb",
+        "targetNodeId": "dr_monitoring",
+        "connectionType": "data-flow",
+        "label": "Recovery endpoint readiness",
+        "description": "Publish standby health and capacity readiness without treating an idle endpoint as recovery success."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "dr_33",
+      "stepNumber": 33,
+      "phase": "Observe health and orchestrate failover",
+      "title": "Alert on database lag and recoverable position",
+      "type": "add_connection",
+      "content": "Compare the promoted candidate's last applied position with the last acknowledged primary state available to monitoring. Alarm before the five-minute RPO limit is breached, using a warning buffer derived from observed lag and alert delivery time rather than inventing one here.",
+      "connection": {
+        "edgeId": "standby_db_to_monitoring",
+        "sourceNodeId": "dr_standby_db",
+        "targetNodeId": "dr_monitoring",
+        "connectionType": "data-flow",
+        "label": "Replica lag and replay position",
+        "description": "Measure cross-region database replay lag and make the candidate recovery point available to the failover gate."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "dr_34",
+      "stepNumber": 34,
+      "phase": "Observe health and orchestrate failover",
+      "title": "Observe S3 replication independently of database lag",
+      "type": "add_connection",
+      "content": "Expose destination-object replication status and age, plus failures in the metadata reconciliation workflow. A database replica can be current while an object required by a recent transaction is still missing.",
+      "connection": {
+        "edgeId": "standby_s3_to_monitoring",
+        "sourceNodeId": "dr_standby_s3",
+        "targetNodeId": "dr_monitoring",
+        "connectionType": "data-flow",
+        "label": "Object replication and reconciliation",
+        "description": "Report required object version status, checksum/recovery gaps, and pending object-to-database reconciliation."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "dr_35",
+      "stepNumber": 35,
+      "phase": "Observe health and orchestrate failover",
+      "title": "Track primary database availability and acknowledged writes",
+      "type": "add_connection",
+      "content": "Record primary writer health and the latest acknowledged durable position used in recovery analysis. Keep monitoring and alert delivery available outside the primary application failure domain.",
+      "connection": {
+        "edgeId": "primary_db_to_monitoring",
+        "sourceNodeId": "dr_primary_db",
+        "targetNodeId": "dr_monitoring",
+        "connectionType": "data-flow",
+        "label": "Primary writer health and commit position",
+        "description": "Publish writer health and recovery-point evidence so failover can compare the last known acknowledged state with the replica."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "dr_36",
+      "stepNumber": 36,
+      "phase": "Observe health and orchestrate failover",
+      "title": "Define the alarm and recovery-state transitions",
+      "type": "explanation",
+      "content": "Use explicit states such as Healthy, Suspect, DeclaredUnavailable, Fencing, Promoting, Validating, ServingRecoveryRegion, and NeedsHumanDecision. Combine independent health signals and prevent duplicate alarms from launching competing promotions. Set thresholds from measured false-positive and detection behavior; the problem supplies no numeric detector interval."
+    },
+    {
+      "id": "dr_37",
+      "stepNumber": 37,
+      "phase": "Observe health and orchestrate failover",
+      "title": "Add the serverless failover action runner",
+      "type": "add_component",
+      "content": "Use the existing Serverless Function catalog component for bounded AWS control-plane actions. A durable orchestration service should own workflow state and retries; do not rely on one function invocation as the only record of a multi-step recovery.",
+      "component": {
+        "nodeId": "dr_failover_runner",
+        "componentType": "serverless-function",
+        "label": "AWS Lambda - DR Promotion Actions",
+        "description": "Idempotent actions invoked by the durable recovery workflow",
+        "position": {"x": 1860, "y": 260},
+        "properties": {
+          "componentName": "DR Promotion Action Runner",
+          "purpose": "Execute bounded, idempotent regional recovery actions invoked by a durable workflow: verify signals, fence the old writer, request replica promotion, validate readiness, and update failover routing. Persist workflow state outside the function invocation."
+        },
+        "highlightReason": "The existing Serverless Function palette type represents AWS Lambda actions; no custom component type or new catalog entry is introduced."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "dr_38",
+      "stepNumber": 38,
+      "phase": "Observe health and orchestrate failover",
+      "title": "Trigger recovery from deduplicated regional evidence",
+      "type": "add_connection",
+      "content": "Monitoring starts the durable recovery workflow only after the configured regional failure declaration; deduplicate repeated events and keep a human override for ambiguous partitions.",
+      "connection": {
+        "edgeId": "monitoring_to_failover_runner",
+        "sourceNodeId": "dr_monitoring",
+        "targetNodeId": "dr_failover_runner",
+        "connectionType": "api-call",
+        "label": "Declared outage event",
+        "description": "Start one durable failover execution from deduplicated health and recovery-point evidence; retain an override for ambiguous incidents."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "dr_39",
+      "stepNumber": 39,
+      "phase": "Observe health and orchestrate failover",
+      "title": "Fence the former writer and promote the recovery database",
+      "type": "add_connection",
+      "content": "Promotion is ordered and auditable: establish that the prior writer cannot accept writes, check the candidate replay position against the RPO policy, then promote once. If the old region is unreachable and fencing cannot be confirmed, use the explicit incident policy rather than starting a competing writer silently.",
+      "connection": {
+        "edgeId": "failover_runner_promotes_standby_db",
+        "sourceNodeId": "dr_failover_runner",
+        "targetNodeId": "dr_standby_db",
+        "connectionType": "api-call",
+        "label": "Fenced, RPO-gated promotion",
+        "description": "After writer fencing and recovery-point validation, promote the replica exactly once and record the new writer epoch."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "dr_40",
+      "stepNumber": 40,
+      "phase": "Observe health and orchestrate failover",
+      "title": "Scale and validate the warm application before routing users",
+      "type": "add_connection",
+      "content": "The orchestration workflow brings the standby to the agreed serving capacity and checks database connectivity, object availability, and representative user operations. Keep the DNS target unhealthy until this gate passes; measure the whole sequence against the 15-minute RTO.",
+      "connection": {
+        "edgeId": "failover_runner_readies_standby_app",
+        "sourceNodeId": "dr_failover_runner",
+        "targetNodeId": "dr_standby_app",
+        "connectionType": "api-call",
+        "label": "Scale and verify recovery service",
+        "description": "Scale warm capacity to the agreed load, validate dependencies and sample requests, and expose readiness only after the promoted writer is usable."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "dr_41",
+      "stepNumber": 41,
+      "phase": "Observe health and orchestrate failover",
+      "title": "Shift Route 53 only after the recovery path is ready",
+      "type": "add_connection",
+      "content": "Change failover routing after promotion, application readiness, and the required object-recovery checks succeed. Track resolver caching and client reconnection in the RTO clock; rollback or hold traffic if post-shift synthetic checks fail.",
+      "connection": {
+        "edgeId": "failover_runner_updates_route53",
+        "sourceNodeId": "dr_failover_runner",
+        "targetNodeId": "dr_route53",
+        "connectionType": "api-call",
+        "label": "Enable recovery-region routing",
+        "description": "Update failover state only after database promotion and application/object readiness gates pass; verify new traffic reaches the recovery region."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "dr_42",
+      "stepNumber": 42,
+      "phase": "Observe health and orchestrate failover",
+      "title": "Make the RPO-versus-RTO exception policy explicit",
+      "type": "decision_point",
+      "content": "The targets can conflict during an unusually lagged or ambiguous failure: promoting an older replica may exceed the five-minute RPO, while waiting for proof may exceed the 15-minute RTO. Do not label both targets met in that case. Record the measured recovery point, declare the exception, and apply the business-approved choice between bounded data loss and delayed service.",
+      "decision": {
+        "question": "What should recovery do when replica evidence cannot satisfy the RPO gate promptly?",
+        "chosen": "Use a pre-agreed safety policy: automatically promote when the verified recovery point is within the RPO bound; otherwise stop at NeedsHumanDecision, preserve evidence, and report the RTO/RPO tradeoff honestly.",
+        "chosenReason": "A failover that hides an excessive recovery gap would not meet the stated data-loss objective, and an unverified writer handoff risks split brain.",
+        "alternatives": [
+          {
+            "option": "Always promote immediately regardless of lag",
+            "tradeoff": "Can breach the RPO target and discard acknowledged writes beyond the approved loss window."
+          },
+          {
+            "option": "Wait indefinitely for the replica to catch up",
+            "tradeoff": "Can breach the RTO target and leave the service unavailable."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "dr_43",
+      "stepNumber": 43,
+      "phase": "Provision, protect, and prove recovery",
+      "title": "Add CloudFormation-managed regional infrastructure",
+      "type": "add_component",
+      "content": "Use the existing Infrastructure as Code palette component and the supplied CloudFormation hint. Keep templates, deployment roles, parameters, and recovery instructions available outside the primary region so a regional outage does not remove the ability to inspect or recreate required resources.",
+      "component": {
+        "nodeId": "dr_cloudformation",
+        "componentType": "infrastructure-as-code",
+        "label": "AWS CloudFormation - Regional Stacks",
+        "description": "Versioned, repeatable deployment for primary and recovery regions",
+        "position": {"x": 0, "y": 560},
+        "properties": {
+          "componentName": "Multi-Region CloudFormation Stacks",
+          "purpose": "Provision repeatable regional application, network, database, storage, monitoring, and recovery configuration; keep reviewed templates and deployment access available if the primary region is unavailable.",
+          "tool": "CloudFormation",
+          "modules": true
+        },
+        "highlightReason": "The existing Infrastructure as Code catalog type directly supports CloudFormation and reusable modules."
+      },
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "dr_44",
+      "stepNumber": 44,
+      "phase": "Provision, protect, and prove recovery",
+      "title": "Provision the primary stack from reviewed infrastructure code",
+      "type": "add_connection",
+      "content": "Version the primary regional stack and test changes before rollout. Record configuration and release identity so the recovery region can run a compatible application and schema version.",
+      "connection": {
+        "edgeId": "cloudformation_to_primary_app",
+        "sourceNodeId": "dr_cloudformation",
+        "targetNodeId": "dr_primary_app",
+        "connectionType": "api-call",
+        "label": "Deploy primary regional stack",
+        "description": "Define and update the primary regional application and its dependent infrastructure through reviewed CloudFormation templates."
+      },
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "dr_45",
+      "stepNumber": 45,
+      "phase": "Provision, protect, and prove recovery",
+      "title": "Keep the recovery stack reproducible and continuously checked",
+      "type": "add_connection",
+      "content": "Manage the standby regional resources as code too; compare stack configuration and application release identity so drift does not appear for the first time during an outage.",
+      "connection": {
+        "edgeId": "cloudformation_to_standby_app",
+        "sourceNodeId": "dr_cloudformation",
+        "targetNodeId": "dr_standby_app",
+        "connectionType": "api-call",
+        "label": "Deploy recovery regional stack",
+        "description": "Provision and detect drift in the recovery-region application and dependencies from the same reviewed infrastructure source."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-requirement:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "dr_46",
+      "stepNumber": 46,
+      "phase": "Provision, protect, and prove recovery",
+      "title": "Keep independent recovery points in a backup vault",
+      "type": "add_component",
+      "content": "Backups are a separate recovery path from live replication: replication can faithfully copy deletion, corruption, or an unwanted write. Store protected database recovery points and required object versions under a separately controlled retention policy. The brief does not supply backup cadence or retention duration.",
+      "component": {
+        "nodeId": "dr_backup_vault",
+        "componentType": "cold-storage",
+        "label": "Protected Cross-Region Backup Vault",
+        "description": "Independent recovery points for database and object restore",
+        "position": {"x": 1440, "y": 520},
+        "properties": {
+          "componentName": "Protected Cross-Region Backup Vault",
+          "purpose": "Retain independently protected database recovery points and required object versions in the recovery region; set retention, access isolation, and lifecycle only after business and compliance requirements are confirmed."
+        },
+        "highlightReason": "The existing Cold Storage catalog type represents the backup/archive destination; no retention period is invented."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "dr_47",
+      "stepNumber": 47,
+      "phase": "Provision, protect, and prove recovery",
+      "title": "Protect database recovery points independently of replication",
+      "type": "add_connection",
+      "content": "Copy or retain database recovery points so an operator can recover from logical corruption as well as region loss. Verify that encryption keys and the documented restore permissions are usable from the recovery environment.",
+      "connection": {
+        "edgeId": "primary_db_to_backup_vault",
+        "sourceNodeId": "dr_primary_db",
+        "targetNodeId": "dr_backup_vault",
+        "connectionType": "data-flow",
+        "label": "Protected database recovery points",
+        "description": "Store independently recoverable database backups/PITR material in the protected recovery vault; do not treat the live replica as the only backup."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8"]
+    },
+    {
+      "id": "dr_48",
+      "stepNumber": 48,
+      "phase": "Provision, protect, and prove recovery",
+      "title": "Protect object versions needed by restore procedures",
+      "type": "add_connection",
+      "content": "Include the object versions and metadata needed to rebuild database references; test deletion and corruption recovery, not only the happy-path copy of a new object.",
+      "connection": {
+        "edgeId": "primary_s3_to_backup_vault",
+        "sourceNodeId": "dr_primary_s3",
+        "targetNodeId": "dr_backup_vault",
+        "connectionType": "data-flow",
+        "label": "Protected object recovery points",
+        "description": "Retain required object versions and recovery metadata independently from the live Cross-Region Replication destination."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:4"]
+    },
+    {
+      "id": "dr_49",
+      "stepNumber": 49,
+      "phase": "Provision, protect, and prove recovery",
+      "title": "Add a repeatable restore and failover test suite",
+      "type": "add_component",
+      "content": "Run restore and regional failover exercises in an isolated test environment with production-like dependencies and representative data checks. Tests must measure elapsed recovery time and recovered data position, not merely confirm that a backup job completed.",
+      "component": {
+        "nodeId": "dr_restore_tests",
+        "componentType": "automated-testing",
+        "label": "DR Restore and Failover Exercises",
+        "description": "Repeatable validation of backups, recovery data, and service readiness",
+        "position": {"x": 1800, "y": 560},
+        "properties": {
+          "componentName": "Disaster Recovery Restore and Failover Tests",
+          "purpose": "In an isolated environment, restore database and object recovery points, validate representative records/checksums and application behavior, rehearse controlled regional failover/failback, and record measured RPO and RTO.",
+          "testTypes": "E2E",
+          "parallelExecution": true
+        },
+        "highlightReason": "The existing Automated Testing catalog type represents repeatable end-to-end restore and failover exercises."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "dr_50",
+      "stepNumber": 50,
+      "phase": "Provision, protect, and prove recovery",
+      "title": "Exercise backup restore rather than trusting job status",
+      "type": "add_connection",
+      "content": "The test suite consumes protected recovery points, restores them into an isolated target, checks data relationships and object checksums, and times the end-to-end path. Keep restore-test permissions isolated from production writes.",
+      "connection": {
+        "edgeId": "backup_vault_to_restore_tests",
+        "sourceNodeId": "dr_backup_vault",
+        "targetNodeId": "dr_restore_tests",
+        "connectionType": "data-flow",
+        "label": "Isolated restore-test input",
+        "description": "Restore protected database and object recovery points into a non-production test target and verify usable data."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "dr_51",
+      "stepNumber": 51,
+      "phase": "Provision, protect, and prove recovery",
+      "title": "Publish restore-test and objective results to monitoring",
+      "type": "add_connection",
+      "content": "A failed restore drill is an operational finding, not a green backup signal. Alert on failed or overdue exercises and retain the measured recovered point, duration, checksum results, and remediation owner.",
+      "connection": {
+        "edgeId": "restore_tests_to_monitoring",
+        "sourceNodeId": "dr_restore_tests",
+        "targetNodeId": "dr_monitoring",
+        "connectionType": "data-flow",
+        "label": "Measured recovery evidence",
+        "description": "Report restore results, recovered position, checksum/data validation, and measured RPO/RTO to cross-region monitoring."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "dr_52",
+      "stepNumber": 52,
+      "phase": "Provision, protect, and prove recovery",
+      "title": "Set backup cadence and retention with the data owner",
+      "type": "decision_point",
+      "content": "The brief requires regular backup and restore testing but does not define a schedule, retention duration, immutability control, or compliance class. Select those policies with the owner, then prove the selected recovery-point objective and restore duration with actual data volumes.",
+      "decision": {
+        "question": "Which backup schedule and retention policy should this design encode?",
+        "chosen": "Keep cadence, retention, and isolation as explicit discovery decisions until the business and compliance owners provide their requirements; automate recurring restore tests once agreed.",
+        "chosenReason": "Invented retention or drill intervals could violate policy or cost assumptions, while an untested backup does not satisfy recoverability.",
+        "alternatives": [
+          {
+            "option": "Copy the replication schedule and call it a backup policy",
+            "tradeoff": "Replication can copy deletion or corruption and does not provide an independent historical recovery point."
+          },
+          {
+            "option": "Hard-code a retention period without owner approval",
+            "tradeoff": "May conflict with compliance, legal hold, restore needs, and storage cost."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "dr_53",
+      "stepNumber": 53,
+      "phase": "Provision, protect, and prove recovery",
+      "title": "Rehearse the full failure envelope and record evidence",
+      "type": "explanation",
+      "content": "Exercise primary-region loss, database promotion, object-recovery gaps, unavailable monitoring paths, stale DNS clients, duplicate alarm delivery, and restore from an older independent recovery point. Record detection, fencing, promotion, readiness, traffic shift, recovered data position, and user-level validation separately so an overall pass cannot hide a failed sub-step."
+    },
+    {
+      "id": "dr_54",
+      "stepNumber": 54,
+      "phase": "Provision, protect, and prove recovery",
+      "title": "Fail back only after resynchronization and an approved handoff",
+      "type": "decision_point",
+      "content": "Recovery is not complete when the original region returns. Keep it fenced from writes, rebuild or resynchronize its data from the current writer, validate database and object recovery points, deploy the same approved configuration, and rehearse the reverse traffic shift. Do not automatically fail back merely because the former primary is healthy.",
+      "decision": {
+        "question": "When may service return to the original primary region?",
+        "chosen": "Only after data resynchronization, consistency checks, application readiness, and an approved controlled failback window; then switch the single writer and routing once.",
+        "chosenReason": "Controlled failback prevents stale writes from reappearing and ensures recovery operations are reversible and measured.",
+        "alternatives": [
+          {
+            "option": "Automatically route back as soon as the old region responds",
+            "tradeoff": "Can reintroduce stale data, split-brain writes, or a second outage during incomplete recovery."
+          },
+          {
+            "option": "Leave the recovery region active with no resynchronization plan",
+            "tradeoff": "The system can drift from its intended topology and remain vulnerable to another regional event."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:4"]
+    }
+  ]
+}

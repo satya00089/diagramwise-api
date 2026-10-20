@@ -1,0 +1,538 @@
+{
+  "problem_id": "6901ef1b9420d83630aca884",
+  "version": "1.0.0-review-draft",
+  "requirementRevision": null,
+  "totalSteps": 31,
+  "phases": [
+    {
+      "name": "Set the access contract and protect the entry point",
+      "stepRange": [1, 8],
+      "description": "Start from the live brief, mark assumptions, and route authenticated client traffic through abuse controls into the session authority."
+    },
+    {
+      "name": "Track leases and reserve a screen atomically",
+      "stepRange": [9, 14],
+      "description": "Keep subscription limits and active-session decisions in a strongly consistent per-account authority; make retries safe and leases explicit."
+    },
+    {
+      "name": "Publish lifecycle events and reclaim expired sessions",
+      "stepRange": [15, 21],
+      "description": "Publish events through a transactional outbox and make stop, timeout, and recovery cleanup idempotent."
+    },
+    {
+      "name": "Survive failure, detect abuse, and scale",
+      "stepRange": [22, 31],
+      "description": "Instrument the complete path, define safe partition behavior, bind sessions to devices, and size from measured heartbeat and contention rates."
+    }
+  ],
+  "steps": [
+    {
+      "id": "netflix_01_brief_and_assumptions",
+      "stepNumber": 1,
+      "phase": "Set the access contract and protect the entry point",
+      "type": "explanation",
+      "title": "Read the live brief and separate facts from assumptions",
+      "content": "Live problem: Netflix: Limit the Number of Screens Each User Can Watch. Description: Design a system to enforce concurrent streaming limits per user account. Requirements from the stored problem: Track active streaming sessions per account; Enforce screen limits (e.g., 2, 4 screens); Handle session start and stop events; Gracefully handle edge cases (network issues); Support different subscription tiers; Real-time session monitoring; Handle millions of concurrent users; Session timeout and cleanup. Constraints: Low latency for session validation; Handle network partitions; Prevent race conditions; Accurate concurrent session counting; Handle session hijacking attempts. Hints (helpful prompts, not new requirements): Distributed session store (Redis); Heartbeat mechanism for active sessions; TTL for session expiration; Distributed locks for session limit enforcement; Event-driven session lifecycle. Counting policy for this design: one committed, unexpired playback authorization (identified by account ID and unique session ID, and bound to a registered device) consumes one screen slot. A device, profile, open app, or network connection alone is not a screen; two concurrent playback sessions on one device count separately, while retries/reconnects with the same idempotency and session IDs do not add another slot. Whether paused/buffering playback, casting, offline downloads, or multiple players on one device count differently is a product policy the brief leaves open. The slot is reserved only on commit and released only by one successful terminal lease transition. Design assumptions, not supplied targets: each account has one home region that owns its screen counter; a strongly consistent transaction store is authoritative; starting a session fails closed when that authority cannot be reached; existing playback may continue only under an unexpired signed lease. Use an illustrative heartbeat every 30 seconds and a 90-second lease expiry as tunable starting values, not requirements or guarantees. The brief gives no exact latency SLO, availability target, tier table, device-proof capability, or grace window; confirm these with product owners before launch. A Redis lock may be an optimization, never the correctness boundary.",
+      "requirementIds": []
+    },
+    {
+      "id": "netflix_02_client",
+      "stepNumber": 2,
+      "phase": "Set the access contract and protect the entry point",
+      "type": "add_component",
+      "title": "Add the streaming clients",
+      "content": "TV, web, and mobile clients request a start before playback, renew a lease with heartbeats, and submit an idempotent stop when playback ends. A client retry reuses its request ID so a lost response cannot consume a second screen. The client never decides whether a screen is available.",
+      "component": {
+        "nodeId": "netflix_clients",
+        "componentType": "web-app",
+        "label": "TV, Web & Mobile Clients",
+        "description": "Authenticated playback clients that start, renew, and stop account sessions",
+        "position": {"x": 0, "y": 280},
+        "properties": {
+          "componentName": "TV, Web & Mobile Clients",
+          "purpose": "Request playback authorization, retry with a stable idempotency key, renew a session lease, and stop playback; do not locally infer that an account has a free screen."
+        },
+        "highlightReason": "The existing Web App catalog component represents the client-side request lifecycle; TV and mobile are the same authenticated client role, not new infrastructure types."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4"]
+    },
+    {
+      "id": "netflix_03_gateway",
+      "stepNumber": 3,
+      "phase": "Set the access contract and protect the entry point",
+      "type": "add_component",
+      "title": "Add the authenticated session API boundary",
+      "content": "Expose start, heartbeat, stop, and session-status endpoints over TLS. Validate the caller's account token, request shape, timestamp, and idempotency key here; authorize a device against the account in the session service before any slot is reserved.",
+      "component": {
+        "nodeId": "netflix_gateway",
+        "componentType": "api-gateway",
+        "label": "Playback Session API Gateway",
+        "description": "Authenticated, validated entry point for session lifecycle requests",
+        "position": {"x": 300, "y": 280},
+        "properties": {
+          "componentName": "Playback Session API Gateway",
+          "purpose": "Terminate TLS, validate request shape and JWT identity, attach a request ID, and route start, heartbeat, stop, and status calls without deciding screen capacity.",
+          "inputValidation": true,
+          "authentication": "JWT"
+        },
+        "highlightReason": "The catalog API Gateway already supports JWT authentication and request validation, so no custom gateway node is needed."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "netflix_04_client_gateway",
+      "stepNumber": 4,
+      "phase": "Set the access contract and protect the entry point",
+      "type": "add_connection",
+      "title": "Send playback lifecycle calls to the API",
+      "content": "Clients use the same authenticated API for starts, renewals, and stops. Keep the request regional to the account's authoritative region to avoid an eventually replicated counter deciding whether playback is allowed.",
+      "connection": {
+        "edgeId": "netflix_clients_gateway",
+        "sourceNodeId": "netflix_clients",
+        "targetNodeId": "netflix_gateway",
+        "connectionType": "http",
+        "label": "TLS start, heartbeat & stop",
+        "description": "Authenticated clients send idempotent session lifecycle requests to the account's home-region API."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "netflix_05_rate_limiter",
+      "stepNumber": 5,
+      "phase": "Set the access contract and protect the entry point",
+      "type": "add_component",
+      "title": "Add distributed request-abuse controls",
+      "content": "Throttle suspicious start and credential-guessing bursts by account, device credential, and source signals. Calibrate thresholds from observed client behavior; do not use an IP address alone as a device identity or set an arbitrary product quota from this brief.",
+      "component": {
+        "nodeId": "netflix_rate_limiter",
+        "componentType": "rate-limiter",
+        "label": "Session Abuse Rate Limiter",
+        "description": "Distributed throttling for anomalous session starts and credential abuse",
+        "position": {"x": 600, "y": 80},
+        "properties": {
+          "componentName": "Session Abuse Rate Limiter",
+          "purpose": "Apply distributed per-account and per-device abuse controls to session starts and authentication attempts; tune thresholds from telemetry and never use an IP address as the sole device identity.",
+          "algorithm": "Token Bucket",
+          "distributed": true
+        },
+        "highlightReason": "The existing Rate Limiter catalog component covers distributed throttling; its threshold remains a measured policy rather than an invented brief value."
+      },
+      "requirementIds": ["legacy-constraint:5"]
+    },
+    {
+      "id": "netflix_06_gateway_limiter",
+      "stepNumber": 6,
+      "phase": "Set the access contract and protect the entry point",
+      "type": "add_connection",
+      "title": "Screen abusive requests before session coordination",
+      "content": "The gateway forwards authenticated requests through the limiter. Rejected bursts do not reach the per-account transactional state path, while legitimate heartbeat renewals remain within a measured policy.",
+      "connection": {
+        "edgeId": "netflix_gateway_limiter",
+        "sourceNodeId": "netflix_gateway",
+        "targetNodeId": "netflix_rate_limiter",
+        "connectionType": "api-call",
+        "label": "Abuse and velocity checks",
+        "description": "Apply distributed request controls to suspicious starts and authentication attempts before business-state work."
+      },
+      "requirementIds": ["legacy-constraint:5"]
+    },
+    {
+      "id": "netflix_07_session_service",
+      "stepNumber": 7,
+      "phase": "Set the access contract and protect the entry point",
+      "type": "add_component",
+      "title": "Add the session authority service",
+      "content": "This service validates account and device authorization, reads the tier limit, atomically reserves or renews a session, and issues a signed playback lease only after the authoritative write succeeds. Horizontally scale stateless instances; serialize only conflicting updates for the same account.",
+      "component": {
+        "nodeId": "netflix_session_service",
+        "componentType": "backend-server",
+        "label": "Playback Session Coordinator",
+        "description": "Session authorization, per-account capacity decisions, and lease issuance",
+        "position": {"x": 930, "y": 280},
+        "properties": {
+          "componentName": "Playback Session Coordinator",
+          "purpose": "Authorize account and device identity, enforce the subscription screen cap in the authoritative store, make lifecycle retries idempotent, and issue signed playback leases only after a committed reservation.",
+          "architecture": "Microservices"
+        },
+        "highlightReason": "The catalog Backend Server represents the domain service; per-account transaction semantics live in the database, not in an invented node type."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "netflix_08_limiter_service",
+      "stepNumber": 8,
+      "phase": "Set the access contract and protect the entry point",
+      "type": "add_connection",
+      "title": "Forward permitted calls to the coordinator",
+      "content": "Only validated, permitted requests reach session business logic. The service still verifies the signed account claims, device binding, ownership, and lease state; gateway authentication is not a substitute for authorization.",
+      "connection": {
+        "edgeId": "netflix_limiter_service",
+        "sourceNodeId": "netflix_rate_limiter",
+        "targetNodeId": "netflix_session_service",
+        "connectionType": "api-call",
+        "label": "Allowed lifecycle requests",
+        "description": "Permitted requests reach the coordinator for account, device, tier, and session-state authorization."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "netflix_09_authoritative_store",
+      "stepNumber": 9,
+      "phase": "Track leases and reserve a screen atomically",
+      "type": "add_component",
+      "title": "Add the authoritative tier and session store",
+      "content": "Keep the account's tier limit, active-session count/version, idempotency outcomes, per-session lease records, and transactional outbox under an account-keyed partition. A conditional transaction enforces the cap and writes a session plus its event intent together. The exact tier table and maximum number of supported screens are product inputs, not values to guess here.",
+      "component": {
+        "nodeId": "netflix_session_store",
+        "componentType": "database",
+        "label": "Account Tier & Session Authority (DynamoDB)",
+        "description": "Strongly consistent per-account limits, session leases, idempotency, and transactional outbox",
+        "position": {"x": 1260, "y": 280},
+        "properties": {
+          "componentName": "Account Tier & Session Authority (DynamoDB)",
+          "purpose": "Authoritative home-region NoSQL state keyed by accountId: tier screen cap, active count/version, session lease records, idempotency outcomes, and transactional outbox. Use strongly consistent reads and conditional transactions; do not use asynchronous cross-region replicas or cache state to authorize starts.",
+          "type": "NoSQL",
+          "engine": "dynamodb",
+          "workload": "OLTP",
+          "sharding": "Hash-based"
+        },
+        "highlightReason": "The catalog Database supports DynamoDB, NoSQL, OLTP, and hash-based partitioning. A transactional conditional write is the correctness boundary for race-free capacity enforcement."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "netflix_10_service_store",
+      "stepNumber": 10,
+      "phase": "Track leases and reserve a screen atomically",
+      "type": "add_connection",
+      "title": "Make the per-account capacity decision transactionally",
+      "content": "For a start, strongly read the current tier and active lease state. If the account has leases whose authoritative expiry has passed, conditionally terminalize those specific leases and decrement their slots, then re-read the state. Reserve with an expected version/count condition: the account remains below its current cap, the request ID has not already succeeded, the session ID is unused, and the session plus outbox intent are written atomically. Two starts competing for the final slot serialize on the same account version: at most one reservation commits, and the loser rereads and is denied if the cap is full. Duplicate retries with the same idempotency key return the original outcome. Stop, expiry, and revocation race on the lease state/version; only one terminal transition decrements the count. If the authority is unreachable or a partition makes its answer uncertain, reject new starts rather than guess from stale cache state.",
+      "connection": {
+        "edgeId": "netflix_service_store",
+        "sourceNodeId": "netflix_session_service",
+        "targetNodeId": "netflix_session_store",
+        "connectionType": "database-connection",
+        "label": "Strong reads + conditional session transaction",
+        "description": "The per-account conditional transaction atomically checks tier capacity, deduplicates retries, creates or renews a lease, and records the outbox intent."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "netflix_11_store_result",
+      "stepNumber": 11,
+      "phase": "Track leases and reserve a screen atomically",
+      "type": "add_connection",
+      "title": "Return the committed authorization result",
+      "content": "Return the stored outcome for duplicate idempotency keys and an explicit capacity denial when the limit is full. Never issue a playback lease from a speculative read or from an uncommitted reservation.",
+      "connection": {
+        "edgeId": "netflix_store_service_result",
+        "sourceNodeId": "netflix_session_store",
+        "targetNodeId": "netflix_session_service",
+        "connectionType": "database-connection",
+        "label": "Committed lease or capacity denial",
+        "description": "The coordinator receives the authoritative transaction result, including an idempotent replay of the original outcome."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "netflix_12_service_client_lease",
+      "stepNumber": 12,
+      "phase": "Track leases and reserve a screen atomically",
+      "type": "add_connection",
+      "title": "Return a short-lived playback lease only after commit",
+      "content": "On success, return a signed, short-lived lease bound to account, session, and device identity; on denial, return a clear screen-limit response. The client can retry the same start request safely after a timeout.",
+      "connection": {
+        "edgeId": "netflix_service_client_lease",
+        "sourceNodeId": "netflix_session_service",
+        "targetNodeId": "netflix_clients",
+        "connectionType": "http",
+        "label": "Signed lease or limit response",
+        "description": "Only a committed session reservation yields a playback lease; rejected or uncertain starts do not grant another screen."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "netflix_13_session_algorithm",
+      "stepNumber": 13,
+      "phase": "Track leases and reserve a screen atomically",
+      "type": "explanation",
+      "title": "Use one serialization point per account, not a best-effort lock",
+      "content": "The database condition or transaction serializes competing starts for one account while different account partitions proceed independently. A Redis lock can reduce contention only if correctness still comes from the transaction; lock expiry, failover, or a network split must never allow a second committed reservation. If the selected store cannot provide the needed conditional transaction and durability semantics, select a different authoritative store before implementation.",
+      "requirementIds": []
+    },
+    {
+      "id": "netflix_14_lease_policy",
+      "stepNumber": 14,
+      "phase": "Track leases and reserve a screen atomically",
+      "type": "explanation",
+      "title": "Renew, expire, and stop leases without counting stale sessions",
+      "content": "Treat a lease as active only while its authoritative expiry is in the future. As an explicit initial assumption, renew every 30 seconds and set a 90-second lease; validate these values against observed heartbeat loss, reconnect time, and playback UX. Heartbeat writes are idempotent and extend only an existing, correctly bound session. A stale or missing session cannot be revived by a heartbeat alone; the client must run the normal start flow. Store TTL may reclaim old records later, but TTL timing is asynchronous and must not decide whether a screen is available.",
+      "requirementIds": []
+    },
+    {
+      "id": "netflix_15_outbox_relay",
+      "stepNumber": 15,
+      "phase": "Publish lifecycle events and reclaim expired sessions",
+      "type": "add_component",
+      "title": "Add a transactional outbox relay",
+      "content": "Poll committed outbox records and publish lifecycle events with stable event IDs. Mark an outbox row delivered only after broker acknowledgment; replay is expected, so consumers must deduplicate. This avoids a database/broker dual-write gap on the session path.",
+      "component": {
+        "nodeId": "netflix_outbox_relay",
+        "componentType": "backend-server",
+        "label": "Session Outbox Relay",
+        "description": "Publishes committed session lifecycle events with retry and deduplication",
+        "position": {"x": 1580, "y": 80},
+        "properties": {
+          "componentName": "Session Outbox Relay",
+          "purpose": "Read transactional outbox records from the authoritative store, publish events with stable IDs, retry broker failures, and mark delivery only after acknowledgment; tolerate duplicate publication."
+        },
+        "highlightReason": "The existing Backend Server is sufficient for an outbox relay; publication is a worker role, not a missing catalog primitive."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:8"]
+    },
+    {
+      "id": "netflix_16_store_outbox",
+      "stepNumber": 16,
+      "phase": "Publish lifecycle events and reclaim expired sessions",
+      "type": "add_connection",
+      "title": "Read only committed outbox events",
+      "content": "The relay sees an event only after the same transaction that accepted or ended a session committed. This keeps asynchronous monitoring and lifecycle consumers off the low-latency playback decision path.",
+      "connection": {
+        "edgeId": "netflix_store_outbox_relay",
+        "sourceNodeId": "netflix_session_store",
+        "targetNodeId": "netflix_outbox_relay",
+        "connectionType": "data-flow",
+        "label": "Committed lifecycle outbox",
+        "description": "The relay polls durable start, stop, renewal, and expiry intents created atomically with authoritative session state."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:8"]
+    },
+    {
+      "id": "netflix_17_event_bus",
+      "stepNumber": 17,
+      "phase": "Publish lifecycle events and reclaim expired sessions",
+      "type": "add_component",
+      "title": "Add the durable session lifecycle event bus",
+      "content": "Partition lifecycle events by account ID so events for one account can be processed in order where needed. Retain events long enough for consumer recovery; choose retention and partition count from measured event rate and replay objectives.",
+      "component": {
+        "nodeId": "netflix_session_bus",
+        "componentType": "message-broker",
+        "label": "Session Lifecycle Event Bus",
+        "description": "Durable, replayable session events partitioned by account",
+        "position": {"x": 1900, "y": 80},
+        "properties": {
+          "componentName": "Session Lifecycle Event Bus",
+          "purpose": "Carry durable session-start, stop, renewal, and expiry events keyed by accountId for lifecycle consumers and monitoring; size partitions and retention from measured rates and replay needs.",
+          "durable": true
+        },
+        "highlightReason": "The existing Message Broker catalog component covers durable lifecycle pub/sub; no custom event-bus node is needed."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "netflix_18_relay_bus",
+      "stepNumber": 18,
+      "phase": "Publish lifecycle events and reclaim expired sessions",
+      "type": "add_connection",
+      "title": "Publish outbox events for asynchronous consumers",
+      "content": "The relay publishes each committed event at least once. Include account ID, session ID, event ID, state version, event time, and expiry; do not include bearer tokens or device secrets.",
+      "connection": {
+        "edgeId": "netflix_relay_bus",
+        "sourceNodeId": "netflix_outbox_relay",
+        "targetNodeId": "netflix_session_bus",
+        "connectionType": "message-queue",
+        "label": "At-least-once lifecycle events",
+        "description": "Stable event IDs and account-keyed ordering support replay-safe downstream processing without putting consumers on the authorization path."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:8"]
+    },
+    {
+      "id": "netflix_19_lifecycle_worker",
+      "stepNumber": 19,
+      "phase": "Publish lifecycle events and reclaim expired sessions",
+      "type": "add_component",
+      "title": "Add the timeout and reconciliation worker",
+      "content": "Consume lifecycle events, reconcile missed stops, and find leases that have passed their expiry. Before freeing capacity, conditionally transition the specific session from active to expired and decrement once; use event IDs/version checks to make retries safe. Alert and reconcile if the stored count disagrees with active lease records.",
+      "component": {
+        "nodeId": "netflix_lifecycle_worker",
+        "componentType": "backend-server",
+        "label": "Session Timeout & Reconciliation Worker",
+        "description": "Idempotent session expiry, missed-stop recovery, and active-count reconciliation",
+        "position": {"x": 2220, "y": 280},
+        "properties": {
+          "componentName": "Session Timeout & Reconciliation Worker",
+          "purpose": "Consume lifecycle events, expire leases after their authoritative deadline, process stop retries idempotently, and reconcile active counts against session records without trusting asynchronous TTL deletion."
+        },
+        "highlightReason": "The existing Backend Server component represents background lifecycle processing; durable scheduling is provided by the catalog Message Broker."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "netflix_20_bus_worker",
+      "stepNumber": 20,
+      "phase": "Publish lifecycle events and reclaim expired sessions",
+      "type": "add_connection",
+      "title": "Deliver lifecycle events to replay-safe consumers",
+      "content": "Consumers checkpoint only after durable processing and deduplicate event IDs. A delayed consumer affects monitoring and cleanup freshness, not the authoritative result of a new start.",
+      "connection": {
+        "edgeId": "netflix_bus_lifecycle_worker",
+        "sourceNodeId": "netflix_session_bus",
+        "targetNodeId": "netflix_lifecycle_worker",
+        "connectionType": "message-queue",
+        "label": "Replayable session events",
+        "description": "The worker consumes start, stop, renewal, and expiry events with idempotent event-ID handling."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:8"]
+    },
+    {
+      "id": "netflix_21_worker_store",
+      "stepNumber": 21,
+      "phase": "Publish lifecycle events and reclaim expired sessions",
+      "type": "add_connection",
+      "title": "Reclaim capacity through a conditional state transition",
+      "content": "A stop or expiry worker update includes the expected session state/version and expiry. Only the winner changes active to terminal and decrements the account count; duplicate events are acknowledged without a second decrement. A network partition leaves uncertain capacity reserved until the authority recovers rather than over-admitting a new screen.",
+      "connection": {
+        "edgeId": "netflix_worker_store",
+        "sourceNodeId": "netflix_lifecycle_worker",
+        "targetNodeId": "netflix_session_store",
+        "connectionType": "database-connection",
+        "label": "Conditional stop, expiry & reconciliation",
+        "description": "Expected-state writes make cleanup idempotent and preserve accurate per-account counts across retries and partitions."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "netflix_22_monitoring",
+      "stepNumber": 22,
+      "phase": "Survive failure, detect abuse, and scale",
+      "type": "add_component",
+      "title": "Add end-to-end session health monitoring",
+      "content": "Track request latency and errors, transaction conflicts/retries, full-limit denials, active sessions by tier, heartbeat lateness, outbox age, broker lag, expiry backlog, count-reconciliation drift, authentication failures, and rate-limit decisions. Alert on user-visible lease/start SLOs after owners define them.",
+      "component": {
+        "nodeId": "netflix_monitoring",
+        "componentType": "monitoring",
+        "label": "Session Health & Abuse Monitoring",
+        "description": "Metrics, traces, and alerts for authorization, lease correctness, cleanup, and abuse",
+        "position": {"x": 2540, "y": 500},
+        "properties": {
+          "componentName": "Session Health & Abuse Monitoring",
+          "purpose": "Correlate account/session/request IDs and measure start and heartbeat latency, transaction conflicts, active-count drift, late leases, outbox age, consumer lag, expiry backlog, abuse signals, and failures without logging tokens or secrets.",
+          "stack": "CloudWatch",
+          "metrics": true
+        },
+        "highlightReason": "The existing Monitoring catalog component covers metrics and alerting. The problem supplies no numeric latency or availability SLO, so set alerts only after those targets are agreed."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "netflix_23_service_metrics",
+      "stepNumber": 23,
+      "phase": "Survive failure, detect abuse, and scale",
+      "type": "add_connection",
+      "title": "Observe authorization and per-account contention",
+      "content": "Emit latency histograms and outcomes for starts, renewals, stops, conditional conflicts, retries, denials, and device-proof failures. Use privacy-safe identifiers and never record signed playback tokens.",
+      "connection": {
+        "edgeId": "netflix_service_monitoring",
+        "sourceNodeId": "netflix_session_service",
+        "targetNodeId": "netflix_monitoring",
+        "connectionType": "data-flow",
+        "label": "Authorization and lease metrics",
+        "description": "Service telemetry exposes tail latency, transaction contention, outcomes, and safe device-abuse signals."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "netflix_24_store_metrics",
+      "stepNumber": 24,
+      "phase": "Survive failure, detect abuse, and scale",
+      "type": "add_connection",
+      "title": "Watch authority saturation and count correctness",
+      "content": "Monitor consumed capacity, throttling, transaction cancellations, hot account keys, read/write latency, and reconciliation drift. Scale across account partitions while treating a single very active account as a serialized hot key that needs explicit contention handling.",
+      "connection": {
+        "edgeId": "netflix_store_monitoring",
+        "sourceNodeId": "netflix_session_store",
+        "targetNodeId": "netflix_monitoring",
+        "connectionType": "data-flow",
+        "label": "Store capacity and invariant metrics",
+        "description": "Measure database pressure, per-account hot spots, conditional conflicts, and authoritative session-count drift."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "netflix_25_bus_metrics",
+      "stepNumber": 25,
+      "phase": "Survive failure, detect abuse, and scale",
+      "type": "add_connection",
+      "title": "Alert on delayed events and cleanup backlog",
+      "content": "Measure publish retries, oldest outbox age, broker lag, duplicate-event rate, expiry backlog, and cleanup delay. These are asynchronous freshness signals; they must not silently change the synchronous slot decision.",
+      "connection": {
+        "edgeId": "netflix_bus_monitoring",
+        "sourceNodeId": "netflix_session_bus",
+        "targetNodeId": "netflix_monitoring",
+        "connectionType": "data-flow",
+        "label": "Outbox, event lag & cleanup freshness",
+        "description": "Operational signals reveal delayed lifecycle consumers while keeping async event processing separate from authorization."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:8"]
+    },
+    {
+      "id": "netflix_26_partition_policy",
+      "stepNumber": 26,
+      "phase": "Survive failure, detect abuse, and scale",
+      "type": "explanation",
+      "title": "Make network partitions fail safe and recover deliberately",
+      "content": "Route each account's writes to one home region. If the coordinator cannot reach that region's authoritative store, fail new starts and renewals that cannot be safely confirmed; do not fall back to a stale replica, local counter, or expiring distributed lock. A client may keep playing only until its already-issued, device-bound lease expires. Promote another region only after fencing the previous writer and reconciling state; active-active asynchronous replication is not sufficient for an exact screen cap. Idempotency keys let clients retry after connectivity returns.",
+      "requirementIds": []
+    },
+    {
+      "id": "netflix_27_hijack_policy",
+      "stepNumber": 27,
+      "phase": "Survive failure, detect abuse, and scale",
+      "type": "explanation",
+      "title": "Bind playback authorization to an account and device",
+      "content": "Validate JWT issuer, audience, expiry, and account identity; authorize the registered device for that account; bind each lease to account ID, session ID, device credential/key ID, and expiry; rotate heartbeat credentials and support explicit revocation. On revocation, first mark the lease revoking and reject renewals; keep its slot counted until the playback enforcement point confirms stop or the issued lease expires, then conditionally mark it terminal and decrement once. Publish a versioned revocation event for enforcement. A self-contained signed lease cannot be recalled offline, so immediate cutoff requires an online revocation check; otherwise cutoff is bounded by lease expiry. The brief does not specify which behavior or grace window to promise. Prefer proof-of-possession for capable clients, protect refresh credentials in platform secure storage, and combine anomaly detection with step-up/re-authentication. Do not treat source IP as device identity, and redact bearer tokens from logs. Confirm device-proof support across TV clients as an open product assumption.",
+      "requirementIds": []
+    },
+    {
+      "id": "netflix_28_tier_change_policy",
+      "stepNumber": 28,
+      "phase": "Survive failure, detect abuse, and scale",
+      "type": "explanation",
+      "title": "Serialize tier changes with session starts",
+      "content": "Store the current tier limit and its version in the same per-account authority as the active count. A tier downgrade and a concurrent start must contend on that account state; after downgrade, apply an explicit policy (for example, deny new starts until active sessions fall below the new cap, then optionally terminate selected sessions). The brief does not choose which existing session to end or whether to grandfather it, so obtain that policy rather than silently inventing it.",
+      "requirementIds": []
+    },
+    {
+      "id": "netflix_29_scale_trigger",
+      "stepNumber": 29,
+      "phase": "Survive failure, detect abuse, and scale",
+      "type": "scale_trigger",
+      "title": "Size heartbeat capacity from measured active streams",
+      "content": "Estimate heartbeat writes as active streams divided by heartbeat interval, then add start/stop bursts, retries, regional skew, and cleanup traffic. For illustration only, one million active streams renewing every 30 seconds imply about 33,000 heartbeat renewals per second before retries and other lifecycle traffic. Benchmark transaction cost and hot-account contention, load-test the authority, and set autoscaling/partition thresholds from production distributions rather than treating that illustration as a forecast.",
+      "scaleTrigger": {
+        "metric": "Heartbeat writes per second, conditional-transaction conflict rate, and hottest-account request rate",
+        "action": "Scale stateless coordinators and database capacity across account-key partitions; apply bounded retries and backpressure to hot accounts",
+        "impact": "Sustains the brief's millions-of-concurrent-users goal without weakening the single-account screen-count invariant"
+      },
+      "requirementIds": []
+    },
+    {
+      "id": "netflix_30_start_flow",
+      "stepNumber": 30,
+      "phase": "Survive failure, detect abuse, and scale",
+      "type": "explanation",
+      "title": "Walk one playback start end to end",
+      "content": "(1) A client sends an authenticated start with account, registered-device proof, session ID, and idempotency key. (2) The gateway validates identity and request shape; abuse controls screen suspicious traffic. (3) The coordinator reads the current tier and lease state from the account's home region. (4) A conditional transaction reserves capacity, writes the lease, records the idempotent result, and appends an outbox event. (5) Only after commit does the service return a signed lease. (6) The relay publishes the event; consumers update monitoring asynchronously. If the transaction times out ambiguously, retry the same key and return the stored outcome rather than creating a second slot.",
+      "requirementIds": []
+    },
+    {
+      "id": "netflix_31_failure_review",
+      "stepNumber": 31,
+      "phase": "Survive failure, detect abuse, and scale",
+      "type": "explanation",
+      "title": "Review failure paths before claiming the design is complete",
+      "content": "Exercise simultaneous starts at the last available screen, duplicate start/stop requests, a lost commit response, a delayed heartbeat, a client network partition, store throttling, region failover before and after fencing, duplicate/out-of-order events, delayed TTL deletion, a tier downgrade during playback, revoked device credentials, and a hijacked lease replay. The invariant is that no path grants more committed active sessions than the authoritative tier cap. The low-latency target, acceptable start-denial behavior during outages, lease grace, tier-downgrade behavior, and device proof policy still need owner decisions.",
+      "requirementIds": []
+    }
+  ]
+}

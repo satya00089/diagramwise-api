@@ -1,0 +1,715 @@
+{
+  "problem_id": "6901ef1b9420d83630aca872",
+  "version": "1.0.0-review-draft",
+  "totalSteps": 47,
+  "phases": [
+    {
+      "name": "Frame user goals, assumptions, and scope",
+      "stepRange": [1, 3],
+      "description": "Establish the marketplace boundary and make unspecified product and workload choices visible."
+    },
+    {
+      "name": "Place the client, entry, and listing/search components",
+      "stepRange": [4, 12],
+      "description": "Add the client, request controls, listing system, search path, cache, and image store."
+    },
+    {
+      "name": "Complete delivery, communication, and operations components",
+      "stepRange": [13, 19],
+      "description": "Add image delivery, conversations, durable events, notifications, ratings, and observability."
+    },
+    {
+      "name": "Wire listing, search, location, and trust paths",
+      "stepRange": [20, 32],
+      "description": "Connect authenticated listing writes, asynchronous indexing, cached browse, and reviews."
+    },
+    {
+      "name": "Wire images and conversations, then review scale and open questions",
+      "stepRange": [33, 47],
+      "description": "Connect direct image delivery and real-time messaging, then identify scale triggers and decisions still needed."
+    }
+  ],
+  "steps": [
+    {
+      "id": "marketplace_scope",
+      "stepNumber": 1,
+      "phase": "Frame user goals, assumptions, and scope",
+      "title": "Start with the buyer and seller journeys",
+      "type": "explanation",
+      "content": "The design covers listing creation, discovery, local search, image galleries, buyer-seller conversations, and reviews. Payment processing is not in the frozen requirements, so do not silently add checkout or escrow to this design."
+    },
+    {
+      "id": "marketplace_boundary_decision",
+      "stepNumber": 2,
+      "phase": "Frame user goals, assumptions, and scope",
+      "title": "Choose logical service boundaries without assuming deployment topology",
+      "type": "decision_point",
+      "content": "Treat the responsibilities below as logical boundaries first. They can begin as a modular deployment and be separated when ownership, load, or release needs justify the operational cost.",
+      "decision": {
+        "question": "Should this walkthrough assume one deployable service or independently operated microservices?",
+        "chosen": "Model listing, messaging, and reviews as logical services; leave deployment boundaries open",
+        "chosenReason": "The brief gives no team structure, traffic profile, or operational maturity from which to justify a fixed microservice topology.",
+        "alternatives": [
+          {
+            "option": "One modular application",
+            "tradeoff": "Simpler operations and transactions, with fewer independent scaling and release boundaries."
+          },
+          {
+            "option": "Independently deployed service per responsibility",
+            "tradeoff": "Independent scaling and ownership, at the cost of distributed transactions, more failure modes, and operational overhead."
+          }
+        ]
+      }
+    },
+    {
+      "id": "marketplace_assumptions",
+      "stepNumber": 3,
+      "phase": "Frame user goals, assumptions, and scope",
+      "title": "Separate assumptions from unresolved product questions",
+      "type": "explanation",
+      "content": "Assumptions: Facebook already provides a user identity/session that the marketplace can validate; listing images can be uploaded directly to object storage using short-lived upload authorization; and location search uses user-approved listing and query locations. Open questions: expected read/write traffic and growth curve, location precision and radius rules, listing moderation/reporting policy, image limits and retention, message delivery/read semantics, review eligibility, and privacy/deletion requirements. These are not supplied targets."
+    },
+    {
+      "id": "marketplace_web_client",
+      "stepNumber": 4,
+      "phase": "Place the client, entry, and listing/search components",
+      "title": "Add the buyer and seller client",
+      "type": "add_component",
+      "content": "Use the existing Web App catalog component for listing forms, browse and filter controls, image galleries, conversations, and reviews. Keep client behavior presentation-focused; the server remains authoritative for identity, permissions, and listing state.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:8"],
+      "component": {
+        "nodeId": "marketplace_web_client",
+        "componentType": "web-app",
+        "label": "Marketplace Web App",
+        "description": "Buyer and seller experience for listing, discovery, images, conversations, and reviews.",
+        "position": {"x": 0, "y": 180},
+        "properties": {
+          "componentName": "Marketplace Web App",
+          "purpose": "Lets buyers and sellers create and browse listings, use location and category filters, view image galleries, message each other, and submit eligible reviews."
+        },
+        "highlightReason": "Reuses the catalog Web App for the browser client; no marketplace-specific client node is needed."
+      }
+    },
+    {
+      "id": "marketplace_api_gateway",
+      "stepNumber": 5,
+      "phase": "Place the client, entry, and listing/search components",
+      "title": "Add the API entry and validation boundary",
+      "type": "add_component",
+      "content": "Route marketplace API operations through the existing API Gateway component. Validate request shape and authenticate the platform-issued identity before a service performs a state change.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:2"],
+      "component": {
+        "nodeId": "marketplace_api_gateway",
+        "componentType": "api-gateway",
+        "label": "Marketplace API Gateway",
+        "description": "Validates and routes listing, discovery, messaging, and review requests.",
+        "position": {"x": 260, "y": 180},
+        "properties": {
+          "componentName": "Marketplace API Gateway",
+          "purpose": "Validates marketplace requests, applies coarse edge controls, and routes operations to the responsible logical service.",
+          "inputValidation": true,
+          "rateLimiting": true,
+          "tlsTermination": true
+        },
+        "highlightReason": "Uses the catalog API Gateway and only its declared validation, rate-limiting, and TLS properties."
+      }
+    },
+    {
+      "id": "marketplace_rate_limiter",
+      "stepNumber": 6,
+      "phase": "Place the client, entry, and listing/search components",
+      "title": "Add distributed abuse throttling",
+      "type": "add_component",
+      "content": "Use the catalog Rate Limiter to bound abusive listing, messaging, and review attempts by authenticated actor and network source. Keep actual quotas and exemptions policy-driven; the brief does not define safe numeric limits.",
+      "requirementIds": ["legacy-constraint:2"],
+      "component": {
+        "nodeId": "marketplace_rate_limiter",
+        "componentType": "rate-limiter",
+        "label": "Marketplace Abuse Rate Limiter",
+        "description": "Applies distributed, policy-driven limits to sensitive marketplace actions.",
+        "position": {"x": 520, "y": 180},
+        "properties": {
+          "componentName": "Marketplace Abuse Rate Limiter",
+          "purpose": "Throttles listing creation, contact attempts, and review submissions using actor and source context; the product team must set quotas from abuse and usability evidence.",
+          "algorithm": "Token Bucket",
+          "distributed": true,
+          "backend": "Redis"
+        },
+        "highlightReason": "The existing Rate Limiter catalog component directly models distributed request throttling; no custom component is required."
+      }
+    },
+    {
+      "id": "marketplace_identity",
+      "stepNumber": 7,
+      "phase": "Place the client, entry, and listing/search components",
+      "title": "Reuse platform identity and enforce marketplace authorization",
+      "type": "add_component",
+      "content": "Use the existing Auth Service catalog component as the integration boundary for platform identity and marketplace authorization. Do not create a second password system. Check listing ownership and conversation membership on every relevant operation.",
+      "requirementIds": ["legacy-constraint:2"],
+      "component": {
+        "nodeId": "marketplace_identity",
+        "componentType": "auth-service",
+        "label": "Platform Identity & Marketplace Authorization",
+        "description": "Validates platform identity and marketplace-scoped permissions.",
+        "position": {"x": 780, "y": 40},
+        "properties": {
+          "componentName": "Platform Identity & Marketplace Authorization",
+          "purpose": "Validates the existing platform session or signed identity and checks listing ownership, conversation membership, and review eligibility."
+        },
+        "highlightReason": "The catalog Auth Service fits the identity integration; Facebook identity is an explicit assumption, not a new custom node."
+      }
+    },
+    {
+      "id": "marketplace_listing_service",
+      "stepNumber": 8,
+      "phase": "Place the client, entry, and listing/search components",
+      "title": "Add listing lifecycle and ownership logic",
+      "type": "add_component",
+      "content": "Use the catalog Backend Server for listing creation, edits, status transitions, ownership checks, and canonical listing records. Publish a change event only after the durable listing update succeeds, using an outbox or equivalent reliable handoff.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7"],
+      "component": {
+        "nodeId": "marketplace_listing_service",
+        "componentType": "backend-server",
+        "label": "Listing & Seller Service",
+        "description": "Owns listing lifecycle, seller ownership, and canonical listing state.",
+        "position": {"x": 1040, "y": 180},
+        "properties": {
+          "componentName": "Listing & Seller Service",
+          "purpose": "Creates, validates, edits, and retires listings; enforces seller ownership and emits durable change events after committed writes."
+        },
+        "highlightReason": "Reuses the existing Backend Server for marketplace domain logic; no dedicated listing component exists in the catalog."
+      }
+    },
+    {
+      "id": "marketplace_listing_store",
+      "stepNumber": 9,
+      "phase": "Place the client, entry, and listing/search components",
+      "title": "Persist canonical listings and review records",
+      "type": "add_component",
+      "content": "Use the catalog Database for authoritative listing state, ownership, categories, and review records. Choose the engine, indexes, partitioning, and transactional boundaries from access-pattern and load tests; millions of listings alone is not a complete capacity specification.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-requirement:7"],
+      "component": {
+        "nodeId": "marketplace_listing_store",
+        "componentType": "database",
+        "label": "Marketplace Transaction Store",
+        "description": "Authoritative persistence for listing and review state.",
+        "position": {"x": 1320, "y": 180},
+        "properties": {
+          "componentName": "Marketplace Transaction Store",
+          "purpose": "Persists canonical listings, seller ownership, category references, and review state with transactional integrity; schema, engine, and partition strategy remain workload decisions."
+        },
+        "highlightReason": "The generic catalog Database supports the needed persistent data role without prematurely choosing a cloud vendor or engine."
+      }
+    },
+    {
+      "id": "marketplace_search_index",
+      "stepNumber": 10,
+      "phase": "Place the client, entry, and listing/search components",
+      "title": "Add text, category, filter, and location search",
+      "type": "add_component",
+      "content": "Use the catalog Search Engine for an asynchronously maintained browse index containing searchable listing text, category/filter fields, and a geo-capable location field. The index is derived data: the transaction store remains canonical, and stale or deleted records must be reconciled.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "marketplace_search_index",
+        "componentType": "search-engine",
+        "label": "Marketplace Search & Geo Index",
+        "description": "Indexes listing text, categories, filters, and location for browse queries.",
+        "position": {"x": 1580, "y": 340},
+        "properties": {
+          "componentName": "Marketplace Search & Geo Index",
+          "purpose": "Maintains derived full-text, category, filter, and geo-capable listing documents for browse queries; supports reindexing and reconciliation from canonical listing changes."
+        },
+        "highlightReason": "The catalog Search Engine covers indexing and structured/full-text queries; its existing type is appropriate for location-aware search without inventing a geo-specific component."
+      }
+    },
+    {
+      "id": "marketplace_browse_cache",
+      "stepNumber": 11,
+      "phase": "Place the client, entry, and listing/search components",
+      "title": "Add a cache for safe, repeatable browse reads",
+      "type": "add_component",
+      "content": "Use the catalog Cache for hot browse responses or listing summaries where stale data is acceptable. Key results by normalized filters and location scope, and avoid caching private conversation or authorization decisions across users.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "marketplace_browse_cache",
+        "componentType": "cache",
+        "label": "Browse Result Cache",
+        "description": "Caches eligible hot browse and listing-summary reads.",
+        "position": {"x": 1320, "y": 390},
+        "properties": {
+          "componentName": "Browse Result Cache",
+          "purpose": "Caches eligible public listing and browse results by normalized query, category, and location scope; excludes private messages and per-user authorization decisions.",
+          "engine": "redis",
+          "cacheStrategy": "cache-aside",
+          "inMemory": true
+        },
+        "highlightReason": "Uses the catalog Cache and its declared Redis/cache-aside properties; cache freshness remains a product and workload decision."
+      }
+    },
+    {
+      "id": "marketplace_image_store",
+      "stepNumber": 12,
+      "phase": "Place the client, entry, and listing/search components",
+      "title": "Store listing images as objects, not database blobs",
+      "type": "add_component",
+      "content": "Use the existing Object Storage component for original and derived listing images. Validate file type and size, scan uploads, and persist object references and moderation state with the listing; define retention and deletion behavior before launch.",
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:3"],
+      "component": {
+        "nodeId": "marketplace_image_store",
+        "componentType": "object-storage",
+        "label": "Listing Image Object Store",
+        "description": "Durable storage for validated listing originals and gallery renditions.",
+        "position": {"x": 1320, "y": 610},
+        "properties": {
+          "componentName": "Listing Image Object Store",
+          "purpose": "Stores listing-image originals and derived gallery renditions separately from transactional records, with integrity validation and policy-defined retention.",
+          "checksumValidation": true
+        },
+        "highlightReason": "The catalog Object Storage component directly models image blobs; no custom image-store node is necessary."
+      }
+    },
+    {
+      "id": "marketplace_cdn",
+      "stepNumber": 13,
+      "phase": "Complete delivery, communication, and operations components",
+      "title": "Deliver gallery images near viewers",
+      "type": "add_component",
+      "content": "Use the catalog CDN to deliver public or appropriately authorized image renditions. Keep private or removed images out of shared caches and make invalidation or versioned URLs part of the removal/moderation workflow.",
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:3"],
+      "component": {
+        "nodeId": "marketplace_cdn",
+        "componentType": "cdn",
+        "label": "Marketplace Image CDN",
+        "description": "Caches and delivers listing gallery renditions at the edge.",
+        "position": {"x": 1580, "y": 610},
+        "properties": {
+          "componentName": "Marketplace Image CDN",
+          "purpose": "Delivers listing image renditions close to viewers while respecting authorization, moderation removal, and cache invalidation rules."
+        },
+        "highlightReason": "The catalog CDN is the supported delivery component for galleries; its provider is intentionally unspecified."
+      }
+    },
+    {
+      "id": "marketplace_messaging_service",
+      "stepNumber": 14,
+      "phase": "Complete delivery, communication, and operations components",
+      "title": "Add authenticated buyer-seller conversations",
+      "type": "add_component",
+      "content": "Use the catalog Backend Server for conversation membership, message validation, and live delivery to connected participants. Authenticate the session, check that the actor belongs to the conversation, and persist before acknowledging durable message acceptance.",
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "marketplace_messaging_service",
+        "componentType": "backend-server",
+        "label": "Buyer-Seller Messaging Service",
+        "description": "Owns conversation authorization, durable message acceptance, and connected-client delivery.",
+        "position": {"x": 1040, "y": 470},
+        "properties": {
+          "componentName": "Buyer-Seller Messaging Service",
+          "purpose": "Checks conversation membership, persists accepted messages, and delivers updates to connected participants; offline delivery and retry semantics are explicit follow-up decisions."
+        },
+        "highlightReason": "Reuses the generic catalog Backend Server for messaging logic; the catalog has no dedicated chat node."
+      }
+    },
+    {
+      "id": "marketplace_conversation_store",
+      "stepNumber": 15,
+      "phase": "Complete delivery, communication, and operations components",
+      "title": "Persist conversation history",
+      "type": "add_component",
+      "content": "Use a catalog Database as the logical conversation store for ordered messages, membership references, and delivery state. Select partition keys, retention, and consistency semantics from conversation access patterns and privacy policy.",
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "marketplace_conversation_store",
+        "componentType": "database",
+        "label": "Conversation Message Store",
+        "description": "Persists conversation history and message delivery state.",
+        "position": {"x": 1320, "y": 470},
+        "properties": {
+          "componentName": "Conversation Message Store",
+          "purpose": "Persists messages in conversation order with membership and delivery metadata; partitioning, retention, and read consistency need workload and privacy decisions."
+        },
+        "highlightReason": "The existing Database catalog represents durable conversation history; no catalog-specific chat database is available or required."
+      }
+    },
+    {
+      "id": "marketplace_event_broker",
+      "stepNumber": 16,
+      "phase": "Complete delivery, communication, and operations components",
+      "title": "Add durable asynchronous domain events",
+      "type": "add_component",
+      "content": "Use the catalog Message Broker for listing-index updates and offline-message notification events. Use stable event IDs, idempotent consumers, bounded retries, and a dead-letter/replay procedure so a broker outage does not silently lose accepted work.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "marketplace_event_broker",
+        "componentType": "message-broker",
+        "label": "Marketplace Event Broker",
+        "description": "Carries durable listing-index and offline-message notification events.",
+        "position": {"x": 1580, "y": 470},
+        "properties": {
+          "componentName": "Marketplace Event Broker",
+          "purpose": "Carries listing-change and offline-message events to independent consumers with durable acceptance, idempotent processing, and replayable failure handling.",
+          "durable": true
+        },
+        "highlightReason": "The catalog Message Broker models replayable asynchronous work; it complements rather than replaces the live conversation path."
+      }
+    },
+    {
+      "id": "marketplace_notifications",
+      "stepNumber": 17,
+      "phase": "Complete delivery, communication, and operations components",
+      "title": "Notify participants who are not connected",
+      "type": "add_component",
+      "content": "Use the catalog Notification Service for eligible offline-message and marketplace notifications. Apply user preferences, deduplicate retries, and avoid exposing message contents in channels that are not authorized for them.",
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "marketplace_notifications",
+        "componentType": "notification-service",
+        "label": "Marketplace Notification Service",
+        "description": "Delivers preference-aware notifications for offline conversation events.",
+        "position": {"x": 1840, "y": 470},
+        "properties": {
+          "componentName": "Marketplace Notification Service",
+          "purpose": "Consumes eligible offline-message events and delivers preference-aware notifications with deduplication and privacy-safe payloads."
+        },
+        "highlightReason": "Reuses the catalog Notification Service; channel choice and delivery guarantees remain open."
+      }
+    },
+    {
+      "id": "marketplace_reviews_service",
+      "stepNumber": 18,
+      "phase": "Complete delivery, communication, and operations components",
+      "title": "Add review eligibility and rating logic",
+      "type": "add_component",
+      "content": "Use the catalog Backend Server for review submission, eligibility checks, aggregation, and abuse handling. Do not treat ratings as proof of a transaction until the product defines what establishes an eligible buyer-seller interaction.",
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:2"],
+      "component": {
+        "nodeId": "marketplace_reviews_service",
+        "componentType": "backend-server",
+        "label": "Ratings & Reviews Service",
+        "description": "Validates review eligibility and stores buyer-seller ratings and review content.",
+        "position": {"x": 1040, "y": 40},
+        "properties": {
+          "componentName": "Ratings & Reviews Service",
+          "purpose": "Validates review eligibility, rate-limits submissions, applies abuse/reporting policy, and maintains rating and review records."
+        },
+        "highlightReason": "The catalog Backend Server is the supported fit for review and rating domain logic; a custom component is unnecessary."
+      }
+    },
+    {
+      "id": "marketplace_monitoring",
+      "stepNumber": 19,
+      "phase": "Complete delivery, communication, and operations components",
+      "title": "Add service and user-journey observability",
+      "type": "add_component",
+      "content": "Use the catalog Monitoring component to track request failures, indexing lag, image processing/delivery, message persistence and delivery, abuse controls, and search quality. Alert thresholds should follow measured baselines and product SLOs, which are not in the brief.",
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "marketplace_monitoring",
+        "componentType": "monitoring",
+        "label": "Marketplace Monitoring",
+        "description": "Observes marketplace service health, data freshness, and user-facing journeys.",
+        "position": {"x": 1840, "y": 180},
+        "properties": {
+          "componentName": "Marketplace Monitoring",
+          "purpose": "Tracks request health, search/index freshness, image delivery, abuse-control outcomes, and live/offline message delivery using measured thresholds."
+        },
+        "highlightReason": "Uses the existing Monitoring catalog component for metrics and alerting without inventing a new observability node."
+      }
+    },
+    {
+      "id": "marketplace_client_api_edge",
+      "stepNumber": 20,
+      "phase": "Wire listing, search, location, and trust paths",
+      "title": "Connect the client to marketplace APIs",
+      "type": "add_connection",
+      "content": "Send authenticated listing and browse requests from the client to the gateway over TLS. Keep large image bytes on the separately authorized upload path.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2"],
+      "connection": {"edgeId": "marketplace_client_api_edge", "sourceNodeId": "marketplace_web_client", "targetNodeId": "marketplace_api_gateway", "connectionType": "api-call", "label": "Marketplace API requests", "description": "TLS-protected listing, browse, and review requests with platform identity context."}
+    },
+    {
+      "id": "marketplace_api_limiter_edge",
+      "stepNumber": 21,
+      "phase": "Wire listing, search, location, and trust paths",
+      "title": "Apply distributed limits before expensive actions",
+      "type": "add_connection",
+      "content": "Apply coarse gateway controls and actor-aware distributed throttling before listing writes, contact attempts, and review submissions.",
+      "requirementIds": ["legacy-constraint:2"],
+      "connection": {"edgeId": "marketplace_api_limiter_edge", "sourceNodeId": "marketplace_api_gateway", "targetNodeId": "marketplace_rate_limiter", "connectionType": "api-call", "label": "Abuse checks", "description": "Applies policy-driven distributed limits using authenticated actor and request-source context."}
+    },
+    {
+      "id": "marketplace_limiter_identity_edge",
+      "stepNumber": 22,
+      "phase": "Wire listing, search, location, and trust paths",
+      "title": "Resolve identity and authorization context",
+      "type": "add_connection",
+      "content": "Validate the platform identity and obtain marketplace-scoped authorization context; never trust a client-supplied seller or conversation owner ID.",
+      "requirementIds": ["legacy-constraint:2"],
+      "connection": {"edgeId": "marketplace_limiter_identity_edge", "sourceNodeId": "marketplace_rate_limiter", "targetNodeId": "marketplace_identity", "connectionType": "api-call", "label": "Identity and permission check", "description": "Validates the existing platform session and resolves marketplace permissions after request controls."}
+    },
+    {
+      "id": "marketplace_identity_listing_edge",
+      "stepNumber": 23,
+      "phase": "Wire listing, search, location, and trust paths",
+      "title": "Pass verified actor context to listing logic",
+      "type": "add_connection",
+      "content": "Pass verified identity and authorization claims to listing logic so ownership checks happen at the data boundary as well as the API edge.",
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:2"],
+      "connection": {"edgeId": "marketplace_identity_listing_edge", "sourceNodeId": "marketplace_identity", "targetNodeId": "marketplace_listing_service", "connectionType": "api-call", "label": "Verified seller context", "description": "Supplies validated identity and authorization context for listing ownership decisions."}
+    },
+    {
+      "id": "marketplace_api_listing_edge",
+      "stepNumber": 24,
+      "phase": "Wire listing, search, location, and trust paths",
+      "title": "Route listing lifecycle operations",
+      "type": "add_connection",
+      "content": "Route create, edit, and retirement operations to the listing service. Make retries idempotent where a client may repeat a request after a timeout.",
+      "requirementIds": ["legacy-requirement:1"],
+      "connection": {"edgeId": "marketplace_api_listing_edge", "sourceNodeId": "marketplace_api_gateway", "targetNodeId": "marketplace_listing_service", "connectionType": "api-call", "label": "Listing lifecycle", "description": "Routes validated listing create, edit, and retirement commands to the authoritative domain service."}
+    },
+    {
+      "id": "marketplace_listing_store_edge",
+      "stepNumber": 25,
+      "phase": "Wire listing, search, location, and trust paths",
+      "title": "Commit canonical listing state",
+      "type": "add_connection",
+      "content": "Persist listing state and ownership in the transaction store. The service should commit the record and its event intent atomically, then update derived indexes asynchronously.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7"],
+      "connection": {"edgeId": "marketplace_listing_store_edge", "sourceNodeId": "marketplace_listing_service", "targetNodeId": "marketplace_listing_store", "connectionType": "database-connection", "label": "Canonical listing records", "description": "Persists authoritative listing, category, seller ownership, and review state."}
+    },
+    {
+      "id": "marketplace_listing_events_edge",
+      "stepNumber": 26,
+      "phase": "Wire listing, search, location, and trust paths",
+      "title": "Publish listing changes reliably",
+      "type": "add_connection",
+      "content": "Emit a listing-change event from a committed outbox or equivalent mechanism. Consumers must tolerate duplicate delivery and support replay after an indexing outage.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:7"],
+      "connection": {"edgeId": "marketplace_listing_events_edge", "sourceNodeId": "marketplace_listing_service", "targetNodeId": "marketplace_event_broker", "connectionType": "message-queue", "label": "Listing change events", "description": "Reliably hands committed listing changes to derived-index consumers with stable event identity."}
+    },
+    {
+      "id": "marketplace_events_search_edge",
+      "stepNumber": 27,
+      "phase": "Wire listing, search, location, and trust paths",
+      "title": "Maintain the browse and geo index asynchronously",
+      "type": "add_connection",
+      "content": "Consume listing events idempotently to update text, category, filter, and geo fields. Track indexing lag and provide a rebuild/reconciliation path from canonical data.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:4"],
+      "connection": {"edgeId": "marketplace_events_search_edge", "sourceNodeId": "marketplace_event_broker", "targetNodeId": "marketplace_search_index", "connectionType": "message-queue", "label": "Idempotent index updates", "description": "Applies replayable listing events to searchable text, category, filter, and geo fields."}
+    },
+    {
+      "id": "marketplace_api_cache_edge",
+      "stepNumber": 28,
+      "phase": "Wire listing, search, location, and trust paths",
+      "title": "Check cache for eligible browse reads",
+      "type": "add_connection",
+      "content": "Send cacheable browse requests using normalized query and location keys. Do not let a shared cache cross user-specific visibility or authorization boundaries.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:1"],
+      "connection": {"edgeId": "marketplace_api_cache_edge", "sourceNodeId": "marketplace_api_gateway", "targetNodeId": "marketplace_browse_cache", "connectionType": "api-call", "label": "Eligible browse lookup", "description": "Looks up only public or correctly scoped browse results using normalized filter and location keys."}
+    },
+    {
+      "id": "marketplace_cache_search_edge",
+      "stepNumber": 29,
+      "phase": "Wire listing, search, location, and trust paths",
+      "title": "Fall through to indexed search on a cache miss",
+      "type": "add_connection",
+      "content": "On a cache miss, query the search index for full-text, category, filter, and location matches; validate visibility and freshness policy before returning results.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:4"],
+      "connection": {"edgeId": "marketplace_cache_search_edge", "sourceNodeId": "marketplace_browse_cache", "targetNodeId": "marketplace_search_index", "connectionType": "api-call", "label": "Search cache miss", "description": "Queries the derived index for text, category, filter, and geo-aware browse results."}
+    },
+    {
+      "id": "marketplace_search_response_edge",
+      "stepNumber": 30,
+      "phase": "Wire listing, search, location, and trust paths",
+      "title": "Return ranked browse results",
+      "type": "add_connection",
+      "content": "Return matching listing summaries and location-aware ordering through the API boundary. Define ranking, distance disclosure, and index freshness expectations with product owners.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:4"],
+      "connection": {"edgeId": "marketplace_search_response_edge", "sourceNodeId": "marketplace_search_index", "targetNodeId": "marketplace_api_gateway", "connectionType": "data-flow", "label": "Browse result summaries", "description": "Returns matching listing summaries for response construction after visibility and freshness checks."}
+    },
+    {
+      "id": "marketplace_api_reviews_edge",
+      "stepNumber": 31,
+      "phase": "Wire listing, search, location, and trust paths",
+      "title": "Route eligible ratings and reviews",
+      "type": "add_connection",
+      "content": "Route review writes through eligibility, abuse, and moderation checks before they affect seller ratings. Keep reporting and appeal policy explicit rather than treating a rating as verified commerce evidence.",
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:2"],
+      "connection": {"edgeId": "marketplace_api_reviews_edge", "sourceNodeId": "marketplace_api_gateway", "targetNodeId": "marketplace_reviews_service", "connectionType": "api-call", "label": "Review submission and reads", "description": "Routes rating operations for eligibility validation, abuse controls, and review policy enforcement."}
+    },
+    {
+      "id": "marketplace_reviews_store_edge",
+      "stepNumber": 32,
+      "phase": "Wire listing, search, location, and trust paths",
+      "title": "Persist review state with marketplace records",
+      "type": "add_connection",
+      "content": "Persist review content, eligibility evidence, and rating aggregates with clear update rules. Decide whether review state shares transactional storage or is separated after measuring its access pattern.",
+      "requirementIds": ["legacy-requirement:6"],
+      "connection": {"edgeId": "marketplace_reviews_store_edge", "sourceNodeId": "marketplace_reviews_service", "targetNodeId": "marketplace_listing_store", "connectionType": "database-connection", "label": "Review and rating state", "description": "Persists review records and rating state in the marketplace transaction boundary."}
+    },
+    {
+      "id": "marketplace_listing_images_edge",
+      "stepNumber": 33,
+      "phase": "Wire images and conversations, then review scale and open questions",
+      "title": "Issue short-lived authorization for image uploads",
+      "type": "add_connection",
+      "content": "Have the listing service authorize an upload and record the object reference only after validation and moderation states are defined. Keep large image payloads out of the listing database.",
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:3"],
+      "connection": {"edgeId": "marketplace_listing_images_edge", "sourceNodeId": "marketplace_listing_service", "targetNodeId": "marketplace_image_store", "connectionType": "api-call", "label": "Upload authorization and image metadata", "description": "Creates narrowly scoped, short-lived upload authorization and associates validated image objects with listings."}
+    },
+    {
+      "id": "marketplace_client_upload_edge",
+      "stepNumber": 34,
+      "phase": "Wire images and conversations, then review scale and open questions",
+      "title": "Upload image bytes directly to object storage",
+      "type": "add_connection",
+      "content": "The client uploads image bytes with short-lived authorization, then confirms completion. Enforce size/type limits, checksum validation, malware/content review, and cleanup of abandoned uploads.",
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:3"],
+      "connection": {"edgeId": "marketplace_client_upload_edge", "sourceNodeId": "marketplace_web_client", "targetNodeId": "marketplace_image_store", "connectionType": "api-call", "label": "Authorized image upload", "description": "Transfers validated image bytes directly to object storage with short-lived scoped authorization."}
+    },
+    {
+      "id": "marketplace_image_cdn_edge",
+      "stepNumber": 35,
+      "phase": "Wire images and conversations, then review scale and open questions",
+      "title": "Expose approved renditions through edge delivery",
+      "type": "add_connection",
+      "content": "Serve approved renditions from object storage through the CDN. Keep original objects private where needed and invalidate or version URLs when content is removed or access changes.",
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:3"],
+      "connection": {"edgeId": "marketplace_image_cdn_edge", "sourceNodeId": "marketplace_image_store", "targetNodeId": "marketplace_cdn", "connectionType": "data-flow", "label": "Approved gallery renditions", "description": "Provides approved image renditions to the delivery edge under the applicable visibility policy."}
+    },
+    {
+      "id": "marketplace_cdn_client_edge",
+      "stepNumber": 36,
+      "phase": "Wire images and conversations, then review scale and open questions",
+      "title": "Render image galleries from the CDN",
+      "type": "add_connection",
+      "content": "Deliver listing galleries via edge-cached renditions so browsing does not depend on the application serving image bytes. Apply private delivery controls if listings can be restricted.",
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:3"],
+      "connection": {"edgeId": "marketplace_cdn_client_edge", "sourceNodeId": "marketplace_cdn", "targetNodeId": "marketplace_web_client", "connectionType": "data-flow", "label": "Gallery image delivery", "description": "Delivers approved listing gallery renditions to buyers and sellers near their location."}
+    },
+    {
+      "id": "marketplace_api_messaging_edge",
+      "stepNumber": 37,
+      "phase": "Wire images and conversations, then review scale and open questions",
+      "title": "Establish the authenticated live messaging path",
+      "type": "add_connection",
+      "content": "Route conversation operations and the live client session to messaging logic. The chosen transport and connection limits are deployment decisions; authorization remains per conversation, not just per socket.",
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:5"],
+      "connection": {"edgeId": "marketplace_api_messaging_edge", "sourceNodeId": "marketplace_api_gateway", "targetNodeId": "marketplace_messaging_service", "connectionType": "api-call", "label": "Conversation and live session", "description": "Routes authenticated message operations and connected-client delivery to the messaging boundary."}
+    },
+    {
+      "id": "marketplace_identity_messaging_edge",
+      "stepNumber": 38,
+      "phase": "Wire images and conversations, then review scale and open questions",
+      "title": "Authorize each conversation participant",
+      "type": "add_connection",
+      "content": "Validate identity and conversation membership before reading history, sending a message, or receiving a live event. Re-check authorization after membership changes.",
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:2", "legacy-constraint:5"],
+      "connection": {"edgeId": "marketplace_identity_messaging_edge", "sourceNodeId": "marketplace_identity", "targetNodeId": "marketplace_messaging_service", "connectionType": "api-call", "label": "Conversation authorization", "description": "Supplies verified identity and membership decisions for message reads, writes, and live delivery."}
+    },
+    {
+      "id": "marketplace_messaging_store_edge",
+      "stepNumber": 39,
+      "phase": "Wire images and conversations, then review scale and open questions",
+      "title": "Persist before acknowledging accepted messages",
+      "type": "add_connection",
+      "content": "Persist messages with stable IDs and conversation ordering before confirming durable acceptance. Define deduplication, edit/delete, retention, and delivery-receipt semantics with product and privacy owners.",
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:5"],
+      "connection": {"edgeId": "marketplace_messaging_store_edge", "sourceNodeId": "marketplace_messaging_service", "targetNodeId": "marketplace_conversation_store", "connectionType": "database-connection", "label": "Ordered durable messages", "description": "Stores accepted messages and delivery state before the service acknowledges durable acceptance."}
+    },
+    {
+      "id": "marketplace_messaging_events_edge",
+      "stepNumber": 40,
+      "phase": "Wire images and conversations, then review scale and open questions",
+      "title": "Fan out durable events for offline delivery",
+      "type": "add_connection",
+      "content": "Publish an idempotent notification event after message persistence. Connected participants use the live path; the broker supports retryable downstream work and offline notification rather than substituting for persistence.",
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:5"],
+      "connection": {"edgeId": "marketplace_messaging_events_edge", "sourceNodeId": "marketplace_messaging_service", "targetNodeId": "marketplace_event_broker", "connectionType": "message-queue", "label": "Persisted message events", "description": "Publishes stable, retryable events for offline notification and other asynchronous consumers."}
+    },
+    {
+      "id": "marketplace_events_notifications_edge",
+      "stepNumber": 41,
+      "phase": "Wire images and conversations, then review scale and open questions",
+      "title": "Deliver privacy-aware offline notifications",
+      "type": "add_connection",
+      "content": "Consume message events for participants who are offline and eligible for notification. Respect preferences, suppress duplicates, and keep sensitive content out of notification payloads unless policy explicitly permits it.",
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:5"],
+      "connection": {"edgeId": "marketplace_events_notifications_edge", "sourceNodeId": "marketplace_event_broker", "targetNodeId": "marketplace_notifications", "connectionType": "message-queue", "label": "Offline message notification events", "description": "Delivers retryable, deduplicated notification work to preference-aware consumers."}
+    },
+    {
+      "id": "marketplace_listing_monitoring_edge",
+      "stepNumber": 42,
+      "phase": "Wire images and conversations, then review scale and open questions",
+      "title": "Observe listing request and persistence health",
+      "type": "add_connection",
+      "content": "Measure listing write outcomes, authorization denials, request latency, and transaction failures. Do not log private message or precise location payloads as diagnostic shortcuts.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:2"],
+      "connection": {"edgeId": "marketplace_listing_monitoring_edge", "sourceNodeId": "marketplace_listing_service", "targetNodeId": "marketplace_monitoring", "connectionType": "data-flow", "label": "Listing service telemetry", "description": "Exports privacy-minimized request, persistence, and abuse-control signals for service health."}
+    },
+    {
+      "id": "marketplace_search_monitoring_edge",
+      "stepNumber": 43,
+      "phase": "Wire images and conversations, then review scale and open questions",
+      "title": "Track search quality and index freshness",
+      "type": "add_connection",
+      "content": "Track query latency, empty/error rates, index lag, and reconciliation outcomes. Define acceptable freshness and location-query quality from user research and measured workload.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:4"],
+      "connection": {"edgeId": "marketplace_search_monitoring_edge", "sourceNodeId": "marketplace_search_index", "targetNodeId": "marketplace_monitoring", "connectionType": "data-flow", "label": "Search and index telemetry", "description": "Reports query health, indexing lag, and reconciliation outcomes without exposing sensitive location data."}
+    },
+    {
+      "id": "marketplace_broker_monitoring_edge",
+      "stepNumber": 44,
+      "phase": "Wire images and conversations, then review scale and open questions",
+      "title": "Alert on event backlog and delivery failures",
+      "type": "add_connection",
+      "content": "Observe broker backlog, retry exhaustion, dead-letter volume, and consumer lag for both index and notification paths. Alerts should indicate actionable recovery conditions.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:5"],
+      "connection": {"edgeId": "marketplace_broker_monitoring_edge", "sourceNodeId": "marketplace_event_broker", "targetNodeId": "marketplace_monitoring", "connectionType": "data-flow", "label": "Event pipeline telemetry", "description": "Exports backlog, retry, dead-letter, and consumer-lag indicators for recovery and capacity planning."}
+    },
+    {
+      "id": "marketplace_scale_trigger",
+      "stepNumber": 45,
+      "phase": "Wire images and conversations, then review scale and open questions",
+      "title": "Scale from observed listing and search pressure",
+      "type": "scale_trigger",
+      "content": "Do not equate the requirement for millions of listings with a fixed shard count or request rate. Baseline storage growth, hot-key distribution, search latency, index lag, and regional demand, then scale or partition the saturated component and verify rebalancing and recovery.",
+      "requirementIds": ["legacy-requirement:7"],
+      "scaleTrigger": {
+        "metric": "Sustained storage/index growth, uneven partition load, query latency, or index-consumer lag relative to the product's measured objectives",
+        "action": "Partition or shard the authoritative and derived data according to validated access patterns; add capacity and rebalance incrementally",
+        "impact": "Supports growth while making hotspots, reindexing, and operational cost visible; thresholds and capacity targets require workload evidence."
+      }
+    },
+    {
+      "id": "marketplace_location_decision",
+      "stepNumber": 46,
+      "phase": "Wire images and conversations, then review scale and open questions",
+      "title": "Choose location indexing after privacy and relevance rules are known",
+      "type": "decision_point",
+      "content": "The catalog Search Engine is a supported fit for a geo-capable index, but the actual field precision, query radius, ranking, freshness, and privacy treatment are not defined in the brief.",
+      "decision": {
+        "question": "Where should location-aware listing discovery be implemented?",
+        "chosen": "Represent location as a field in the existing search index, subject to geo-query capability validation",
+        "chosenReason": "This keeps text, category, filters, and location discovery on the catalog's existing Search Engine abstraction without adding an unsupported custom node.",
+        "alternatives": [
+          {
+            "option": "Use database geospatial queries as the primary browse path",
+            "tradeoff": "Can simplify transactional consistency but must be tested for the required filter, ranking, and scale workload."
+          },
+          {
+            "option": "Introduce a dedicated geo service",
+            "tradeoff": "May fit specialized needs but adds a component and operational boundary not justified by the current brief."
+          }
+        ]
+      }
+    },
+    {
+      "id": "marketplace_review_open_questions",
+      "stepNumber": 47,
+      "phase": "Wire images and conversations, then review scale and open questions",
+      "title": "Review unresolved policies before calling this production-ready",
+      "type": "explanation",
+      "content": "Open questions: listing and image moderation workflow; scam reporting and appeals; review eligibility; location precision, consent, and deletion; image retention and private-listing delivery; message ordering, receipts, edits, and retention; index freshness and ranking; expected traffic, availability, latency, and recovery objectives. Assumptions in this draft are starting hypotheses, not confirmed product requirements or SLOs."
+    }
+  ]
+}

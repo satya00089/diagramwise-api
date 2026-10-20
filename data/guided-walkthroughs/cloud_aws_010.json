@@ -1,0 +1,690 @@
+{
+  "problem_id": "cloud_aws_010",
+  "version": "1.0-review",
+  "requirementRevision": null,
+  "totalSteps": 48,
+  "phases": [
+    {
+      "name": "Frame the lake workload and query contract",
+      "stepRange": [1, 6],
+      "description": "Preserve the frozen prompt as facts, identify missing workload details, and make partitioning and data-movement choices explicit."
+    },
+    {
+      "name": "Ingest and organize data in S3",
+      "stepRange": [7, 22],
+      "description": "Land streaming and batch inputs durably, transform them into query-ready zones, and plan for partition pruning and petabyte growth."
+    },
+    {
+      "name": "Catalog datasets and govern access",
+      "stepRange": [23, 32],
+      "description": "Automate metadata discovery and make Lake Formation, IAM, and S3 policy boundaries part of every access path."
+    },
+    {
+      "name": "Query, visualize, and validate scale",
+      "stepRange": [33, 48],
+      "description": "Query curated S3 data in place, connect QuickSight, and test the stated latency and concurrency goals without presenting them as achieved."
+    }
+  ],
+  "steps": [
+    {
+      "id": "lake_01",
+      "stepNumber": 1,
+      "phase": "Frame the lake workload and query contract",
+      "title": "Keep the frozen problem snapshot intact",
+      "type": "explanation",
+      "content": "Frozen problem facts: id cloud_aws_010; title Build a Scalable Data Lake Architecture; slug build-a-scalable-data-lake-architecture; description: Design a data lake architecture that ingests data from multiple sources, catalogs and organizes data, enables SQL queries, and provides data visualization capabilities. Difficulty Hard; category AWS - Data Lake; domain infra; estimated time 60-90 minutes; has_guided_walkthrough is false in the source snapshot. Requirements: Store structured and unstructured data; Catalog and discover datasets; Query data without moving it; Transform and prepare data; Implement data governance; Control access to sensitive data; Visualize data insights; Support petabyte-scale data. Constraints: Query latency under 10 seconds; Support concurrent queries (100+); Enforce fine-grained access control; Minimize data movement costs; Automate data cataloging. Hints: S3 for data lake storage; AWS Glue for ETL and catalog; Athena for SQL queries; Lake Formation for governance; QuickSight for visualization; Partition data for performance. Tags: aws, data-lake, s3, glue, athena, analytics. Company examples: Amazon, Netflix, Airbnb. This file is a local review draft; it does not change the frozen availability field or assert publication.",
+      "requirementIds": []
+    },
+    {
+      "id": "lake_02",
+      "stepNumber": 2,
+      "phase": "Frame the lake workload and query contract",
+      "title": "Separate stated needs from sizing assumptions",
+      "type": "explanation",
+      "content": "The prompt does not specify source count or formats, ingest rates, data skew, retention, freshness, query shapes, user populations, region policy, or the exact meaning of query latency. Ask which fields are commonly filtered or joined, which data is sensitive, how quickly dashboards must reflect new records, and whether users need row- or column-level restrictions. Do not invent throughput, retention, availability, or service-level targets to fill these gaps.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "lake_03",
+      "stepNumber": 3,
+      "phase": "Frame the lake workload and query contract",
+      "title": "Treat latency and concurrency as goals to prove",
+      "type": "decision_point",
+      "content": "The frozen brief asks for query latency under 10 seconds and 100+ concurrent queries. It does not define the query mix, percentile, dashboard freshness, or whether time includes queueing and result rendering. Carry both numbers as acceptance goals, then measure end-to-end query time and queue time with representative data and users. The diagram alone cannot establish that either goal is met.",
+      "decision": {
+        "question": "What evidence is needed before claiming the stated query and concurrency goals are satisfied?",
+        "chosen": "Agree on representative query classes and timing boundaries, then load-test the 10-second and 100+ concurrent-query goals against production-shaped partitions and permissions.",
+        "chosenReason": "The prompt supplies goals but not workload distributions or proof; query planning, queueing, quotas, and authorization all affect observed results.",
+        "alternatives": [
+          {"option": "Treat a successful Athena query as proof of the latency goal", "tradeoff": "One query does not capture queueing, data skew, cold metadata, dashboard fan-out, or concurrent workloads."},
+          {"option": "Infer concurrency capacity from the architecture diagram", "tradeoff": "Service quotas and query mix must be measured; a workgroup is an isolation and policy boundary, not a capacity guarantee."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "lake_04",
+      "stepNumber": 4,
+      "phase": "Frame the lake workload and query contract",
+      "title": "Start partition design from query predicates",
+      "type": "explanation",
+      "content": "List the frequent time, tenant, region, and business-domain predicates before choosing S3 prefixes. Athena can prune partitions when predicates match the table layout, reducing files scanned and helping query planning. Do not partition on every column or a high-cardinality identifier: that creates excessive metadata and small files. Validate the key and granularity against real filters, joins, skew, and late-arriving data.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:1"]
+    },
+    {
+      "id": "lake_05",
+      "stepNumber": 5,
+      "phase": "Frame the lake workload and query contract",
+      "title": "Choose durable raw and query-ready zones",
+      "type": "decision_point",
+      "content": "Separate source-preserving raw data from validated, query-ready curated data. Keep structured and unstructured objects in S3, record source and schema versions, and quarantine malformed or unauthorized records under a controlled prefix. Store analytical tables in compressed columnar formats such as Parquet or ORC when their readers and transformations support them; keep original objects where replay or audit requires them.",
+      "decision": {
+        "question": "How should the lake preserve replayability while serving efficient SQL queries?",
+        "chosen": "Retain source-aligned raw objects and publish validated, compressed columnar datasets in a curated zone with explicit schema and partition metadata.",
+        "chosenReason": "The raw zone supports reprocessing while curated files reduce unnecessary scans; the data contract and retention policy still require owner decisions.",
+        "alternatives": [
+          {"option": "Expose every raw source object directly to analysts", "tradeoff": "Source changes and inconsistent formats leak into queries, governance, and dashboard logic."},
+          {"option": "Rewrite or copy every source into one normalized format immediately", "tradeoff": "It adds transformation and storage movement before query needs and replay requirements are known."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:8"]
+    },
+    {
+      "id": "lake_06",
+      "stepNumber": 6,
+      "phase": "Frame the lake workload and query contract",
+      "title": "Keep large data in place and move only what is needed",
+      "type": "decision_point",
+      "content": "Prefer Athena queries over curated S3 objects in place. Keep the lake and query services in the intended data-residency region, return result sets rather than copying source datasets into a second analytics store, and account for cross-region transfer and repeated extracts. Move or materialize a bounded dataset only when a measured consumer need justifies its additional copy, refresh path, permissions, and cost.",
+      "decision": {
+        "question": "Which data should cross a storage or regional boundary for analytics?",
+        "chosen": "Leave the canonical datasets in S3 and use Athena for SQL; approve any materialized or cross-region copy as a separate, purpose-bound data product.",
+        "chosenReason": "This follows the query-without-moving requirement and makes extra storage, refresh, and transfer costs visible decisions.",
+        "alternatives": [
+          {"option": "Load the entire lake into a warehouse before every query", "tradeoff": "Duplicates large datasets and adds refresh, storage, and data-movement costs."},
+          {"option": "Allow ad hoc cross-region exports", "tradeoff": "Can create ungoverned copies and unpredictable transfer costs."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "lake_07",
+      "stepNumber": 7,
+      "phase": "Ingest and organize data in S3",
+      "title": "Represent the producing systems",
+      "type": "add_component",
+      "content": "Treat operational databases, application events, partner feeds, and file producers as distinct source contracts even when the diagram groups them. Record ownership, schema/version, sensitivity, arrival mode, and replay method at the boundary.",
+      "component": {
+        "nodeId": "lake_sources",
+        "componentType": "backend-server",
+        "label": "Operational, Partner, and File Sources",
+        "description": "Producers of structured records, events, and unstructured objects",
+        "position": {"x": 0, "y": 300},
+        "properties": {"componentName": "Lake Data Sources", "purpose": "Represent operational databases, application events, partner feeds, and file producers with explicit owner, schema, sensitivity, arrival, and replay contracts."},
+        "highlightReason": "The existing Backend Server palette node represents source systems without inventing a new component type."
+      },
+      "requirementIds": ["legacy-requirement:1"]
+    },
+    {
+      "id": "lake_08",
+      "stepNumber": 8,
+      "phase": "Ingest and organize data in S3",
+      "title": "Add a durable path for streaming records",
+      "type": "add_component",
+      "content": "Use Amazon Kinesis Data Streams for event sources that need a streaming ingest boundary. Partition keys, retention, ordering expectations, replay behavior, and consumer capacity depend on the actual event distribution and must be sized from evidence.",
+      "component": {
+        "nodeId": "lake_stream",
+        "componentType": "message-broker",
+        "label": "Amazon Kinesis Data Streams",
+        "description": "Durable streaming ingress for event-shaped lake data",
+        "position": {"x": 360, "y": 80},
+        "properties": {"componentName": "Amazon Kinesis Data Streams", "purpose": "Accept event records on a replayable streaming path; choose partition keys, retention, and consumer capacity from measured event volume and skew."},
+        "highlightReason": "The Message Broker palette type supports the streaming-ingress role and exposes editable component context."
+      },
+      "requirementIds": ["legacy-requirement:1"]
+    },
+    {
+      "id": "lake_09",
+      "stepNumber": 9,
+      "phase": "Ingest and organize data in S3",
+      "title": "Buffer and deliver streaming data to the lake",
+      "type": "add_component",
+      "content": "Use Amazon Data Firehose to buffer and deliver the stream to S3. Select buffering, compression, format conversion, retry, and error-output behavior from freshness, file-size, and replay requirements; do not promise a freshness interval the prompt does not state.",
+      "component": {
+        "nodeId": "lake_delivery",
+        "componentType": "stream-processor",
+        "label": "Amazon Data Firehose",
+        "description": "Buffered delivery from streaming ingress into the raw S3 zone",
+        "position": {"x": 720, "y": 80},
+        "properties": {"componentName": "Amazon Data Firehose", "purpose": "Buffer and deliver accepted stream records into the raw S3 zone, with format conversion, compression, retry, and error routing configured from the data contract."},
+        "highlightReason": "The existing Stream Processor palette node represents a managed stream-delivery stage."
+      },
+      "requirementIds": ["legacy-requirement:1"]
+    },
+    {
+      "id": "lake_10",
+      "stepNumber": 10,
+      "phase": "Ingest and organize data in S3",
+      "title": "Land source-preserving objects in the raw zone",
+      "type": "add_component",
+      "content": "Keep raw structured extracts, unstructured objects, and delivered stream files in a restricted S3 landing zone. Use explicit source/date prefixes, encryption, versioning or retention controls where required, and a quarantine location for records that fail validation.",
+      "component": {
+        "nodeId": "lake_raw",
+        "componentType": "object-storage",
+        "label": "Amazon S3 — Raw and Quarantine Zones",
+        "description": "Source-aligned objects, replay inputs, and restricted rejected records",
+        "position": {"x": 1080, "y": 300},
+        "properties": {"componentName": "S3 Raw and Quarantine", "purpose": "Retain structured and unstructured source objects for replay; isolate malformed or rejected records under restricted prefixes.", "provider": "S3", "versioning": true},
+        "highlightReason": "The existing Object Storage palette type explicitly supports S3 and versioning."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8"]
+    },
+    {
+      "id": "lake_11",
+      "stepNumber": 11,
+      "phase": "Ingest and organize data in S3",
+      "title": "Route event sources into the stream",
+      "type": "add_connection",
+      "content": "Send event-shaped records to the streaming boundary. Keep the source event identity and schema version so delivery retries and later reprocessing can be reconciled.",
+      "connection": {"edgeId": "lake_sources_stream", "sourceNodeId": "lake_sources", "targetNodeId": "lake_stream", "connectionType": "event-stream", "label": "Versioned source events", "description": "Structured event records with source identity and schema version"},
+      "requirementIds": ["legacy-requirement:1"]
+    },
+    {
+      "id": "lake_12",
+      "stepNumber": 12,
+      "phase": "Ingest and organize data in S3",
+      "title": "Deliver buffered events to S3",
+      "type": "add_connection",
+      "content": "Firehose consumes the stream and delivers objects to the raw prefix. Buffering can reduce tiny-object creation but increases freshness delay; choose the setting after agreeing on the ingestion freshness need.",
+      "connection": {"edgeId": "lake_stream_delivery", "sourceNodeId": "lake_stream", "targetNodeId": "lake_delivery", "connectionType": "data-flow", "label": "Replayable stream records", "description": "Kinesis records enter buffered S3 delivery"},
+      "requirementIds": ["legacy-requirement:1"]
+    },
+    {
+      "id": "lake_13",
+      "stepNumber": 13,
+      "phase": "Ingest and organize data in S3",
+      "title": "Write delivered objects into the raw prefixes",
+      "type": "add_connection",
+      "content": "Use date and source prefixes that support downstream filtering and replay. Keep Firehose delivery failures observable and route rejected payloads to a separately permissioned error prefix rather than silently dropping them.",
+      "connection": {"edgeId": "lake_delivery_raw", "sourceNodeId": "lake_delivery", "targetNodeId": "lake_raw", "connectionType": "data-flow", "label": "Buffered objects to raw S3", "description": "Delivered event objects and controlled error records"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:6"]
+    },
+    {
+      "id": "lake_14",
+      "stepNumber": 14,
+      "phase": "Ingest and organize data in S3",
+      "title": "Land batch files and extracts on the same governed path",
+      "type": "add_connection",
+      "content": "Batch exports and unstructured files arrive directly in source-scoped S3 raw prefixes. Validate checksums and manifests at ingest, preserve source identifiers, and apply the same encryption and ownership rules as the streaming path.",
+      "connection": {"edgeId": "lake_sources_raw", "sourceNodeId": "lake_sources", "targetNodeId": "lake_raw", "connectionType": "data-flow", "label": "Batch files and database extracts", "description": "Structured and unstructured objects land without a separate analytics-store copy"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:6"]
+    },
+    {
+      "id": "lake_15",
+      "stepNumber": 15,
+      "phase": "Ingest and organize data in S3",
+      "title": "Add the managed transformation stage",
+      "type": "add_component",
+      "content": "Use AWS Glue ETL jobs to validate schemas, normalize records, remove or tokenize sensitive fields where approved, and produce curated tables. Keep job inputs and outputs in S3 so transformations read and write the lake rather than moving the full dataset to a separate engine.",
+      "component": {
+        "nodeId": "lake_etl",
+        "componentType": "processing-worker",
+        "label": "AWS Glue ETL Jobs",
+        "description": "Managed batch transformations from raw to curated data",
+        "position": {"x": 1440, "y": 470},
+        "properties": {"componentName": "AWS Glue ETL Jobs", "purpose": "Validate and transform raw S3 datasets into curated query-ready tables while recording schema, run, and rejected-record outcomes.", "tasks": "Data Processing", "autoscale": true},
+        "highlightReason": "The Processing Worker palette node supports data-processing tasks and autoscaling."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6"]
+    },
+    {
+      "id": "lake_16",
+      "stepNumber": 16,
+      "phase": "Ingest and organize data in S3",
+      "title": "Read raw objects for bounded transformation runs",
+      "type": "add_connection",
+      "content": "Glue reads selected raw prefixes using an explicit incremental or replay window. Make the run safe to retry, retain references to source objects, and avoid a full-lake scan when only a subset changed.",
+      "connection": {"edgeId": "lake_raw_etl", "sourceNodeId": "lake_raw", "targetNodeId": "lake_etl", "connectionType": "data-flow", "label": "Selected raw partitions", "description": "S3 source objects and schema metadata for transformation"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:8"]
+    },
+    {
+      "id": "lake_17",
+      "stepNumber": 17,
+      "phase": "Ingest and organize data in S3",
+      "title": "Create the curated S3 query zone",
+      "type": "add_component",
+      "content": "Separate curated datasets from raw source objects, with table-level prefixes and permissions aligned to data sensitivity. Choose columnar compression and partition layout for observed query predicates; these are design levers for the stated under-10-second goal, not evidence that it is met. Publish changes only after schema and quality checks pass.",
+      "component": {
+        "nodeId": "lake_curated",
+        "componentType": "object-storage",
+        "label": "Amazon S3 — Curated Tables",
+        "description": "Compressed, partitioned datasets for SQL and dashboards",
+        "position": {"x": 1800, "y": 300},
+        "properties": {"componentName": "S3 Curated Tables", "purpose": "Serve validated, compressed columnar datasets with deliberate partition keys and sensitivity-aligned prefixes.", "provider": "S3", "versioning": true},
+        "highlightReason": "The existing Object Storage palette type represents the curated S3 zone and its version history."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:1"]
+    },
+    {
+      "id": "lake_18",
+      "stepNumber": 18,
+      "phase": "Ingest and organize data in S3",
+      "title": "Publish validated transformation outputs",
+      "type": "add_connection",
+      "content": "Write curated outputs to versioned table prefixes with an explicit commit or publish boundary. Record the input range and schema version so a retry does not leave partially published partitions visible as complete data.",
+      "connection": {"edgeId": "lake_etl_curated", "sourceNodeId": "lake_etl", "targetNodeId": "lake_curated", "connectionType": "data-flow", "label": "Validated columnar tables", "description": "Transformed records with committed schema and partition metadata"},
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:8"]
+    },
+    {
+      "id": "lake_19",
+      "stepNumber": 19,
+      "phase": "Ingest and organize data in S3",
+      "title": "Make transformation retries and schema changes explicit",
+      "type": "decision_point",
+      "content": "Glue job bookmarks can help track processed inputs, but they do not by themselves guarantee exactly-once output publication. Define idempotent partition writes, schema compatibility rules, late-data handling, and a quarantine/replay procedure. Preserve an old compatible table version or use an explicitly selected table format when updates and deletes are required.",
+      "decision": {
+        "question": "How should a failed or repeated ETL run affect a curated partition?",
+        "chosen": "Use an idempotent partition-level commit with recorded source range and schema version; test replay and late-arriving data before relying on bookmarks.",
+        "chosenReason": "This limits recomputation and prevents a retry from silently duplicating or exposing a partial result.",
+        "alternatives": [
+          {"option": "Append every retry to the same output prefix", "tradeoff": "Repeated execution can duplicate rows and make aggregates incorrect."},
+          {"option": "Overwrite the whole curated dataset for every source change", "tradeoff": "It increases scan and compute work and can expose a large replacement failure surface."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:8"]
+    },
+    {
+      "id": "lake_20",
+      "stepNumber": 20,
+      "phase": "Ingest and organize data in S3",
+      "title": "Choose partitions without creating a metadata or small-file problem",
+      "type": "decision_point",
+      "content": "Base partitions on measured filters, often a time field plus only a bounded domain dimension. Compare catalog-registered partitions with Athena partition projection when paths are predictable: projection can avoid enumerating a very large partition list, while registered metadata is more explicit for irregular layouts. Do not enable both patterns blindly; test planning, discovery, late data, and query behavior.",
+      "decision": {
+        "question": "Which partition-discovery strategy fits the lake's paths and query predicates?",
+        "chosen": "Start with query-driven date partitions and catalog metadata; evaluate partition projection only for predictable paths where metadata enumeration is a measured planning cost.",
+        "chosenReason": "The prompt requires partition-aware performance and automatic cataloging, but the source layout and cardinality are unspecified.",
+        "alternatives": [
+          {"option": "Partition by a high-cardinality user or event identifier", "tradeoff": "Creates many small partitions and metadata entries while often pruning little for broad analytical queries."},
+          {"option": "Use one unpartitioned object prefix for every table", "tradeoff": "Queries can scan much more data than their predicates need."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "lake_21",
+      "stepNumber": 21,
+      "phase": "Ingest and organize data in S3",
+      "title": "Compact files and preserve partition-level recovery",
+      "type": "explanation",
+      "content": "Buffer streaming deliveries and compact fragmented curated files as part of controlled maintenance. Excessively small files increase metadata and request overhead; overly large partitions or skewed keys can also slow scans and transformations. Track files and bytes per partition, and compact only with a safe publish procedure so readers do not see a mixture of old and partial outputs.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:1"]
+    },
+    {
+      "id": "lake_22",
+      "stepNumber": 22,
+      "phase": "Ingest and organize data in S3",
+      "title": "Scale storage and processing from measured growth",
+      "type": "scale_trigger",
+      "content": "Petabyte-scale support depends on durable S3 storage, useful partitions, compressed columnar files, and bounded processing. Evaluate S3 storage classes and lifecycle transitions from each dataset's access frequency, retrieval needs, restore behavior, and owner-approved retention policy. The brief supplies no storage-class choice, retention schedule, retrieval objective, availability target, cost budget, or ingestion/query throughput target; tiering is a workload-dependent design choice, not a scale guarantee.",
+      "scaleTrigger": {
+        "metric": "Growth in stored bytes, object age and access frequency, retrieval needs, bytes scanned per query, partition/file counts, source backlog, transformation duration, and partition skew",
+        "action": "Measure by dataset and workload; refine partition keys, compact fragmented files, process changed ranges, and evaluate storage classes and lifecycle transitions only against owner-approved access, retrieval, restore, and retention policies.",
+        "impact": "Supports petabyte-scale storage and query planning without promising a particular retention period, availability, retrieval performance, throughput, or cost."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:8"]
+    },
+    {
+      "id": "lake_23",
+      "stepNumber": 23,
+      "phase": "Catalog datasets and govern access",
+      "title": "Represent shared table and partition metadata",
+      "type": "add_component",
+      "content": "Use the AWS Glue Data Catalog for database, table, schema, location, and partition metadata consumed by Glue and Athena. Keep metadata ownership and schema-change policy explicit; the catalog describes datasets but does not by itself grant safe access to their S3 objects.",
+      "component": {
+        "nodeId": "lake_catalog",
+        "componentType": "database",
+        "label": "AWS Glue Data Catalog",
+        "description": "Shared table, schema, location, and partition metadata",
+        "position": {"x": 1800, "y": 80},
+        "properties": {"componentName": "AWS Glue Data Catalog", "purpose": "Store discoverable table, schema, S3 location, and partition definitions shared by Glue and Athena."},
+        "highlightReason": "The existing Database palette type provides an editable metadata-store representation."
+      },
+      "requirementIds": ["legacy-requirement:2"]
+    },
+    {
+      "id": "lake_24",
+      "stepNumber": 24,
+      "phase": "Catalog datasets and govern access",
+      "title": "Automate schema and partition discovery",
+      "type": "add_component",
+      "content": "Use AWS Glue crawlers for discovery where source schemas and path conventions are suitable. Scope crawler targets and roles, review schema changes before exposing breaking changes, and monitor missed or ambiguous partitions; automatic crawling does not replace data ownership or quality checks.",
+      "component": {
+        "nodeId": "lake_crawler",
+        "componentType": "processing-worker",
+        "label": "AWS Glue Crawlers",
+        "description": "Automated discovery of supported S3 schemas and partitions",
+        "position": {"x": 1440, "y": 80},
+        "properties": {"componentName": "AWS Glue Crawlers", "purpose": "Discover supported S3 schema and partition metadata on an agreed schedule or ingest trigger, with scoped targets and reviewed schema changes."},
+        "highlightReason": "The existing Processing Worker palette type represents the managed catalog-discovery job."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "lake_25",
+      "stepNumber": 25,
+      "phase": "Catalog datasets and govern access",
+      "title": "Discover source-aligned raw metadata",
+      "type": "add_connection",
+      "content": "Point discovery at approved raw prefixes and exclude quarantine or sensitive paths unless the crawler role and intended catalog exposure are explicitly approved.",
+      "connection": {"edgeId": "lake_raw_crawler", "sourceNodeId": "lake_raw", "targetNodeId": "lake_crawler", "connectionType": "data-flow", "label": "Approved raw prefixes", "description": "Scoped S3 paths for source schema and partition discovery"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "lake_26",
+      "stepNumber": 26,
+      "phase": "Catalog datasets and govern access",
+      "title": "Discover curated table changes",
+      "type": "add_connection",
+      "content": "Catalog curated tables after a successful publish. Make crawler updates additive or reviewed where possible so an unexpected source rename does not silently change the user-facing schema.",
+      "connection": {"edgeId": "lake_curated_crawler", "sourceNodeId": "lake_curated", "targetNodeId": "lake_crawler", "connectionType": "data-flow", "label": "Published curated paths", "description": "Curated schema and partition discovery after validated writes"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "lake_27",
+      "stepNumber": 27,
+      "phase": "Catalog datasets and govern access",
+      "title": "Publish discovered metadata into the shared catalog",
+      "type": "add_connection",
+      "content": "Write approved table and partition metadata into the Glue Data Catalog so consumers can discover datasets without copying their objects. Define how crawler output is reviewed, versioned, and rolled back when schema inference is wrong.",
+      "connection": {"edgeId": "lake_crawler_catalog", "sourceNodeId": "lake_crawler", "targetNodeId": "lake_catalog", "connectionType": "api-call", "label": "Discovered schemas and partitions", "description": "Automated metadata updates for governed lake tables"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "lake_28",
+      "stepNumber": 28,
+      "phase": "Catalog datasets and govern access",
+      "title": "Keep ETL table metadata aligned with committed outputs",
+      "type": "add_connection",
+      "content": "Glue jobs may update catalog definitions as part of a controlled table publish. Coordinate crawler and job ownership so two writers do not race to replace schema or partition metadata.",
+      "connection": {"edgeId": "lake_etl_catalog", "sourceNodeId": "lake_etl", "targetNodeId": "lake_catalog", "connectionType": "api-call", "label": "Committed schema and partition metadata", "description": "ETL publishes metadata aligned with validated curated outputs"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "lake_29",
+      "stepNumber": 29,
+      "phase": "Catalog datasets and govern access",
+      "title": "Add Lake Formation as the lake permission authority",
+      "type": "add_component",
+      "content": "Use AWS Lake Formation permissions for registered lake resources and the intended query and ETL principals. Define grants by database, table, column, row filter, or LF-Tags where supported by the chosen access path, and retain IAM as an identity and service-permission layer.",
+      "component": {
+        "nodeId": "lake_governance",
+        "componentType": "auth-service",
+        "label": "AWS Lake Formation Governance",
+        "description": "Fine-grained permissions for catalog resources and governed S3 data access",
+        "position": {"x": 2220, "y": 40},
+        "properties": {"componentName": "AWS Lake Formation", "purpose": "Manage least-privilege data lake grants for approved principals and registered resources; coordinate fine-grained permissions with IAM and S3 resource policies."},
+        "highlightReason": "The existing Auth Service palette type represents the central authorization boundary."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "lake_30",
+      "stepNumber": 30,
+      "phase": "Catalog datasets and govern access",
+      "title": "Govern catalog resources and S3 locations together",
+      "type": "add_connection",
+      "content": "Register intended S3 locations and grant approved principals access to catalog databases and tables through Lake Formation. Verify the execution role and bucket policy together; catalog visibility alone must not imply object access.",
+      "connection": {"edgeId": "lake_governance_catalog", "sourceNodeId": "lake_governance", "targetNodeId": "lake_catalog", "connectionType": "api-call", "label": "Catalog grants and LF-Tags", "description": "Governed database, table, column, and supported row-filter permissions"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "lake_31",
+      "stepNumber": 31,
+      "phase": "Catalog datasets and govern access",
+      "title": "Give transformation jobs only the required data paths",
+      "type": "add_connection",
+      "content": "Grant the Glue job role the raw read, curated write, and catalog operations needed for its specific job. Keep crawler and ETL roles distinct when their path access differs, and avoid broad human or workload access to every lake prefix.",
+      "connection": {"edgeId": "lake_governance_etl", "sourceNodeId": "lake_governance", "targetNodeId": "lake_etl", "connectionType": "api-call", "label": "Scoped Glue execution grants", "description": "Least-privilege read, write, and catalog actions for ETL jobs"},
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "lake_32",
+      "stepNumber": 32,
+      "phase": "Catalog datasets and govern access",
+      "title": "Close direct-S3 bypasses in every access path",
+      "type": "decision_point",
+      "content": "A fine-grained Lake Formation design is incomplete if users can fetch the same sensitive objects through direct S3 object reads using an unrelated broad IAM grant. Align Lake Formation permissions, IAM identity policies, registered-location access, bucket policies, and QuickSight service roles. Test both allowed and denied table, column, row-filter, and direct-object requests for each supported principal type.",
+      "decision": {
+        "question": "How will sensitive-data controls remain effective when consumers can also address S3 directly?",
+        "chosen": "Route analyst access through Lake Formation-aware services and restrict direct S3 permissions to the required service roles and approved operational principals.",
+        "chosenReason": "Authorization must hold at the object and query boundaries; hiding a table from a catalog does not protect its underlying objects.",
+        "alternatives": [
+          {"option": "Rely only on Glue Catalog table visibility", "tradeoff": "A principal with broad S3 permissions can bypass catalog discovery and read objects directly."},
+          {"option": "Give every analytics role broad bucket read access", "tradeoff": "It defeats fine-grained grants and increases the impact of a mistaken query or credential."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "lake_33",
+      "stepNumber": 33,
+      "phase": "Query, visualize, and validate scale",
+      "title": "Add serverless SQL over the catalog and S3",
+      "type": "add_component",
+      "content": "Use Amazon Athena to plan and execute SQL against curated S3 tables using Glue Catalog metadata. Workgroups can separate query configuration, result locations, access policies, and workload accounting; they do not remove the need to manage service quotas or test concurrency.",
+      "component": {
+        "nodeId": "lake_athena",
+        "componentType": "analytics",
+        "label": "Amazon Athena SQL Workgroups",
+        "description": "Serverless SQL query path over cataloged S3 data",
+        "position": {"x": 2220, "y": 330},
+        "properties": {"componentName": "Amazon Athena", "purpose": "Run SQL directly against curated S3 tables using Glue Catalog metadata; separate workloads with workgroups and observe scans, queueing, and quotas."},
+        "highlightReason": "The existing Analytics palette node represents the query engine without introducing a warehouse copy."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3"]
+    },
+    {
+      "id": "lake_34",
+      "stepNumber": 34,
+      "phase": "Query, visualize, and validate scale",
+      "title": "Scan only authorized curated partitions",
+      "type": "add_connection",
+      "content": "Athena reads the selected curated S3 objects in place. Build SQL predicates on partition columns, project only needed columns, and use columnar files so the query scans fewer bytes; confirm actual plans and bytes scanned rather than assuming pruning occurred. Partition pruning and lower scan volume are query-design levers, not latency or throughput guarantees, and scanned bytes are distinct from data transferred or copied. The source dataset stays in S3 rather than being loaded into a separate warehouse for this query.",
+      "connection": {"edgeId": "lake_curated_athena", "sourceNodeId": "lake_curated", "targetNodeId": "lake_athena", "connectionType": "data-flow", "label": "Pruned S3 table scans", "description": "Athena reads selected curated objects without loading the lake into a separate warehouse"},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "lake_35",
+      "stepNumber": 35,
+      "phase": "Query, visualize, and validate scale",
+      "title": "Use catalog metadata during query planning",
+      "type": "add_connection",
+      "content": "Athena resolves table schemas, locations, and partition metadata from the Glue Data Catalog before reading the selected S3 objects. Stale or excessive metadata can affect planning and discovery, so include catalog freshness and partition counts in validation.",
+      "connection": {"edgeId": "lake_athena_catalog", "sourceNodeId": "lake_athena", "targetNodeId": "lake_catalog", "connectionType": "api-call", "label": "Table and partition lookup", "description": "Query planning resolves schemas and locations without copying table data"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3"]
+    },
+    {
+      "id": "lake_36",
+      "stepNumber": 36,
+      "phase": "Query, visualize, and validate scale",
+      "title": "Authorize Athena queries with Lake Formation",
+      "type": "add_connection",
+      "content": "Resolve the caller and workgroup role, then enforce the intended Lake Formation grants for the cataloged table and underlying registered S3 location. Verify column and row restrictions on the actual Athena query path; a dashboard filter is not a substitute for server-side authorization.",
+      "connection": {"edgeId": "lake_governance_athena", "sourceNodeId": "lake_governance", "targetNodeId": "lake_athena", "connectionType": "api-call", "label": "Principal and table authorization", "description": "Fine-grained governed access for SQL queries against registered lake data"},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "lake_37",
+      "stepNumber": 37,
+      "phase": "Query, visualize, and validate scale",
+      "title": "Isolate query results from canonical datasets",
+      "type": "add_component",
+      "content": "Give each intended Athena workgroup a governed S3 query-result location with encryption, retention, and access rules. Result files are derived outputs, not a replacement copy of the lake; restrict them because they may contain sensitive query results.",
+      "component": {
+        "nodeId": "lake_results",
+        "componentType": "object-storage",
+        "label": "Amazon S3 — Athena Results",
+        "description": "Restricted query output objects separated from source tables",
+        "position": {"x": 2600, "y": 560},
+        "properties": {"componentName": "Athena Query Results", "purpose": "Store bounded query outputs in a separately governed result location with workgroup-specific encryption, retention, and access rules.", "provider": "S3"},
+        "highlightReason": "The existing Object Storage palette type represents Athena's result location and its separate policy boundary."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "lake_38",
+      "stepNumber": 38,
+      "phase": "Query, visualize, and validate scale",
+      "title": "Write query output to its controlled result location",
+      "type": "add_connection",
+      "content": "Configure Athena workgroups to use the approved result prefix and enforce the intended settings. Monitor result retention and access separately from source-table grants so query output does not become an untracked data lake copy.",
+      "connection": {"edgeId": "lake_athena_results", "sourceNodeId": "lake_athena", "targetNodeId": "lake_results", "connectionType": "data-flow", "label": "Bounded query result objects", "description": "Derived SQL outputs use a restricted workgroup result location"},
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "lake_39",
+      "stepNumber": 39,
+      "phase": "Query, visualize, and validate scale",
+      "title": "Add QuickSight as the visualization client",
+      "type": "add_component",
+      "content": "Use Amazon QuickSight dashboards and analyses over approved Athena datasets. Map users or groups to the intended governed principals, limit dataset and dashboard sharing, and include refresh or query behavior in the freshness contract.",
+      "component": {
+        "nodeId": "lake_quicksight",
+        "componentType": "web-app",
+        "label": "Amazon QuickSight Dashboards",
+        "description": "Business visualization over governed Athena datasets",
+        "position": {"x": 3000, "y": 300},
+        "properties": {"componentName": "Amazon QuickSight", "purpose": "Present dashboards over approved Athena datasets using user/group access mapped to the governed data permissions."},
+        "highlightReason": "The existing Web App palette node represents the dashboard-facing consumer with editable access purpose."
+      },
+      "requirementIds": ["legacy-requirement:7"]
+    },
+    {
+      "id": "lake_40",
+      "stepNumber": 40,
+      "phase": "Query, visualize, and validate scale",
+      "title": "Route dashboard queries through Athena",
+      "type": "add_connection",
+      "content": "For a direct-query dataset, QuickSight sends SQL through the approved Athena workgroup and identity path against the S3-backed tables, avoiding a separate imported dataset copy. Keep dashboard filters as usability controls only; enforce sensitive row and column restrictions in the governed query/data path. Choosing direct query does not establish a latency or concurrency result.",
+      "connection": {"edgeId": "lake_quicksight_athena", "sourceNodeId": "lake_quicksight", "targetNodeId": "lake_athena", "connectionType": "api-call", "label": "Governed dashboard SQL", "description": "QuickSight uses the intended identity and Athena workgroup for direct queries"},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "lake_41",
+      "stepNumber": 41,
+      "phase": "Query, visualize, and validate scale",
+      "title": "Return query results for visualization",
+      "type": "add_connection",
+      "content": "Return only the selected result rows and metadata needed by the dashboard; the source dataset remains in S3 rather than being copied to the visualization layer. Review query fan-out and selected columns so a visual refresh does not issue broad repeated scans. Result transfer and scan volume are separate measures, and neither is an unstated latency guarantee.",
+      "connection": {"edgeId": "lake_athena_quicksight", "sourceNodeId": "lake_athena", "targetNodeId": "lake_quicksight", "connectionType": "data-flow", "label": "Query results and metadata", "description": "Bounded analytical rows and freshness context for charts and dashboards"},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "lake_42",
+      "stepNumber": 42,
+      "phase": "Query, visualize, and validate scale",
+      "title": "Tune the stated query-latency goal from plans and scans",
+      "type": "decision_point",
+      "content": "For the stated under-10-second query goal, inspect Athena query plans, partition pruning, bytes scanned, file format, file counts, catalog lookup, queue time, and dashboard fan-out. Benchmark representative simple and join-heavy queries under the intended access policies. Do not report the target as met from the use of Athena or partitioning alone.",
+      "decision": {
+        "question": "What should be changed when representative queries miss the stated 10-second goal?",
+        "chosen": "Locate the measured cost first, then improve predicates, partition layout, columnar projection, file compaction, metadata discovery, or query shape and rerun the same workload.",
+        "chosenReason": "The cause may be planning, scanning, queueing, joins, or visualization fan-out; targeted evidence avoids unnecessary data copies.",
+        "alternatives": [
+          {"option": "Copy every curated table into another engine immediately", "tradeoff": "Adds data movement, refresh, and governance paths without showing that the scan is the bottleneck."},
+          {"option": "Partition by more fields without checking cardinality", "tradeoff": "Can increase planning overhead and small files while worsening the query path."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:1"]
+    },
+    {
+      "id": "lake_43",
+      "stepNumber": 43,
+      "phase": "Query, visualize, and validate scale",
+      "title": "Validate 100+ concurrent queries without assuming quota capacity",
+      "type": "decision_point",
+      "content": "Use Athena workgroups to separate interactive dashboards, ad hoc exploration, and scheduled transformations by policy and accounting. Measure running and queued queries, throttling, scan volume, and dependency limits under the stated 100+ concurrent-query goal. Check current regional/service quotas and request changes through the normal AWS process where needed; workgroups alone do not guarantee concurrency capacity.",
+      "decision": {
+        "question": "How should the architecture handle the 100+ concurrent-query goal?",
+        "chosen": "Load-test the real query mix across workgroups, observe queueing and quotas, and tune workload isolation and supported capacity only from measured bottlenecks.",
+        "chosenReason": "Different dashboard and exploratory queries have different scan and fan-out costs, and the prompt does not establish available account capacity.",
+        "alternatives": [
+          {"option": "Put every user and query in one unrestricted workgroup", "tradeoff": "Makes noisy-neighbor behavior and query cost harder to isolate or govern."},
+          {"option": "Assume workgroups multiply service concurrency limits", "tradeoff": "Configuration boundaries do not themselves raise service quotas or prove the target under load."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "lake_44",
+      "stepNumber": 44,
+      "phase": "Query, visualize, and validate scale",
+      "title": "Choose QuickSight direct query or SPICE deliberately",
+      "type": "decision_point",
+      "content": "Use direct query as the initial path when keeping data in S3 and avoiding another copy are primary. QuickSight SPICE can improve dashboard responsiveness and reduce repeated source queries by importing a dataset, but that is a materialized copy with refresh, freshness, storage, and permission implications. Choose per dataset after measuring the dashboard need and documenting the added data path.",
+      "decision": {
+        "question": "Should a dashboard use direct Athena queries or import data into SPICE?",
+        "chosen": "Start with direct query for the in-place lake path; use SPICE only for a bounded dataset when measured dashboard behavior justifies its refresh and copy costs.",
+        "chosenReason": "This preserves the query-without-moving design by default while allowing an explicit, governed performance tradeoff.",
+        "alternatives": [
+          {"option": "Import all lake tables into SPICE", "tradeoff": "Creates broad duplicate datasets and refresh work that can conflict with data-movement and freshness goals."},
+          {"option": "Require direct query for every dashboard regardless of evidence", "tradeoff": "May leave repeated or fan-out dashboard workloads slower or more expensive than a bounded materialization."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "lake_45",
+      "stepNumber": 45,
+      "phase": "Query, visualize, and validate scale",
+      "title": "Observe the lake as a data product",
+      "type": "add_component",
+      "content": "Use Amazon CloudWatch metrics, logs, and alarms for ingestion delivery, Glue runs and crawler changes, catalog failures, Athena scans and queueing, and dashboard-facing query errors. Correlate runs to dataset, partition, schema version, and query workgroup without logging sensitive row contents.",
+      "component": {
+        "nodeId": "lake_monitoring",
+        "componentType": "monitoring",
+        "label": "Amazon CloudWatch Lake Operations",
+        "description": "Ingestion, catalog, transformation, query, and access signals",
+        "position": {"x": 2220, "y": 680},
+        "properties": {"componentName": "CloudWatch Lake Operations", "purpose": "Observe ingestion backlog, Glue ETL and crawler outcomes, catalog changes, Athena scans and queueing, access denials, and recovery state without logging sensitive row contents.", "stack": "CloudWatch", "metrics": true, "alerts": true},
+        "highlightReason": "The existing Monitoring palette type supports CloudWatch metrics and alerting."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "lake_46",
+      "stepNumber": 46,
+      "phase": "Query, visualize, and validate scale",
+      "title": "Measure SQL scan and concurrency behavior",
+      "type": "add_connection",
+      "content": "Track query execution and queue time, bytes scanned, partitions selected, failed or throttled queries, workgroup, and authorization outcome. Compare the observed query mix with the 10-second and 100+ concurrency goals without logging SQL literals or result rows that may contain sensitive values.",
+      "connection": {"edgeId": "lake_athena_monitoring", "sourceNodeId": "lake_athena", "targetNodeId": "lake_monitoring", "connectionType": "data-flow", "label": "Query plans, scans, queueing, and denials", "description": "Workgroup-level measures for latency, cost, concurrency, and access outcomes"},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "lake_47",
+      "stepNumber": 47,
+      "phase": "Query, visualize, and validate scale",
+      "title": "Measure ingest, ETL, and catalog quality",
+      "type": "add_connection",
+      "content": "Observe delivery failures and backlog, Glue run duration and retries, rejected records, crawler schema changes, missing partitions, and catalog freshness. Alert on data-quality or discovery gaps that would make a successful infrastructure run produce incomplete or misleading dashboards.",
+      "connection": {"edgeId": "lake_etl_monitoring", "sourceNodeId": "lake_etl", "targetNodeId": "lake_monitoring", "connectionType": "data-flow", "label": "Job, schema, and partition health", "description": "Transformation and metadata quality signals for lake consumers"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "lake_48",
+      "stepNumber": 48,
+      "phase": "Query, visualize, and validate scale",
+      "title": "Prove the design with workload and access tests",
+      "type": "scale_trigger",
+      "content": "Before claiming readiness, exercise representative structured and unstructured ingestion, schema evolution, replays, partition pruning, compaction, catalog discovery, sensitive-data grants and denials, direct-S3 denial paths, dashboard freshness, and query fan-out. Test the stated under-10-second query and 100+ concurrent-query goals with production-shaped data and approved identities. Record dataset copies, materializations, and cross-region transfers separately from bytes scanned when evaluating data-movement costs. Revisit partitioning and workgroup isolation when measurements show scan, planning, queue, or quota pressure; no target is proven by this review draft.",
+      "scaleTrigger": {
+        "metric": "Observed query latency and queue time, bytes scanned, partition/file skew, concurrency throttles, Glue backlog, catalog freshness, dataset copies and transfers, and access-test outcomes",
+        "action": "Run representative scale and negative-authorization tests; record copied/materialized data and cross-region transfer separately from scanned bytes; adjust partition and file layout, crawler scope, workgroup policy, or service quota only where measurements identify a limit; rerun the same workload after each change.",
+        "impact": "Connects petabyte-scale storage, query planning, fine-grained governance, visualization behavior, and measured data movement without assuming an SLA or cost result."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

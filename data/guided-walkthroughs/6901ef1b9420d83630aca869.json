@@ -1,0 +1,564 @@
+{
+  "problem_id": "6901ef1b9420d83630aca869",
+  "version": "1.0.0-review-draft",
+  "requirementRevision": null,
+  "totalSteps": 31,
+  "phases": [
+    {
+      "name": "Accept and persist job intent",
+      "stepRange": [1, 7],
+      "description": "Define the job lifecycle and make durable schedule state authoritative before dispatching work."
+    },
+    {
+      "name": "Materialize due occurrences safely",
+      "stepRange": [8, 13],
+      "description": "Evaluate recurring schedules once per occurrence and dispatch due work without full-table scans or dual-write loss."
+    },
+    {
+      "name": "Prioritize and execute work",
+      "stepRange": [14, 22],
+      "description": "Buffer prioritized occurrences and execute them with leases, idempotency, heartbeats, and durable retry state."
+    },
+    {
+      "name": "Recover failures and scale operations",
+      "stepRange": [23, 31],
+      "description": "Isolate exhausted jobs, observe scheduling correctness, and scale from measured bottlenecks."
+    }
+  ],
+  "steps": [
+    {
+      "id": "js_01",
+      "stepNumber": 1,
+      "phase": "Accept and persist job intent",
+      "title": "Separate a schedule from each execution",
+      "type": "explanation",
+      "content": "A job definition describes what should run and when; each scheduled occurrence is a separate run with its own status, attempt history, and idempotency identity. Keep the definition and run state durable. The brief does not specify a lateness objective, request rate, retention period, or retry cap, so treat those as product and operations decisions rather than promises in this draft."
+    },
+    {
+      "id": "js_02",
+      "stepNumber": 2,
+      "phase": "Accept and persist job intent",
+      "title": "Add the Job Scheduling API",
+      "type": "add_component",
+      "content": "Accept create, inspect, update, pause, and cancel operations for one-time and recurring jobs. Validate the requested schedule and carry a client idempotency key so a retried create request returns the original job rather than creating another definition.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6"],
+      "component": {
+        "nodeId": "job_api",
+        "componentType": "api-gateway",
+        "label": "Job Scheduling API",
+        "description": "Validated job create, update, cancel, and status requests",
+        "position": {"x": 80, "y": 240},
+        "properties": {
+          "componentName": "Job Scheduling API",
+          "purpose": "Expose the job lifecycle API for one-time timestamps and recurring cron-like schedules. Validate schedule input and client idempotency keys before passing commands to the scheduling control plane."
+        },
+        "highlightReason": "The existing API Gateway component represents the public boundary without introducing a new component type."
+      }
+    },
+    {
+      "id": "js_03",
+      "stepNumber": 3,
+      "phase": "Accept and persist job intent",
+      "title": "Add the scheduling control plane",
+      "type": "add_component",
+      "content": "Keep schedule validation, definition versioning, next-occurrence calculation, and lifecycle transitions in a stateless control service. It coordinates durable store operations; it does not execute arbitrary job payloads on the request path.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6"],
+      "component": {
+        "nodeId": "job_control",
+        "componentType": "backend-server",
+        "label": "Scheduling Control Plane",
+        "description": "Validates schedules and manages job definitions",
+        "position": {"x": 390, "y": 240},
+        "properties": {
+          "componentName": "Scheduling Control Plane",
+          "purpose": "Validate one-time and recurring schedule definitions, assign schedule revisions, calculate the next cron occurrence, and persist lifecycle changes. Keep this service stateless so instances can scale independently.",
+          "architecture": "Microservices"
+        },
+        "highlightReason": "The catalog Backend Server cleanly models application logic while the actual due-time work remains asynchronous."
+      }
+    },
+    {
+      "id": "js_04",
+      "stepNumber": 4,
+      "phase": "Accept and persist job intent",
+      "title": "Route lifecycle requests to the control plane",
+      "type": "add_connection",
+      "content": "Pass a stable idempotency key with each create command. A repeated client request should resolve to the same job definition even if the first response was lost.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6"],
+      "connection": {
+        "edgeId": "job_api_to_control",
+        "sourceNodeId": "job_api",
+        "targetNodeId": "job_control",
+        "connectionType": "api-call",
+        "label": "Validated schedule commands",
+        "description": "Create and lifecycle requests carry schedule data, revision intent, and an idempotency key."
+      }
+    },
+    {
+      "id": "js_05",
+      "stepNumber": 5,
+      "phase": "Accept and persist job intent",
+      "title": "Add the authoritative Job State Store",
+      "type": "add_component",
+      "content": "Persist job definitions and each occurrence separately. Keep current status plus appendable attempt and transition history, due and retry timestamps, lease metadata, and the outbox record in the transactional source of truth. Store large payloads inline only when appropriate; otherwise store an immutable payload reference.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6"],
+      "component": {
+        "nodeId": "job_store",
+        "componentType": "database",
+        "label": "Job State Store",
+        "description": "Transactional schedule definitions, run state, attempts, leases, and outbox",
+        "position": {"x": 720, "y": 240},
+        "properties": {
+          "componentName": "Job State Store",
+          "purpose": "Authoritative OLTP store for schedule definitions and revisions, next_fire_at, occurrence records, status and attempt history, retry_at, lease expiry and fencing token, and transactional outbox entries. Enforce a unique logical occurrence key based on job, schedule revision, and scheduled time. Index due, retry, and expired-lease work for bounded shard or time-bucket reads; atomically advance recurring schedules with occurrence creation.",
+          "type": "RDBMS",
+          "workload": "OLTP"
+        },
+        "highlightReason": "The catalog Database supports transactional uniqueness and state changes; no specific database vendor or unsupported capacity target is assumed."
+      }
+    },
+    {
+      "id": "js_06",
+      "stepNumber": 6,
+      "phase": "Accept and persist job intent",
+      "title": "Persist definitions and lifecycle state transactionally",
+      "type": "add_connection",
+      "content": "Use a transaction for a schedule revision and its next due time. Enforce create idempotency in durable state rather than relying on an API process's memory.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:6"],
+      "connection": {
+        "edgeId": "control_to_store",
+        "sourceNodeId": "job_control",
+        "targetNodeId": "job_store",
+        "connectionType": "database-connection",
+        "label": "Definitions, revisions, and run state",
+        "description": "Persist the canonical schedule and state transitions; enforce idempotent creation in the durable store."
+      }
+    },
+    {
+      "id": "js_07",
+      "stepNumber": 7,
+      "phase": "Accept and persist job intent",
+      "title": "Keep one next occurrence for recurring schedules",
+      "type": "decision_point",
+      "content": "Do not pre-expand an unlimited future horizon. Store the recurring expression and its next occurrence, then compute the next one from the prior scheduled instant when a run is materialized. This bounds queue/index growth and avoids drift from computing recurrence off completion time.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6"],
+      "decision": {
+        "question": "How should recurring schedules be represented?",
+        "chosen": "Persist the schedule definition and only its next due occurrence; advance the definition transactionally as that occurrence is materialized.",
+        "chosenReason": "It preserves the recurring intent while keeping pending work bounded and preventing completion delays from shifting future run times.",
+        "alternatives": [
+          {"option": "Pre-create every future occurrence", "tradeoff": "A long horizon can inflate storage and makes pause, edit, or cancellation more expensive."},
+          {"option": "Schedule the next run relative to completion time", "tradeoff": "Long or variable run times cause recurring jobs to drift from their intended cadence."}
+        ]
+      }
+    },
+    {
+      "id": "js_08",
+      "stepNumber": 8,
+      "phase": "Materialize due occurrences safely",
+      "title": "Make cron and time-zone semantics explicit",
+      "type": "explanation",
+      "content": "Evaluate cron-like expressions with a defined parser and persist the schedule's time-zone context; use UTC instants for due indexing and execution timestamps. If no time zone is supplied, UTC is a draft assumption. The brief does not define behavior for daylight-saving gaps, repeated local times, or cron granularity, so make those contract choices explicit and test them rather than implying a precision guarantee."
+    },
+    {
+      "id": "js_09",
+      "stepNumber": 9,
+      "phase": "Materialize due occurrences safely",
+      "title": "Add the due-time scheduler and dispatcher",
+      "type": "add_component",
+      "content": "Poll indexed due schedule, retry, and expired-lease records in bounded batches. Claim due work transactionally, create its unique run occurrence and outbox entry, and advance a recurring definition in the same state transition. Avoid rescanning all job definitions on each poll.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "job_dispatcher",
+        "componentType": "processing-worker",
+        "label": "Due-time Scheduler",
+        "description": "Claims due occurrences and relays committed outbox messages",
+        "position": {"x": 1050, "y": 240},
+        "properties": {
+          "componentName": "Due-time Scheduler",
+          "purpose": "Read indexed due schedules, retry times, and expired leases in bounded batches. Claim each occurrence and update its schedule or retry state transactionally, then publish committed outbox records to the ready queue. Partition dispatch ownership by stable shard or time-bucket keys rather than scanning the full job set.",
+          "autoscale": true
+        },
+        "highlightReason": "The existing Processing Worker is a catalog component for asynchronous scheduler polling; a new scheduler-specific type is unnecessary."
+      }
+    },
+    {
+      "id": "js_10",
+      "stepNumber": 10,
+      "phase": "Materialize due occurrences safely",
+      "title": "Read only due, retryable, or expired work",
+      "type": "add_connection",
+      "content": "Use an index that lets dispatchers query a bounded set of due records by stable shard or time bucket. Include retry_at and expired lease times in the indexed dispatch plan so recovery does not require a full table scan.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "store_to_dispatcher",
+        "sourceNodeId": "job_store",
+        "targetNodeId": "job_dispatcher",
+        "connectionType": "database-connection",
+        "label": "Indexed due, retry, and expired leases",
+        "description": "Bounded index reads find scheduled work, backoff expirations, and leases that need recovery."
+      }
+    },
+    {
+      "id": "js_11",
+      "stepNumber": 11,
+      "phase": "Materialize due occurrences safely",
+      "title": "Claim one logical occurrence exactly once in state",
+      "type": "add_connection",
+      "content": "Within one transaction, conditionally claim the due definition, insert the unique occurrence, advance the next recurring time if applicable, and append an outbox event. A conflict on the logical occurrence key means another dispatcher already materialized it; do not emit a second run.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "dispatcher_to_store",
+        "sourceNodeId": "job_dispatcher",
+        "targetNodeId": "job_store",
+        "connectionType": "database-connection",
+        "label": "Unique run claim and transactional outbox",
+        "description": "Atomically record the occurrence, advance recurrence, and create durable publish intent before dispatch."
+      }
+    },
+    {
+      "id": "js_12",
+      "stepNumber": 12,
+      "phase": "Materialize due occurrences safely",
+      "title": "Close the database-to-queue dual-write gap",
+      "type": "decision_point",
+      "content": "Commit run state and an outbox event together, then let the dispatcher relay committed events with retry. If publication is retried after a crash, the occurrence ID remains stable and workers deduplicate from durable run state.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:6"],
+      "decision": {
+        "question": "How can a run be durable if queue publication fails after the schedule is claimed?",
+        "chosen": "Write an outbox record in the same transaction as the occurrence and schedule transition, then retry publishing that record until acknowledged.",
+        "chosenReason": "The database remains authoritative, while the outbox makes publication recoverable without pretending two independent systems share one transaction.",
+        "alternatives": [
+          {"option": "Write the database and queue sequentially without an outbox", "tradeoff": "A process crash between writes can permanently lose a due run or publish work whose state did not commit."},
+          {"option": "Treat the queue as the only schedule source of truth", "tradeoff": "Recurring definitions, edits, run history, and recovery become difficult to reconcile."}
+        ]
+      }
+    },
+    {
+      "id": "js_13",
+      "stepNumber": 13,
+      "phase": "Materialize due occurrences safely",
+      "title": "Measure timing instead of inventing a precision target",
+      "type": "explanation",
+      "content": "Store scheduled_for, enqueued_at, started_at, and completed_at as UTC instants; synchronize host clocks and measure dispatch lateness from scheduled_for to started_at. The brief requires accurate timing but sets no maximum lateness or sub-second precision, so expose the distribution and agree an explicit objective before promising one."
+    },
+    {
+      "id": "js_14",
+      "stepNumber": 14,
+      "phase": "Prioritize and execute work",
+      "title": "Add the durable ready-job queue",
+      "type": "add_component",
+      "content": "Publish compact occurrence references, not mutable schedule definitions or large payloads. Model importance as priority lanes and retain durable delivery across worker outages; the job store, not the queue, remains the authoritative state.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "job_ready_queue",
+        "componentType": "queue",
+        "label": "Ready Priority Queue",
+        "description": "Durable occurrence references organized for priority-aware consumption",
+        "position": {"x": 1370, "y": 240},
+        "properties": {
+          "componentName": "Ready Priority Queue",
+          "purpose": "Durably buffer job occurrence IDs, schedule revisions, and priority metadata. Maintain priority lanes with a fairness or aging policy so important work moves ahead without permanently starving lower-priority jobs. Recover delivery from the authoritative run store after worker outages.",
+          "durable": true
+        },
+        "highlightReason": "The existing Queue component directly represents buffered asynchronous work and avoids a made-up priority-queue component type."
+      }
+    },
+    {
+      "id": "js_15",
+      "stepNumber": 15,
+      "phase": "Prioritize and execute work",
+      "title": "Publish committed occurrences by priority",
+      "type": "add_connection",
+      "content": "The outbox relay publishes only committed occurrence references. Workers can scale independently from schedule creation, and priority metadata is retained through delivery.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "dispatcher_to_ready_queue",
+        "sourceNodeId": "job_dispatcher",
+        "targetNodeId": "job_ready_queue",
+        "connectionType": "message-queue",
+        "label": "Committed prioritized run references",
+        "description": "Relay outbox events containing stable occurrence identity, schedule revision, and job priority."
+      }
+    },
+    {
+      "id": "js_16",
+      "stepNumber": 16,
+      "phase": "Prioritize and execute work",
+      "title": "Prevent low-priority starvation",
+      "type": "decision_point",
+      "content": "Priority should affect scheduling without allowing a continuous high-priority stream to block every other job. Use configurable weighted service or aging, and watch wait time per lane; the brief does not define the priority scale or fairness weights.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7"],
+      "decision": {
+        "question": "How should the queue respect importance while still making progress on every priority?",
+        "chosen": "Keep explicit priority lanes and apply a configurable fairness or aging rule across them.",
+        "chosenReason": "This preserves priority ordering while making starvation observable and controllable without inventing a fixed priority scale.",
+        "alternatives": [
+          {"option": "Strictly drain the highest priority first", "tradeoff": "Lower-priority work can starve indefinitely under sustained high-priority load."},
+          {"option": "Ignore priority and use one FIFO order", "tradeoff": "The scheduler cannot honor the stated importance ordering."}
+        ]
+      }
+    },
+    {
+      "id": "js_17",
+      "stepNumber": 17,
+      "phase": "Prioritize and execute work",
+      "title": "Add the distributed worker pool",
+      "type": "add_component",
+      "content": "Run jobs on independent workers that can scale out across partitions. Keep payload execution isolated from due-time scanning so a slow or long-running handler does not block scheduler accuracy.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "job_workers",
+        "componentType": "processing-worker",
+        "label": "Job Worker Pool",
+        "description": "Horizontally scalable consumers for due job occurrences",
+        "position": {"x": 1690, "y": 240},
+        "properties": {
+          "componentName": "Job Worker Pool",
+          "purpose": "Consume ready occurrence references, claim execution leases, run job handlers, and persist outcomes. Scale worker capacity independently and isolate long-running or resource-heavy work so it cannot stall schedule dispatch.",
+          "autoscale": true
+        },
+        "highlightReason": "The existing Processing Worker catalog component is the closest match for distributed background execution."
+      }
+    },
+    {
+      "id": "js_18",
+      "stepNumber": 18,
+      "phase": "Prioritize and execute work",
+      "title": "Consume work with at-least-once delivery",
+      "type": "add_connection",
+      "content": "Assume a message may be delivered more than once. The queue transports a stable occurrence ID; the worker must acquire the matching durable lease before executing it.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "ready_queue_to_workers",
+        "sourceNodeId": "job_ready_queue",
+        "targetNodeId": "job_workers",
+        "connectionType": "message-queue",
+        "label": "At-least-once occurrence delivery",
+        "description": "Workers receive stable run references and claim them against durable state before executing."
+      }
+    },
+    {
+      "id": "js_19",
+      "stepNumber": 19,
+      "phase": "Prioritize and execute work",
+      "title": "Persist leases, heartbeats, results, and history",
+      "type": "add_connection",
+      "content": "Use an atomic state transition to grant a worker a lease and fencing token. Persist heartbeat/lease renewal, attempt number, outcome, and error history; reject writes from an expired worker holding an older fencing token.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "workers_to_store",
+        "sourceNodeId": "job_workers",
+        "targetNodeId": "job_store",
+        "connectionType": "database-connection",
+        "label": "Fenced leases, heartbeats, and run history",
+        "description": "Atomically claim each run and record its attempts, state transitions, heartbeat, result, and error."
+      }
+    },
+    {
+      "id": "js_20",
+      "stepNumber": 20,
+      "phase": "Prioritize and execute work",
+      "title": "Prevent duplicate side effects without claiming exactly once",
+      "type": "decision_point",
+      "content": "The unique occurrence key prevents duplicate run materialization, and the lease/fencing token prevents two current owners from committing scheduler state. A crash after an external side effect but before recording success can still cause a retry; pass the stable occurrence ID as an idempotency key to handlers or downstream systems that can honor it.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:3"],
+      "decision": {
+        "question": "Can the scheduler guarantee exactly-once execution across arbitrary worker side effects?",
+        "chosen": "Use durable unique occurrences, fenced leases, at-least-once delivery, and idempotent handler effects keyed by occurrence ID.",
+        "chosenReason": "The scheduler can control its own state but cannot atomically commit with an arbitrary external side effect; stating that boundary avoids a false exactly-once guarantee.",
+        "alternatives": [
+          {"option": "Promise exactly-once execution from the queue alone", "tradeoff": "A worker can crash between performing a side effect and acknowledging or recording the message."},
+          {"option": "Retry without a stable idempotency identity", "tradeoff": "The same logical occurrence may repeat externally visible side effects."}
+        ]
+      }
+    },
+    {
+      "id": "js_21",
+      "stepNumber": 21,
+      "phase": "Prioritize and execute work",
+      "title": "Recover worker loss and support long-running jobs",
+      "type": "decision_point",
+      "content": "Workers renew leases with heartbeats and a monotonically increasing fencing token. When a worker disappears, the dispatcher reclaims only after lease expiry; stale workers cannot commit after reassignment. Long-running handlers should checkpoint when possible and renew before expiry, rather than relying on a guessed fixed maximum runtime.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"],
+      "decision": {
+        "question": "How can a crashed worker be replaced without allowing the old worker to keep writing?",
+        "chosen": "Use expiring renewable leases with fencing tokens, and have the dispatcher retry only after durable lease expiry is observed.",
+        "chosenReason": "Heartbeat and expiry make worker loss recoverable; fencing rejects stale owners while checkpoints limit repeated work for long executions.",
+        "alternatives": [
+          {"option": "Use a lock with no expiry or heartbeat", "tradeoff": "A crashed worker can strand a job indefinitely."},
+          {"option": "Requeue immediately when a worker is slow", "tradeoff": "The original worker may still be active, creating concurrent execution."}
+        ]
+      }
+    },
+    {
+      "id": "js_22",
+      "stepNumber": 22,
+      "phase": "Prioritize and execute work",
+      "title": "Record exponential retry state before retrying",
+      "type": "explanation",
+      "content": "Classify failures as retryable or terminal. For retryable failures, atomically record the attempt, error, and a capped exponential backoff time with jitter; let the due-time dispatcher requeue only when retry_at arrives. Set a policy-owned maximum attempt count. This keeps retries visible and prevents immediate poison-message loops."
+    },
+    {
+      "id": "js_23",
+      "stepNumber": 23,
+      "phase": "Recover failures and scale operations",
+      "title": "Add a durable dead-letter queue",
+      "type": "add_component",
+      "content": "Keep terminal failures and exhausted retries out of the hot ready queue. Store the authoritative terminal state and reason first, then publish a compact reference for investigation and controlled redrive.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "job_dlq",
+        "componentType": "queue",
+        "label": "Dead-letter Queue",
+        "description": "Durable references to terminal or exhausted job runs",
+        "position": {"x": 1690, "y": 540},
+        "properties": {
+          "componentName": "Dead-letter Queue",
+          "purpose": "Retain references to runs that reached a terminal failure or exhausted their configured retry policy. Support investigation and an explicit, idempotent redrive process without silently returning poison work to the ready queue.",
+          "durable": true
+        },
+        "highlightReason": "The catalog Queue can represent the separate failure lane; it keeps failed work visible without adding a custom component."
+      }
+    },
+    {
+      "id": "js_24",
+      "stepNumber": 24,
+      "phase": "Recover failures and scale operations",
+      "title": "Publish terminal runs after durable state changes",
+      "type": "add_connection",
+      "content": "The worker records the terminal transition and outbox event in the Job State Store. The dispatcher relays that event to the dead-letter queue, so a publish failure is recoverable and the run is not lost between state and queue writes.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "dispatcher_to_dlq",
+        "sourceNodeId": "job_dispatcher",
+        "targetNodeId": "job_dlq",
+        "connectionType": "message-queue",
+        "label": "Outbox-published terminal runs",
+        "description": "Relay durable terminal-state events for inspection and policy-controlled redrive."
+      }
+    },
+    {
+      "id": "js_25",
+      "stepNumber": 25,
+      "phase": "Recover failures and scale operations",
+      "title": "Add scheduling and execution monitoring",
+      "type": "add_component",
+      "content": "Measure scheduler correctness as well as service health. Correlate due time, enqueue time, run ID, attempt, and worker lease so a late or duplicated execution can be diagnosed from durable transitions.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "job_monitoring",
+        "componentType": "monitoring",
+        "label": "Scheduler Monitoring",
+        "description": "Timing, backlog, worker, retry, and terminal-failure signals",
+        "position": {"x": 1160, "y": 650},
+        "properties": {
+          "componentName": "Scheduler Monitoring",
+          "purpose": "Track scheduled-to-start lateness, oldest due item, backlog and wait by priority, dispatcher partition skew, retry and lease-expiry rates, execution duration, and dead-letter volume. Alert on agreed service objectives after workload and timing targets are defined.",
+          "metrics": true,
+          "alerts": true
+        },
+        "highlightReason": "The existing Monitoring component covers the signals needed to validate timing, recovery, and scale."
+      }
+    },
+    {
+      "id": "js_26",
+      "stepNumber": 26,
+      "phase": "Recover failures and scale operations",
+      "title": "Observe schedule lateness and dispatch health",
+      "type": "add_connection",
+      "content": "Emit scheduled-to-start delay, due-index backlog, retry backlog, expired lease count, and outbox age from the dispatcher. These show whether the system is meeting the timing objective and whether recovery is keeping up.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "dispatcher_to_monitoring",
+        "sourceNodeId": "job_dispatcher",
+        "targetNodeId": "job_monitoring",
+        "connectionType": "data-flow",
+        "label": "Due lag, retries, leases, and outbox age",
+        "description": "Measure timing accuracy and whether due or recovery work is accumulating."
+      }
+    },
+    {
+      "id": "js_27",
+      "stepNumber": 27,
+      "phase": "Recover failures and scale operations",
+      "title": "Watch queue fairness and pressure",
+      "type": "add_connection",
+      "content": "Measure queue depth and oldest wait separately for each priority lane. Use those signals for capacity and fairness decisions, not a single aggregate that can hide starvation.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "ready_queue_to_monitoring",
+        "sourceNodeId": "job_ready_queue",
+        "targetNodeId": "job_monitoring",
+        "connectionType": "data-flow",
+        "label": "Backlog and wait by priority",
+        "description": "Expose queue age and pressure for each lane to detect starvation and backpressure."
+      }
+    },
+    {
+      "id": "js_28",
+      "stepNumber": 28,
+      "phase": "Recover failures and scale operations",
+      "title": "Monitor worker health and run duration",
+      "type": "add_connection",
+      "content": "Track active leases, missed heartbeats, stale-token rejections, run duration, retryable errors, and worker saturation. Distinguish a slow long-running job from a dead worker before reclaiming it.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "workers_to_monitoring",
+        "sourceNodeId": "job_workers",
+        "targetNodeId": "job_monitoring",
+        "connectionType": "data-flow",
+        "label": "Worker leases, run time, and outcomes",
+        "description": "Correlate execution health and recovery with each durable run identity."
+      }
+    },
+    {
+      "id": "js_29",
+      "stepNumber": 29,
+      "phase": "Recover failures and scale operations",
+      "title": "Alert on exhausted work",
+      "type": "add_connection",
+      "content": "Make dead-letter volume, age, and redrive outcomes visible to operators. Redrive must preserve or deliberately supersede the occurrence identity so duplicate side effects remain controlled.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:2"],
+      "connection": {
+        "edgeId": "dlq_to_monitoring",
+        "sourceNodeId": "job_dlq",
+        "targetNodeId": "job_monitoring",
+        "connectionType": "data-flow",
+        "label": "Terminal failures and redrive outcomes",
+        "description": "Surface exhausted runs for operator review and controlled recovery."
+      }
+    },
+    {
+      "id": "js_30",
+      "stepNumber": 30,
+      "phase": "Recover failures and scale operations",
+      "title": "Correlate history with service health",
+      "type": "add_connection",
+      "content": "Use run IDs and state-transition timestamps to compare stored outcomes with queue and worker signals. Retention and history compaction are operational policies; do not discard the audit fields needed to explain a retry or recovered lease.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "store_to_monitoring",
+        "sourceNodeId": "job_store",
+        "targetNodeId": "job_monitoring",
+        "connectionType": "data-flow",
+        "label": "Durable state transitions and attempt history",
+        "description": "Correlate metrics with authoritative schedule, lease, retry, and execution records."
+      }
+    },
+    {
+      "id": "js_31",
+      "stepNumber": 31,
+      "phase": "Recover failures and scale operations",
+      "title": "Scale from due-work distribution and measured lag",
+      "type": "scale_trigger",
+      "content": "The brief calls for millions of jobs but gives no arrival rate, deadline distribution, or service-level target. Scale dispatcher and worker pools independently; retain a stable job/shard identity, query bounded due buckets, and validate that occurrence uniqueness still holds across any repartitioning.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"],
+      "scaleTrigger": {
+        "metric": "Scheduled-to-start lag, due and retry backlog by shard and priority, worker saturation, and oldest unprocessed outbox age",
+        "action": "Scale the constrained dispatcher or worker pool independently, then rebalance stable time or hash partitions only after checking hot-key distribution and cross-partition uniqueness behavior.",
+        "impact": "Adds capacity at the measured bottleneck while preserving durable schedule state, priority fairness, and unique logical occurrences; numeric thresholds remain an explicit product/operations decision."
+      }
+    }
+  ]
+}

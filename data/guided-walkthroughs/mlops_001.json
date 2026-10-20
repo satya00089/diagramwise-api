@@ -1,0 +1,1148 @@
+{
+  "problem_id": "mlops_001",
+  "version": "1.0.0-review-draft",
+  "totalSteps": 60,
+  "phases": [
+    {
+      "name": "Read the brief and make assumptions visible",
+      "stepRange": [1, 5],
+      "description": "Separate supplied facts from open questions, choose reproducibility boundaries, and make the startup objective measurable without inventing traffic or workload numbers."
+    },
+    {
+      "name": "Build the versioned control plane",
+      "stepRange": [6, 15],
+      "description": "Add the entry point, Git-backed definitions, DAG orchestrator, lineage store, durable dispatch, runtime, monitoring, alerts, experiment tracking, and versioned input snapshots."
+    },
+    {
+      "name": "Add heterogeneous execution and artifact stages",
+      "stepRange": [16, 25],
+      "description": "Represent CPU preparation, Spark batch execution, GPU training, evaluation, content-addressed artifacts, model registration, and deployment using catalog-backed components."
+    },
+    {
+      "name": "Connect control, data, artifact, and operational flows",
+      "stepRange": [26, 55],
+      "description": "Wire every previously created endpoint into an acyclic execution graph with explicit contracts for parameters, immutable inputs, retries, cache reuse, lineage, evaluation, and deployment."
+    },
+    {
+      "name": "Pressure-test the stated constraints",
+      "stepRange": [56, 60],
+      "description": "Tie concurrency, heterogeneous capacity, deduplication, retries, and historical replay back to the exact brief; treat unstated workload thresholds as questions, not facts."
+    }
+  ],
+  "steps": [
+    {
+      "id": "mlops_scope_facts",
+      "stepNumber": 1,
+      "phase": "Read the brief and make assumptions visible",
+      "title": "Keep the supplied scope intact",
+      "type": "explanation",
+      "content": "FACT — The supplied description is: \"Design a platform that orchestrates end-to-end ML workflows from data ingestion through model deployment, with DAG-based pipeline definitions, caching, and reproducibility guarantees.\" The eight supplied requirements and five supplied constraints are preserved verbatim in the frozen fixture asserted by the focused test. They are acceptance scope, not optional implementation hints. Hints such as Kubeflow Pipelines, Airflow, or Prefect are suggestions, not an additional requirement to support every product.",
+      "requirementIds": []
+    },
+    {
+      "id": "mlops_scope_question",
+      "stepNumber": 2,
+      "phase": "Read the brief and make assumptions visible",
+      "title": "Ask which actors start a run",
+      "type": "decision_point",
+      "content": "FACT — Parameterization and scheduling are explicit requirements. ASSUMPTION — The brief does not specify a user interface, API, Git event, or manual trigger. Model an authenticated API and Git change as useful entry paths, and keep schedule evaluation within the orchestration control plane; confirm actor and trigger needs in an interview.",
+      "decision": {
+        "question": "How should a run enter the platform when callers and trigger types are not specified?",
+        "chosen": "Provide a versioned pipeline control plane with an authenticated API entry and a scheduler owned by the orchestrator; treat these entry mechanisms as design assumptions to validate.",
+        "chosenReason": "It supports the explicitly required parameters and schedules while keeping the number of trigger paths small and their run records consistent.",
+        "alternatives": [
+          {
+            "option": "Assume every run starts from a Git push",
+            "tradeoff": "Simple for code changes but does not cover scheduled or parameterized ad hoc runs."
+          },
+          {
+            "option": "Create separate run semantics for each trigger",
+            "tradeoff": "Makes lineage, retries, and reproducibility harder to compare across scheduled and manual executions."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:4"]
+    },
+    {
+      "id": "mlops_open_questions",
+      "stepNumber": 3,
+      "phase": "Read the brief and make assumptions visible",
+      "title": "Record the workload facts that are missing",
+      "type": "explanation",
+      "content": "FACT — The brief sets pipeline startup latency under 30 seconds and support for 100+ concurrent runs. It does not provide dataset sizes, run duration, arrival distribution, tenant count, retention period, geographic footprint, or an availability target. Do not turn those unknowns into invented capacity numbers; ask for workload profiles and measure run admission separately from time to first executable task.",
+      "requirementIds": []
+    },
+    {
+      "id": "mlops_replay_decision",
+      "stepNumber": 4,
+      "phase": "Read the brief and make assumptions visible",
+      "title": "Define what a historical replay must pin",
+      "type": "decision_point",
+      "content": "DESIGN CHOICE — A run is reproducible only when its definition and every material input are identifiable. Store references and immutable digests, not secret values. Confirm retention, access-control, and whether external data sources can provide point-in-time snapshots; the brief does not specify those policies.",
+      "decision": {
+        "question": "Which run identity should be sufficient to reconstruct the historical execution?",
+        "chosen": "Pin the Git revision, canonical DAG and step versions, resolved parameters, input snapshot digests, container image digests, dependency references, random seeds when applicable, and produced artifact digests in run lineage.",
+        "chosenReason": "The combination makes code, configuration, data, environment, and outputs inspectable without assuming that a mutable tag or latest dataset can reproduce an old run.",
+        "alternatives": [
+          {
+            "option": "Store only a pipeline name and run timestamp",
+            "tradeoff": "Neither identifies the code nor freezes data and runtime dependencies."
+          },
+          {
+            "option": "Copy secret values into each run record",
+            "tradeoff": "Creates an unnecessary credential exposure; retain versioned secret references and access policy instead."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "mlops_startup_trigger",
+      "stepNumber": 5,
+      "phase": "Read the brief and make assumptions visible",
+      "title": "Measure startup at the user-visible boundary",
+      "type": "scale_trigger",
+      "content": "DESIGN CHECK — The brief's startup target is under 30 seconds. Keep the control plane able to validate and admit a run without waiting for all model work to finish. Identify the exact start and stop events with the interviewer; a proposed measurement is accepted trigger to first runnable task. Do not claim the target is met until measured under representative scheduling and image-pull conditions.",
+      "scaleTrigger": {
+        "metric": "Accepted schedule or API trigger to first runnable pipeline task; target stated by the brief: under 30 seconds",
+        "action": "If the measured startup approaches the stated limit, profile definition loading, scheduling, queue admission, and runtime preparation separately; optimize the measured bottleneck and remeasure.",
+        "impact": "Separates orchestration startup from long-running training and makes the latency requirement testable without inventing a workload profile."
+      },
+      "requirementIds": ["legacy-constraint:1"]
+    },
+    {
+      "id": "mlops_api",
+      "stepNumber": 6,
+      "phase": "Build the versioned control plane",
+      "title": "Add the authenticated run entry",
+      "type": "add_component",
+      "content": "ASSUMPTION — An API is a reasonable interface for submitting a pipeline revision, validated parameters, and an optional schedule change, but the brief does not require a specific UI or protocol. Return a run identifier after durable admission rather than holding the request open for training.",
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1"],
+      "component": {
+        "nodeId": "mlops_api",
+        "componentType": "api-gateway",
+        "label": "Pipeline Run API",
+        "description": "Authenticated control-plane entry for validated pipeline revisions, parameters, and schedule operations.",
+        "position": {"x": 0, "y": 220},
+        "highlightReason": "The API returns a durable run identity quickly and leaves workflow execution asynchronous.",
+        "properties": {
+          "componentName": "Pipeline Run API",
+          "purpose": "Validate caller authorization, pipeline revision, and parameter schema; durably hand off run requests and return a run identifier without waiting for execution."
+        }
+      }
+    },
+    {
+      "id": "mlops_git",
+      "stepNumber": 7,
+      "phase": "Build the versioned control plane",
+      "title": "Version pipeline definitions in Git",
+      "type": "add_component",
+      "content": "FACT — Git integration is an explicit requirement and the brief's hints recommend pipeline versioning with Git. Store an immutable commit reference with each run; a moving branch name alone is not a reproducible revision.",
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "mlops_git",
+        "componentType": "github",
+        "label": "Pipeline Definition Repository",
+        "description": "Git-hosted pipeline code, schemas, dependency lockfiles, and review history.",
+        "position": {"x": 0, "y": 40},
+        "highlightReason": "A commit is the immutable source revision that a historical run can identify.",
+        "properties": {
+          "componentName": "Pipeline Definition Repository",
+          "purpose": "Store reviewed DAG definitions and their schemas; record the resolved commit SHA and dependency-lock revision for every run."
+        }
+      }
+    },
+    {
+      "id": "mlops_orchestrator",
+      "stepNumber": 8,
+      "phase": "Build the versioned control plane",
+      "title": "Represent the workflow as a versioned DAG",
+      "type": "add_component",
+      "content": "FACT — DAG definitions are explicitly required. Use the orchestration platform to validate dependencies, persist the canonical graph version, resolve parameters, and evaluate schedules. The brief names Kubeflow Pipelines, Airflow, or Prefect as examples; this draft chooses Kubeflow as an illustrative catalog setting, not as a mandatory vendor decision.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:2"],
+      "component": {
+        "nodeId": "mlops_orchestrator",
+        "componentType": "mlops-pipeline",
+        "label": "DAG Orchestrator & Scheduler",
+        "description": "Validates immutable DAG revisions, resolves run parameters, evaluates schedules, and coordinates asynchronous task execution.",
+        "position": {"x": 260, "y": 140},
+        "highlightReason": "A persisted DAG revision is the control-plane contract shared by scheduled and on-demand runs.",
+        "properties": {
+          "componentName": "DAG Orchestrator & Scheduler",
+          "purpose": "Validate and version DAG structure; resolve a schema-checked parameter snapshot; schedule runs; coordinate retries and emit stage state without executing long-running model work in the request path.",
+          "platform": "Kubeflow",
+          "stages": "ingest -> prepare -> train -> evaluate -> register -> deploy"
+        }
+      }
+    },
+    {
+      "id": "mlops_run_db",
+      "stepNumber": 9,
+      "phase": "Build the versioned control plane",
+      "title": "Persist run and lineage records",
+      "type": "add_component",
+      "content": "FACT — Run lineage and historical reproduction are explicit. Keep the control-plane record separate from large binary artifacts: persist run state, parent run, stage attempts, code and image references, resolved parameters, data digests, and artifact references here; keep credentials out of the record.",
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "mlops_run_db",
+        "componentType": "database",
+        "label": "Run & Lineage Metadata",
+        "description": "Queryable run state, stage attempts, immutable source references, parameter snapshots, and artifact lineage.",
+        "position": {"x": 520, "y": 40},
+        "highlightReason": "A durable lineage record links the exact inputs and environment to every output and retry.",
+        "properties": {
+          "componentName": "Run & Lineage Metadata",
+          "purpose": "Persist run and stage state, parent and retry identities, Git and image digests, resolved parameters, input and output artifact references, and timestamps needed to inspect or replay a historical run."
+        }
+      }
+    },
+    {
+      "id": "mlops_queue",
+      "stepNumber": 10,
+      "phase": "Build the versioned control plane",
+      "title": "Buffer runnable stages durably",
+      "type": "add_component",
+      "content": "FACT — The platform must handle pipeline failures with retry and support 100+ concurrent runs. A durable queue absorbs bursts and lets the scheduler observe backlog; use exponential backoff for retryable work, but choose the retry cap from failure semantics rather than inventing a count. Make task claims idempotent so redelivery does not publish duplicate outputs.",
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:2"],
+      "component": {
+        "nodeId": "mlops_queue",
+        "componentType": "queue",
+        "label": "Runnable Stage Queue",
+        "description": "Durable dispatch of run and stage identities to independently scaled execution pools.",
+        "position": {"x": 520, "y": 240},
+        "highlightReason": "Durable dispatch separates run admission from available CPU, GPU, and Spark execution capacity.",
+        "properties": {
+          "componentName": "Runnable Stage Queue",
+          "purpose": "Carry idempotent run and stage claims; expose queue age and backlog; use bounded, policy-driven retries and preserve terminal failures for alerting.",
+          "durable": true,
+          "backoff": "exponential"
+        }
+      }
+    },
+    {
+      "id": "mlops_runtime",
+      "stepNumber": 11,
+      "phase": "Build the versioned control plane",
+      "title": "Route tasks to isolated compute pools",
+      "type": "add_component",
+      "content": "FACT — Heterogeneous execution across CPU, GPU, and Spark is an explicit constraint. Use a container orchestrator as the placement and isolation boundary; choose resource class per DAG task and scale each pool from its own queued work rather than treating every run as one identical worker.",
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "mlops_runtime",
+        "componentType": "container-orchestrator",
+        "label": "Container Task Runtime",
+        "description": "Schedules pinned task images onto CPU, GPU, and Spark execution backends with independent capacity controls.",
+        "position": {"x": 800, "y": 240},
+        "highlightReason": "Task-level resource requests let concurrent pipelines share a controlled heterogeneous runtime.",
+        "properties": {
+          "componentName": "Container Task Runtime",
+          "purpose": "Launch version-pinned tasks with explicit CPU, memory, accelerator, and Spark resource classes; autoscale execution capacity while keeping control-plane admission separate.",
+          "platform": "Kubernetes",
+          "autoscaling": true
+        }
+      }
+    },
+    {
+      "id": "mlops_monitoring",
+      "stepNumber": 12,
+      "phase": "Build the versioned control plane",
+      "title": "Observe orchestration and data quality",
+      "type": "add_component",
+      "content": "DESIGN CHOICE — Observe run admission, time to first task, queue age, stage duration, retry and terminal-failure counts, cache hits, artifact bytes, and evaluation outcomes. These are proposed diagnostic signals; the brief supplies no numeric alert thresholds except its startup and concurrency constraints.",
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2"],
+      "component": {
+        "nodeId": "mlops_monitoring",
+        "componentType": "monitoring",
+        "label": "Pipeline Health & Alerts",
+        "description": "Control-plane latency, queue and task health, retry state, artifact behavior, and model-evaluation telemetry.",
+        "position": {"x": 1080, "y": 40},
+        "highlightReason": "Failures and startup regressions need observable signals before automated retry or alerting can be trusted.",
+        "properties": {
+          "componentName": "Pipeline Health & Alerts",
+          "purpose": "Measure run admission and startup, queue age, stage attempts, resource-class wait, cache outcomes, artifact integrity, and evaluation status; alert on explicit service policies.",
+          "metrics": true,
+          "alerts": true
+        }
+      }
+    },
+    {
+      "id": "mlops_alerts",
+      "stepNumber": 13,
+      "phase": "Build the versioned control plane",
+      "title": "Deliver actionable failure notifications",
+      "type": "add_component",
+      "content": "DESIGN CHOICE — Notify on a terminal run failure or a policy-defined sustained service issue, not on every retry attempt. Include run, stage, attempt, and a link to lineage while applying the product's access controls. The brief requires alerting but does not specify a delivery channel or escalation policy.",
+      "requirementIds": ["legacy-requirement:6"],
+      "component": {
+        "nodeId": "mlops_alerts",
+        "componentType": "notification-service",
+        "label": "Run Failure Notifications",
+        "description": "Policy-driven delivery of terminal failure and sustained service alerts with a lineage link.",
+        "position": {"x": 1340, "y": 40},
+        "highlightReason": "An alert should identify the failed run and stage without exposing credentials or unrelated tenant data.",
+        "properties": {
+          "componentName": "Run Failure Notifications",
+          "purpose": "Deliver deduplicated terminal-failure alerts with run and stage identity, attempt context, and an access-controlled lineage link; keep channel choice configurable."
+        }
+      }
+    },
+    {
+      "id": "mlops_tracking",
+      "stepNumber": 14,
+      "phase": "Build the versioned control plane",
+      "title": "Keep experiment metrics attached to run identity",
+      "type": "add_component",
+      "content": "DESIGN CHOICE — Experiment tracking complements, but does not replace, the run metadata store: record parameters, evaluation metrics, and model candidates under the same immutable run identity. Preserve failed and rejected experiments for comparison rather than publishing them as production models.",
+      "requirementIds": ["legacy-requirement:5"],
+      "component": {
+        "nodeId": "mlops_tracking",
+        "componentType": "experiment-tracking",
+        "label": "Experiment Metrics & Parameters",
+        "description": "Run-linked parameter, metric, and candidate-model history for comparison and audit.",
+        "position": {"x": 1340, "y": 200},
+        "highlightReason": "Evaluation evidence remains traceable to the exact run instead of being detached from pipeline lineage.",
+        "properties": {
+          "componentName": "Experiment Metrics & Parameters",
+          "purpose": "Record resolved parameters, training context, evaluation metrics, and candidate references under the immutable pipeline run identity.",
+          "platform": "MLflow"
+        }
+      }
+    },
+    {
+      "id": "mlops_input_store",
+      "stepNumber": 15,
+      "phase": "Build the versioned control plane",
+      "title": "Pin source datasets before execution",
+      "type": "add_component",
+      "content": "ASSUMPTION — Use object storage for immutable dataset snapshots, consistent with the supplied hint. A mutable path such as \"latest\" is not a replayable input; resolve it to a version or content digest when the run is admitted. Clarify source-system snapshot guarantees separately.",
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "mlops_input_store",
+        "componentType": "object-storage",
+        "label": "Versioned Dataset Snapshots",
+        "description": "Immutable input snapshots and checksums referenced by each admitted run.",
+        "position": {"x": 0, "y": 440},
+        "highlightReason": "Historical replay requires the actual input version, not only the pipeline code version.",
+        "properties": {
+          "componentName": "Versioned Dataset Snapshots",
+          "purpose": "Retain versioned source snapshots and checksums; store the resolved object version or content digest in run lineage so replay does not silently read a newer dataset.",
+          "versioning": true,
+          "checksumValidation": true
+        }
+      }
+    },
+    {
+      "id": "mlops_cpu_worker",
+      "stepNumber": 16,
+      "phase": "Add heterogeneous execution and artifact stages",
+      "title": "Add the ordinary CPU data-preparation path",
+      "type": "add_component",
+      "content": "FACT — Data processing is an explicit pipeline stage. Use a containerized, idempotent worker for validation and preparation that fits the CPU execution class; record its image digest and input/output identities so a retry can be distinguished from a new computation.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "mlops_cpu_worker",
+        "componentType": "processing-worker",
+        "label": "CPU Data Preparation",
+        "description": "Containerized validation and feature-preparation task for work that fits the CPU execution class.",
+        "position": {"x": 300, "y": 440},
+        "highlightReason": "An explicit CPU path avoids reserving accelerators for work that does not need them.",
+        "properties": {
+          "componentName": "CPU Data Preparation",
+          "purpose": "Validate input schemas and prepare deterministic feature artifacts on CPU; use immutable task-image and input digests for retry-safe execution.",
+          "tasks": "Data Processing",
+          "autoscale": true
+        }
+      }
+    },
+    {
+      "id": "mlops_spark_backend",
+      "stepNumber": 17,
+      "phase": "Add heterogeneous execution and artifact stages",
+      "title": "Represent the Spark batch execution backend",
+      "type": "add_component",
+      "content": "CATALOG REVIEW — The component catalog has a Spark Streaming option, but no general Spark batch compute component. Streaming is not a safe substitute for the batch backend named by this brief, so use the supported generic custom component here only. Route a data-preparation stage to this backend when workload profiling justifies distributed Spark; no dataset-size threshold is supplied.",
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "mlops_spark_backend",
+        "componentType": "custom-component",
+        "label": "Apache Spark Batch Backend",
+        "description": "Semantically named generic component for the batch Spark executor, which has no direct catalog component.",
+        "position": {"x": 560, "y": 440},
+        "highlightReason": "This is the only generic component: the catalog's Spark entry is specifically streaming, not a general batch execution backend.",
+        "properties": {
+          "componentName": "Apache Spark Batch Backend",
+          "subtitle": "Distributed batch data processing",
+          "purpose": "Run parameterized, containerized Spark batch stages selected by the DAG; publish deterministic outputs and runtime identity for lineage and replay.",
+          "componentType": "Compute Backend",
+          "technology": "Apache Spark",
+          "notes": "Custom is used because the catalog only models Spark Streaming, while this node represents the brief's general heterogeneous Spark execution backend."
+        }
+      }
+    },
+    {
+      "id": "mlops_gpu_pool",
+      "stepNumber": 18,
+      "phase": "Add heterogeneous execution and artifact stages",
+      "title": "Reserve accelerators only for GPU work",
+      "type": "add_component",
+      "content": "FACT — GPU is one of the explicitly named execution classes. Keep its capacity isolated from general CPU work and let each DAG task declare whether it needs an accelerator; the brief does not identify a GPU model, pool size, or scheduling policy.",
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "mlops_gpu_pool",
+        "componentType": "gpu-cluster",
+        "label": "GPU Training Capacity",
+        "description": "Separately scheduled accelerator capacity for training tasks that declare a GPU requirement.",
+        "position": {"x": 820, "y": 440},
+        "highlightReason": "Separate accelerator capacity prevents CPU and GPU tasks from competing under one undifferentiated worker limit.",
+        "properties": {
+          "componentName": "GPU Training Capacity",
+          "purpose": "Provide an independently scheduled GPU execution class for tasks that request accelerators; retain the actual allocated runtime identity in each run record."
+        }
+      }
+    },
+    {
+      "id": "mlops_trainer",
+      "stepNumber": 19,
+      "phase": "Add heterogeneous execution and artifact stages",
+      "title": "Add the reproducible training stage",
+      "type": "add_component",
+      "content": "FACT — Model training is explicitly part of the orchestrated workflow. Parameterize training inputs and settings through a versioned schema, pin the task image and dependencies, and keep secrets as references. The catalog's Distributed setting is an illustrative execution mode, not a claim that every training job must use multiple devices.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:4", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "mlops_trainer",
+        "componentType": "model-training",
+        "label": "Model Training Stage",
+        "description": "Versioned training step consuming immutable prepared inputs and resolved run parameters.",
+        "position": {"x": 1080, "y": 440},
+        "highlightReason": "A retry or replay needs the same training definition, parameters, data reference, and runtime image.",
+        "properties": {
+          "componentName": "Model Training Stage",
+          "purpose": "Train from immutable prepared artifacts and the run's resolved parameter snapshot; pin code, dependency, and container-image identity in lineage.",
+          "computeType": "Distributed"
+        }
+      }
+    },
+    {
+      "id": "mlops_evaluator",
+      "stepNumber": 20,
+      "phase": "Add heterogeneous execution and artifact stages",
+      "title": "Make evaluation a separate DAG stage",
+      "type": "add_component",
+      "content": "FACT — Evaluation is explicitly required and should gate promotion. Run it as a separate, retryable task over the candidate model and the evaluation dataset version; keep evaluation metrics and decision evidence attached to the originating run.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5"],
+      "component": {
+        "nodeId": "mlops_evaluator",
+        "componentType": "processing-worker",
+        "label": "Model Evaluation & Validation",
+        "description": "Isolated data-processing task that evaluates a candidate against a pinned evaluation input and records promotion evidence.",
+        "position": {"x": 1340, "y": 440},
+        "highlightReason": "A model should not reach the registry or serving stage before its evaluation result is recorded.",
+        "properties": {
+          "componentName": "Model Evaluation & Validation",
+          "purpose": "Evaluate the candidate model against the pinned evaluation dataset and versioned criteria; emit metrics and a pass or reject decision for the same run identity.",
+          "tasks": "Data Processing"
+        }
+      }
+    },
+    {
+      "id": "mlops_feature_store",
+      "stepNumber": 21,
+      "phase": "Add heterogeneous execution and artifact stages",
+      "title": "Persist immutable intermediate artifacts",
+      "type": "add_component",
+      "content": "FACT — Intermediate artifacts need caching and artifact storage is recommended by the supplied hints. Write prepared data under a content-derived immutable identity, verify checksums, and keep metadata separate from large objects. A digest should include every input that can change the result, not merely the source filename.",
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:3", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "mlops_feature_store",
+        "componentType": "object-storage",
+        "label": "Prepared Data Artifacts",
+        "description": "Durable, immutable intermediate outputs addressable by content digest and referenced from run lineage.",
+        "position": {"x": 560, "y": 640},
+        "highlightReason": "An immutable object reference allows cache reuse and historical replay to point to the same bytes.",
+        "properties": {
+          "componentName": "Prepared Data Artifacts",
+          "purpose": "Persist content-addressed prepared datasets and transformation outputs; verify checksums and retain object-version references for historical runs.",
+          "versioning": true,
+          "checksumValidation": true
+        }
+      }
+    },
+    {
+      "id": "mlops_cache",
+      "stepNumber": 22,
+      "phase": "Add heterogeneous execution and artifact stages",
+      "title": "Add a content-addressable cache index",
+      "type": "add_component",
+      "content": "FACT — Artifact caching and deduplication are explicit. Use the cache as a lookup/index, not the durable source of truth. A cache key should bind the canonical step definition, immutable input digests, resolved parameters, and pinned runtime image; if any material input changes, do not reuse the result.",
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:3"],
+      "component": {
+        "nodeId": "mlops_cache",
+        "componentType": "cache",
+        "label": "Content Digest Cache Index",
+        "description": "Fast mapping from deterministic computation keys to verified durable artifact references.",
+        "position": {"x": 820, "y": 640},
+        "highlightReason": "The cache avoids recomputation while object storage remains authoritative for artifact bytes.",
+        "properties": {
+          "componentName": "Content Digest Cache Index",
+          "purpose": "Map a canonical step, input, parameter, and image digest to a verified immutable object reference; treat misses as normal and never use a mutable cache entry as the replay source.",
+          "engine": "redis",
+          "cacheStrategy": "cache-aside",
+          "inMemory": true
+        }
+      }
+    },
+    {
+      "id": "mlops_model_store",
+      "stepNumber": 23,
+      "phase": "Add heterogeneous execution and artifact stages",
+      "title": "Persist model candidates independently",
+      "type": "add_component",
+      "content": "DESIGN CHOICE — Store trained model bytes separately from prepared datasets so retention and access policies can differ. Keep a candidate immutable and addressable before evaluation; do not confuse writing an artifact with approving it for serving.",
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "mlops_model_store",
+        "componentType": "object-storage",
+        "label": "Immutable Model Candidates",
+        "description": "Versioned candidate-model binaries and manifests before evaluation and registry promotion.",
+        "position": {"x": 1080, "y": 640},
+        "highlightReason": "The same candidate bytes can be evaluated, registered, deployed, or replayed without overwriting an earlier run.",
+        "properties": {
+          "componentName": "Immutable Model Candidates",
+          "purpose": "Persist candidate model bytes and manifests by immutable digest; retain the object reference in lineage before any promotion decision.",
+          "versioning": true,
+          "checksumValidation": true
+        }
+      }
+    },
+    {
+      "id": "mlops_registry",
+      "stepNumber": 24,
+      "phase": "Add heterogeneous execution and artifact stages",
+      "title": "Register only evaluated candidates",
+      "type": "add_component",
+      "content": "DESIGN CHOICE — The catalog contains a model registry. Promote a candidate only after the evaluation stage records its result and provenance; retain rejected candidates and approval history so a registry tag never erases the underlying artifact identity.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "mlops_registry",
+        "componentType": "model-registry",
+        "label": "Evaluated Model Registry",
+        "description": "Model versions, evaluation evidence, and approved deployment references.",
+        "position": {"x": 1600, "y": 440},
+        "highlightReason": "Registry promotion follows evaluation and retains the immutable candidate digest and run lineage.",
+        "properties": {
+          "componentName": "Evaluated Model Registry",
+          "purpose": "Register a candidate only with its immutable artifact digest, evaluation evidence, source run, and approval state; preserve prior versions for rollback and replay.",
+          "platform": "MLflow"
+        }
+      }
+    },
+    {
+      "id": "mlops_serving",
+      "stepNumber": 25,
+      "phase": "Add heterogeneous execution and artifact stages",
+      "title": "Finish at a controlled deployment boundary",
+      "type": "add_component",
+      "content": "FACT — The problem description covers orchestration through model deployment. Keep deployment downstream of successful evaluation and registry approval, with the deployed model pinned by digest; promotion and rollback policy details remain interview questions because the brief does not specify them.",
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "mlops_serving",
+        "componentType": "model-serving",
+        "label": "Approved Model Deployment",
+        "description": "Serving deployment pinned to an approved registry version and immutable model artifact.",
+        "position": {"x": 1860, "y": 440},
+        "highlightReason": "The deployed version can be traced back to the evaluated run and restored without losing prior history.",
+        "properties": {
+          "componentName": "Approved Model Deployment",
+          "purpose": "Deploy only an approved registry version by immutable artifact digest; record rollout and rollback references against the originating run.",
+          "platform": "KServe",
+          "autoscaling": true
+        }
+      }
+    },
+    {
+      "id": "mlops_edge_api",
+      "stepNumber": 26,
+      "phase": "Connect control, data, artifact, and operational flows",
+      "title": "Submit validated run parameters",
+      "type": "add_connection",
+      "content": "The API sends a schema-validated parameter snapshot and requested pipeline revision to the orchestrator. Persist the resolved values, not only the caller's mutable defaults, so a replay uses the same inputs.",
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1"],
+      "connection": {
+        "edgeId": "mlops_edge_01",
+        "sourceNodeId": "mlops_api",
+        "targetNodeId": "mlops_orchestrator",
+        "connectionType": "http",
+        "label": "Validated revision & parameters",
+        "description": "Authenticated request with a pipeline revision, validated parameter snapshot, and optional schedule operation."
+      }
+    },
+    {
+      "id": "mlops_edge_git",
+      "stepNumber": 27,
+      "phase": "Connect control, data, artifact, and operational flows",
+      "title": "Resolve a pipeline definition to a commit",
+      "type": "add_connection",
+      "content": "The orchestrator resolves the requested definition to an immutable Git commit and records that commit in the run before dispatch. A moving branch can select a revision at admission, but the run must retain the resolved SHA.",
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "mlops_edge_02",
+        "sourceNodeId": "mlops_git",
+        "targetNodeId": "mlops_orchestrator",
+        "connectionType": "data-flow",
+        "label": "DAG definition at commit SHA",
+        "description": "Version-controlled pipeline code and schema resolved to the exact source revision for the run."
+      }
+    },
+    {
+      "id": "mlops_edge_run_metadata",
+      "stepNumber": 28,
+      "phase": "Connect control, data, artifact, and operational flows",
+      "title": "Create the durable run identity before execution",
+      "type": "add_connection",
+      "content": "Persist the run definition, resolved parameters, schedule context, Git revision, and initial state before placing work on the queue. This gives retries and status queries a stable identity even if execution capacity is temporarily unavailable.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:4", "legacy-constraint:2"],
+      "connection": {
+        "edgeId": "mlops_edge_03",
+        "sourceNodeId": "mlops_orchestrator",
+        "targetNodeId": "mlops_run_db",
+        "connectionType": "database-connection",
+        "label": "Run definition & resolved inputs",
+        "description": "Durable run identity, canonical DAG revision, parameters, schedule provenance, and source commit before dispatch."
+      }
+    },
+    {
+      "id": "mlops_edge_dispatch",
+      "stepNumber": 29,
+      "phase": "Connect control, data, artifact, and operational flows",
+      "title": "Dispatch runnable DAG stages asynchronously",
+      "type": "add_connection",
+      "content": "The orchestrator enqueues only stages whose dependencies are satisfied. Keep run-level concurrency and per-resource-class capacity as separate scheduler decisions; a queue backlog must not be mistaken for an executed stage.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:2"],
+      "connection": {
+        "edgeId": "mlops_edge_04",
+        "sourceNodeId": "mlops_orchestrator",
+        "targetNodeId": "mlops_queue",
+        "connectionType": "message-queue",
+        "label": "Dependency-ready stage claims",
+        "description": "Idempotent run and stage identities become executable only after DAG predecessors complete."
+      }
+    },
+    {
+      "id": "mlops_edge_control_monitoring",
+      "stepNumber": 30,
+      "phase": "Connect control, data, artifact, and operational flows",
+      "title": "Measure orchestration startup and state",
+      "type": "add_connection",
+      "content": "Emit accepted-run, scheduling, and stage-state timestamps so the stated startup target can be measured from a consistent boundary. Avoid combining queue wait with model execution duration in one opaque latency number.",
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:1"],
+      "connection": {
+        "edgeId": "mlops_edge_05",
+        "sourceNodeId": "mlops_orchestrator",
+        "targetNodeId": "mlops_monitoring",
+        "connectionType": "event-stream",
+        "label": "Run admission & stage events",
+        "description": "Timestamped accepted-run, scheduling, dependency, retry, completion, and terminal-state events."
+      }
+    },
+    {
+      "id": "mlops_edge_cache_lookup",
+      "stepNumber": 31,
+      "phase": "Connect control, data, artifact, and operational flows",
+      "title": "Check the reusable artifact key before scheduling work",
+      "type": "add_connection",
+      "content": "Before dispatching a deterministic stage, compute its canonical key from the stage definition, immutable input digests, resolved parameters, and task image digest. A hit can reuse a verified artifact; a missing or invalid reference executes the stage normally.",
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "mlops_edge_06",
+        "sourceNodeId": "mlops_orchestrator",
+        "targetNodeId": "mlops_cache",
+        "connectionType": "api-call",
+        "label": "Canonical stage digest lookup",
+        "description": "Cache lookup binds code, inputs, parameters, and runtime identity before an expensive stage is admitted."
+      }
+    },
+    {
+      "id": "mlops_edge_queue_runtime",
+      "stepNumber": 32,
+      "phase": "Connect control, data, artifact, and operational flows",
+      "title": "Claim work on the selected execution runtime",
+      "type": "add_connection",
+      "content": "The runtime claims a durable stage lease with run identity, dependency outputs, resource class, and attempt number. Expired leases may be retried only through idempotent stage semantics and the recorded retry policy.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:2"],
+      "connection": {
+        "edgeId": "mlops_edge_07",
+        "sourceNodeId": "mlops_queue",
+        "targetNodeId": "mlops_runtime",
+        "connectionType": "message-queue",
+        "label": "Leased runnable stage",
+        "description": "Durable run and stage claim with attempt identity and the resource class selected by the DAG scheduler."
+      }
+    },
+    {
+      "id": "mlops_edge_runtime_cpu",
+      "stepNumber": 33,
+      "phase": "Connect control, data, artifact, and operational flows",
+      "title": "Launch the CPU preparation container",
+      "type": "add_connection",
+      "content": "Route ordinary validation and preparation tasks to the CPU class with a pinned image and explicit resource request. CPU work should not occupy the GPU pool merely because both belong to the same pipeline run.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "mlops_edge_08",
+        "sourceNodeId": "mlops_runtime",
+        "targetNodeId": "mlops_cpu_worker",
+        "connectionType": "api-call",
+        "label": "Pinned CPU task image & inputs",
+        "description": "Container launch request with stage identity, immutable inputs, parameters, and CPU resource class."
+      }
+    },
+    {
+      "id": "mlops_edge_runtime_spark",
+      "stepNumber": 34,
+      "phase": "Connect control, data, artifact, and operational flows",
+      "title": "Submit distributed batch work to Spark",
+      "type": "add_connection",
+      "content": "Select Spark for a stage when measured data shape or execution needs justify distributed processing. The choice is a stage-level resource decision; no fixed dataset-size threshold or Spark cluster size is implied by the brief.",
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "mlops_edge_09",
+        "sourceNodeId": "mlops_runtime",
+        "targetNodeId": "mlops_spark_backend",
+        "connectionType": "api-call",
+        "label": "Versioned Spark stage submission",
+        "description": "Submit a pinned, parameterized batch job and retain the Spark application identity in run lineage."
+      }
+    },
+    {
+      "id": "mlops_edge_runtime_gpu",
+      "stepNumber": 35,
+      "phase": "Connect control, data, artifact, and operational flows",
+      "title": "Allocate GPU capacity only to requesting stages",
+      "type": "add_connection",
+      "content": "The scheduler grants accelerator capacity according to the training step's explicit resource request and records the actual runtime allocation. If no GPU is required, the DAG remains executable on another supported class.",
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "mlops_edge_10",
+        "sourceNodeId": "mlops_runtime",
+        "targetNodeId": "mlops_gpu_pool",
+        "connectionType": "api-call",
+        "label": "GPU resource allocation",
+        "description": "Resource-class allocation for training stages that explicitly request accelerator capacity."
+      }
+    },
+    {
+      "id": "mlops_edge_input_cpu",
+      "stepNumber": 36,
+      "phase": "Connect control, data, artifact, and operational flows",
+      "title": "Read an immutable dataset snapshot on CPU",
+      "type": "add_connection",
+      "content": "The CPU preparation stage reads the exact dataset object version or digest resolved at run admission. Schema and checksum failures should fail visibly rather than silently switching to a newer input.",
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:4", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "mlops_edge_11",
+        "sourceNodeId": "mlops_input_store",
+        "targetNodeId": "mlops_cpu_worker",
+        "connectionType": "data-flow",
+        "label": "Pinned source snapshot",
+        "description": "Versioned dataset bytes and checksum resolved into the run's immutable input manifest."
+      }
+    },
+    {
+      "id": "mlops_edge_input_spark",
+      "stepNumber": 37,
+      "phase": "Connect control, data, artifact, and operational flows",
+      "title": "Provide the same pinned input to Spark stages",
+      "type": "add_connection",
+      "content": "The distributed path consumes the same immutable input identity as the CPU path. This keeps a resource-class choice from changing the logical dataset seen by a stage.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:4", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "mlops_edge_12",
+        "sourceNodeId": "mlops_input_store",
+        "targetNodeId": "mlops_spark_backend",
+        "connectionType": "data-flow",
+        "label": "Pinned source snapshot for Spark",
+        "description": "The same content-verified dataset version is passed to the distributed batch execution path."
+      }
+    },
+    {
+      "id": "mlops_edge_cpu_artifacts",
+      "stepNumber": 38,
+      "phase": "Connect control, data, artifact, and operational flows",
+      "title": "Persist deterministic CPU outputs",
+      "type": "add_connection",
+      "content": "On a successful cache miss, the CPU task writes an immutable prepared artifact and its manifest. Include output checksum, schema/version, source digests, parameters, and image identity so retries and downstream consumers can verify the result.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:3", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "mlops_edge_13",
+        "sourceNodeId": "mlops_cpu_worker",
+        "targetNodeId": "mlops_feature_store",
+        "connectionType": "data-flow",
+        "label": "Checksummed prepared artifacts",
+        "description": "Immutable CPU transformation outputs with content digest and complete input/runtime provenance."
+      }
+    },
+    {
+      "id": "mlops_edge_spark_artifacts",
+      "stepNumber": 39,
+      "phase": "Connect control, data, artifact, and operational flows",
+      "title": "Normalize Spark outputs to the same artifact contract",
+      "type": "add_connection",
+      "content": "CPU and Spark implementations should publish equivalent versioned schemas and digest-bearing manifests for the same logical stage. Compare outputs where determinism permits; if backend differences affect semantics, include the backend/runtime version in the computation identity.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "mlops_edge_14",
+        "sourceNodeId": "mlops_spark_backend",
+        "targetNodeId": "mlops_feature_store",
+        "connectionType": "data-flow",
+        "label": "Checksummed distributed outputs",
+        "description": "Spark-produced immutable artifacts under the same schema, lineage, and content-addressing contract."
+      }
+    },
+    {
+      "id": "mlops_edge_cpu_cache_publish",
+      "stepNumber": 40,
+      "phase": "Connect control, data, artifact, and operational flows",
+      "title": "Publish the successful computation key",
+      "type": "add_connection",
+      "content": "Only after output validation succeeds, map the complete computation digest to the durable artifact reference. Avoid caching partial, failed, nondeterministic, or untracked side-effecting stage results.",
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "mlops_edge_15",
+        "sourceNodeId": "mlops_cpu_worker",
+        "targetNodeId": "mlops_cache",
+        "connectionType": "data-flow",
+        "label": "Validated digest-to-artifact mapping",
+        "description": "Successful deterministic output digest indexed to its checksummed durable object reference."
+      }
+    },
+    {
+      "id": "mlops_edge_cache_artifacts",
+      "stepNumber": 41,
+      "phase": "Connect control, data, artifact, and operational flows",
+      "title": "Resolve cache hits to durable object references",
+      "type": "add_connection",
+      "content": "A cache hit returns an immutable object reference, not artifact bytes from volatile memory. Verify the referenced object and digest before reuse; treat missing or corrupt entries as misses and recompute safely.",
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:3", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "mlops_edge_16",
+        "sourceNodeId": "mlops_cache",
+        "targetNodeId": "mlops_feature_store",
+        "connectionType": "data-flow",
+        "label": "Verified cache-hit object reference",
+        "description": "A digest match resolves to durable, checksum-verified prepared artifact bytes."
+      }
+    },
+    {
+      "id": "mlops_edge_features_training",
+      "stepNumber": 42,
+      "phase": "Connect control, data, artifact, and operational flows",
+      "title": "Train from prepared, versioned artifacts",
+      "type": "add_connection",
+      "content": "The training stage consumes immutable prepared artifacts regardless of whether they were freshly computed or reused. Record the exact object digests and resolved parameter values alongside the training attempt.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "mlops_edge_17",
+        "sourceNodeId": "mlops_feature_store",
+        "targetNodeId": "mlops_trainer",
+        "connectionType": "data-flow",
+        "label": "Immutable prepared inputs",
+        "description": "Checksummed feature and dataset artifacts selected by the run's pinned DAG and input manifest."
+      }
+    },
+    {
+      "id": "mlops_edge_gpu_training",
+      "stepNumber": 43,
+      "phase": "Connect control, data, artifact, and operational flows",
+      "title": "Bind the training attempt to its actual compute class",
+      "type": "add_connection",
+      "content": "Attach the actual GPU allocation and runtime identity to the training attempt when the task requests it. The training image and resource class belong in lineage because changing kernels or backend versions can affect reproducibility.",
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:5", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "mlops_edge_18",
+        "sourceNodeId": "mlops_gpu_pool",
+        "targetNodeId": "mlops_trainer",
+        "connectionType": "data-flow",
+        "label": "Recorded GPU execution context",
+        "description": "Accelerator assignment and runtime identity for a training stage that explicitly requests GPU capacity."
+      }
+    },
+    {
+      "id": "mlops_edge_training_model_artifacts",
+      "stepNumber": 44,
+      "phase": "Connect control, data, artifact, and operational flows",
+      "title": "Persist the exact trained candidate",
+      "type": "add_connection",
+      "content": "Write model bytes and a manifest under an immutable digest before evaluation. The manifest links the model to source data, parameters, code, dependencies, runtime, and training attempt; never overwrite a prior candidate under a mutable name.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "mlops_edge_19",
+        "sourceNodeId": "mlops_trainer",
+        "targetNodeId": "mlops_model_store",
+        "connectionType": "data-flow",
+        "label": "Immutable model candidate & manifest",
+        "description": "Trained model bytes plus checksummed digest and the full run and input provenance manifest."
+      }
+    },
+    {
+      "id": "mlops_edge_candidate_evaluation",
+      "stepNumber": 45,
+      "phase": "Connect control, data, artifact, and operational flows",
+      "title": "Evaluate the candidate before promotion",
+      "type": "add_connection",
+      "content": "Evaluation reads the exact candidate digest and its pinned evaluation inputs. The output is an explicit pass/reject result and metrics, not an implicit side effect of model training.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "mlops_edge_20",
+        "sourceNodeId": "mlops_model_store",
+        "targetNodeId": "mlops_evaluator",
+        "connectionType": "data-flow",
+        "label": "Pinned candidate for evaluation",
+        "description": "Immutable model artifact and manifest evaluated against the run's versioned criteria and data."
+      }
+    },
+    {
+      "id": "mlops_edge_evaluation_registry",
+      "stepNumber": 46,
+      "phase": "Connect control, data, artifact, and operational flows",
+      "title": "Gate registry promotion on evaluation evidence",
+      "type": "add_connection",
+      "content": "Only a passing evaluation with its candidate digest, criteria version, and run lineage can proceed to registration. Rejected candidates remain inspectable but do not flow into serving deployment.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5"],
+      "connection": {
+        "edgeId": "mlops_edge_21",
+        "sourceNodeId": "mlops_evaluator",
+        "targetNodeId": "mlops_registry",
+        "connectionType": "data-flow",
+        "label": "Passing evaluation & provenance",
+        "description": "Promotion request includes metrics, criteria version, candidate digest, and originating run identity."
+      }
+    },
+    {
+      "id": "mlops_edge_evaluation_tracking",
+      "stepNumber": 47,
+      "phase": "Connect control, data, artifact, and operational flows",
+      "title": "Record parameters and evaluation results together",
+      "type": "add_connection",
+      "content": "Persist metrics for passing and rejected candidates under the same run and parameter snapshot. This enables later comparison without making the experiment tracker the authority for binary artifacts or run-state transitions.",
+      "requirementIds": ["legacy-requirement:5"],
+      "connection": {
+        "edgeId": "mlops_edge_22",
+        "sourceNodeId": "mlops_evaluator",
+        "targetNodeId": "mlops_tracking",
+        "connectionType": "data-flow",
+        "label": "Run-linked evaluation metrics",
+        "description": "Evaluation measurements, criteria version, parameters, and candidate digest for experiment comparison."
+      }
+    },
+    {
+      "id": "mlops_edge_registry_serving",
+      "stepNumber": 48,
+      "phase": "Connect control, data, artifact, and operational flows",
+      "title": "Deploy only the approved immutable version",
+      "type": "add_connection",
+      "content": "Serving receives a specific approved registry version and immutable model digest. Use a controlled rollout and preserve the previous version for rollback; define the rollout policy with the interviewer because the brief does not set one.",
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "mlops_edge_23",
+        "sourceNodeId": "mlops_registry",
+        "targetNodeId": "mlops_serving",
+        "connectionType": "data-flow",
+        "label": "Approved model digest & registry version",
+        "description": "Explicitly approved immutable candidate reference for serving deployment and rollback."
+      }
+    },
+    {
+      "id": "mlops_edge_cpu_lineage",
+      "stepNumber": 49,
+      "phase": "Connect control, data, artifact, and operational flows",
+      "title": "Record preparation inputs and outputs in lineage",
+      "type": "add_connection",
+      "content": "Record each preparation attempt, source snapshot, resolved parameters, image digest, output digest, and retry parent against its run. The object store holds bytes; the lineage store explains how those bytes were produced.",
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "mlops_edge_24",
+        "sourceNodeId": "mlops_cpu_worker",
+        "targetNodeId": "mlops_run_db",
+        "connectionType": "database-connection",
+        "label": "Preparation attempt lineage",
+        "description": "Input, parameter, image, attempt, and output references keyed by immutable run and stage identity."
+      }
+    },
+    {
+      "id": "mlops_edge_training_lineage",
+      "stepNumber": 50,
+      "phase": "Connect control, data, artifact, and operational flows",
+      "title": "Record the training execution context",
+      "type": "add_connection",
+      "content": "Persist the training attempt, selected compute class, image and dependency identity, input digests, seed where applicable, and produced model digest. A retry is a new attempt under the same run, not an overwrite of prior evidence.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:4", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "mlops_edge_25",
+        "sourceNodeId": "mlops_trainer",
+        "targetNodeId": "mlops_run_db",
+        "connectionType": "database-connection",
+        "label": "Training attempt & model lineage",
+        "description": "Pinned inputs, parameters, runtime, compute class, attempt identity, and output model digest."
+      }
+    },
+    {
+      "id": "mlops_edge_evaluation_lineage",
+      "stepNumber": 51,
+      "phase": "Connect control, data, artifact, and operational flows",
+      "title": "Preserve evaluation evidence for replay and audit",
+      "type": "add_connection",
+      "content": "Store the candidate digest, evaluation data version, criteria version, result, and metrics together. This lets a reviewer distinguish a model artifact from the evidence that authorized or rejected its promotion.",
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "mlops_edge_26",
+        "sourceNodeId": "mlops_evaluator",
+        "targetNodeId": "mlops_run_db",
+        "connectionType": "database-connection",
+        "label": "Evaluation decision & evidence",
+        "description": "Candidate and evaluation-data digests, criteria version, result, and metrics attached to the run."
+      }
+    },
+    {
+      "id": "mlops_edge_runtime_lineage",
+      "stepNumber": 52,
+      "phase": "Connect control, data, artifact, and operational flows",
+      "title": "Record resource allocation and task status",
+      "type": "add_connection",
+      "content": "Record task lease, selected resource class, runtime identity, state transition, and timestamps so queueing, execution, retries, and failures can be reconstructed independently.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7"],
+      "connection": {
+        "edgeId": "mlops_edge_27",
+        "sourceNodeId": "mlops_runtime",
+        "targetNodeId": "mlops_run_db",
+        "connectionType": "database-connection",
+        "label": "Leases, resource class & task state",
+        "description": "Runtime allocation and state transitions linked to the run and idempotent stage attempt."
+      }
+    },
+    {
+      "id": "mlops_edge_queue_monitoring",
+      "stepNumber": 53,
+      "phase": "Connect control, data, artifact, and operational flows",
+      "title": "Expose queue pressure and retry behavior",
+      "type": "add_connection",
+      "content": "Export queue age, ready and leased work, retry outcomes, and terminal failures. Use those observations to decide admission and scale policy; do not hide an overloaded executor behind an indefinitely growing queue.",
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:2"],
+      "connection": {
+        "edgeId": "mlops_edge_28",
+        "sourceNodeId": "mlops_queue",
+        "targetNodeId": "mlops_monitoring",
+        "connectionType": "event-stream",
+        "label": "Queue age, retries & terminal failures",
+        "description": "Operational queue signals used for concurrency, retry, and alert policies."
+      }
+    },
+    {
+      "id": "mlops_edge_serving_monitoring",
+      "stepNumber": 54,
+      "phase": "Connect control, data, artifact, and operational flows",
+      "title": "Observe deployment state against model identity",
+      "type": "add_connection",
+      "content": "Report rollout state and the deployed model digest so operators can compare serving behavior with the evaluated registry version. Model-quality thresholds and rollback criteria require product-specific evidence and are not specified in this brief.",
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "mlops_edge_29",
+        "sourceNodeId": "mlops_serving",
+        "targetNodeId": "mlops_monitoring",
+        "connectionType": "event-stream",
+        "label": "Deployment & model-version health",
+        "description": "Serving rollout state and deployed model digest correlated with the evaluated run and registry version."
+      }
+    },
+    {
+      "id": "mlops_edge_alert_delivery",
+      "stepNumber": 55,
+      "phase": "Connect control, data, artifact, and operational flows",
+      "title": "Route actionable alerts to delivery",
+      "type": "add_connection",
+      "content": "Route deduplicated terminal failures and configured service alerts to the notification service. Include an access-controlled run link and alert reason, not raw data or secrets.",
+      "requirementIds": ["legacy-requirement:6"],
+      "connection": {
+        "edgeId": "mlops_edge_30",
+        "sourceNodeId": "mlops_monitoring",
+        "targetNodeId": "mlops_alerts",
+        "connectionType": "event-stream",
+        "label": "Policy-qualified run alerts",
+        "description": "Deduplicated terminal-failure and service-health notifications with protected lineage links."
+      }
+    },
+    {
+      "id": "mlops_concurrency_trigger",
+      "stepNumber": 56,
+      "phase": "Pressure-test the stated constraints",
+      "title": "Test the stated concurrent-run floor",
+      "type": "scale_trigger",
+      "content": "FACT — The stated capacity requirement is 100+ concurrent pipeline runs. Validate that many active run records can be admitted and progressed while measuring queue age and resource-class waits. Treat simultaneous active runs as different from the number of worker processes; ask for run-duration and arrival profiles before selecting pool sizes.",
+      "scaleTrigger": {
+        "metric": "Active pipeline runs and oldest-ready-stage age, with a capacity test at 100+ concurrent runs",
+        "action": "When runnable work accumulates, scale scheduler and executor capacity independently by CPU, GPU, and Spark class; apply explicit admission and per-run resource limits based on a confirmed workload profile.",
+        "impact": "Tests the brief's concurrency requirement without assuming every run starts every stage at once or inventing worker counts."
+      },
+      "requirementIds": ["legacy-constraint:2"]
+    },
+    {
+      "id": "mlops_compute_trigger",
+      "stepNumber": 57,
+      "phase": "Pressure-test the stated constraints",
+      "title": "Scale each compute class from its own demand",
+      "type": "scale_trigger",
+      "content": "FACT — CPU, GPU, and Spark are the three compute classes named by the brief. Track runnable-stage wait and utilization separately by class; do not scale an expensive GPU pool because CPU preprocessing is backlogged or send GPU-only work to an unsupported runtime.",
+      "scaleTrigger": {
+        "metric": "Runnable work and wait time segmented by CPU, GPU, and Spark resource class",
+        "action": "Scale or admit each class independently, preserve task resource declarations, and validate that a saturated class does not block unrelated eligible DAG branches.",
+        "impact": "Makes heterogeneous execution explicit while limiting noisy-neighbor effects across concurrent pipelines."
+      },
+      "requirementIds": ["legacy-constraint:5"]
+    },
+    {
+      "id": "mlops_dedup_trigger",
+      "stepNumber": 58,
+      "phase": "Pressure-test the stated constraints",
+      "title": "Verify deduplication without weakening correctness",
+      "type": "scale_trigger",
+      "content": "FACT — Artifact storage with deduplication is a stated constraint. Test repeated identical stage inputs and then change each material key dimension in turn. Identical work may resolve to the same verified bytes; changed code, data, parameters, or runtime must not hit an incompatible result.",
+      "scaleTrigger": {
+        "metric": "Digest collisions, cache hit/miss outcomes, checksum verification, and duplicate artifact writes",
+        "action": "Reject mismatched manifests, treat missing or corrupt objects as cache misses, and retain immutable references for historical runs.",
+        "impact": "Prevents deduplication from returning stale or semantically different artifacts while reducing duplicate storage and recomputation."
+      },
+      "requirementIds": ["legacy-constraint:3"]
+    },
+    {
+      "id": "mlops_failure_decision",
+      "stepNumber": 59,
+      "phase": "Pressure-test the stated constraints",
+      "title": "Separate retryable failures from terminal failures",
+      "type": "decision_point",
+      "content": "DESIGN CHOICE — Classify transient infrastructure errors separately from deterministic data, schema, or code errors. Retry only idempotent stages under a bounded policy, preserve every attempt, and send terminal failure state to alerting. The brief requires retry and alerting but gives no retry count or backoff duration; ask for those operational policies rather than inventing values.",
+      "decision": {
+        "question": "Should every failed stage retry automatically?",
+        "chosen": "Retry only classified transient failures with exponential backoff and an explicit policy cap; surface deterministic failures promptly and preserve a replayable failed state.",
+        "chosenReason": "Blind retries can repeat invalid work or side effects, while a recorded policy gives operators a bounded, inspectable recovery path.",
+        "alternatives": [
+          {
+            "option": "Retry every error indefinitely",
+            "tradeoff": "Can waste capacity, hide deterministic defects, and prevent terminal alerts."
+          },
+          {
+            "option": "Never retry a failed task",
+            "tradeoff": "Makes transient infrastructure failures require avoidable manual recovery."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:6"]
+    },
+    {
+      "id": "mlops_replay_review",
+      "stepNumber": 60,
+      "phase": "Pressure-test the stated constraints",
+      "title": "Walk a historical run from definition to deployed model",
+      "type": "explanation",
+      "content": "FINAL REVIEW — Select a historical run and resolve its Git SHA, DAG and task versions, parameter snapshot, input dataset digests, container and backend identities, stage attempts, prepared-artifact digests, evaluation evidence, registry version, and deployed model digest. Verify the referenced bytes and access policy before replay. The draft graph contains the decisions needed to attempt that reconstruction, but browser persistence and live AI assessment have not been run for this local review draft.",
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:4"]
+    }
+  ]
+}

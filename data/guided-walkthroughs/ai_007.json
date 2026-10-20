@@ -1,0 +1,656 @@
+{
+  "problem_id": "ai_007",
+  "version": "1.0",
+  "totalSteps": 36,
+  "phases": [
+    {
+      "name": "Freeze the brief and define the fast path",
+      "stepRange": [1, 3],
+      "description": "Separate supplied product goals from workload assumptions, then distinguish latency-sensitive completions from asynchronous repository work."
+    },
+    {
+      "name": "Build the IDE request and repository-context paths",
+      "stepRange": [4, 33],
+      "description": "Authenticate repository-scoped requests, retrieve bounded multi-file context, and route completion, generation, explanation, and review tasks to appropriate model work."
+    },
+    {
+      "name": "Add privacy controls and operational feedback",
+      "stepRange": [34, 36],
+      "description": "Filter secrets, isolate tenant data, queue expensive review and indexing work, and measure quality, security, and latency against explicit acceptance tests."
+    }
+  ],
+  "steps": [
+    {
+      "id": "code_assistant_brief",
+      "stepNumber": 1,
+      "phase": "Freeze the brief and define the fast path",
+      "title": "Start from the frozen problem",
+      "type": "explanation",
+      "content": "Problem: Design an AI-Powered Code Assistant (ai_007; design-an-ai-powered-code-assistant). Category: AI - Developer Tools; domain: aiml; difficulty: Very Hard; estimated time: 90+ minutes. Description: Design an AI code assistant that provides inline code completions, generates code from natural language, performs code review, and explains code, integrated with IDEs and CI/CD pipelines. Requirements: Provide real-time inline code completions; Generate code from natural language descriptions; Perform automated code review and suggest fixes; Explain existing code in natural language; Support 20+ programming languages; Respect repository context and coding standards; Integrate with IDE extensions and CI/CD; Handle multi-file context for accurate suggestions. Constraints: Code completion latency under 200ms; Suggestion acceptance rate above 30%; Support codebases with 1M+ lines; Maintain code security (no secret leakage); Handle 100k+ active developer sessions. Supplied hints: code-specific LLMs such as CodeLlama or StarCoder, Fill-in-the-Middle (FIM), tree-sitter, repository RAG, caching, and speculative decoding. Companies named in the frozen row: GitHub, Google, JetBrains, and Sourcegraph; these are context, not mandatory vendors."
+    },
+    {
+      "id": "code_assistant_assumptions",
+      "stepNumber": 2,
+      "phase": "Freeze the brief and define the fast path",
+      "title": "Make unknown workload and privacy choices explicit",
+      "type": "explanation",
+      "content": "The brief gives a 200ms completion target, 100k active-session target, 1M-line repository size, and acceptance-rate target, but not latency percentile, requests per session, language mix, repository count, code size distribution, or data-retention policy. Treat these as acceptance targets, not demonstrated capacity. Confirm whether 200ms is end-to-end and which percentile applies. Assume repository content is tenant-owned, access is rechecked at request time, and content is not used for cross-tenant caching or model training unless separately consented. Never claim the target is met until representative load, model-quality, and secret-leakage tests pass."
+    },
+    {
+      "id": "code_assistant_fast_path",
+      "stepNumber": 3,
+      "phase": "Freeze the brief and define the fast path",
+      "title": "Keep inline completion separate from longer tasks",
+      "type": "decision_point",
+      "content": "Use a bounded, latency-sensitive path for inline completions and a durable asynchronous path for repository indexing, CI review, and large multi-file jobs. This avoids allowing a full repository review to consume the completion budget.",
+      "decision": {
+        "question": "Should inline completions and repository-wide reviews share one synchronous execution path?",
+        "chosen": "No. Keep completions bounded and interactive; queue repository-wide indexing and review work.",
+        "chosenReason": "The brief sets a sub-200ms completion target but gives no comparable deadline for reviews. Separate admission, concurrency, and retry behavior so batch work cannot starve the IDE path.",
+        "alternatives": [
+          { "option": "One synchronous path for every task", "tradeoff": "Simpler initial topology, but large repository jobs can create head-of-line blocking and unpredictable completion latency." },
+          { "option": "Separate completion and review model fleets", "tradeoff": "Can isolate capacity further, but raises cost and operational complexity; decide after measured task mix." }
+        ]
+      }
+    },
+    {
+      "id": "code_assistant_clients",
+      "stepNumber": 4,
+      "phase": "Build the IDE request and repository-context paths",
+      "title": "Represent IDE extensions and CI clients",
+      "type": "add_component",
+      "content": "Use the existing client component to represent IDE extensions, the web console, and CI/CD integrations. The client sends the active language, cursor or review task, repository identity, and only the context permitted by repository policy.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "code_assistant_clients",
+        "componentType": "web-app",
+        "label": "IDE Extensions & CI Clients",
+        "position": { "x": 40, "y": 310 },
+        "properties": {
+          "componentName": "IDE Extensions & CI Clients",
+          "purpose": "Existing client-catalog representation for IDE extensions, a web console, and CI/CD adapters. Send repository-scoped requests and render streamed completions or review results without embedding long-lived credentials."
+        },
+        "highlightReason": "The prompt explicitly requires IDE and CI/CD integration; keep the client surface visible instead of treating it as an implicit API caller."
+      }
+    },
+    {
+      "id": "code_assistant_api",
+      "stepNumber": 5,
+      "phase": "Build the IDE request and repository-context paths",
+      "title": "Add a bounded public request boundary",
+      "type": "add_component",
+      "content": "Validate task type, repository and file identifiers, language, context size, and deadlines. Rate limits and concurrency limits must be measured and tenant-aware; the brief does not define requests per second or per-user quotas.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "code_assistant_api",
+        "componentType": "api-gateway",
+        "label": "Assistant API Gateway",
+        "position": { "x": 300, "y": 310 },
+        "properties": {
+          "componentName": "Assistant API Gateway",
+          "purpose": "Validate task and repository scope, enforce authentication and bounded context/deadlines, route interactive completion separately from review and indexing, and provide an explicit overload response."
+        },
+        "highlightReason": "One explicit API boundary makes session-scale admission, authentication, and task routing reviewable."
+      }
+    },
+    {
+      "id": "code_assistant_auth",
+      "stepNumber": 6,
+      "phase": "Build the IDE request and repository-context paths",
+      "title": "Recheck repository and tenant permissions",
+      "type": "add_component",
+      "content": "Authorize each request against the caller's current repository membership and policy. Do not treat an IDE token, cached index, or previously approved file as permanent authorization; revocation and repository removal must invalidate access promptly.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "code_assistant_auth",
+        "componentType": "auth-service",
+        "label": "Identity & Repository Authorization",
+        "position": { "x": 560, "y": 310 },
+        "properties": {
+          "componentName": "Identity & Repository Authorization",
+          "purpose": "Validate user and service identity, tenant membership, repository permissions, and policy version before context retrieval or model invocation."
+        },
+        "highlightReason": "Repository context is sensitive source code, so authorization is part of the retrieval path, not just sign-in."
+      }
+    },
+    {
+      "id": "code_assistant_router",
+      "stepNumber": 7,
+      "phase": "Build the IDE request and repository-context paths",
+      "title": "Route by task and latency budget",
+      "type": "add_component",
+      "content": "Select a code-completion, generation, explanation, or review policy, attach a bounded token/context budget, and keep model/provider routing replaceable. Streaming and cancellation should return control promptly when an IDE request is superseded.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "code_assistant_router",
+        "componentType": "ai-gateway",
+        "label": "Task Router & Model Policy",
+        "position": { "x": 830, "y": 310 },
+        "properties": {
+          "componentName": "Task Router & Model Policy",
+          "purpose": "Choose task-specific prompts, bounded context, model routing, rate limits, streaming, and cancellation for completion, generation, explanation, and review. Keep provider integration behind this replaceable boundary."
+        },
+        "highlightReason": "Different assistant tasks have different latency and context needs; one routing boundary makes that tradeoff explicit."
+      }
+    },
+    {
+      "id": "code_assistant_cache",
+      "stepNumber": 8,
+      "phase": "Build the IDE request and repository-context paths",
+      "title": "Use only safe, tenant-scoped cache entries",
+      "type": "add_component",
+      "content": "Cache only responses whose key includes tenant, repository, policy/model version, language, and relevant context digest. Avoid caching secret-bearing prompt material or sharing entries across tenants; invalidation must follow policy and repository changes.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "code_assistant_cache",
+        "componentType": "cache",
+        "label": "Tenant-Scoped Completion Cache",
+        "position": { "x": 1090, "y": 90 },
+        "properties": {
+          "componentName": "Tenant-Scoped Completion Cache",
+          "purpose": "Reduce repeat completion latency with tenant/repository/policy-version scoped keys and short, policy-controlled lifetimes; never use a shared cross-tenant response namespace."
+        },
+        "highlightReason": "Caching can help the fast path, but cache-key isolation is necessary to avoid leaking private repository context."
+      }
+    },
+    {
+      "id": "code_assistant_model",
+      "stepNumber": 9,
+      "phase": "Build the IDE request and repository-context paths",
+      "title": "Serve code-specific inference",
+      "type": "add_component",
+      "content": "Use code-specific model serving for FIM completion and longer generation, explanation, or review tasks. Benchmark warm and cold paths, context lengths, concurrency, and model quality; speculative decoding or a smaller draft model are options to test, not guaranteed latency wins.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "code_assistant_model",
+        "componentType": "model-serving",
+        "label": "Code Model Serving",
+        "position": { "x": 1370, "y": 310 },
+        "properties": {
+          "componentName": "Code Model Serving",
+          "purpose": "Serve versioned code models for FIM inline completion, natural-language generation, explanation, and review; expose streaming, cancellation, queue depth, and model-version telemetry."
+        },
+        "highlightReason": "The model is on the completion critical path, so its measured latency and concurrency must be visible."
+      }
+    },
+    {
+      "id": "code_assistant_embedding",
+      "stepNumber": 10,
+      "phase": "Build the IDE request and repository-context paths",
+      "title": "Parse and index multiple languages",
+      "type": "add_component",
+      "content": "Use language-aware parsing such as tree-sitter where supported, preserve file and symbol boundaries, and build versioned chunks across the repository. Track parser coverage for the 20+ language target rather than silently treating every file as plain text.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:3"],
+      "component": {
+        "nodeId": "code_assistant_embedding",
+        "componentType": "embedding-service",
+        "label": "Language-Aware Repository Indexer",
+        "position": { "x": 830, "y": 570 },
+        "properties": {
+          "componentName": "Language-Aware Repository Indexer",
+          "purpose": "Parse and chunk versioned multi-file repository content across the supported language set, derive lexical and semantic representations, and keep parser/index coverage observable."
+        },
+        "highlightReason": "Multi-file context and 20+ languages require explicit parsing/indexing coverage, not a single-file prompt assumption."
+      }
+    },
+    {
+      "id": "code_assistant_vector_index",
+      "stepNumber": 11,
+      "phase": "Build the IDE request and repository-context paths",
+      "title": "Retrieve repository context within authorization scope",
+      "type": "add_component",
+      "content": "Index code chunks with tenant, repository, branch or revision, path, language, and permission metadata. Retrieval must apply the caller's current access scope before context reaches the model; stale indexes should be invalidated or rebuilt after repository changes.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "code_assistant_vector_index",
+        "componentType": "vector-database",
+        "label": "Repository Context Index",
+        "position": { "x": 1090, "y": 570 },
+        "properties": {
+          "componentName": "Repository Context Index",
+          "purpose": "Retrieve relevant code chunks using tenant, repository, revision, language, and authorization metadata; combine semantic candidates with lexical/symbol lookup in the application retrieval policy."
+        },
+        "highlightReason": "A repository-aware index supports multi-file context while preserving revision and tenant boundaries."
+      }
+    },
+    {
+      "id": "code_assistant_repo_store",
+      "stepNumber": 12,
+      "phase": "Build the IDE request and repository-context paths",
+      "title": "Keep repository snapshots minimized and protected",
+      "type": "add_component",
+      "content": "If indexing needs durable source snapshots or derived artifacts, store only what the retention policy permits, encrypt them, isolate tenant keys, and support deletion on disconnect or policy change. Prefer fetching authorized repository content on demand when feasible.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "code_assistant_repo_store",
+        "componentType": "object-storage",
+        "label": "Protected Repository Artifacts",
+        "position": { "x": 560, "y": 570 },
+        "properties": {
+          "componentName": "Protected Repository Artifacts",
+          "purpose": "Hold only authorized, encrypted, versioned snapshots or derived indexing artifacts when required; apply tenant isolation, retention, revocation, and deletion policy."
+        },
+        "highlightReason": "Large repositories need durable indexing inputs, but persistence must remain subordinate to repository permissions and retention policy."
+      }
+    },
+    {
+      "id": "code_assistant_policy_store",
+      "stepNumber": 13,
+      "phase": "Build the IDE request and repository-context paths",
+      "title": "Version repository policy and index metadata",
+      "type": "add_component",
+      "content": "Persist repository connectors, branch/revision manifests, coding-standard references, policy versions, and index status. Do not store raw secrets as policy; secret material belongs in a dedicated credential system outside this diagram's scope.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "code_assistant_policy_store",
+        "componentType": "database",
+        "label": "Repository Policy & Index Metadata",
+        "position": { "x": 300, "y": 570 },
+        "properties": {
+          "componentName": "Repository Policy & Index Metadata",
+          "purpose": "Store connector references, repository and revision manifests, coding-standard versions, access-policy versions, and indexing state without treating the database as a secret vault."
+        },
+        "highlightReason": "Repository standards and index freshness must be versioned so model context can be traced to the policy and revision used."
+      }
+    },
+    {
+      "id": "code_assistant_review_queue",
+      "stepNumber": 14,
+      "phase": "Build the IDE request and repository-context paths",
+      "title": "Queue repository-scale review work",
+      "type": "add_component",
+      "content": "Use durable jobs for CI-triggered reviews, full-repository indexing, and tasks that exceed the interactive context budget. Make retries idempotent, expose status to the IDE/CI client, and prevent batch queues from consuming all completion capacity.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "code_assistant_review_queue",
+        "componentType": "queue",
+        "label": "Review & Index Job Queue",
+        "position": { "x": 560, "y": 840 },
+        "properties": {
+          "componentName": "Review & Index Job Queue",
+          "purpose": "Buffer repository-wide CI reviews and index refresh jobs with idempotency keys, bounded retries, visible job state, and separate capacity from interactive completions."
+        },
+        "highlightReason": "The queue isolates large multi-file work from the latency-sensitive inline completion path."
+      }
+    },
+    {
+      "id": "code_assistant_worker",
+      "stepNumber": 15,
+      "phase": "Build the IDE request and repository-context paths",
+      "title": "Fetch, parse, and review authorized repository changes",
+      "type": "add_component",
+      "content": "Workers fetch only authorized revisions, parse changed files, retrieve bounded neighboring context, run review tasks, and publish index updates. Recheck permissions before fetching and before publishing results; avoid logging source text or prompts by default.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "code_assistant_worker",
+        "componentType": "processing-worker",
+        "label": "Repository Index & Review Workers",
+        "position": { "x": 830, "y": 840 },
+        "properties": {
+          "componentName": "Repository Index & Review Workers",
+          "purpose": "Process versioned repository jobs, perform language-aware parsing and code review, refresh indexes, and emit results only after authorization and policy checks."
+        },
+        "highlightReason": "A worker pool absorbs repository-scale processing and gives indexing/review a separately scalable execution path."
+      }
+    },
+    {
+      "id": "code_assistant_guardrails",
+      "stepNumber": 16,
+      "phase": "Build the IDE request and repository-context paths",
+      "title": "Filter secrets and unsafe context at both boundaries",
+      "type": "add_component",
+      "content": "Scan outbound context and model output for secrets and policy violations, redact where safe, and block or route ambiguous cases for review. Keep authorization and secret scanning distinct: a user allowed to read a repository does not make every secret safe to send to a model.",
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "code_assistant_guardrails",
+        "componentType": "ai-guardrails",
+        "label": "Secret & Policy Guardrails",
+        "position": { "x": 1090, "y": 840 },
+        "properties": {
+          "componentName": "Secret & Policy Guardrails",
+          "purpose": "Inspect model-bound context and generated output for secrets, unsafe disclosure, and repository policy violations; support redaction, denial, and auditable policy outcomes."
+        },
+        "highlightReason": "No-secret-leakage is an explicit constraint and needs a visible control on model inputs and outputs."
+      }
+    },
+    {
+      "id": "code_assistant_monitoring",
+      "stepNumber": 17,
+      "phase": "Build the IDE request and repository-context paths",
+      "title": "Measure latency, quality, and safety without collecting source text",
+      "type": "add_component",
+      "content": "Track completion latency by percentile and task, active sessions, queue age, model errors, cache hit rate, parser/index coverage, suggestion acceptance, and secret-filter outcomes. Use aggregate or privacy-reviewed telemetry; do not place source code, prompts, or secrets in routine metrics or logs.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "code_assistant_monitoring",
+        "componentType": "monitoring",
+        "label": "Assistant Quality & Safety Telemetry",
+        "position": { "x": 1370, "y": 840 },
+        "properties": {
+          "componentName": "Assistant Quality & Safety Telemetry",
+          "purpose": "Observe task latency, active sessions, queue age, model failures, cache behavior, language coverage, suggestion acceptance, and secret-filter decisions using privacy-reviewed aggregate telemetry."
+        },
+        "highlightReason": "The latency, acceptance, scale, and security constraints are measurable outcomes that require product and operations feedback."
+      }
+    },
+    {
+      "id": "code_client_api",
+      "stepNumber": 18,
+      "phase": "Build the IDE request and repository-context paths",
+      "title": "Connect clients to the request boundary",
+      "type": "add_connection",
+      "content": "Use authenticated, cancellable requests for inline completion and explicit job submission for CI or repository-wide review. Stream partial completion results when supported, and report overload or permission failures clearly.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "code_client_api_edge",
+        "sourceNodeId": "code_assistant_clients",
+        "targetNodeId": "code_assistant_api",
+        "connectionType": "api-call",
+        "label": "Completion, generation & review requests",
+        "description": "IDE and CI clients send bounded, authenticated task requests and receive streamed responses or durable job identifiers."
+      }
+    },
+    {
+      "id": "code_api_auth",
+      "stepNumber": 19,
+      "phase": "Build the IDE request and repository-context paths",
+      "title": "Authorize each request before context access",
+      "type": "add_connection",
+      "content": "Resolve identity and repository permissions before reading indexed context, snapshots, policy, or cached outputs. Carry a permission and policy version through downstream calls so revocation can invalidate stale work.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "code_api_auth_edge",
+        "sourceNodeId": "code_assistant_api",
+        "targetNodeId": "code_assistant_auth",
+        "connectionType": "api-call",
+        "label": "Identity & repository authorization",
+        "description": "Validate caller identity, repository scope, and current policy before returning code context to any downstream service."
+      }
+    },
+    {
+      "id": "code_auth_router",
+      "stepNumber": 20,
+      "phase": "Build the IDE request and repository-context paths",
+      "title": "Route authorized interactive tasks",
+      "type": "add_connection",
+      "content": "Only an authorized request enters task-specific routing. The router applies context budgets, model policy, streaming, cancellation, and tenant-level concurrency controls.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "code_auth_router_edge",
+        "sourceNodeId": "code_assistant_auth",
+        "targetNodeId": "code_assistant_router",
+        "connectionType": "api-call",
+        "label": "Authorized task & policy context",
+        "description": "Pass only the authorized task, repository scope, and policy version to the task router."
+      }
+    },
+    {
+      "id": "code_api_review_queue",
+      "stepNumber": 21,
+      "phase": "Build the IDE request and repository-context paths",
+      "title": "Separate long-running review and indexing jobs",
+      "type": "add_connection",
+      "content": "The API acknowledges review and indexing work with a job ID and status rather than holding an IDE request open for an unbounded repository scan. Interactive completions remain on the separately bounded path.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "code_api_queue_edge",
+        "sourceNodeId": "code_assistant_api",
+        "targetNodeId": "code_assistant_review_queue",
+        "connectionType": "message-queue",
+        "label": "Review & index jobs",
+        "description": "Durably enqueue idempotent repository review and index refresh jobs with visible status and retry policy."
+      }
+    },
+    {
+      "id": "code_queue_worker",
+      "stepNumber": 22,
+      "phase": "Build the IDE request and repository-context paths",
+      "title": "Run repository-scale jobs in isolated workers",
+      "type": "add_connection",
+      "content": "Workers consume jobs under their own concurrency budget, recheck repository access, and publish results against the exact commit or revision that was reviewed.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "code_queue_worker_edge",
+        "sourceNodeId": "code_assistant_review_queue",
+        "targetNodeId": "code_assistant_worker",
+        "connectionType": "message-queue",
+        "label": "Versioned repository jobs",
+        "description": "Deliver review and index jobs to a separately scaled worker pool with idempotency and revision-aware results."
+      }
+    },
+    {
+      "id": "code_worker_store",
+      "stepNumber": 23,
+      "phase": "Build the IDE request and repository-context paths",
+      "title": "Protect repository artifacts and revision inputs",
+      "type": "add_connection",
+      "content": "Workers fetch authorized content and persist only the minimum snapshots or derived artifacts required by the approved retention policy. Repository deletion or permission revocation must trigger cleanup or access invalidation.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "code_worker_store_edge",
+        "sourceNodeId": "code_assistant_worker",
+        "targetNodeId": "code_assistant_repo_store",
+        "connectionType": "data-flow",
+        "label": "Authorized revision artifacts",
+        "description": "Store minimized, encrypted, tenant-isolated repository snapshots or derived artifacts only when policy requires durable inputs."
+      }
+    },
+    {
+      "id": "code_worker_policy",
+      "stepNumber": 24,
+      "phase": "Build the IDE request and repository-context paths",
+      "title": "Load current coding standards and index manifests",
+      "type": "add_connection",
+      "content": "Bind each result to the coding-standard and access-policy versions used. This makes generated suggestions explainable and prevents a stale index from silently overriding current repository rules.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "code_worker_policy_edge",
+        "sourceNodeId": "code_assistant_worker",
+        "targetNodeId": "code_assistant_policy_store",
+        "connectionType": "database-connection",
+        "label": "Standards, permissions & revision state",
+        "description": "Read and update versioned repository policy, connector metadata, revision manifests, and indexing state."
+      }
+    },
+    {
+      "id": "code_worker_embedding",
+      "stepNumber": 25,
+      "phase": "Build the IDE request and repository-context paths",
+      "title": "Build language-aware multi-file representations",
+      "type": "add_connection",
+      "content": "Index symbols, files, and language metadata across the supported language set. Measure parser coverage and index freshness separately from model quality; unsupported languages should have an explicit fallback rather than fabricated structure.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "code_worker_embedding_edge",
+        "sourceNodeId": "code_assistant_worker",
+        "targetNodeId": "code_assistant_embedding",
+        "connectionType": "data-flow",
+        "label": "Versioned multi-file code chunks",
+        "description": "Parse repository revisions into language-aware, path- and symbol-tagged chunks for lexical and semantic retrieval."
+      }
+    },
+    {
+      "id": "code_embedding_index",
+      "stepNumber": 26,
+      "phase": "Build the IDE request and repository-context paths",
+      "title": "Publish searchable context by repository revision",
+      "type": "add_connection",
+      "content": "Publish index records atomically by repository and revision where practical. A query should not mix chunks from an incomplete refresh with a different branch or permission version.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "code_embedding_index_edge",
+        "sourceNodeId": "code_assistant_embedding",
+        "targetNodeId": "code_assistant_vector_index",
+        "connectionType": "data-flow",
+        "label": "Revision-scoped code index",
+        "description": "Store semantic code chunks with repository, revision, path, language, and permission metadata for scoped retrieval."
+      }
+    },
+    {
+      "id": "code_router_embedding",
+      "stepNumber": 27,
+      "phase": "Build the IDE request and repository-context paths",
+      "title": "Encode only the bounded query context",
+      "type": "add_connection",
+      "content": "The task router asks the indexer for query or active-file representations only after authorization, with strict context budgets. Keep the current buffer and repository index separately versioned so unsaved edits are not confused with committed code.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "code_router_embedding_edge",
+        "sourceNodeId": "code_assistant_router",
+        "targetNodeId": "code_assistant_embedding",
+        "connectionType": "api-call",
+        "label": "Authorized code-context query",
+        "description": "Prepare a bounded language-aware query representation for repository retrieval without conflating unsaved buffers and indexed revisions."
+      }
+    },
+    {
+      "id": "code_index_router",
+      "stepNumber": 28,
+      "phase": "Build the IDE request and repository-context paths",
+      "title": "Return revision- and permission-filtered context",
+      "type": "add_connection",
+      "content": "Retrieve a bounded set of relevant chunks using lexical, symbol, and semantic signals. Apply tenant and repository filters before any content is passed to the model, then rank by the task's context budget.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "code_index_router_edge",
+        "sourceNodeId": "code_assistant_vector_index",
+        "targetNodeId": "code_assistant_router",
+        "connectionType": "data-flow",
+        "label": "Scoped multi-file context",
+        "description": "Return only authorized, revision-consistent code chunks within the model context budget."
+      }
+    },
+    {
+      "id": "code_router_cache",
+      "stepNumber": 29,
+      "phase": "Build the IDE request and repository-context paths",
+      "title": "Check the isolated completion cache",
+      "type": "add_connection",
+      "content": "Cache lookup follows authorization and uses a digest that changes when repository revision, policy, model, or language changes. A cache hit is an optimization, not an authorization bypass.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "code_router_cache_edge",
+        "sourceNodeId": "code_assistant_router",
+        "targetNodeId": "code_assistant_cache",
+        "connectionType": "database-connection",
+        "label": "Tenant-scoped cache lookup",
+        "description": "Read only a policy- and revision-scoped entry after current repository authorization has succeeded."
+      }
+    },
+    {
+      "id": "code_router_guardrails",
+      "stepNumber": 30,
+      "phase": "Build the IDE request and repository-context paths",
+      "title": "Inspect model-bound context before inference",
+      "type": "add_connection",
+      "content": "Run secret and policy checks before sending repository snippets to a model. The same guardrail policy should inspect generated output before it is returned or cached.",
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "code_router_guardrails_edge",
+        "sourceNodeId": "code_assistant_router",
+        "targetNodeId": "code_assistant_guardrails",
+        "connectionType": "api-call",
+        "label": "Prompt & output policy checks",
+        "description": "Inspect model-bound context and generated suggestions for secrets and policy violations before release."
+      }
+    },
+    {
+      "id": "code_guardrails_model",
+      "stepNumber": 31,
+      "phase": "Build the IDE request and repository-context paths",
+      "title": "Invoke the model only with permitted context",
+      "type": "add_connection",
+      "content": "Pass approved task context to model serving with a bounded prompt and explicit policy/model version. Do not assume model-provider retention or training behavior; verify and configure those controls as part of provider selection.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "code_guardrails_model_edge",
+        "sourceNodeId": "code_assistant_guardrails",
+        "targetNodeId": "code_assistant_model",
+        "connectionType": "api-call",
+        "label": "Approved code task & bounded context",
+        "description": "Submit policy-approved prompts to the code model; apply corresponding output checks before returning or caching results."
+      }
+    },
+    {
+      "id": "code_model_router",
+      "stepNumber": 32,
+      "phase": "Build the IDE request and repository-context paths",
+      "title": "Return cancellable model results through task policy",
+      "type": "add_connection",
+      "content": "Return streamed or complete model output with model/version metadata to the router, where safety checks, task formatting, cancellation, and cache policy are applied before the API responds.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "code_model_router_edge",
+        "sourceNodeId": "code_assistant_model",
+        "targetNodeId": "code_assistant_router",
+        "connectionType": "data-flow",
+        "label": "Model output & latency metadata",
+        "description": "Return generated output and timing/version metadata for policy checks, task formatting, streaming, and cancellation."
+      }
+    },
+    {
+      "id": "code_router_api",
+      "stepNumber": 33,
+      "phase": "Build the IDE request and repository-context paths",
+      "title": "Deliver safe results to the IDE or CI client",
+      "type": "add_connection",
+      "content": "Return an inline suggestion, explanation, or review result only after policy checks; identify the repository revision and task so stale suggestions are not applied to changed files.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1"],
+      "connection": {
+        "edgeId": "code_router_api_edge",
+        "sourceNodeId": "code_assistant_router",
+        "targetNodeId": "code_assistant_api",
+        "connectionType": "data-flow",
+        "label": "Checked suggestion or review result",
+        "description": "Return policy-checked output with task and repository revision metadata to the client API."
+      }
+    },
+    {
+      "id": "code_router_monitoring",
+      "stepNumber": 34,
+      "phase": "Add privacy controls and operational feedback",
+      "title": "Measure task outcomes without source-code telemetry",
+      "type": "add_connection",
+      "content": "Emit task type, latency, model version, cache outcome, and quality/safety labels as privacy-reviewed telemetry. Acceptance rate must be measured from user behavior with an agreed denominator and opt-out policy.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "code_router_monitoring_edge",
+        "sourceNodeId": "code_assistant_router",
+        "targetNodeId": "code_assistant_monitoring",
+        "connectionType": "data-flow",
+        "label": "Latency, quality & safety signals",
+        "description": "Export aggregate task, latency, acceptance, cache, and policy metrics without routine source or prompt payloads."
+      }
+    },
+    {
+      "id": "code_worker_monitoring",
+      "stepNumber": 35,
+      "phase": "Add privacy controls and operational feedback",
+      "title": "Observe repository-scale capacity and language coverage",
+      "type": "add_connection",
+      "content": "Monitor worker queue age, files and languages processed, indexing lag, retry rates, and stale-revision rejection. Scale from measured backlog and throughput rather than assuming a fixed worker count from the 1M-line target.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "code_worker_monitoring_edge",
+        "sourceNodeId": "code_assistant_worker",
+        "targetNodeId": "code_assistant_monitoring",
+        "connectionType": "data-flow",
+        "label": "Index and review workload metrics",
+        "description": "Report queue age, processing throughput, language coverage, freshness, and retry outcomes for capacity planning."
+      }
+    },
+    {
+      "id": "code_assistant_acceptance",
+      "stepNumber": 36,
+      "phase": "Add privacy controls and operational feedback",
+      "title": "Gate rollout on measured quality and security",
+      "type": "scale_trigger",
+      "content": "Keep the stated acceptance-rate and latency goals as product gates rather than preset architecture facts. Run offline code benchmarks, representative IDE latency tests, repository-scale indexing tests, red-team secret-leakage tests, and a privacy-reviewed acceptance experiment before broad rollout.",
+      "scaleTrigger": {
+        "metric": "Completion latency distribution, suggestion acceptance rate, active sessions, index freshness, and secret-filter outcomes",
+        "action": "Segment by task, language, repository size, model version, and tenant; tune model routing, cache policy, context budgets, and worker capacity only from measured bottlenecks.",
+        "impact": "The brief's under-200ms, above-30%, 1M+ line, no-secret-leakage, and 100k-session targets remain unverified until end-to-end tests establish them."
+      }
+    }
+  ]
+}

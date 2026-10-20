@@ -1,0 +1,861 @@
+{
+  "problem_id": "ml_004",
+  "version": "1.0.0-review-draft",
+  "totalSteps": 52,
+  "phases": [
+    {
+      "name": "Define outcome, evaluation, and decision boundaries",
+      "stepRange": [1, 7],
+      "description": "Preserve the supplied churn brief, make the 30-day label and top-decile quality gate testable, and identify unresolved business-policy inputs."
+    },
+    {
+      "name": "Add data, model, and product components",
+      "stepRange": [8, 22],
+      "description": "Build a point-in-time data foundation, separate scheduled scoring from weekly training, and include the business and operational surfaces."
+    },
+    {
+      "name": "Connect daily scoring, retention, and outcome flows",
+      "stepRange": [23, 43],
+      "description": "Connect source snapshots through features and models, then route scored candidates to retention tools and return outcomes for evaluation."
+    },
+    {
+      "name": "Prove measurable targets and safe operation",
+      "stepRange": [44, 52],
+      "description": "Observe quality and workflow health, protect batch correctness, and review unresolved choices before treating the design as production-ready."
+    }
+  ],
+  "steps": [
+    {
+      "id": "churn_scope",
+      "stepNumber": 1,
+      "phase": "Define outcome, evaluation, and decision boundaries",
+      "title": "Keep the live brief intact",
+      "type": "explanation",
+      "content": "Problem: Design a Customer Churn Prediction System. Description: Design an ML system that predicts customer churn probability, identifies at-risk segments, determines churn drivers, and integrates with retention campaign tools for proactive engagement. Requirements: Predict churn probability for each customer; Identify key drivers of churn; Segment customers by churn risk level; Integrate with CRM and marketing automation; Track model predictions vs actual outcomes; Generate customer lifetime value estimates; Trigger automated retention workflows; Provide dashboards for business stakeholders. Constraints: Predict churn 30 days in advance; Precision above 75% at top decile; Process daily batch scoring for 10M+ customers; Model retraining weekly with new data; Explainable predictions for business users. Hints: Use survival analysis for time-to-churn modeling; Engineer behavioral features from usage patterns; Implement SHAP for feature attribution; Use cohort analysis for segment-level insights; Build a feature pipeline from CRM, billing, and usage data; Implement propensity scoring with uplift modeling. Companies listed as context: Salesforce, HubSpot, Spotify, Telcos. These are supplied inputs, not measured performance or a mandated technology choice.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "churn_open_questions",
+      "stepNumber": 2,
+      "phase": "Define outcome, evaluation, and decision boundaries",
+      "title": "Separate design inputs from interview questions",
+      "type": "explanation",
+      "content": "Supplied facts: daily batch scoring, a 10M+ customer floor, a 30-day prediction horizon, a top-decile precision target, weekly retraining, explainability, CRM/marketing integration, and outcome tracking. Clarifying questions: What event and inactivity rule constitute churn, and how are pauses, reactivations, cancellations, and censoring handled? At what business-local cutoff is each daily score valid? How much campaign capacity is available, which actions are eligible, and what consent, suppression, and contact policies apply? Which definition and horizon of customer lifetime value should stakeholders use? What CRM/API quotas and outcome-delivery guarantees exist? Do not silently choose answers or turn an aspirational target into a measured result.",
+      "requirementIds": []
+    },
+    {
+      "id": "churn_label_contract",
+      "stepNumber": 3,
+      "phase": "Define outcome, evaluation, and decision boundaries",
+      "title": "Define a point-in-time 30-day churn outcome",
+      "type": "decision_point",
+      "content": "Every training and evaluation example needs an index time, only features available by that time, and an outcome window extending 30 days forward. Survival analysis can model time to the agreed churn event and handle right-censoring; a calibrated 30-day probability can then serve the product contract. Finalize the churn event and censoring rules with the business before labels are generated.",
+      "decision": {
+        "question": "How should the system represent churn timing while returning a probability 30 days in advance?",
+        "chosen": "Use survival analysis for time-to-event learning and derive a calibrated probability of the agreed churn event within the 30-day horizon; compare it with a direct horizon classifier during evaluation.",
+        "chosenReason": "Time-to-event modeling uses event timing and censored observations, while the derived horizon probability remains aligned with the stated user-facing prediction.",
+        "alternatives": [
+          {"option": "Train only a binary classifier", "tradeoff": "It can answer the 30-day label directly but discards event timing and needs careful handling of censored examples."},
+          {"option": "Return an unqualified survival curve", "tradeoff": "It preserves event-time detail but may not satisfy stakeholders who need one clearly defined 30-day churn probability."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:1"]
+    },
+    {
+      "id": "churn_quality_gate",
+      "stepNumber": 4,
+      "phase": "Define outcome, evaluation, and decision boundaries",
+      "title": "Make precision at the top decile an explicit release gate",
+      "type": "explanation",
+      "content": "Rank the eligible scored population using the same selection rule that operations will use, then measure precision among its top decile against matured 30-day outcomes. The stated acceptance target is above 75%; it is not evidence that a candidate model already achieves it. Use time-based holdouts, prevent customer and temporal leakage, report uncertainty and cohort breakdowns, and agree how incomplete outcomes affect the release decision.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "churn_batch_contract",
+      "stepNumber": 5,
+      "phase": "Define outcome, evaluation, and decision boundaries",
+      "title": "Treat 10M+ as a daily batch floor, not an invented RPS target",
+      "type": "scale_trigger",
+      "content": "The brief requires daily scoring for 10M+ customers. It does not specify the batch completion window, peak profile, source size, or serving latency target. Partition work by a stable customer key, checkpoint progress, and make each score write idempotent so retries cannot create conflicting campaign actions. Size parallelism only after those missing workload and completion-window details are agreed.",
+      "scaleTrigger": {
+        "metric": "Daily scored-customer count against the supplied 10M+ floor, batch completion time once agreed, and failed or retried partitions.",
+        "action": "Benchmark a representative full daily run, then increase partition-level parallelism or adjust storage/compute only where measured bottlenecks threaten the agreed completion window.",
+        "impact": "Protects completeness and repeatability at the stated daily scale without inventing a traffic rate, batch deadline, or customer count beyond the supplied floor."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "churn_explanation_contract",
+      "stepNumber": 6,
+      "phase": "Define outcome, evaluation, and decision boundaries",
+      "title": "Specify what an explainable business prediction contains",
+      "type": "explanation",
+      "content": "Return the score with model and feature-snapshot versions, a human-readable risk segment, and the strongest supported feature attributions. SHAP is a supplied implementation hint, not proof of causal drivers. Agree whether users need local explanations for each customer, cohort-level summaries, or both; label associations as model drivers rather than causes unless a causal design establishes otherwise.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "churn_uplift_decision",
+      "stepNumber": 7,
+      "phase": "Define outcome, evaluation, and decision boundaries",
+      "title": "Do not confuse churn risk with campaign impact",
+      "type": "decision_point",
+      "content": "A high churn probability identifies risk; it does not show that a retention offer will change the customer's behavior. Use propensity scoring to estimate response only when its target is defined, and use uplift modeling with valid treatment/control exposure and outcome data to estimate incremental campaign effect. Keep the churn-risk and treatment-effect outputs distinct when deciding whom to contact.",
+      "decision": {
+        "question": "Should campaign eligibility be based only on predicted churn risk?",
+        "chosen": "Combine the risk score with an independently evaluated response/uplift estimate and business-approved eligibility, consent, and campaign constraints when those inputs are available.",
+        "chosenReason": "This distinguishes who may churn from who may be retained by a specific action, and avoids presenting correlation as treatment impact.",
+        "alternatives": [
+          {"option": "Send the same offer to every high-risk customer", "tradeoff": "It is simple but can spend campaign capacity on customers who would not respond or who would stay without an offer."},
+          {"option": "Use an uplift model without reliable treatment assignment and outcome data", "tradeoff": "Its incremental-effect estimates are not identified by the available evidence and may misdirect campaigns."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7"]
+    },
+    {
+      "id": "churn_sources",
+      "stepNumber": 8,
+      "phase": "Add data, model, and product components",
+      "title": "Represent CRM, billing, and usage as governed source systems",
+      "type": "add_component",
+      "content": "Start with the sources named in the brief. Extract stable customer identity, effective timestamps, schema/version metadata, and source freshness while respecting each system's access and retention rules. Keep CRM and billing records distinct from product-usage events until they are reconciled under an explicit identity and point-in-time policy.",
+      "component": {
+        "nodeId": "churn_sources",
+        "componentType": "custom-component",
+        "label": "CRM, Billing & Product Usage Systems",
+        "description": "The supplied customer, billing, and behavioral usage sources; vendor and ingestion protocol remain selectable.",
+        "position": {"x": 0, "y": 260},
+        "properties": {"componentName": "CRM, Billing & Product Usage Systems", "componentType": "External Data Sources", "purpose": "Provide CRM, billing, and product-usage records with source identifiers, effective timestamps, schema/version metadata, and source freshness. Vendor choice and source-specific guarantees remain open."},
+        "highlightReason": "The brief explicitly calls for a feature pipeline from CRM, billing, and usage data, but does not mandate a provider."
+      },
+      "requirementIds": []
+    },
+    {
+      "id": "churn_api",
+      "stepNumber": 9,
+      "phase": "Add data, model, and product components",
+      "title": "Expose a protected reporting and control boundary",
+      "type": "add_component",
+      "content": "Use an authenticated API for dashboard queries and authorized operational controls. Do not make a synchronous request per customer for the daily batch; the scoring workflow should process partitioned jobs and publish durable results for later retrieval.",
+      "component": {
+        "nodeId": "churn_api",
+        "componentType": "api-gateway",
+        "label": "Reporting & Operations API",
+        "description": "Authenticated boundary for business dashboards and explicitly authorized operational requests.",
+        "position": {"x": 300, "y": -100},
+        "properties": {"componentName": "Reporting & Operations API", "purpose": "Authenticate and authorize stakeholder dashboard queries and operational controls; enforce tenant/business-unit scope where applicable. The daily customer scoring path is asynchronous batch, not a synchronous per-customer API."},
+        "highlightReason": "The business reporting surface needs a controlled access boundary, separate from the large scheduled scoring workload."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-requirement:7"]
+    },
+    {
+      "id": "churn_raw_store",
+      "stepNumber": 10,
+      "phase": "Add data, model, and product components",
+      "title": "Land replayable source snapshots and scoring artifacts",
+      "type": "add_component",
+      "content": "Keep immutable or versioned source extracts, manifests, scoring outputs, and model explanation artifacts in durable object storage. Apply encryption, scoped access, integrity checks, and retention/deletion rules approved by the data owners; the brief does not provide a retention duration.",
+      "component": {
+        "nodeId": "churn_raw_store",
+        "componentType": "object-storage",
+        "label": "Versioned Snapshots & Batch Artifacts",
+        "description": "Durable landing and replay boundary for source snapshots, manifests, and scoring outputs.",
+        "position": {"x": 300, "y": 460},
+        "properties": {"componentName": "Versioned Snapshots & Batch Artifacts", "purpose": "Store access-controlled, integrity-checked source snapshots, run manifests, model artifacts or references, and scoring outputs for reproducibility and bounded replay. Retention and deletion policy require owner input."},
+        "highlightReason": "Versioned snapshots make point-in-time feature construction and batch recovery reproducible."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "churn_ingestion",
+      "stepNumber": 11,
+      "phase": "Add data, model, and product components",
+      "title": "Validate and reconcile source records before feature building",
+      "type": "add_component",
+      "content": "Normalize schemas and timestamps, validate identity and required fields, quarantine malformed records, and make late or corrected source data visible. Preserve effective-time and ingestion-time fields so training can reconstruct what was knowable at a scoring index time.",
+      "component": {
+        "nodeId": "churn_ingestion",
+        "componentType": "backend-server",
+        "label": "Source Validation & Point-in-Time Builder",
+        "description": "Batch ingestion and identity reconciliation for CRM, billing, usage, and outcome records.",
+        "position": {"x": 580, "y": 260},
+        "properties": {"componentName": "Source Validation & Point-in-Time Builder", "purpose": "Validate source schemas and customer identity, normalize event and effective times, detect late/corrected data, quarantine invalid records, and construct point-in-time-safe records without silently filling missing data."},
+        "highlightReason": "Temporal leakage and identity mismatches can make offline churn quality look better than a real daily run."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "churn_warehouse",
+      "stepNumber": 12,
+      "phase": "Add data, model, and product components",
+      "title": "Keep curated history and delayed outcomes queryable",
+      "type": "add_component",
+      "content": "Store curated point-in-time customer features, score snapshots, campaign assignment and delivery events, and matured outcomes with their source/model versions. Separate event time from processing time and retain corrections as traceable changes rather than rewriting historical evidence invisibly.",
+      "component": {
+        "nodeId": "churn_warehouse",
+        "componentType": "data-warehouse",
+        "label": "Customer History & Outcome Warehouse",
+        "description": "Curated temporal history for feature construction, evaluation, cohorts, and stakeholder reporting.",
+        "position": {"x": 860, "y": 260},
+        "properties": {"componentName": "Customer History & Outcome Warehouse", "purpose": "Query curated point-in-time source data, prediction snapshots, campaign assignments/exposures, matured outcomes, and CLV inputs for reproducible training and cohort evaluation. Partitioning and retention follow measured workload and owner policy."},
+        "highlightReason": "Prediction-versus-outcome tracking requires a durable joinable history, not just the latest customer row."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "churn_features",
+      "stepNumber": 13,
+      "phase": "Add data, model, and product components",
+      "title": "Build consistent behavioral and business features",
+      "type": "add_component",
+      "content": "Compute usage-pattern aggregates and CRM/billing features from point-in-time snapshots. Keep the offline training view and daily scoring view governed by the same definitions and versions; record missingness and freshness instead of silently substituting a value. Choose feature windows with domain owners rather than inventing them.",
+      "component": {
+        "nodeId": "churn_features",
+        "componentType": "feature-store",
+        "label": "Point-in-Time Customer Feature Store",
+        "description": "Governed offline and batch-serving features from CRM, billing, and product behavior.",
+        "position": {"x": 1140, "y": 260},
+        "properties": {"componentName": "Point-in-Time Customer Feature Store", "purpose": "Version reusable behavioral, CRM, and billing features with point-in-time joins, source freshness, and missingness metadata. Keep training and batch scoring definitions aligned; feature windows and freshness bounds are owner-approved choices."},
+        "highlightReason": "The supplied feature-pipeline hint calls for CRM, billing, and usage data while point-in-time parity protects evaluation validity."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "churn_workflow",
+      "stepNumber": 14,
+      "phase": "Add data, model, and product components",
+      "title": "Orchestrate separate daily scoring and weekly learning runs",
+      "type": "add_component",
+      "content": "Coordinate source readiness, feature materialization, daily batch scoring, output validation, and publication as one replayable workflow. Keep weekly retraining as a separate scheduled branch that waits for eligible new data, passes quality gates, and never replaces the serving model merely because a run completed.",
+      "component": {
+        "nodeId": "churn_workflow",
+        "componentType": "mlops-pipeline",
+        "label": "Daily Scoring & Weekly Training Orchestrator",
+        "description": "Versioned orchestration for daily customer scoring and gated weekly model retraining.",
+        "position": {"x": 860, "y": -100},
+        "properties": {"componentName": "Daily Scoring & Weekly Training Orchestrator", "purpose": "Run daily source/feature readiness checks, partitioned scoring, output validation, and idempotent publication; separately schedule weekly training, time-based evaluation, approval, and controlled model promotion. Track run and data/model versions for replay."},
+        "highlightReason": "Daily scoring and weekly retraining have different schedules and must not block or overwrite each other."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "churn_training",
+      "stepNumber": 15,
+      "phase": "Add data, model, and product components",
+      "title": "Train time-to-churn, risk, CLV, and response candidates",
+      "type": "add_component",
+      "content": "Train and compare survival/time-to-event and direct 30-day risk candidates using temporal holdouts. Treat customer lifetime value and campaign response/uplift as separately defined targets and models; only train uplift where treatment assignment and outcome evidence support it. Compute SHAP-compatible attributions for the approved model family and verify explanation fidelity.",
+      "component": {
+        "nodeId": "churn_training",
+        "componentType": "model-training",
+        "label": "Churn, Survival, CLV & Uplift Training",
+        "description": "Weekly candidate training and temporal evaluation for distinct prediction and intervention objectives.",
+        "position": {"x": 1420, "y": -100},
+        "properties": {"componentName": "Churn, Survival, CLV & Uplift Training", "purpose": "Train and compare time-to-churn/survival and calibrated 30-day risk candidates; define CLV and response/uplift targets separately. Use point-in-time features and time-based holdouts, measure precision at the top decile, and validate SHAP attribution fidelity before proposing a release."},
+        "highlightReason": "Model choice must be evaluated against the 30-day outcome, top-decile precision, CLV definition, and explainability needs."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "churn_registry",
+      "stepNumber": 16,
+      "phase": "Add data, model, and product components",
+      "title": "Promote only evaluated, explainable model versions",
+      "type": "add_component",
+      "content": "Register immutable model and feature-schema versions with label definition, training-data cutoff, evaluation results, calibration, SHAP/explanation method, and approval status. Block promotion when the measured precision-at-top-decile gate or required review fails; keep the previous approved version available for rollback.",
+      "component": {
+        "nodeId": "churn_registry",
+        "componentType": "model-registry",
+        "label": "Approved Model & Feature Versions",
+        "description": "Traceable candidate and approved versions with evaluation and release metadata.",
+        "position": {"x": 1700, "y": -100},
+        "properties": {"componentName": "Approved Model & Feature Versions", "purpose": "Version candidate and approved artifacts with feature schema, label/outcome definition, data cutoff, calibration, precision-at-top-decile evidence, explanation method, approval, and rollback metadata."},
+        "highlightReason": "Weekly training is not equivalent to a safe production release; promotion needs evidence and a reversible version boundary."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "churn_serving",
+      "stepNumber": 17,
+      "phase": "Add data, model, and product components",
+      "title": "Score the daily population with a pinned model snapshot",
+      "type": "add_component",
+      "content": "Run batch inference against one explicitly selected approved model and compatible feature snapshot per run. Emit one traceable record per eligible customer with the 30-day churn probability, score timestamp, risk segment, CLV estimate when defined, feature/model versions, and supported SHAP explanation references. Surface missing or stale required features as exceptions rather than silently mis-scoring.",
+      "component": {
+        "nodeId": "churn_serving",
+        "componentType": "model-serving",
+        "label": "Daily Batch Scoring & Explanation",
+        "description": "Partitioned inference using a pinned approved model and matching feature snapshot.",
+        "position": {"x": 1980, "y": 260},
+        "properties": {"componentName": "Daily Batch Scoring & Explanation", "purpose": "Score the daily eligible population with one pinned approved model and compatible feature version; produce the calibrated 30-day churn probability, risk segment, defined CLV output, and business-readable SHAP attribution references. Reject incompatible or missing required features visibly."},
+        "highlightReason": "This is the operational boundary that turns the daily scoring and explainability requirements into versioned customer outputs."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "churn_campaign_queue",
+      "stepNumber": 18,
+      "phase": "Add data, model, and product components",
+      "title": "Buffer approved retention actions for reliable delivery",
+      "type": "add_component",
+      "content": "Queue only eligible, bounded campaign work and references to the durable score record. Include an idempotency key and model/run context so retries do not create duplicate actions. Apply business-owned eligibility, consent, and suppression rules before dispatch; do not infer an offer or contact policy from the risk score.",
+      "component": {
+        "nodeId": "churn_campaign_queue",
+        "componentType": "queue",
+        "label": "Retention Workflow Queue",
+        "description": "Durable, retryable handoff for authorized campaign actions.",
+        "position": {"x": 2260, "y": 260},
+        "properties": {"componentName": "Retention Workflow Queue", "purpose": "Buffer approved customer-action references with idempotency keys, run/model versions, bounded retries, and dead-letter visibility. Apply business-owned consent, eligibility, and suppression policy before dispatch."},
+        "highlightReason": "A durable asynchronous handoff decouples batch scoring from CRM/marketing availability and enables safe retries."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7"]
+    },
+    {
+      "id": "churn_retention_adapter",
+      "stepNumber": 19,
+      "phase": "Add data, model, and product components",
+      "title": "Integrate with CRM and marketing tools through a narrow adapter",
+      "type": "add_component",
+      "content": "Use a dedicated adapter to map approved risk/eligibility outputs to each external system's contract, enforce idempotency, and record acknowledgements, failures, and campaign exposure. Keep provider-specific credentials and rate limits behind this boundary; the exact CRM and marketing vendors remain a deployment choice.",
+      "component": {
+        "nodeId": "churn_retention_adapter",
+        "componentType": "custom-component",
+        "label": "CRM & Marketing Automation Adapter",
+        "description": "Provider-neutral integration boundary for authorized retention workflow actions and callbacks.",
+        "position": {"x": 2540, "y": 260},
+        "properties": {"componentName": "CRM & Marketing Automation Adapter", "componentType": "External Integration", "technology": "CRM and marketing automation APIs", "purpose": "Translate approved campaign actions to external CRM/marketing contracts, protect credentials, respect provider quotas and business eligibility policy, use idempotent delivery, and capture acknowledgement and outcome callbacks. Vendor choice remains open."},
+        "highlightReason": "The palette has no CRM/marketing adapter component, so a clearly named custom component represents this external boundary without inventing a provider."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7", "legacy-requirement:5"]
+    },
+    {
+      "id": "churn_analytics",
+      "stepNumber": 20,
+      "phase": "Add data, model, and product components",
+      "title": "Compute cohorts, prediction outcomes, and campaign results",
+      "type": "add_component",
+      "content": "Join score snapshots to matured 30-day outcomes and campaign assignment/exposure records. Provide cohort analysis for risk segments, model quality and calibration views, CLV summaries under the approved definition, and campaign outcome comparisons. Distinguish predictive association from causal campaign lift.",
+      "component": {
+        "nodeId": "churn_analytics",
+        "componentType": "analytics",
+        "label": "Cohort & Prediction Outcome Analytics",
+        "description": "Reconciles scores, matured outcomes, segments, CLV, and campaign evidence for reporting.",
+        "position": {"x": 1420, "y": 560},
+        "properties": {"componentName": "Cohort & Prediction Outcome Analytics", "purpose": "Compute cohort-level risk and churn outcomes, prediction-versus-actual evaluation, calibration and top-decile precision, defined CLV summaries, and campaign comparisons from versioned data. Report treatment effects only when assignment and outcome evidence support them."},
+        "highlightReason": "Cohort analysis and outcome tracking make model quality interpretable to business stakeholders."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "churn_dashboard",
+      "stepNumber": 21,
+      "phase": "Add data, model, and product components",
+      "title": "Give stakeholders a governed business dashboard",
+      "type": "add_component",
+      "content": "Show the scoring run's freshness/completeness, risk-segment and cohort trends, matured prediction outcomes, top-decile precision evidence, explanations understandable to business users, and campaign delivery/outcome status. Make model version, data cutoff, and label maturity visible so a provisional metric cannot be mistaken for a final one.",
+      "component": {
+        "nodeId": "churn_dashboard",
+        "componentType": "admin-console",
+        "label": "Business Stakeholder Dashboard",
+        "description": "Access-controlled dashboard for customer-risk cohorts, model evidence, and campaign outcomes.",
+        "position": {"x": 1700, "y": 560},
+        "properties": {"componentName": "Business Stakeholder Dashboard", "purpose": "Present risk segments, cohort insights, explainable predictions, score-run completeness, model/data versions, matured prediction outcomes, CLV under its agreed definition, and campaign delivery/results with role-appropriate access."},
+        "highlightReason": "The existing Admin Console palette component already fits a business-facing dashboard, so no new component type is needed."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "churn_monitoring",
+      "stepNumber": 22,
+      "phase": "Add data, model, and product components",
+      "title": "Observe the complete model and batch lifecycle",
+      "type": "add_component",
+      "content": "Track source freshness, eligible and scored counts, rejected records, partition retries, batch completion, feature missingness, model/version use, score distribution, explanation availability, queue age, CRM acknowledgements, outcome maturity, and cohort-level quality. Alert thresholds and batch deadlines need owner agreement; none are specified in the brief.",
+      "component": {
+        "nodeId": "churn_monitoring",
+        "componentType": "monitoring",
+        "label": "Pipeline, Model & Campaign Monitoring",
+        "description": "Operational and model-quality visibility across data, scoring, delivery, and delayed outcomes.",
+        "position": {"x": 2260, "y": -100},
+        "properties": {"componentName": "Pipeline, Model & Campaign Monitoring", "purpose": "Observe source freshness, score completeness, retries, feature quality, model/version and score drift, explanation coverage, precision-at-top-decile after labels mature, queue/CRM delivery, and delayed outcomes. Configure thresholds and deadlines only after owners define them."},
+        "highlightReason": "A completed job is not sufficient evidence of a complete, high-quality, actionable daily run."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "churn_sources_to_raw",
+      "stepNumber": 23,
+      "phase": "Connect daily scoring, retention, and outcome flows",
+      "title": "Preserve source extracts before transforming them",
+      "type": "add_connection",
+      "content": "Land versioned source snapshots with a run manifest and checksums. Restrict access to the minimum approved fields and keep source and ingestion timestamps for later point-in-time reconstruction.",
+      "connection": {
+        "edgeId": "churn_e_sources_raw",
+        "sourceNodeId": "churn_sources",
+        "targetNodeId": "churn_raw_store",
+        "connectionType": "data-flow",
+        "label": "CRM, billing & usage snapshots",
+        "description": "Versioned source extracts and manifests for safe replay and point-in-time analysis."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "churn_sources_to_ingestion",
+      "stepNumber": 24,
+      "phase": "Connect daily scoring, retention, and outcome flows",
+      "title": "Ingest changes with source-time context",
+      "type": "add_connection",
+      "content": "Read CRM/billing extracts and product-usage changes with stable identity, effective time, source version, and freshness metadata. Make late-arriving and corrected events observable to downstream feature and label builders.",
+      "connection": {
+        "edgeId": "churn_e_sources_ingestion",
+        "sourceNodeId": "churn_sources",
+        "targetNodeId": "churn_ingestion",
+        "connectionType": "data-flow",
+        "label": "Source records & effective timestamps",
+        "description": "CRM, billing, and usage inputs with identity and temporal provenance."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "churn_raw_to_ingestion",
+      "stepNumber": 25,
+      "phase": "Connect daily scoring, retention, and outcome flows",
+      "title": "Build curated records from replayable snapshots",
+      "type": "add_connection",
+      "content": "The builder consumes versioned snapshots or bounded change extracts, records source watermarks, and writes a reproducible transform manifest. A rerun must use an explicit snapshot/run identity rather than silently mixing new source data into an old score run.",
+      "connection": {
+        "edgeId": "churn_e_raw_ingestion",
+        "sourceNodeId": "churn_raw_store",
+        "targetNodeId": "churn_ingestion",
+        "connectionType": "data-flow",
+        "label": "Snapshot references & source manifests",
+        "description": "Replayable inputs and integrity metadata for deterministic batch transformation."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "churn_ingestion_to_warehouse",
+      "stepNumber": 26,
+      "phase": "Connect daily scoring, retention, and outcome flows",
+      "title": "Persist validated temporal history",
+      "type": "add_connection",
+      "content": "Commit normalized customer, usage, campaign, and outcome records with event/effective time, processing time, source version, and quality status. Retain a traceable correction path for records that arrive after a scoring run.",
+      "connection": {
+        "edgeId": "churn_e_ingestion_warehouse",
+        "sourceNodeId": "churn_ingestion",
+        "targetNodeId": "churn_warehouse",
+        "connectionType": "database-connection",
+        "label": "Validated temporal customer history",
+        "description": "Curated records with source provenance, event time, and data-quality state."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "churn_warehouse_to_features",
+      "stepNumber": 27,
+      "phase": "Connect daily scoring, retention, and outcome flows",
+      "title": "Materialize versioned behavioral features",
+      "type": "add_connection",
+      "content": "Build feature values using only records effective at or before each score/training index time. Materialize offline history for training and the matching daily batch view for inference; surface freshness, missingness, and schema mismatch.",
+      "connection": {
+        "edgeId": "churn_e_warehouse_features",
+        "sourceNodeId": "churn_warehouse",
+        "targetNodeId": "churn_features",
+        "connectionType": "data-flow",
+        "label": "Point-in-time CRM, billing & behavior features",
+        "description": "Versioned feature values with source time, freshness, and missingness provenance."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "churn_warehouse_to_training",
+      "stepNumber": 28,
+      "phase": "Connect daily scoring, retention, and outcome flows",
+      "title": "Train from matured, time-bounded examples",
+      "type": "add_connection",
+      "content": "Provide historical point-in-time features and only labels whose 30-day outcome window has matured under the agreed churn definition. Keep prediction time, outcome maturity, and treatment exposure aligned; do not let future campaign or billing events leak into features.",
+      "connection": {
+        "edgeId": "churn_e_warehouse_training",
+        "sourceNodeId": "churn_warehouse",
+        "targetNodeId": "churn_training",
+        "connectionType": "data-flow",
+        "label": "Point-in-time features & matured outcomes",
+        "description": "Time-aligned training examples, label maturity, and campaign assignment context."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "churn_workflow_to_training",
+      "stepNumber": 29,
+      "phase": "Connect daily scoring, retention, and outcome flows",
+      "title": "Start weekly training only when new data is eligible",
+      "type": "add_connection",
+      "content": "The weekly branch checks snapshot completeness, label maturity, data-quality conditions, and reproducibility metadata before training. A missed or failed run remains visible and retryable; the currently approved scoring model stays pinned.",
+      "connection": {
+        "edgeId": "churn_e_workflow_training",
+        "sourceNodeId": "churn_workflow",
+        "targetNodeId": "churn_training",
+        "connectionType": "api-call",
+        "label": "Weekly candidate-training run",
+        "description": "Versioned scheduled request to train and evaluate a new candidate without automatic promotion."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "churn_training_to_registry",
+      "stepNumber": 30,
+      "phase": "Connect daily scoring, retention, and outcome flows",
+      "title": "Register candidates together with their evidence",
+      "type": "add_connection",
+      "content": "Publish candidate artifacts with label and feature versions, data cutoff, temporal evaluation, calibration, top-decile precision, cohort results, and SHAP validation. A failed quality or approval gate leaves the previous approved model untouched.",
+      "connection": {
+        "edgeId": "churn_e_training_registry",
+        "sourceNodeId": "churn_training",
+        "targetNodeId": "churn_registry",
+        "connectionType": "data-flow",
+        "label": "Candidate model & evaluation evidence",
+        "description": "Immutable artifact, compatible feature schema, measured quality, and explanation validation."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "churn_registry_to_serving",
+      "stepNumber": 31,
+      "phase": "Connect daily scoring, retention, and outcome flows",
+      "title": "Pin one approved artifact to each scoring run",
+      "type": "add_connection",
+      "content": "Resolve the approved model and its matching feature schema once per run and persist those version identifiers in the run manifest. Rollback changes the selected version explicitly; it does not mutate already recorded prediction provenance.",
+      "connection": {
+        "edgeId": "churn_e_registry_serving",
+        "sourceNodeId": "churn_registry",
+        "targetNodeId": "churn_serving",
+        "connectionType": "api-call",
+        "label": "Approved model & explanation contract",
+        "description": "Pinned, approved artifact version with its compatible input and output schema."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "churn_features_to_serving",
+      "stepNumber": 32,
+      "phase": "Connect daily scoring, retention, and outcome flows",
+      "title": "Serve the same feature definitions used in evaluation",
+      "type": "add_connection",
+      "content": "Provide a customer-keyed batch feature snapshot with schema, source watermark, and missingness/freshness metadata. Reject incompatible schema or required-data gaps into a visible exception path rather than scoring a fabricated vector.",
+      "connection": {
+        "edgeId": "churn_e_features_serving",
+        "sourceNodeId": "churn_features",
+        "targetNodeId": "churn_serving",
+        "connectionType": "data-flow",
+        "label": "Versioned daily customer feature rows",
+        "description": "Batch inputs compatible with the pinned model and carrying source freshness metadata."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "churn_workflow_to_serving",
+      "stepNumber": 33,
+      "phase": "Connect daily scoring, retention, and outcome flows",
+      "title": "Run and checkpoint the daily scoring partitions",
+      "type": "add_connection",
+      "content": "The daily workflow validates input readiness, assigns stable customer partitions, runs inference, and checkpoints each completed partition. Reprocessing the same run/partition must write the same logical score record and not emit a duplicate retention action.",
+      "connection": {
+        "edgeId": "churn_e_workflow_serving",
+        "sourceNodeId": "churn_workflow",
+        "targetNodeId": "churn_serving",
+        "connectionType": "api-call",
+        "label": "Daily scoring run & partition manifest",
+        "description": "Idempotent batch request with explicit source snapshot and pinned model versions."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "churn_serving_to_queue",
+      "stepNumber": 34,
+      "phase": "Connect daily scoring, retention, and outcome flows",
+      "title": "Persist complete score outputs before campaign dispatch",
+      "type": "add_connection",
+      "content": "Write the score record and explanation references with customer/run/model/feature IDs, then enqueue only eligible action references with an idempotency key. Separate risk ranking from campaign eligibility and record why a candidate was included or excluded under approved policy.",
+      "connection": {
+        "edgeId": "churn_e_serving_queue",
+        "sourceNodeId": "churn_serving",
+        "targetNodeId": "churn_campaign_queue",
+        "connectionType": "message-queue",
+        "label": "Idempotent eligible retention-action references",
+        "description": "Durable handoff of approved campaign candidates with score provenance and eligibility decision."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "churn_queue_to_adapter",
+      "stepNumber": 35,
+      "phase": "Connect daily scoring, retention, and outcome flows",
+      "title": "Dispatch retention work with bounded retries",
+      "type": "add_connection",
+      "content": "The adapter consumes with idempotent delivery, bounded backoff, and a visible dead-letter/reconciliation path. Respect provider quota and campaign policy; a downstream outage must not cause duplicate offers or silently erase pending actions.",
+      "connection": {
+        "edgeId": "churn_e_queue_adapter",
+        "sourceNodeId": "churn_campaign_queue",
+        "targetNodeId": "churn_retention_adapter",
+        "connectionType": "message-queue",
+        "label": "Approved campaign work & idempotency key",
+        "description": "Retryable, bounded work items with model/run provenance and policy outcome."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7"]
+    },
+    {
+      "id": "churn_adapter_to_sources",
+      "stepNumber": 36,
+      "phase": "Connect daily scoring, retention, and outcome flows",
+      "title": "Send eligible actions to CRM and marketing automation",
+      "type": "add_connection",
+      "content": "Map the chosen action and explanation summary to each external contract, return provider acknowledgements, and capture campaign assignment and exposure identifiers. Avoid sending unnecessary raw behavioral features to downstream marketing systems.",
+      "connection": {
+        "edgeId": "churn_e_adapter_sources",
+        "sourceNodeId": "churn_retention_adapter",
+        "targetNodeId": "churn_sources",
+        "connectionType": "api-call",
+        "label": "Authorized CRM/marketing action & callback",
+        "description": "Provider-neutral outbound action and inbound delivery/outcome status at the external-system boundary."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7"]
+    },
+    {
+      "id": "churn_serving_to_warehouse",
+      "stepNumber": 37,
+      "phase": "Connect daily scoring, retention, and outcome flows",
+      "title": "Keep an immutable prediction ledger",
+      "type": "add_connection",
+      "content": "Persist each score with score/index time, model and feature versions, outcome-horizon definition, risk segment, explanation reference, and batch-run identity. An idempotent key prevents retries from overwriting a different run's evidence.",
+      "connection": {
+        "edgeId": "churn_e_serving_warehouse",
+        "sourceNodeId": "churn_serving",
+        "targetNodeId": "churn_warehouse",
+        "connectionType": "database-connection",
+        "label": "Versioned customer prediction ledger",
+        "description": "Traceable probabilities, segments, CLV where defined, explanation references, and run provenance."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "churn_adapter_to_warehouse",
+      "stepNumber": 38,
+      "phase": "Connect daily scoring, retention, and outcome flows",
+      "title": "Join campaign assignment and matured actual outcomes",
+      "type": "add_connection",
+      "content": "Return action eligibility, assignment, send/delivery status, campaign exposure, response, and later churn outcomes with stable identifiers and event times. Label maturity and corrections must remain explicit so the dashboard does not compare predictions with incomplete outcomes as if they were final.",
+      "connection": {
+        "edgeId": "churn_e_adapter_warehouse",
+        "sourceNodeId": "churn_retention_adapter",
+        "targetNodeId": "churn_warehouse",
+        "connectionType": "data-flow",
+        "label": "Campaign exposure, delivery & outcome events",
+        "description": "Time-stamped feedback needed to evaluate predictions and, where justified, incremental campaign effect."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1"]
+    },
+    {
+      "id": "churn_warehouse_to_analytics",
+      "stepNumber": 39,
+      "phase": "Connect daily scoring, retention, and outcome flows",
+      "title": "Evaluate matured results by time and cohort",
+      "type": "add_connection",
+      "content": "Join predictions to the actual outcome only after the agreed horizon matures; compute precision at the operational top decile, calibration, risk-segment outcomes, cohort changes, and campaign results with sample completeness visible. Do not let a favorable aggregate hide a failing cohort.",
+      "connection": {
+        "edgeId": "churn_e_warehouse_analytics",
+        "sourceNodeId": "churn_warehouse",
+        "targetNodeId": "churn_analytics",
+        "connectionType": "data-flow",
+        "label": "Predictions, labels, campaign exposure & cohorts",
+        "description": "Temporal evaluation inputs with label-maturity and data-completeness metadata."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "churn_analytics_to_api",
+      "stepNumber": 40,
+      "phase": "Connect daily scoring, retention, and outcome flows",
+      "title": "Serve only authorized, aggregated business views",
+      "type": "add_connection",
+      "content": "Expose cohort and model evidence through bounded, authorized queries. Keep customer-level details behind explicit role and purpose checks and avoid allowing dashboard filters to bypass data-access controls.",
+      "connection": {
+        "edgeId": "churn_e_analytics_api",
+        "sourceNodeId": "churn_analytics",
+        "targetNodeId": "churn_api",
+        "connectionType": "data-flow",
+        "label": "Governed cohort and model metrics",
+        "description": "Business-ready aggregates with model version and outcome maturity context."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8"]
+    },
+    {
+      "id": "churn_api_to_analytics",
+      "stepNumber": 41,
+      "phase": "Connect daily scoring, retention, and outcome flows",
+      "title": "Apply query scope before reading analytics",
+      "type": "add_connection",
+      "content": "Validate stakeholder authorization, business-unit scope, time range, and allowed aggregation before executing a report query. Audit access to customer-level explanations separately from aggregated cohort views.",
+      "connection": {
+        "edgeId": "churn_e_api_analytics",
+        "sourceNodeId": "churn_api",
+        "targetNodeId": "churn_analytics",
+        "connectionType": "api-call",
+        "label": "Authorized dashboard query",
+        "description": "Validated, scoped query for cohorts, model evidence, and campaign outcomes."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-requirement:2"]
+    },
+    {
+      "id": "churn_dashboard_to_api",
+      "stepNumber": 42,
+      "phase": "Connect daily scoring, retention, and outcome flows",
+      "title": "Route business dashboard requests through authorization",
+      "type": "add_connection",
+      "content": "The dashboard requests cohort and model views from the protected API rather than directly querying source stores. UI visibility is not a substitute for server-side authorization.",
+      "connection": {
+        "edgeId": "churn_e_dashboard_api",
+        "sourceNodeId": "churn_dashboard",
+        "targetNodeId": "churn_api",
+        "connectionType": "http",
+        "label": "Authenticated stakeholder report request",
+        "description": "Dashboard query with user identity, selected view, and authorized scope."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "churn_api_to_dashboard",
+      "stepNumber": 43,
+      "phase": "Connect daily scoring, retention, and outcome flows",
+      "title": "Return explanations with their version and maturity context",
+      "type": "add_connection",
+      "content": "Return risk segment, score date, model/data version, readable attribution, and whether outcomes are mature. Preserve the distinction between SHAP feature attribution and causal churn drivers in labels and help text.",
+      "connection": {
+        "edgeId": "churn_e_api_dashboard",
+        "sourceNodeId": "churn_api",
+        "targetNodeId": "churn_dashboard",
+        "connectionType": "data-flow",
+        "label": "Scoped cohort metrics & readable explanations",
+        "description": "Authorized business view with score provenance and explicit outcome maturity."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "churn_serving_to_monitoring",
+      "stepNumber": 44,
+      "phase": "Prove measurable targets and safe operation",
+      "title": "Measure scoring completeness and model signals",
+      "type": "add_connection",
+      "content": "Emit run/model/feature versions, eligible and completed partition counts, rejected rows, score distribution, explanation availability, and data freshness. Compare quality with actual outcomes only when the relevant label horizon has matured.",
+      "connection": {
+        "edgeId": "churn_e_serving_monitoring",
+        "sourceNodeId": "churn_serving",
+        "targetNodeId": "churn_monitoring",
+        "connectionType": "data-flow",
+        "label": "Versioned scoring, completeness & explanation telemetry",
+        "description": "Operational counts and model signals keyed to a specific batch, artifact, and feature snapshot."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "churn_workflow_to_monitoring",
+      "stepNumber": 45,
+      "phase": "Prove measurable targets and safe operation",
+      "title": "Alert on workflow lag and incomplete runs",
+      "type": "add_connection",
+      "content": "Report source-readiness failures, partition retries, stalled runs, late completion against the owner-agreed deadline, weekly training status, gate outcome, queue age, and dead-letter volume. Do not claim an SLA until the completion window and alert boundaries are decided.",
+      "connection": {
+        "edgeId": "churn_e_workflow_monitoring",
+        "sourceNodeId": "churn_workflow",
+        "targetNodeId": "churn_monitoring",
+        "connectionType": "data-flow",
+        "label": "Daily/weekly run state & retry telemetry",
+        "description": "Workflow freshness, progress, gate decisions, and delivery backlog."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "churn_warehouse_to_monitoring",
+      "stepNumber": 46,
+      "phase": "Prove measurable targets and safe operation",
+      "title": "Monitor matured quality by cohort, not only in aggregate",
+      "type": "add_connection",
+      "content": "Publish label maturity, top-decile precision, calibration, missingness, score drift, and segment/cohort slices with denominator and data-completeness context. Trigger a review when the supplied quality target is missed; owners must define operational alert thresholds and remediation authority.",
+      "connection": {
+        "edgeId": "churn_e_warehouse_monitoring",
+        "sourceNodeId": "churn_warehouse",
+        "targetNodeId": "churn_monitoring",
+        "connectionType": "data-flow",
+        "label": "Matured actuals, cohort quality & drift inputs",
+        "description": "Delayed evaluation evidence joined to prediction, feature, model, and campaign versions."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "churn_uplift_validation",
+      "stepNumber": 47,
+      "phase": "Prove measurable targets and safe operation",
+      "title": "Validate campaign benefit without selection bias",
+      "type": "decision_point",
+      "content": "Campaign exposure is usually selected using risk, so a simple exposed-versus-unexposed outcome comparison can be biased. Preserve assignment, eligibility, and exposure evidence; use a randomized holdout or a defensible causal design approved by the business before claiming incremental retention benefit.",
+      "decision": {
+        "question": "What evidence supports an uplift claim for a retention action?",
+        "chosen": "Retain treatment assignment and exposure provenance and evaluate a randomized holdout where feasible; otherwise document the assumptions and limitations of the approved causal method.",
+        "chosenReason": "The estimate must distinguish the action's effect from the pre-existing risk differences that caused customers to be selected.",
+        "alternatives": [
+          {"option": "Compare all contacted and uncontacted customers directly", "tradeoff": "Selection by churn risk and campaign eligibility confounds the outcome comparison."},
+          {"option": "Treat SHAP attribution as campaign impact", "tradeoff": "Feature contribution to a prediction does not measure the causal effect of an intervention."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7"]
+    },
+    {
+      "id": "churn_scale_trigger",
+      "stepNumber": 48,
+      "phase": "Prove measurable targets and safe operation",
+      "title": "Scale the batch from measured partition performance",
+      "type": "scale_trigger",
+      "content": "The daily population is 10M+ customers, but the brief does not state when the batch must finish. Measure read, feature, inference, explanation, write, and downstream dispatch costs independently. Increase parallel partitions only while source systems, warehouse, model runtime, and campaign quotas remain within agreed bounds.",
+      "scaleTrigger": {
+        "metric": "Daily eligible/scored population against 10M+, per-partition processing time, incomplete/retried work, and the agreed batch deadline.",
+        "action": "Profile the full run, then adjust partition sizing and independent compute concurrency; apply bounded backpressure at source and campaign boundaries when dependencies approach their agreed limits.",
+        "impact": "Improves daily completion and recovery while preserving source-system and campaign protections; avoids inventing an RPS, latency, or batch-window target."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "churn_explanation_validation",
+      "stepNumber": 49,
+      "phase": "Prove measurable targets and safe operation",
+      "title": "Check explanation fidelity and risk-segment stability",
+      "type": "explanation",
+      "content": "Verify SHAP output against the exact model and feature version, present business-readable names and direction carefully, and suppress explanations for invalid or incompatible score rows. Review segment definitions and stability with stakeholders; the brief requests risk levels but supplies no cut points, so do not invent fixed thresholds.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "churn_weekly_retrain_gate",
+      "stepNumber": 50,
+      "phase": "Prove measurable targets and safe operation",
+      "title": "Keep weekly retraining behind evidence and approval gates",
+      "type": "explanation",
+      "content": "A weekly schedule satisfies the requested retraining cadence only when eligible new data and matured labels exist. Compare the candidate to the currently approved model on the same temporal holdout, verify precision above 75% at the top decile, inspect cohort and calibration changes, confirm explanations, and require the agreed approval before promotion. Failed candidates remain registered but do not replace production.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "churn_failure_review",
+      "stepNumber": 51,
+      "phase": "Prove measurable targets and safe operation",
+      "title": "Exercise partial failure, replay, and delayed-label cases",
+      "type": "explanation",
+      "content": "Test missing or late source partitions, identity conflicts, schema changes, stale features, scoring-worker interruption, duplicate retries, partial prediction writes, model rollback, CRM quota/outage, duplicate campaign callbacks, corrected outcomes, delayed label maturity, and missing SHAP output. Every case needs a visible run state, bounded recovery path, and no duplicate or unauthorized campaign action.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "churn_review_questions",
+      "stepNumber": 52,
+      "phase": "Prove measurable targets and safe operation",
+      "title": "Close the design review with owner decisions",
+      "type": "explanation",
+      "content": "Before implementation, agree: the churn event, inactivity/censoring and reactivation rules; score cutoff timezone and batch completion window; campaign capacity, consent, suppression, and approval policy; CLV horizon and value definition; CRM/marketing API contracts and quotas; customer identity and data-retention/deletion policy; cohort definitions; and who can approve model promotion or rollback. Acceptance evidence should include a complete 10M+ daily run, precision above 75% at the operational top decile on matured time-based outcomes, explainable versioned scores, prediction-versus-actual reporting, and safe idempotent campaign delivery. Unspecified numeric cutoffs remain open interview inputs.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

@@ -1,0 +1,1072 @@
+{
+  "problem_id": "ml_012",
+  "version": "1.0.0-review-draft",
+  "totalSteps": 44,
+  "phases": [
+    {
+      "name": "Define the trading and evidence boundaries",
+      "stepRange": [
+        1,
+        3
+      ],
+      "description": "Treat the prompt metrics as evaluation gates and separate offline experimentation, paper trading, and live execution."
+    },
+    {
+      "name": "Build historical and simulated environments",
+      "stepRange": [
+        4,
+        12
+      ],
+      "description": "Preserve point-in-time market data and simulate execution frictions before training an agent."
+    },
+    {
+      "name": "Train, evaluate, and register policies",
+      "stepRange": [
+        13,
+        25
+      ],
+      "description": "Make reward, walk-forward evaluation, regime features, and model provenance explicit."
+    },
+    {
+      "name": "Separate inference, risk, and execution",
+      "stepRange": [
+        26,
+        42
+      ],
+      "description": "Keep the low-latency path bounded, enforce risk independently of the policy, and make paper results auditable."
+    },
+    {
+      "name": "Capacity and launch review",
+      "stepRange": [
+        43,
+        44
+      ],
+      "description": "Benchmark the stated instrument and latency targets; no backtest score is a live performance guarantee."
+    }
+  ],
+  "steps": [
+    {
+      "id": "rl_frame_brief",
+      "stepNumber": 1,
+      "phase": "Define the trading and evidence boundaries",
+      "title": "Read the frozen trading brief",
+      "type": "explanation",
+      "content": "Design a Reinforcement Learning Trading System. Design a reinforcement learning-based trading system that learns optimal trading strategies from market data, manages risk, and executes trades with low latency while adapting to market regime changes. Functional requirements: Train RL agents on historical market data; Define reward functions balancing returns and risk; Handle continuous action spaces for position sizing; Implement market environment simulation; Support multiple asset classes; Implement risk management constraints; Detect and adapt to market regime changes; Provide backtesting and paper trading capabilities. Non-functional constraints: Sharpe ratio above 1.5 in backtests; Maximum drawdown below 15%; Trade execution latency under 10ms; Handle 1000+ instruments simultaneously; Avoid overfitting to historical data. Hints: Use PPO or SAC algorithms for continuous action spaces; Implement realistic market simulators with slippage and fees; Use multi-agent RL for portfolio optimization; Implement walk-forward validation to prevent overfitting; Use attention mechanisms for market state representation; Implement regime detection with Hidden Markov Models. These are supplied targets and suggestions, not evidence of live profitability or safe execution."
+    },
+    {
+      "id": "rl_clarify",
+      "stepNumber": 2,
+      "phase": "Define the trading and evidence boundaries",
+      "title": "Clarify what the prompt leaves open",
+      "type": "explanation",
+      "content": "Ask which venues, asset classes, trading hours, bar/tick frequencies, order types, fee schedules, slippage model, financing/borrow costs, market-impact assumptions, capital limits, and latency measurement boundary apply. Define Sharpe frequency and annualization, drawdown calculation, out-of-sample windows, instrument universe/survivorship rules, and whether the 10ms clock starts at signal generation or at venue acknowledgement. Do not invent these values or interpret a backtest as a guarantee."
+    },
+    {
+      "id": "rl_decide_boundaries",
+      "stepNumber": 3,
+      "phase": "Define the trading and evidence boundaries",
+      "title": "Keep research, paper, and live paths isolated",
+      "type": "decision_point",
+      "content": "The same versioned policy can be evaluated in a simulator and in paper mode, but simulated orders must never enter the live execution route. The 10ms execution target belongs to a deliberately short hot path, not the historical data or training pipeline.",
+      "decision": {
+        "question": "Should historical replay, model training, and live orders share one synchronous pipeline?",
+        "chosen": "Use separate offline research and online execution paths with a strict, independently enforced risk boundary.",
+        "chosenReason": "This prevents training/replay load from adding unpredictable work to execution and prevents paper orders from reaching a live venue.",
+        "alternatives": [
+          {
+            "option": "Run training or replay in the live request path",
+            "tradeoff": "Unbounded compute and I/O make latency and operational isolation difficult."
+          },
+          {
+            "option": "Let the policy send orders directly to the venue",
+            "tradeoff": "A model defect can bypass deterministic exposure, freshness, and kill-switch controls."
+          }
+        ]
+      }
+    },
+    {
+      "id": "rl_market_adapter",
+      "stepNumber": 4,
+      "phase": "Build historical and simulated environments",
+      "title": "Normalize market data across asset classes",
+      "type": "add_component",
+      "content": "The catalog has no exchange-feed component, so use a custom adapter for venue-specific protocols. Normalize instrument identity, event time, sequence, currency, corporate actions, and source quality without assuming a common session calendar.",
+      "component": {
+        "nodeId": "rl_market_adapter",
+        "componentType": "custom-component",
+        "label": "Market Data Adapters",
+        "description": "Normalizes live and historical market events across configured asset classes.",
+        "position": {
+          "x": 80,
+          "y": 250
+        },
+        "properties": {
+          "componentName": "Market Data Adapters",
+          "componentType": "Market Data Integration",
+          "technology": "Venue-specific feed adapters",
+          "purpose": "Normalize configured asset-class and venue feeds with instrument identity, event time, sequence, currency, session, and source-quality metadata."
+        },
+        "highlightReason": "Multiple asset classes are explicit; their protocols, calendars, and data entitlements must be isolated behind adapters."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:5",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "rl_event_stream",
+      "stepNumber": 5,
+      "phase": "Build historical and simulated environments",
+      "title": "Decouple market capture from research consumers",
+      "type": "add_component",
+      "content": "Use a partitioned event stream for capture, replay, and asynchronous consumers. Do not put this broker on the latency-critical order path unless measurements prove the chosen topology meets the 10ms target.",
+      "component": {
+        "nodeId": "rl_event_stream",
+        "componentType": "message-broker",
+        "label": "Market Event Archive Stream",
+        "description": "Durable asynchronous transport for replay and research data.",
+        "position": {
+          "x": 360,
+          "y": 250
+        },
+        "properties": {
+          "componentName": "Market Event Archive Stream",
+          "purpose": "Buffer normalized market events for archival and offline research; partition by a stable instrument key and size retention from measured event rates."
+        },
+        "highlightReason": "Historical replay and model training need a durable feed but must remain off the live execution hot path."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "rl_edge_market_stream",
+      "stepNumber": 6,
+      "phase": "Build historical and simulated environments",
+      "title": "Publish a replayable market event record",
+      "type": "add_connection",
+      "content": "Retain source sequence and event time so replay can detect gaps and ordering defects. Entitlement and redistribution rules belong at the adapter boundary.",
+      "connection": {
+        "edgeId": "rl_market_to_stream",
+        "sourceNodeId": "rl_market_adapter",
+        "targetNodeId": "rl_event_stream",
+        "connectionType": "event-stream",
+        "label": "Normalized market events",
+        "description": "Asynchronous event capture with source, instrument, event-time, sequence, and quality metadata."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:5",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "rl_history_store",
+      "stepNumber": 7,
+      "phase": "Build historical and simulated environments",
+      "title": "Version the historical research dataset",
+      "type": "add_component",
+      "content": "Store immutable or versioned source partitions and corporate-action/metadata snapshots. Training and backtests must use only data available at the simulated decision time; corrections create new dataset versions rather than silently rewriting results.",
+      "component": {
+        "nodeId": "rl_history_store",
+        "componentType": "object-storage",
+        "label": "Point-in-Time Market History",
+        "description": "Versioned event history for simulation, training, and audit.",
+        "position": {
+          "x": 650,
+          "y": 520
+        },
+        "properties": {
+          "componentName": "Point-in-Time Market History",
+          "provider": "S3",
+          "versioning": true,
+          "checksumValidation": true,
+          "purpose": "Retain versioned market events, instrument metadata, corporate actions, and dataset manifests for point-in-time replay and reproducible evaluation."
+        },
+        "highlightReason": "Leakage and survivorship bias often enter through data revisions and universe construction, not only model code."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "rl_edge_stream_history",
+      "stepNumber": 8,
+      "phase": "Build historical and simulated environments",
+      "title": "Archive asynchronously from the capture stream",
+      "type": "add_connection",
+      "content": "Keep archival independent of live decisions. Verify completeness with sequence-gap checks and immutable manifests before data is admitted to a backtest.",
+      "connection": {
+        "edgeId": "rl_stream_to_history",
+        "sourceNodeId": "rl_event_stream",
+        "targetNodeId": "rl_history_store",
+        "connectionType": "data-flow",
+        "label": "Versioned market partitions",
+        "description": "Durable asynchronous market history with capture manifests and source quality metadata."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "rl_simulator",
+      "stepNumber": 9,
+      "phase": "Build historical and simulated environments",
+      "title": "Model the market and execution mechanics",
+      "type": "add_component",
+      "content": "Build a simulator that accounts for fees, spread, slippage, partial fills, market hours, and a defensible market-impact model. The simulator is a custom domain component because no catalog item models a point-in-time trading environment.",
+      "component": {
+        "nodeId": "rl_simulator",
+        "componentType": "custom-component",
+        "label": "Market and Execution Simulator",
+        "description": "Runs point-in-time backtests and isolated paper-trading sessions.",
+        "position": {
+          "x": 950,
+          "y": 520
+        },
+        "properties": {
+          "componentName": "Market and Execution Simulator",
+          "componentType": "Simulation Environment",
+          "technology": "Versioned market replay",
+          "purpose": "Replay point-in-time market state and model fees, slippage, order types, partial fills, sessions, and documented market-impact assumptions for backtesting and paper trading."
+        },
+        "highlightReason": "Realistic simulation is required to evaluate reward and risk; friction assumptions materially change measured Sharpe and drawdown."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "rl_edge_history_simulator",
+      "stepNumber": 10,
+      "phase": "Build historical and simulated environments",
+      "title": "Replay only data available at each decision time",
+      "type": "add_connection",
+      "content": "Construct point-in-time bars/state with no future prices, revised fundamentals, or surviving-only universe leakage. Keep simulator version and friction configuration in the experiment record.",
+      "connection": {
+        "edgeId": "rl_history_to_simulator",
+        "sourceNodeId": "rl_history_store",
+        "targetNodeId": "rl_simulator",
+        "connectionType": "data-flow",
+        "label": "Point-in-time market replay",
+        "description": "Immutable market and instrument snapshots presented only as they would have been known at each simulated time."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:8",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "rl_training",
+      "stepNumber": 11,
+      "phase": "Build historical and simulated environments",
+      "title": "Train policy candidates inside the environment",
+      "type": "add_component",
+      "content": "Compare PPO or SAC candidates against simple baselines across multiple seeds and temporal folds. Record action bounds, observation versions, reward version, training code, and all data/simulator manifests.",
+      "component": {
+        "nodeId": "rl_training",
+        "componentType": "model-training",
+        "label": "RL Policy Training",
+        "description": "Trains and compares agents against the versioned simulated market.",
+        "position": {
+          "x": 1250,
+          "y": 520
+        },
+        "properties": {
+          "componentName": "RL Policy Training",
+          "computeType": "GPU",
+          "purpose": "Train reinforcement-learning candidates such as PPO or SAC inside the versioned environment; record observation, action, reward, seed, dataset, and simulator versions."
+        },
+        "highlightReason": "Historical training must be coupled to an explicit environment and reward, not directly to live execution."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "rl_edge_sim_training",
+      "stepNumber": 12,
+      "phase": "Build historical and simulated environments",
+      "title": "Use simulated transitions for policy learning",
+      "type": "add_connection",
+      "content": "Store transition provenance and separate training from evaluation folds. Avoid evaluating on the same episodes used to tune reward coefficients or select checkpoints.",
+      "connection": {
+        "edgeId": "rl_simulator_to_training",
+        "sourceNodeId": "rl_simulator",
+        "targetNodeId": "rl_training",
+        "connectionType": "data-flow",
+        "label": "Simulated transitions and rewards",
+        "description": "Versioned observations, actions, fills, costs, portfolio state, and terminal outcomes for training."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "rl_registry",
+      "stepNumber": 13,
+      "phase": "Train, evaluate, and register policies",
+      "title": "Track every policy and experiment version",
+      "type": "add_component",
+      "content": "Register policy weights with reward, environment, feature, data, code, seed, and evaluation manifests. Retain rejected candidates too, so selection decisions and backtests can be reproduced.",
+      "component": {
+        "nodeId": "rl_registry",
+        "componentType": "model-registry",
+        "label": "Trading Policy Registry",
+        "description": "Versions policy artifacts, experiment metadata, and evaluation evidence.",
+        "position": {
+          "x": 1550,
+          "y": 520
+        },
+        "properties": {
+          "componentName": "Trading Policy Registry",
+          "platform": "MLflow",
+          "purpose": "Version policy artifacts and bind them to data, reward, simulator, code, feature, and evaluation manifests for reproducibility and rollback."
+        },
+        "highlightReason": "Changing reward or simulator assumptions changes the policy's meaning and requires traceable versions."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "rl_eval_gate",
+      "stepNumber": 14,
+      "phase": "Train, evaluate, and register policies",
+      "title": "Evaluate on walk-forward windows and realistic costs",
+      "type": "add_component",
+      "content": "Use a custom gate for multiple walk-forward windows, untouched holdouts, multiple seeds, realistic cost sensitivity, and regime slices. The Sharpe >1.5 and drawdown <15% values are supplied targets; define calculation conventions and confidence before promotion.",
+      "component": {
+        "nodeId": "rl_eval_gate",
+        "componentType": "custom-component",
+        "label": "Walk-Forward Risk Evaluation",
+        "description": "Tests strategy robustness and prompt acceptance metrics before promotion.",
+        "position": {
+          "x": 1550,
+          "y": 800
+        },
+        "properties": {
+          "componentName": "Walk-Forward Risk Evaluation",
+          "componentType": "Model Evaluation Gate",
+          "technology": "Temporal folds and cost stress tests",
+          "purpose": "Measure Sharpe and maximum drawdown on untouched walk-forward periods, multiple seeds, asset-class/regime slices, and cost-stressed simulations; block promotion when the agreed protocol is not met."
+        },
+        "highlightReason": "A high backtest score can be an artifact of leakage, tuning, or unrealistic fills; the prompt requires explicit overfit controls."
+      },
+      "requirementIds": [
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "rl_edge_training_eval",
+      "stepNumber": 15,
+      "phase": "Train, evaluate, and register policies",
+      "title": "Gate against data not used for tuning",
+      "type": "add_connection",
+      "content": "Keep walk-forward boundaries and evaluation code immutable for a candidate run. Include slippage/fee sensitivity and compare with non-RL baselines before accepting a policy.",
+      "connection": {
+        "edgeId": "rl_training_to_eval",
+        "sourceNodeId": "rl_training",
+        "targetNodeId": "rl_eval_gate",
+        "connectionType": "data-flow",
+        "label": "Policy candidates and fold results",
+        "description": "Frozen candidates, temporal split manifests, seeds, costs, and per-window risk/return metrics."
+      },
+      "requirementIds": [
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "rl_edge_eval_registry",
+      "stepNumber": 16,
+      "phase": "Train, evaluate, and register policies",
+      "title": "Register only evidence-backed candidates",
+      "type": "add_connection",
+      "content": "Attach exact metric definitions, fold outcomes, and approvals to a registered policy. Do not collapse a distribution of window results into one unqualified headline number.",
+      "connection": {
+        "edgeId": "rl_eval_to_registry",
+        "sourceNodeId": "rl_eval_gate",
+        "targetNodeId": "rl_registry",
+        "connectionType": "api-call",
+        "label": "Qualified policy and report",
+        "description": "A versioned candidate plus walk-forward evidence and an explicit promotion decision."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "rl_policy_model",
+      "stepNumber": 17,
+      "phase": "Train, evaluate, and register policies",
+      "title": "Model the continuous position-sizing policy",
+      "type": "add_component",
+      "content": "Represent the policy's continuous outputs as bounded target positions or deltas. Convert them to valid orders only after deterministic exposure, cash, leverage, freshness, and venue checks; the prompt supplies no numeric risk limits.",
+      "component": {
+        "nodeId": "rl_policy_model",
+        "componentType": "ml-model",
+        "label": "Continuous-Action Trading Policy",
+        "description": "Maps the approved market state to continuous position-sizing actions.",
+        "position": {
+          "x": 1850,
+          "y": 450
+        },
+        "properties": {
+          "componentName": "Continuous-Action Trading Policy",
+          "modelType": "Regression",
+          "framework": "PyTorch",
+          "purpose": "Produce bounded continuous target-position proposals from the documented observation and reward versions; proposals are not executable orders until the independent risk service approves them."
+        },
+        "highlightReason": "Continuous action spaces are explicitly required, but a model output must be projected into allowed orders and risk limits."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "rl_edge_registry_policy",
+      "stepNumber": 18,
+      "phase": "Train, evaluate, and register policies",
+      "title": "Pin the exact policy artifact",
+      "type": "add_connection",
+      "content": "Deploy by immutable digest and retain a fast rollback to a previously approved version. Keep policy metadata and runtime observation schema compatible before activation.",
+      "connection": {
+        "edgeId": "rl_registry_to_policy",
+        "sourceNodeId": "rl_registry",
+        "targetNodeId": "rl_policy_model",
+        "connectionType": "data-flow",
+        "label": "Approved policy artifact",
+        "description": "Immutable policy version with reward, data, environment, and evaluation provenance."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "rl_regime_model",
+      "stepNumber": 19,
+      "phase": "Train, evaluate, and register policies",
+      "title": "Detect market regimes as versioned context",
+      "type": "add_component",
+      "content": "A regime detector can use an HMM or another validated method, but regimes are uncertain estimates rather than known labels. Evaluate stability, delay, and false transitions across assets and time.",
+      "component": {
+        "nodeId": "rl_regime_model",
+        "componentType": "ml-model",
+        "label": "Market Regime Detector",
+        "description": "Estimates regime context for policy conditioning and evaluation.",
+        "position": {
+          "x": 1850,
+          "y": 700
+        },
+        "properties": {
+          "componentName": "Market Regime Detector",
+          "modelType": "Clustering",
+          "framework": "PyTorch",
+          "purpose": "Estimate versioned market-regime context from point-in-time observations and expose confidence and transition behavior for policy conditioning and evaluation."
+        },
+        "highlightReason": "The brief requires adaptation to regime changes, but does not define regimes or label quality."
+      },
+      "requirementIds": [
+        "legacy-requirement:7",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "rl_edge_registry_regime",
+      "stepNumber": 20,
+      "phase": "Train, evaluate, and register policies",
+      "title": "Version regime logic with the policy",
+      "type": "add_connection",
+      "content": "Record the detector version and regime-state schema with each policy. Backtests must compute regime state using only data observable at that time.",
+      "connection": {
+        "edgeId": "rl_registry_to_regime",
+        "sourceNodeId": "rl_registry",
+        "targetNodeId": "rl_regime_model",
+        "connectionType": "data-flow",
+        "label": "Approved regime artifact",
+        "description": "Versioned regime estimator, confidence behavior, and point-in-time input contract."
+      },
+      "requirementIds": [
+        "legacy-requirement:7",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "rl_training_explanation",
+      "stepNumber": 21,
+      "phase": "Train, evaluate, and register policies",
+      "title": "Make reward trade-offs inspectable",
+      "type": "explanation",
+      "content": "Define a reward that balances returns and risk and accounts for turnover and execution costs. If drawdown limits are hard constraints, enforce them in the risk system as well as evaluate them offline; a reward penalty alone cannot guarantee a maximum drawdown."
+    },
+    {
+      "id": "rl_serving",
+      "stepNumber": 22,
+      "phase": "Train, evaluate, and register policies",
+      "title": "Serve an approved policy on the hot path",
+      "type": "add_component",
+      "content": "Load pinned policy and regime versions and keep inference work bounded. The under-10ms target is a measured end-to-end budget; this catalog component does not guarantee it, and the boundary must be agreed with the venue.",
+      "component": {
+        "nodeId": "rl_serving",
+        "componentType": "model-serving",
+        "label": "Low-Latency Policy Inference",
+        "description": "Produces position proposals from fresh market state and approved model versions.",
+        "position": {
+          "x": 2150,
+          "y": 450
+        },
+        "properties": {
+          "componentName": "Low-Latency Policy Inference",
+          "platform": "KServe",
+          "autoscaling": true,
+          "purpose": "Run approved policy and regime artifacts on bounded, fresh observations and return target-position proposals with model version and inference timing."
+        },
+        "highlightReason": "Inference belongs on the online path; model loading, cold starts, and feature access must be included in latency measurement."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:7",
+        "legacy-constraint:3",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "rl_edge_policy_serving",
+      "stepNumber": 23,
+      "phase": "Train, evaluate, and register policies",
+      "title": "Load the approved continuous-action policy",
+      "type": "add_connection",
+      "content": "Validate the action schema and reject incompatible policy versions before a rollout. A model promotion should be atomic from the serving process's perspective.",
+      "connection": {
+        "edgeId": "rl_policy_to_serving",
+        "sourceNodeId": "rl_policy_model",
+        "targetNodeId": "rl_serving",
+        "connectionType": "data-flow",
+        "label": "Pinned policy and action schema",
+        "description": "Approved continuous-action artifact and its observation/action contract."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-constraint:3",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "rl_edge_regime_serving",
+      "stepNumber": 24,
+      "phase": "Train, evaluate, and register policies",
+      "title": "Condition inference on current regime evidence",
+      "type": "add_connection",
+      "content": "Pass regime estimate, confidence, and timestamp as explicit context. Define conservative behavior for missing, stale, or low-confidence regime state.",
+      "connection": {
+        "edgeId": "rl_regime_to_serving",
+        "sourceNodeId": "rl_regime_model",
+        "targetNodeId": "rl_serving",
+        "connectionType": "data-flow",
+        "label": "Regime estimate and confidence",
+        "description": "Versioned point-in-time regime context for policy conditioning."
+      },
+      "requirementIds": [
+        "legacy-requirement:7",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "rl_live_data_edge",
+      "stepNumber": 25,
+      "phase": "Train, evaluate, and register policies",
+      "title": "Feed live observations directly to inference",
+      "type": "add_connection",
+      "content": "Keep the market-event archive broker off this direct live observation route. Measure market-event age and inference time separately, then measure the agreed complete signal-to-execution interval.",
+      "connection": {
+        "edgeId": "rl_market_to_serving",
+        "sourceNodeId": "rl_market_adapter",
+        "targetNodeId": "rl_serving",
+        "connectionType": "data-flow",
+        "label": "Fresh market observations",
+        "description": "Bounded live market state delivered directly to inference, outside the asynchronous archival path."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:5",
+        "legacy-requirement:7",
+        "legacy-constraint:3",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "rl_online_cache",
+      "stepNumber": 26,
+      "phase": "Separate inference, risk, and execution",
+      "title": "Keep approved portfolio state close to risk checks",
+      "type": "add_component",
+      "content": "Cache can reduce repeated reads for read-mostly state, but never make it the sole authority for balances, exposure, or order idempotency. Include version/freshness and fail closed if authoritative state cannot be confirmed.",
+      "component": {
+        "nodeId": "rl_online_cache",
+        "componentType": "cache",
+        "label": "Market and Portfolio Snapshot Cache",
+        "description": "Low-latency, versioned read cache for bounded decision context.",
+        "position": {
+          "x": 2450,
+          "y": 760
+        },
+        "properties": {
+          "componentName": "Market and Portfolio Snapshot Cache",
+          "engine": "redis",
+          "cacheStrategy": "cache-aside",
+          "inMemory": true,
+          "purpose": "Cache versioned market and portfolio snapshots for risk evaluation while preserving the ledger as authoritative state and rejecting stale snapshots."
+        },
+        "highlightReason": "The stated low-latency target encourages fast reads, but risk decisions cannot depend on stale cached exposure."
+      },
+      "requirementIds": [
+        "legacy-requirement:6",
+        "legacy-constraint:3",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "rl_risk_engine",
+      "stepNumber": 27,
+      "phase": "Separate inference, risk, and execution",
+      "title": "Enforce deterministic risk independently",
+      "type": "add_component",
+      "content": "Apply owner-approved limits for exposure, cash, leverage, instrument eligibility, order size, stale data, and kill switches. The prompt requires risk constraints but supplies no numeric limits; reject or hold proposals when authoritative state is unavailable.",
+      "component": {
+        "nodeId": "rl_risk_engine",
+        "componentType": "custom-component",
+        "label": "Pre-Trade Risk and Order Policy",
+        "description": "Validates every model proposal against deterministic account and venue rules.",
+        "position": {
+          "x": 2750,
+          "y": 500
+        },
+        "properties": {
+          "componentName": "Pre-Trade Risk and Order Policy",
+          "componentType": "Risk Service",
+          "technology": "Deterministic pre-trade controls",
+          "purpose": "Validate target-position proposals, fresh state, instrument eligibility, owner-defined exposure limits, order bounds, idempotency, and kill-switch state; fail closed on uncertain risk state."
+        },
+        "highlightReason": "A learned reward does not replace deterministic risk controls or an independently operable kill switch."
+      },
+      "requirementIds": [
+        "legacy-requirement:6",
+        "legacy-constraint:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "rl_edge_cache_risk",
+      "stepNumber": 28,
+      "phase": "Separate inference, risk, and execution",
+      "title": "Read versioned context without trusting stale values",
+      "type": "add_connection",
+      "content": "Risk checks validate snapshot age/version against explicit policy and consult the authoritative ledger when required. Missing or stale account state must stop order submission.",
+      "connection": {
+        "edgeId": "rl_cache_to_risk",
+        "sourceNodeId": "rl_online_cache",
+        "targetNodeId": "rl_risk_engine",
+        "connectionType": "data-flow",
+        "label": "Versioned risk context",
+        "description": "Read-optimized snapshot with timestamp and version, subject to freshness validation."
+      },
+      "requirementIds": [
+        "legacy-requirement:6",
+        "legacy-constraint:3",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "rl_edge_serving_risk",
+      "stepNumber": 29,
+      "phase": "Separate inference, risk, and execution",
+      "title": "Submit proposals, not executable orders",
+      "type": "add_connection",
+      "content": "Attach policy version, observation timestamp, instrument, target position, confidence/diagnostics, and correlation ID. Risk owns the final conversion to an order.",
+      "connection": {
+        "edgeId": "rl_serving_to_risk",
+        "sourceNodeId": "rl_serving",
+        "targetNodeId": "rl_risk_engine",
+        "connectionType": "api-call",
+        "label": "Position proposal",
+        "description": "Bounded model output and provenance for deterministic pre-trade validation."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:6",
+        "legacy-constraint:3",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "rl_execution_adapter",
+      "stepNumber": 30,
+      "phase": "Separate inference, risk, and execution",
+      "title": "Isolate venue execution behind an adapter",
+      "type": "add_component",
+      "content": "Translate approved orders to venue protocols, enforce idempotency, reconcile acknowledgements/fills, and report timeouts without blind duplicate submission. Keep credentials and venue-specific rules outside the policy model.",
+      "component": {
+        "nodeId": "rl_execution_adapter",
+        "componentType": "custom-component",
+        "label": "Broker and Venue Execution Adapter",
+        "description": "Submits risk-approved orders and reconciles venue responses.",
+        "position": {
+          "x": 3050,
+          "y": 500
+        },
+        "properties": {
+          "componentName": "Broker and Venue Execution Adapter",
+          "componentType": "Execution Adapter",
+          "technology": "Venue-specific order APIs",
+          "purpose": "Submit only risk-approved orders with idempotency and correlation IDs, enforce venue protocol rules, and reconcile acknowledgement, partial fill, rejection, and timeout states."
+        },
+        "highlightReason": "Execution latency and order correctness need an explicit venue boundary and auditable state transitions."
+      },
+      "requirementIds": [
+        "legacy-requirement:6",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "rl_edge_risk_execution",
+      "stepNumber": 31,
+      "phase": "Separate inference, risk, and execution",
+      "title": "Send only approved orders to a venue",
+      "type": "add_connection",
+      "content": "Measure risk-check and venue acknowledgement latency separately as well as the end-to-end metric. Persist idempotency state before retrying ambiguous timeouts.",
+      "connection": {
+        "edgeId": "rl_risk_to_execution",
+        "sourceNodeId": "rl_risk_engine",
+        "targetNodeId": "rl_execution_adapter",
+        "connectionType": "api-call",
+        "label": "Approved order intent",
+        "description": "Risk-approved, bounded, idempotent order request with instrument and policy provenance."
+      },
+      "requirementIds": [
+        "legacy-requirement:6",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "rl_ledger",
+      "stepNumber": 32,
+      "phase": "Separate inference, risk, and execution",
+      "title": "Maintain an authoritative order and portfolio ledger",
+      "type": "add_component",
+      "content": "Record proposals, approvals/rejections, order state transitions, fills, positions, cash, and reconciliations with immutable correlation and policy identifiers. Define transactional consistency and recovery before live use.",
+      "component": {
+        "nodeId": "rl_ledger",
+        "componentType": "database",
+        "label": "Orders and Portfolio Ledger",
+        "description": "Authoritative record for approved orders, fills, and account state.",
+        "position": {
+          "x": 3350,
+          "y": 500
+        },
+        "properties": {
+          "componentName": "Orders and Portfolio Ledger",
+          "type": "RDBMS",
+          "workload": "OLTP",
+          "rbac": true,
+          "auditLog": true,
+          "purpose": "Persist idempotent order intents, acknowledgements, fills, positions, cash, approvals, and reconciliation history as authoritative risk state."
+        },
+        "highlightReason": "Risk checks require trustworthy positions and every execution outcome must be auditable."
+      },
+      "requirementIds": [
+        "legacy-requirement:6"
+      ]
+    },
+    {
+      "id": "rl_edge_execution_ledger",
+      "stepNumber": 33,
+      "phase": "Separate inference, risk, and execution",
+      "title": "Reconcile venue outcomes into the ledger",
+      "type": "add_connection",
+      "content": "Process venue callbacks idempotently and reconcile open/partial/filled/rejected states. A timeout is an unknown outcome until queried, not proof that an order failed.",
+      "connection": {
+        "edgeId": "rl_execution_to_ledger",
+        "sourceNodeId": "rl_execution_adapter",
+        "targetNodeId": "rl_ledger",
+        "connectionType": "database-connection",
+        "label": "Order and fill reconciliation",
+        "description": "Durable venue acknowledgements, fill events, order state, and resulting position updates."
+      },
+      "requirementIds": [
+        "legacy-requirement:6"
+      ]
+    },
+    {
+      "id": "rl_api_gateway",
+      "stepNumber": 34,
+      "phase": "Separate inference, risk, and execution",
+      "title": "Keep research controls off direct venue credentials",
+      "type": "add_component",
+      "content": "Expose authenticated, audited controls for experiment launch, approved paper sessions, and read-only results. Separate permissions for research, approval, and any later live activation.",
+      "component": {
+        "nodeId": "rl_api_gateway",
+        "componentType": "api-gateway",
+        "label": "Research and Paper-Trading API",
+        "description": "Authenticated control plane for simulation requests and result retrieval.",
+        "position": {
+          "x": 950,
+          "y": 900
+        },
+        "properties": {
+          "componentName": "Research and Paper-Trading API",
+          "authentication": "OAuth 2.0",
+          "inputValidation": true,
+          "rateLimiting": true,
+          "purpose": "Authorize and audit backtest and isolated paper-session requests, validate experiment inputs, and expose results without exposing live venue credentials."
+        },
+        "highlightReason": "Backtesting and paper trading are explicit user capabilities; control-plane access must not bypass live risk and execution boundaries."
+      },
+      "requirementIds": [
+        "legacy-requirement:8"
+      ]
+    },
+    {
+      "id": "rl_frontend",
+      "stepNumber": 35,
+      "phase": "Separate inference, risk, and execution",
+      "title": "Provide an auditable research surface",
+      "type": "add_component",
+      "content": "Show dataset and simulator versions, split boundaries, costs, reward definition, policy digest, fold metrics, drawdown, and paper/live state. Make it visually impossible to confuse simulated fills with actual venue fills.",
+      "component": {
+        "nodeId": "rl_frontend",
+        "componentType": "web-app",
+        "label": "Strategy Research Console",
+        "description": "Compares reproducible backtests and isolated paper sessions.",
+        "position": {
+          "x": 650,
+          "y": 900
+        },
+        "properties": {
+          "componentName": "Strategy Research Console",
+          "framework": "React",
+          "purpose": "Launch authorized research and paper sessions and review dataset, simulator, policy, costs, fold results, risk metrics, and clear paper-versus-live status."
+        },
+        "highlightReason": "Researchers need reproducible comparisons without treating a single backtest number as live evidence."
+      },
+      "requirementIds": [
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "rl_edge_frontend_api",
+      "stepNumber": 36,
+      "phase": "Separate inference, risk, and execution",
+      "title": "Authenticate experiment and paper-session requests",
+      "type": "add_connection",
+      "content": "Use scoped authorization and immutable request IDs; paper-session controls must never grant live venue privileges.",
+      "connection": {
+        "edgeId": "rl_frontend_to_api",
+        "sourceNodeId": "rl_frontend",
+        "targetNodeId": "rl_api_gateway",
+        "connectionType": "http",
+        "label": "Research and paper controls",
+        "description": "Authenticated, audited API calls to create simulations and retrieve evaluation results."
+      },
+      "requirementIds": [
+        "legacy-requirement:8"
+      ]
+    },
+    {
+      "id": "rl_edge_api_simulator",
+      "stepNumber": 37,
+      "phase": "Separate inference, risk, and execution",
+      "title": "Run backtests and paper sessions in isolation",
+      "type": "add_connection",
+      "content": "The simulator owns isolated paper state and realistic execution frictions. Paper orders and simulated fills must not share the live venue adapter's route or credentials.",
+      "connection": {
+        "edgeId": "rl_api_to_simulator",
+        "sourceNodeId": "rl_api_gateway",
+        "targetNodeId": "rl_simulator",
+        "connectionType": "api-call",
+        "label": "Versioned simulation request",
+        "description": "Authorized backtest or paper-session command with frozen policy, market, reward, and simulator versions."
+      },
+      "requirementIds": [
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "rl_edge_simulator_ledger",
+      "stepNumber": 38,
+      "phase": "Separate inference, risk, and execution",
+      "title": "Persist paper outcomes with explicit mode",
+      "type": "add_connection",
+      "content": "Use a separate paper account namespace and label every simulated order/fill as paper. The simulator must not be able to reach the live execution adapter.",
+      "connection": {
+        "edgeId": "rl_simulator_to_ledger",
+        "sourceNodeId": "rl_simulator",
+        "targetNodeId": "rl_ledger",
+        "connectionType": "data-flow",
+        "label": "Isolated paper results",
+        "description": "Paper-mode proposals and simulated fills stored with a distinct account and environment identity."
+      },
+      "requirementIds": [
+        "legacy-requirement:8",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "rl_monitoring",
+      "stepNumber": 39,
+      "phase": "Separate inference, risk, and execution",
+      "title": "Observe live risk and model behavior",
+      "type": "add_component",
+      "content": "Track market-data freshness, policy/regime versions, inference and risk latency, rejected proposals, venue acknowledgements, exposure, drawdown, and kill-switch state. Monitoring alerts do not replace an independently operable stop control.",
+      "component": {
+        "nodeId": "rl_monitoring",
+        "componentType": "monitoring",
+        "label": "Trading Risk and Latency Monitoring",
+        "description": "Observes model, risk, venue, and portfolio behavior.",
+        "position": {
+          "x": 3350,
+          "y": 850
+        },
+        "properties": {
+          "componentName": "Trading Risk and Latency Monitoring",
+          "stack": "Prometheus + Grafana",
+          "metrics": true,
+          "alerts": true,
+          "purpose": "Measure market-state age, inference and execution latency, policy versions, risk rejects, venue state, exposure, drawdown, and operational kill-switch status."
+        },
+        "highlightReason": "Low-latency execution and risk constraints require live measurement and operational response."
+      },
+      "requirementIds": [
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "rl_edge_serving_monitor",
+      "stepNumber": 40,
+      "phase": "Separate inference, risk, and execution",
+      "title": "Measure the inference portion of the budget",
+      "type": "add_connection",
+      "content": "Record warm/cold inference separately and include feature acquisition and serialization. The 10ms execution target's start/end boundary still needs product and venue agreement.",
+      "connection": {
+        "edgeId": "rl_serving_to_monitor",
+        "sourceNodeId": "rl_serving",
+        "targetNodeId": "rl_monitoring",
+        "connectionType": "data-flow",
+        "label": "Inference timing and version",
+        "description": "Policy latency, model identity, input freshness, and error telemetry."
+      },
+      "requirementIds": [
+        "legacy-requirement:7",
+        "legacy-constraint:3",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "rl_edge_execution_monitor",
+      "stepNumber": 41,
+      "phase": "Separate inference, risk, and execution",
+      "title": "Measure venue outcomes and risk state",
+      "type": "add_connection",
+      "content": "Measure submission-to-acknowledgement and fill latency, plus risk-check time and order-state reconciliation. Alert on stale position state and stop new orders when the safe state cannot be established.",
+      "connection": {
+        "edgeId": "rl_execution_to_monitor",
+        "sourceNodeId": "rl_execution_adapter",
+        "targetNodeId": "rl_monitoring",
+        "connectionType": "data-flow",
+        "label": "Venue and risk telemetry",
+        "description": "Order acknowledgement/fill timing, rejects, reconciliation state, and risk-control signals."
+      },
+      "requirementIds": [
+        "legacy-requirement:6",
+        "legacy-constraint:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "rl_scale_trigger",
+      "stepNumber": 42,
+      "phase": "Separate inference, risk, and execution",
+      "title": "Benchmark the 1000-instrument target",
+      "type": "scale_trigger",
+      "content": "The prompt gives an instrument count but no tick rate, asset mix, or portfolio cardinality. Load-test correlated bursts, market open/close behavior, model state size, and recovery; avoid inventing a qps or partition count.",
+      "scaleTrigger": {
+        "metric": "Per-instrument event age, inference/risk/execution latency, queue depth, and concurrent active instruments",
+        "action": "Partition independent research/archival workloads and add hot-path capacity only after profiling the measured bottleneck; preserve deterministic ordering and account-risk state.",
+        "impact": "Validate simultaneous handling of 1000+ instruments and the agreed under-10ms boundary without allowing offline research to contend with live order processing."
+      }
+    },
+    {
+      "id": "rl_launch_review",
+      "stepNumber": 43,
+      "phase": "Capacity and launch review",
+      "title": "Decide what the metrics actually mean",
+      "type": "decision_point",
+      "content": "Agree the metric convention and test protocol before judging a candidate. The thresholds in the brief are goals to demonstrate under that protocol, not guarantees supplied by a component selection.",
+      "decision": {
+        "question": "Can one backtest Sharpe and drawdown result qualify a strategy for live orders?",
+        "chosen": "No; require frozen walk-forward evidence, costs and regime slices, paper results, independent risk approval, and measured latency before any live activation.",
+        "chosenReason": "Single-window backtests are vulnerable to tuning, data leakage, survivorship, and unrealistic execution assumptions.",
+        "alternatives": [
+          {
+            "option": "Promote the best historical Sharpe immediately",
+            "tradeoff": "Selection bias and unmodeled frictions can make apparent performance non-representative."
+          },
+          {
+            "option": "Treat simulated latency as venue latency",
+            "tradeoff": "It omits network, risk, acknowledgement, and fill behavior outside the simulator."
+          }
+        ]
+      }
+    },
+    {
+      "id": "rl_final_review",
+      "stepNumber": 44,
+      "phase": "Capacity and launch review",
+      "title": "Keep limits and launch authority explicit",
+      "type": "explanation",
+      "content": "Before any live use, obtain owner-approved exposure and loss limits, venue access controls, kill-switch ownership, reconciliation procedures, market-data licensing, and incident playbooks. The walkthrough describes an architecture for evaluating a strategy; it does not assert profitability, regulatory approval, or readiness for real-money execution."
+    }
+  ]
+}

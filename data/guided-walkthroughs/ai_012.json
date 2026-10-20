@@ -1,0 +1,810 @@
+{
+  "problem_id": "ai_012",
+  "version": "1.0-review",
+  "totalSteps": 45,
+  "phases": [
+    {
+      "name": "Set the language and latency contract",
+      "stepRange": [1, 20],
+      "description": "Establish tenant-safe entry, pair capabilities, terminology context, and a warm low-latency text translation path."
+    },
+    {
+      "name": "Keep live speech on a bounded streaming path",
+      "stepRange": [21, 26],
+      "description": "Process ordered audio chunks incrementally, preserve turn context, and enforce a deadline for translated audio."
+    },
+    {
+      "name": "Translate large documents asynchronously without losing structure",
+      "stepRange": [27, 35],
+      "description": "Upload large files directly, process them as durable jobs, and reassemble translated segments against the original document structure."
+    },
+    {
+      "name": "Close the quality, editing, and operating loops",
+      "stepRange": [36, 45],
+      "description": "Return calibrated quality estimates, route low-confidence work to post-editing, promote reviewed edits into tenant-scoped memory, and measure service objectives."
+    }
+  ],
+  "steps": [
+    {
+      "id": "tr_01",
+      "stepNumber": 1,
+      "phase": "Set the language and latency contract",
+      "title": "Separate supported-pair guarantees from language-count claims",
+      "type": "explanation",
+      "content": "The brief asks for 100+ language pairs, text latency under 200ms, speech under one second, BLEU above 40 for supported pairs, and 10k+ concurrent requests. Do not imply that every one of the more than 10,000 possible directed pairs meets the same quality or latency. Publish a capability registry per direction and domain, and count a pair as supported only after quality and capacity qualification. Treat the latency numbers as end-to-end p95 targets under the declared 10k-concurrency load; benchmark them explicitly, since a cold remote model call cannot be assumed to fit either budget.",
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "tr_02",
+      "stepNumber": 2,
+      "phase": "Set the language and latency contract",
+      "title": "Add translation and localization clients",
+      "type": "add_component",
+      "component": {
+        "nodeId": "tr_clients",
+        "componentType": "web-app",
+        "label": "Web & Localization Clients",
+        "description": "Text, live speech, document upload, and human post-editing",
+        "position": {"x": 0, "y": 260},
+        "properties": {
+          "componentName": "Web & Localization Clients",
+          "purpose": "Offer text and live speech translation, direct document upload, language-pair selection, domain context, quality explanations, and an editor that lets a human revise and approve translations. Show unsupported pairs and low-confidence results honestly instead of silently substituting a language or presenting a score as certainty."
+        },
+        "highlightReason": "The same client supports interactive translation, large-file workflows, and the human correction loop."
+      },
+      "title": "Add Web & Localization Clients",
+      "content": "The editor is part of the quality system: display source and target segments, domain and glossary context, a calibrated quality estimate, and a review state. A correction is not trusted terminology until the user explicitly approves it.",
+      "requirementIds": ["legacy-requirement:7"]
+    },
+    {
+      "id": "tr_03",
+      "stepNumber": 3,
+      "phase": "Set the language and latency contract",
+      "title": "Add the public translation API",
+      "type": "add_component",
+      "component": {
+        "nodeId": "tr_gateway",
+        "componentType": "api-gateway",
+        "label": "Translation API Gateway",
+        "description": "Authentication, quotas, pair validation, and upload grants",
+        "position": {"x": 270, "y": 260},
+        "properties": {
+          "componentName": "Translation API Gateway",
+          "purpose": "Validate source and target language identifiers against the published capability registry, authenticate tenant-scoped requests, enforce payload and concurrency quotas, apply request IDs and deadlines, and issue short-lived scoped grants for direct document upload. Keep interactive text and speech routes distinct from long-running document jobs."
+        },
+        "highlightReason": "One controlled boundary protects tenant data and prevents unsupported language pairs from entering an unqualified model path."
+      },
+      "title": "Add Translation API Gateway",
+      "content": "The gateway accepts small interactive requests but does not proxy 100MB files or wait synchronously for full-document translation. Validate the stated 10k+ concurrent-request target through load tests and enforce evidence-based, tenant-scoped admission limits; the target is not a preselected capacity guarantee.",
+      "requirementIds": ["legacy-constraint:2"]
+    },
+    {
+      "id": "tr_04",
+      "stepNumber": 4,
+      "phase": "Set the language and latency contract",
+      "title": "Connect clients to the translation API",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "tr_clients_gateway",
+        "sourceNodeId": "tr_clients",
+        "targetNodeId": "tr_gateway",
+        "connectionType": "https",
+        "label": "Authenticated translation requests",
+        "description": "Send text and job-control requests over TLS with a request ID, selected language direction, domain, and deadline."
+      },
+      "title": "Connect Web & Localization Clients to Translation API Gateway",
+      "content": "Carry a stable request ID so retries, streamed chunks, document jobs, and post-edit actions can be correlated without duplicating work."
+    },
+    {
+      "id": "tr_05",
+      "stepNumber": 5,
+      "phase": "Set the language and latency contract",
+      "title": "Add tenant identity and data policy checks",
+      "type": "add_component",
+      "component": {
+        "nodeId": "tr_auth",
+        "componentType": "auth-service",
+        "label": "Identity & Data Policy",
+        "description": "Tenant, role, retention, and sensitive-domain controls",
+        "position": {"x": 270, "y": 40},
+        "properties": {
+          "componentName": "Identity & Data Policy",
+          "purpose": "Authorize project, glossary, translation-memory, document, and post-edit access by tenant and role. Enforce configured retention and data-residency policies, encrypt sensitive medical and legal content, and prevent source text or cached segments from crossing tenant boundaries."
+        },
+        "highlightReason": "Medical and legal translation makes data isolation and controlled reuse part of correctness, not an optional add-on."
+      },
+      "title": "Add Identity & Data Policy",
+      "content": "Resolve authorization before reading a glossary, translation memory, cache entry, or uploaded document; fail closed when policy cannot be established."
+    },
+    {
+      "id": "tr_06",
+      "stepNumber": 6,
+      "phase": "Set the language and latency contract",
+      "title": "Authorize the request before translation",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "tr_gateway_auth",
+        "sourceNodeId": "tr_gateway",
+        "targetNodeId": "tr_auth",
+        "connectionType": "api-call",
+        "label": "Tenant and project policy check",
+        "description": "Verify user, project, domain, retention, and language-pair permissions before processing content."
+      },
+      "title": "Connect Translation API Gateway to Identity & Data Policy",
+      "content": "No cache hit, terminology lookup, model call, or document fetch may bypass this authorization boundary."
+    },
+    {
+      "id": "tr_07",
+      "requirementIds": ["legacy-requirement:1","legacy-requirement:2","legacy-requirement:3"],
+      "stepNumber": 7,
+      "phase": "Set the language and latency contract",
+      "title": "Add the translation request orchestrator",
+      "type": "add_component",
+      "component": {
+        "nodeId": "tr_orchestrator",
+        "componentType": "ai-orchestrator",
+        "label": "Translation Orchestrator",
+        "description": "Pair routing, context assembly, deadlines, and workflow selection",
+        "position": {"x": 570, "y": 260},
+        "properties": {
+          "componentName": "Translation Orchestrator",
+          "purpose": "Select the text, speech, or document workflow; bind each request to a qualified directed language pair, domain, tenant, glossary version, and deadline; assemble relevant context; preserve segment order; and return partial or final results with provenance and quality state."
+        },
+        "highlightReason": "A single orchestration boundary applies the same pair, glossary, deadline, and tenant rules across all modalities."
+      },
+      "title": "Add Translation Orchestrator",
+      "content": "Keep provider-specific model APIs behind the model gateway. If a pair has no qualified route or cannot meet the remaining deadline, return an explicit unsupported/degraded state rather than an unlabelled machine translation."
+    },
+    {
+      "id": "tr_08",
+      "stepNumber": 8,
+      "phase": "Set the language and latency contract",
+      "title": "Route authorized requests into translation workflows",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "tr_gateway_orchestrator",
+        "sourceNodeId": "tr_gateway",
+        "targetNodeId": "tr_orchestrator",
+        "connectionType": "api-call",
+        "label": "Authorized request with deadline",
+        "description": "Pass identity context, pair, domain, request ID, modality, and remaining latency budget."
+      },
+      "title": "Connect Translation API Gateway to Translation Orchestrator",
+      "content": "The gateway authenticates and bounds a request; the orchestrator chooses the qualified work path."
+    },
+    {
+      "id": "tr_09",
+      "stepNumber": 9,
+      "phase": "Set the language and latency contract",
+      "title": "Add a versioned language-pair capability registry",
+      "type": "add_component",
+      "component": {
+        "nodeId": "tr_pair_registry",
+        "componentType": "database",
+        "label": "Language Pair & Model Registry",
+        "description": "Pair, domain, model version, quality, and capacity status",
+        "position": {"x": 570, "y": 40},
+        "properties": {
+          "componentName": "Language Pair & Model Registry",
+          "purpose": "Store directed source-target pair capabilities, supported domains and modalities, model and glossary compatibility, measured p95 latency, BLEU evaluation version, rollout state, and fallback eligibility. Publish only pairs whose current model passed the quality gate; keep regional variants distinct where their language behavior differs."
+        },
+        "highlightReason": "A versioned capability registry prevents marketing language counts from being mistaken for measured pair-level support."
+      },
+      "title": "Add Language Pair & Model Registry",
+      "content": "A pair becomes supported only after repeatable evaluation and production-capacity qualification; require the stated corpus-level BLEU score above 40 for that pair, record the evaluation corpus and metric version, and revoke support after a model or data change until requalified.",
+      "requirementIds": ["legacy-constraint:3"]
+    },
+    {
+      "id": "tr_10",
+      "requirementIds": ["legacy-requirement:1","legacy-constraint:3"],
+      "stepNumber": 10,
+      "phase": "Set the language and latency contract",
+      "title": "Check pair capabilities before selecting a model",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "tr_orchestrator_pair_registry",
+        "sourceNodeId": "tr_orchestrator",
+        "targetNodeId": "tr_pair_registry",
+        "connectionType": "database-connection",
+        "label": "Qualified pair and domain lookup",
+        "description": "Resolve supported direction, modality, model version, quality status, and currently eligible fallback."
+      },
+      "title": "Connect Translation Orchestrator to Language Pair & Model Registry",
+      "content": "The capability check is part of request admission, not a post-translation warning."
+    },
+    {
+      "id": "tr_11",
+      "stepNumber": 11,
+      "phase": "Set the language and latency contract",
+      "title": "Add provider-neutral model routing",
+      "type": "add_component",
+      "component": {
+        "nodeId": "tr_ai_gateway",
+        "componentType": "ai-gateway",
+        "label": "Model Routing Gateway",
+        "description": "Route by language pair, domain, quality, latency, and capacity",
+        "position": {"x": 870, "y": 260},
+        "properties": {
+          "componentName": "Model Routing Gateway",
+          "purpose": "Route only to a healthy model qualified for the exact directed pair and domain. Enforce request deadlines, bounded retries, circuit breakers, capacity-aware admission, and compatible fallback; pin each request to a model version so retries do not silently change terminology or quality behavior."
+        },
+        "highlightReason": "Provider-neutral routing supports pair-specific models and measured fallback without making the client depend on one vendor."
+      },
+      "title": "Add Model Routing Gateway",
+      "content": "A fallback is valid only when it supports the same direction, modality, domain policy, and terminology contract; otherwise surface a controlled failure or lower-confidence result."
+    },
+    {
+      "id": "tr_12",
+      "stepNumber": 12,
+      "phase": "Set the language and latency contract",
+      "title": "Connect orchestration to model routing",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "tr_orchestrator_ai_gateway",
+        "sourceNodeId": "tr_orchestrator",
+        "targetNodeId": "tr_ai_gateway",
+        "connectionType": "api-call",
+        "label": "Pair-qualified inference request",
+        "description": "Send normalized text or speech segments with domain context, glossary version, model policy, and remaining deadline."
+      },
+      "title": "Connect Translation Orchestrator to Model Routing Gateway",
+      "content": "Keep a traceable model version and pair ID with every result so quality and latency can be audited later."
+    },
+    {
+      "id": "tr_13",
+      "stepNumber": 13,
+      "phase": "Set the language and latency contract",
+      "title": "Add warm, pair-aware translation model serving",
+      "type": "add_component",
+      "component": {
+        "nodeId": "tr_nmt",
+        "componentType": "model-serving",
+        "label": "Multilingual NMT Model Pools",
+        "description": "Warm transformer inference with pair-aware capacity",
+        "position": {"x": 1170, "y": 260},
+        "properties": {
+          "componentName": "Multilingual NMT Model Pools",
+          "purpose": "Serve transformer NMT models with warm capacity for qualified language directions, domain-aware decoding, bounded sequence lengths, and autoscaling based on queue depth and accelerator saturation. Isolate slow or low-volume pairs so they cannot consume the latency budget of common pairs; preserve input segment order and return model/version metadata."
+        },
+        "highlightReason": "Warm, pair-aware inference and admission control are required to make the text latency target measurable at 10k concurrent requests."
+      },
+      "title": "Add Multilingual NMT Model Pools",
+      "content": "The 200ms target must be verified end-to-end under load; if the provisioned model path misses it, reduce work on the synchronous path or revise capacity/design rather than claiming the target from a model benchmark alone.",
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "tr_14",
+      "requirementIds": ["legacy-requirement:1"],
+      "stepNumber": 14,
+      "phase": "Set the language and latency contract",
+      "title": "Connect model routing to translation inference",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "tr_ai_gateway_nmt",
+        "sourceNodeId": "tr_ai_gateway",
+        "targetNodeId": "tr_nmt",
+        "connectionType": "api-call",
+        "label": "Deadline-bounded NMT inference",
+        "description": "Invoke a warm model qualified for the requested language direction and domain."
+      },
+      "title": "Connect Model Routing Gateway to Multilingual NMT Model Pools",
+      "content": "The model pool returns a versioned translation result; the orchestrator remains responsible for context and modality workflow."
+    },
+    {
+      "id": "tr_15",
+      "stepNumber": 15,
+      "phase": "Set the language and latency contract",
+      "title": "Add a privacy-scoped segment cache",
+      "type": "add_component",
+      "component": {
+        "nodeId": "tr_cache",
+        "componentType": "cache",
+        "label": "Translation Segment Cache",
+        "description": "Version-aware reuse for repeated segments",
+        "position": {"x": 870, "y": 510},
+        "properties": {
+          "componentName": "Translation Segment Cache",
+          "purpose": "Cache deterministic repeated segments using tenant or explicit shared-tenant scope, source text fingerprint, source and target language, domain, glossary version, model version, and policy. Apply short bounded TTLs, never reuse a result across unauthorized tenants, and invalidate entries when a glossary or model version changes."
+        },
+        "highlightReason": "Repeated strings can avoid expensive inference, while explicit scope and version keys prevent stale or cross-tenant translations."
+      },
+      "title": "Add Translation Segment Cache",
+      "content": "Do not cache sensitive text in a global keyspace. A cache hit still passes current authorization and quality-policy checks."
+    },
+    {
+      "id": "tr_16",
+      "requirementIds": ["legacy-requirement:1","legacy-constraint:1"],
+      "stepNumber": 16,
+      "phase": "Set the language and latency contract",
+      "title": "Check the cache before model inference",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "tr_orchestrator_cache",
+        "sourceNodeId": "tr_orchestrator",
+        "targetNodeId": "tr_cache",
+        "connectionType": "api-call",
+        "label": "Scoped segment lookup",
+        "description": "Look up an authorized segment using pair, domain, tenant scope, glossary version, and model version."
+      },
+      "title": "Connect Translation Orchestrator to Translation Segment Cache",
+      "content": "A cache hit can serve the interactive path quickly; misses continue through terminology lookup and model inference."
+    },
+    {
+      "id": "tr_17",
+      "stepNumber": 17,
+      "phase": "Set the language and latency contract",
+      "title": "Add translation memory and approved glossaries",
+      "type": "add_component",
+      "component": {
+        "nodeId": "tr_memory",
+        "componentType": "database",
+        "label": "Tenant Translation Memory & Glossaries",
+        "description": "Approved segment pairs, terminology, domain, and provenance",
+        "position": {"x": 1170, "y": 40},
+        "properties": {
+          "componentName": "Tenant Translation Memory & Glossaries",
+          "purpose": "Store approved source-target segment pairs and versioned terminology by tenant, project, language direction, and domain. Preserve provenance and reviewer approval; distinguish exact matches from fuzzy suggestions; never promote raw model output or unreviewed medical/legal edits into authoritative glossary entries."
+        },
+        "highlightReason": "The glossary constrains terminology before decoding; approved memory improves consistency without treating every prior output as truth."
+      },
+      "title": "Add Tenant Translation Memory & Glossaries",
+      "content": "Use glossary version as part of the inference and cache key. Expose exact and fuzzy memory matches distinctly so the user can inspect how context affected a translation.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:8"]
+    },
+    {
+      "id": "tr_18",
+      "requirementIds": ["legacy-requirement:4","legacy-requirement:6","legacy-requirement:8"],
+      "stepNumber": 18,
+      "phase": "Set the language and latency contract",
+      "title": "Retrieve authorized terminology and memory context",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "tr_orchestrator_memory",
+        "sourceNodeId": "tr_orchestrator",
+        "targetNodeId": "tr_memory",
+        "connectionType": "database-connection",
+        "label": "Tenant- and domain-scoped context lookup",
+        "description": "Retrieve approved terminology and relevant prior segments for this project and language direction."
+      },
+      "title": "Connect Translation Orchestrator to Tenant Translation Memory & Glossaries",
+      "content": "Fetch only context authorized for this tenant and request; include the selected glossary revision in trace and result metadata."
+    },
+    {
+      "id": "tr_19",
+      "stepNumber": 19,
+      "phase": "Set the language and latency contract",
+      "title": "Cache successful translations under the same scope",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "tr_cache_orchestrator",
+        "sourceNodeId": "tr_cache",
+        "targetNodeId": "tr_orchestrator",
+        "connectionType": "data-flow",
+        "label": "Version-matched cache result",
+        "description": "Return a hit only when tenant scope, language direction, domain, glossary, model, and policy versions still match."
+      },
+      "title": "Connect Translation Segment Cache back to Translation Orchestrator",
+      "content": "Model results can be written to the cache after validation; memory entries remain separate and require explicit approval."
+    },
+    {
+      "id": "tr_20",
+      "stepNumber": 20,
+      "phase": "Set the language and latency contract",
+      "title": "Choose incremental streaming for speech",
+      "type": "decision_point",
+      "content": "For live speech, a request-response design waits for an utterance and adds avoidable delay. Choose ordered, bounded streaming chunks with partial transcripts and translated-audio frames; cancel stale work when the speaker corrects or interrupts. The sub-second goal is measured from accepted source audio to the first useful translated audio for qualified pairs, not as a promise that an arbitrarily long utterance completes in under a second.",
+      "decision": {
+        "question": "How should the speech path trade latency against complete-utterance context?",
+        "chosen": "Stream ordered chunks with a rolling context window, bounded look-ahead, cancellation, and a sub-second first-useful-audio deadline",
+        "chosenReason": "It makes latency and cancellation explicit while retaining enough local context to avoid translating every chunk in isolation.",
+        "alternatives": [
+          {"option": "Wait for the whole utterance", "tradeoff": "Simpler sentence context, but violates the interactive latency goal for longer speech."},
+          {"option": "Translate each tiny chunk independently", "tradeoff": "Low apparent delay but loses context and can produce unstable terminology and sentence boundaries."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:8", "legacy-constraint:2"]
+    },
+    {
+      "id": "tr_21",
+      "stepNumber": 21,
+      "phase": "Keep live speech on a bounded streaming path",
+      "title": "Add a live speech session service",
+      "type": "add_component",
+      "component": {
+        "nodeId": "tr_speech_session",
+        "componentType": "backend-server",
+        "label": "Streaming Speech Session Service",
+        "description": "Ordered audio chunks, partial results, and turn cancellation",
+        "position": {"x": 270, "y": 740},
+        "properties": {
+          "componentName": "Streaming Speech Session Service",
+          "purpose": "Maintain short-lived authenticated speech sessions, sequence incoming audio chunks, apply backpressure, emit partial transcript and translated-audio frames, and cancel superseded work. Forward only supported language and audio capabilities, retain bounded turn context, and enforce a deadline for the first useful translated audio."
+        },
+        "highlightReason": "A stateful stream boundary preserves chunk order and lets the service cancel late work instead of returning stale speech."
+      },
+      "title": "Add Streaming Speech Session Service",
+      "content": "The model-serving pool performs the qualified ASR, translation, and speech-synthesis capabilities; this session service manages transport and turn state, not model semantics. Treat the under-one-second speech target as end-to-end time to first useful translated audio, and validate it under the stated concurrent load.",
+      "requirementIds": ["legacy-requirement:2"]
+    },
+    {
+      "id": "tr_22",
+      "stepNumber": 22,
+      "phase": "Keep live speech on a bounded streaming path",
+      "title": "Open a secure speech stream from the client",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "tr_clients_speech",
+        "sourceNodeId": "tr_clients",
+        "targetNodeId": "tr_speech_session",
+        "connectionType": "websocket",
+        "label": "Authenticated ordered audio stream",
+        "description": "Stream sequenced audio chunks and receive partial transcript and translated speech frames over a bounded session."
+      },
+      "title": "Connect Web & Localization Clients to Streaming Speech Session Service",
+      "content": "Bind the session to the authorized user and project; sequence numbers make dropped or reordered chunks detectable. Include the complete speech-to-speech path in the under-one-second measurement rather than timing transport alone.",
+      "requirementIds": ["legacy-requirement:2"]
+    },
+    {
+      "id": "tr_23",
+      "stepNumber": 23,
+      "phase": "Keep live speech on a bounded streaming path",
+      "title": "Reuse orchestration and pair policy for each speech turn",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "tr_speech_orchestrator",
+        "sourceNodeId": "tr_speech_session",
+        "targetNodeId": "tr_orchestrator",
+        "connectionType": "event-stream",
+        "label": "Ordered partial speech turn",
+        "description": "Forward chunk sequence, source/target pair, domain, rolling context, cancellation token, and remaining deadline."
+      },
+      "title": "Connect Streaming Speech Session Service to Translation Orchestrator",
+      "content": "The orchestrator applies the same capability, glossary, model-version, and tenant policy used for text. Do not enqueue live speech behind document jobs; carry the remaining deadline through each translation stage so speech-to-speech stays within the stated under-one-second target.",
+      "requirementIds": ["legacy-requirement:2"]
+    },
+    {
+      "id": "tr_24",
+      "stepNumber": 24,
+      "phase": "Keep live speech on a bounded streaming path",
+      "title": "Keep chunk order and context when a model is slow",
+      "type": "explanation",
+      "content": "Carry turn ID and monotonically increasing chunk sequence through ASR, translation, and speech synthesis. Bound in-flight audio and look-ahead; apply backpressure rather than growing an unbounded queue. If the deadline is exceeded, cancel that attempt before one capability-equivalent failover, preserve order, and visibly report a partial or unavailable turn instead of speaking late output after a newer chunk. The less-than-one-second target requires load tests of the full accepted-audio-to-first-useful-audio path at concurrency.",
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "tr_25",
+      "stepNumber": 25,
+      "phase": "Keep live speech on a bounded streaming path",
+      "title": "Apply the same glossary to spoken output",
+      "type": "explanation",
+      "content": "Resolve domain terms before the speech model emits translated audio and keep pronunciation/term choices consistent across chunks. If confidence is low or the pair lacks a qualified streaming route, return a visible transcript or an explicit unsupported state; do not silently route a medical or legal conversation through a generic pair model.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:8"]
+    },
+    {
+      "id": "tr_26",
+      "stepNumber": 26,
+      "phase": "Keep live speech on a bounded streaming path",
+      "title": "Return partial and final speech results with provenance",
+      "type": "explanation",
+      "content": "The client receives ordered partial transcript and translated-audio frames followed by a final turn marker, selected pair/model version, and any quality warning. Deduplicate repeated frame delivery by turn and sequence ID. Do not block speech delivery on a slow document workflow or on nonessential analytics.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5"]
+    },
+    {
+      "id": "tr_27",
+      "stepNumber": 27,
+      "phase": "Translate large documents asynchronously without losing structure",
+      "title": "Keep large document transfers out of the interactive request",
+      "type": "explanation",
+      "content": "A document can be up to 100MB, so the API should issue a scoped upload grant and return a job ID rather than proxying the file through a synchronous translation call. Preserve a structural representation of paragraphs, tables, styles, links, and segment order; translate text spans only, retain non-translatable objects, and verify the reassembled artifact before marking the job complete.",
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "tr_28",
+      "requirementIds": ["legacy-requirement:3","legacy-constraint:5"],
+      "stepNumber": 28,
+      "phase": "Translate large documents asynchronously without losing structure",
+      "title": "Add encrypted document object storage",
+      "type": "add_component",
+      "component": {
+        "nodeId": "tr_document_storage",
+        "componentType": "object-storage",
+        "label": "Encrypted Document Object Store",
+        "description": "Originals, extracted structure, and translated artifacts",
+        "position": {"x": 570, "y": 740},
+        "properties": {
+          "componentName": "Encrypted Document Object Store",
+          "purpose": "Store uploaded originals and translated artifacts encrypted with tenant-scoped access, lifecycle retention, checksums, and immutable job references. Use multipart/resumable upload for files up to 100MB; keep document bytes out of queue messages and metadata records."
+        },
+        "highlightReason": "Direct object storage handles large payloads durably without placing file bytes on the latency-sensitive API path."
+      },
+      "title": "Add Encrypted Document Object Store",
+      "content": "Store metadata and a checksum alongside each object version; only the authorized document worker may read the job's scoped source artifact."
+    },
+    {
+      "id": "tr_29",
+      "requirementIds": ["legacy-requirement:3","legacy-constraint:5"],
+      "stepNumber": 29,
+      "phase": "Translate large documents asynchronously without losing structure",
+      "title": "Upload documents directly with a scoped grant",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "tr_clients_document_storage",
+        "sourceNodeId": "tr_clients",
+        "targetNodeId": "tr_document_storage",
+        "connectionType": "https",
+        "label": "Resumable authorized document upload",
+        "description": "Upload the original directly to object storage using a short-lived tenant- and object-scoped grant."
+      },
+      "title": "Connect Web & Localization Clients to Encrypted Document Object Store",
+      "content": "The gateway issues the grant; the browser uploads bytes directly, and the API stores only job metadata and object references."
+    },
+    {
+      "id": "tr_30",
+      "requirementIds": ["legacy-requirement:3"],
+      "stepNumber": 30,
+      "phase": "Translate large documents asynchronously without losing structure",
+      "title": "Add a durable document job queue",
+      "type": "add_component",
+      "component": {
+        "nodeId": "tr_document_queue",
+        "componentType": "queue",
+        "label": "Document Translation Jobs",
+        "description": "Durable jobs, retries, and bounded worker admission",
+        "position": {"x": 870, "y": 740},
+        "properties": {
+          "componentName": "Document Translation Jobs",
+          "purpose": "Queue metadata-only jobs containing tenant, object version, language direction, domain, glossary revision, idempotency key, and status reference. Apply bounded retries, visibility timeouts, per-tenant fairness, concurrency limits, and a dead-letter path; never mix this backlog with interactive text or speech inference."
+        },
+        "highlightReason": "Durable, isolated job admission absorbs large-document work without consuming the real-time latency budget."
+      },
+      "title": "Add Document Translation Jobs",
+      "content": "Make job submission idempotent so a browser retry cannot launch duplicate charges or duplicate translated artifacts."
+    },
+    {
+      "id": "tr_31",
+      "requirementIds": ["legacy-requirement:3","legacy-constraint:5"],
+      "stepNumber": 31,
+      "phase": "Translate large documents asynchronously without losing structure",
+      "title": "Enqueue a job only after the source upload is verified",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "tr_storage_queue",
+        "sourceNodeId": "tr_document_storage",
+        "targetNodeId": "tr_document_queue",
+        "connectionType": "message-queue",
+        "label": "Verified object version and job metadata",
+        "description": "After upload checksum and authorization checks, enqueue a durable reference to the immutable source object version."
+      },
+      "title": "Connect Encrypted Document Object Store to Document Translation Jobs",
+      "content": "The consumer verifies tenant ownership and object checksum again before extraction."
+    },
+    {
+      "id": "tr_32",
+      "requirementIds": ["legacy-requirement:3","legacy-constraint:5"],
+      "stepNumber": 32,
+      "phase": "Translate large documents asynchronously without losing structure",
+      "title": "Add document extraction and reassembly workers",
+      "type": "add_component",
+      "component": {
+        "nodeId": "tr_document_worker",
+        "componentType": "processing-worker",
+        "label": "Document Structure & Translation Workers",
+        "description": "Extract, segment, translate, and restore document structure",
+        "position": {"x": 1170, "y": 740},
+        "properties": {
+          "componentName": "Document Structure & Translation Workers",
+          "purpose": "Validate file type and size, extract a structural document tree, segment translatable text with stable IDs and surrounding context, translate in bounded batches using the approved glossary and memory, then reassemble into the original format. Preserve styles, tables, links, placeholders, and non-text assets; verify structure and output checksum before publishing the artifact."
+        },
+        "highlightReason": "Separating document-specific extraction from model inference preserves formatting and isolates long-running work."
+      },
+      "title": "Add Document Structure & Translation Workers",
+      "content": "Persist per-segment status so a failed batch can resume without retranslating a completed document or losing the original layout."
+    },
+    {
+      "id": "tr_33",
+      "requirementIds": ["legacy-requirement:3","legacy-constraint:4"],
+      "stepNumber": 33,
+      "phase": "Translate large documents asynchronously without losing structure",
+      "title": "Dispatch queued document jobs to bounded workers",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "tr_queue_worker",
+        "sourceNodeId": "tr_document_queue",
+        "targetNodeId": "tr_document_worker",
+        "connectionType": "message-queue",
+        "label": "Fairly admitted document job",
+        "description": "Deliver an idempotent job reference to a worker with bounded document and segment concurrency."
+      },
+      "title": "Connect Document Translation Jobs to Document Structure & Translation Workers",
+      "content": "Scale workers from queue age and backlog while reserving model capacity for interactive requests."
+    },
+    {
+      "id": "tr_34",
+      "requirementIds": ["legacy-requirement:3","legacy-constraint:4"],
+      "stepNumber": 34,
+      "phase": "Translate large documents asynchronously without losing structure",
+      "title": "Reuse the approved translation path for document segments",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "tr_worker_orchestrator",
+        "sourceNodeId": "tr_document_worker",
+        "targetNodeId": "tr_orchestrator",
+        "connectionType": "api-call",
+        "label": "Context-preserving document segments",
+        "description": "Translate bounded segments with document context, pair qualification, domain glossary, stable segment IDs, and job deadline."
+      },
+      "title": "Connect Document Structure & Translation Workers to Translation Orchestrator",
+      "content": "Use the same capability, tenant, cache, and model-version rules as interactive text; document jobs receive separate quotas and capacity admission."
+    },
+    {
+      "id": "tr_35",
+      "stepNumber": 35,
+      "phase": "Translate large documents asynchronously without losing structure",
+      "title": "Write and verify the formatted translated artifact",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "tr_worker_storage",
+        "sourceNodeId": "tr_document_worker",
+        "targetNodeId": "tr_document_storage",
+        "connectionType": "data-flow",
+        "label": "Reassembled translated document",
+        "description": "Write a new immutable artifact after segment completeness, structure-preservation, and checksum checks pass."
+      },
+      "title": "Connect Document Structure & Translation Workers to Encrypted Document Object Store",
+      "content": "Keep the original immutable, retain output-to-source lineage, and publish a downloadable result only when validation succeeds.",
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "tr_36",
+      "stepNumber": 36,
+      "phase": "Close the quality, editing, and operating loops",
+      "title": "Add a separate translation quality estimator",
+      "type": "add_component",
+      "component": {
+        "nodeId": "tr_quality_model",
+        "componentType": "ml-model",
+        "label": "Translation Quality Estimator",
+        "description": "Calibrated confidence and review signals by pair/domain",
+        "position": {"x": 1470, "y": 260},
+        "properties": {
+          "componentName": "Translation Quality Estimator",
+          "purpose": "Estimate translation quality using pair- and domain-calibrated signals, expose a score with calibration version and uncertainty, and flag results below the review threshold. Do not treat BLEU as a per-request confidence score; BLEU is a corpus-level offline quality gate for supported pairs."
+        },
+        "highlightReason": "A separate estimator gives users a calibrated per-result signal while corpus BLEU remains an offline release metric."
+      },
+      "title": "Add Translation Quality Estimator",
+      "content": "A quality score is evidence with uncertainty, not a guarantee. Keep low-confidence output visible as needing review and avoid inventing a score for an unqualified pair.",
+      "requirementIds": ["legacy-requirement:5"]
+    },
+    {
+      "id": "tr_37",
+      "requirementIds": ["legacy-requirement:2","legacy-requirement:5","legacy-constraint:2"],
+      "stepNumber": 37,
+      "phase": "Close the quality, editing, and operating loops",
+      "title": "Estimate the quality of generated translations",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "tr_nmt_quality",
+        "sourceNodeId": "tr_nmt",
+        "targetNodeId": "tr_quality_model",
+        "connectionType": "api-call",
+        "label": "Translation plus pair and domain context",
+        "description": "Score the generated candidate with source, target, pair, domain, and model-version features."
+      },
+      "title": "Connect Multilingual NMT Model Pools to Translation Quality Estimator",
+      "content": "For live speech, make scoring deadline-aware; do not delay the first useful audio indefinitely for a noncritical score."
+    },
+    {
+      "id": "tr_38",
+      "requirementIds": ["legacy-requirement:5","legacy-requirement:7"],
+      "stepNumber": 38,
+      "phase": "Close the quality, editing, and operating loops",
+      "title": "Return quality state to the workflow",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "tr_quality_orchestrator",
+        "sourceNodeId": "tr_quality_model",
+        "targetNodeId": "tr_orchestrator",
+        "connectionType": "data-flow",
+        "label": "Calibrated score and review decision",
+        "description": "Return score, uncertainty, calibration version, and a threshold-based review recommendation."
+      },
+      "title": "Connect Translation Quality Estimator to Translation Orchestrator",
+      "content": "The orchestrator attaches quality metadata to the result and selects the post-editing state without conflating score with corpus evaluation."
+    },
+    {
+      "id": "tr_39",
+      "stepNumber": 39,
+      "phase": "Close the quality, editing, and operating loops",
+      "title": "Make BLEU a reproducible release gate",
+      "type": "explanation",
+      "content": "Evaluate BLEU above 40 separately for each claimed supported pair using a versioned, representative held-out corpus, fixed tokenization, and domain slices. Publish the evaluation version and sample coverage; do not average a weak pair into a strong aggregate or claim a universal threshold for untested languages. Re-run the gate after model, glossary-handling, or decoding changes and canary new versions before broad rollout.",
+      "requirementIds": ["legacy-constraint:3"]
+    },
+    {
+      "id": "tr_40",
+      "stepNumber": 40,
+      "phase": "Close the quality, editing, and operating loops",
+      "title": "Use low-confidence results to start a post-editing task",
+      "type": "explanation",
+      "content": "When the calibrated quality state falls below the domain threshold, show the user the source, candidate, terminology matches, model version, and uncertainty, then let an authorized reviewer edit and approve the segment. Preserve before/after text and reviewer provenance. This human workflow is a supported outcome, not an automatic claim that the model is correct.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7"]
+    },
+    {
+      "id": "tr_41",
+      "stepNumber": 41,
+      "phase": "Close the quality, editing, and operating loops",
+      "title": "Promote only approved edits into tenant memory",
+      "type": "explanation",
+      "content": "After a reviewer explicitly approves an edit, write its source-target pair, language direction, domain, reviewer, and glossary/memory revision to that tenant's translation memory. Glossary changes follow a separate approval/versioning flow; invalidate affected cache keys and keep an audit trail. Unreviewed suggestions, rejected candidates, and one tenant's corrections must not leak into another tenant's memory.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7"]
+    },
+    {
+      "id": "tr_42",
+      "stepNumber": 42,
+      "phase": "Close the quality, editing, and operating loops",
+      "title": "Add end-to-end translation telemetry",
+      "type": "add_component",
+      "component": {
+        "nodeId": "tr_monitoring",
+        "componentType": "monitoring",
+        "label": "Translation SLO & Quality Monitoring",
+        "description": "Latency, concurrency, pair quality, and job health",
+        "position": {"x": 1470, "y": 740},
+        "properties": {
+          "componentName": "Translation SLO & Quality Monitoring",
+          "purpose": "Measure end-to-end p50/p95/p99 latency by modality, direction, domain, and cache/model path; track active concurrency, accelerator saturation, queue age, deadline misses, quality-review rates, and document structure-validation failures. Exclude or redact source text and medical/legal content from general logs."
+        },
+        "highlightReason": "The latency, pair-quality, concurrency, and document-preservation claims need independent production evidence."
+      },
+      "title": "Add Translation SLO & Quality Monitoring",
+      "content": "Alert on pair-specific quality regressions and latency saturation; a healthy aggregate can hide a failing low-volume language direction. Measure active load against the stated 10k+ concurrent-request target, while treating capacity and latency as unproven until representative tests pass.",
+      "requirementIds": ["legacy-constraint:2"]
+    },
+    {
+      "id": "tr_43",
+      "requirementIds": ["legacy-requirement:1","legacy-constraint:1","legacy-constraint:3"],
+      "stepNumber": 43,
+      "phase": "Close the quality, editing, and operating loops",
+      "title": "Observe model routing and pair latency",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "tr_gateway_monitoring",
+        "sourceNodeId": "tr_ai_gateway",
+        "targetNodeId": "tr_monitoring",
+        "connectionType": "event-stream",
+        "label": "Redacted inference and capacity metrics",
+        "description": "Emit pair/model version, latency, deadline, fallback, and capacity metrics without raw translation text."
+      },
+      "title": "Connect Model Routing Gateway to Translation SLO & Quality Monitoring",
+      "content": "Pair-level telemetry lets operations distinguish a slow model, cache miss, overloaded accelerator pool, and unsupported direction."
+    },
+    {
+      "id": "tr_44",
+      "requirementIds": ["legacy-requirement:3","legacy-constraint:5"],
+      "stepNumber": 44,
+      "phase": "Close the quality, editing, and operating loops",
+      "title": "Observe document job and formatting health",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "tr_worker_monitoring",
+        "sourceNodeId": "tr_document_worker",
+        "targetNodeId": "tr_monitoring",
+        "connectionType": "event-stream",
+        "label": "Redacted job and structure-validation metrics",
+        "description": "Report job age, retry count, segment failures, output validation, and completion state without document contents."
+      },
+      "title": "Connect Document Structure & Translation Workers to Translation SLO & Quality Monitoring",
+      "content": "Alert on queue age and format-validation failures independently of interactive translation latency."
+    },
+    {
+      "id": "tr_45",
+      "stepNumber": 45,
+      "phase": "Close the quality, editing, and operating loops",
+      "title": "Review the end-to-end design and its honest limits",
+      "type": "explanation",
+      "content": "Text uses a warm, qualified pair model with versioned terminology and a scoped cache; speech streams ordered chunks under a first-useful-audio deadline; large documents move through durable jobs and are reassembled with structure checks. Human post-editing feeds only approved tenant memory. Before claiming success, load-test 10k concurrent requests, measure end-to-end latency by pair and modality, and show BLEU above 40 only for each pair that passed its versioned evaluation. These targets remain assumptions until measured against the actual workload and deployment capacity.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

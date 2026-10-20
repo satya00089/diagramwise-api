@@ -1,0 +1,1487 @@
+{
+  "problem_id": "68d7013f6f42e23bb16a2233",
+  "version": "1.0-review",
+  "totalSteps": 74,
+  "phases": [
+    {
+      "name": "1. Accept safely and persist intent",
+      "stepRange": [
+        1,
+        15
+      ],
+      "description": "Keep ingress fast, validate category and consent, and durably record idempotency and outbox intent before acknowledging."
+    },
+    {
+      "name": "2. Enforce preferences and manage content",
+      "stepRange": [
+        16,
+        23
+      ],
+      "description": "Use current preferences, immutable content versions, audited administration, and stable marketing-only experiment assignment."
+    },
+    {
+      "name": "3. Fan out through isolated channels",
+      "stepRange": [
+        24,
+        50
+      ],
+      "description": "Isolate channel throughput and retries, recheck consent before delivery, and keep the in-app inbox durable."
+    },
+    {
+      "name": "4. Retry, measure, and absorb spikes",
+      "stepRange": [
+        51,
+        74
+      ],
+      "description": "Bound retries, quarantine terminal errors, scale within provider limits, and track verified outcomes without leaking personal data."
+    }
+  ],
+  "steps": [
+    {
+      "id": "notif_01",
+      "stepNumber": 1,
+      "phase": "1. Accept safely and persist intent",
+      "title": "Separate acceptance from delivery",
+      "type": "explanation",
+      "content": "The brief asks for email, SMS, push, and in-app notifications across marketing, transactional, and alert use cases; user preferences and opt-outs; templates; analytics; rate limits; and millions per day. No exact traffic mix or latency SLA is supplied. For capacity planning only, assume 10 million notification requests/day, a 10x peak, and up to four selected channels per request: about 116 requests/second average, 1,160 at peak, and up to about 4,640 channel delivery attempts/second if every request fans out to all channels. Treat those as sizing assumptions to ratify, not product promises. Keep provider calls off the request path; target a durable enqueue acknowledgment under 100ms p95 as a provisional goal."
+    },
+    {
+      "id": "notif_02",
+      "stepNumber": 2,
+      "phase": "1. Accept safely and persist intent",
+      "title": "Add the product event producers",
+      "type": "add_component",
+      "content": "Existing product services emit domain events (for example, order confirmed or security alert) using a stable event ID and recipient ID. They do not embed provider credentials or send email/SMS directly.",
+      "component": {
+        "nodeId": "notif_producers",
+        "componentType": "backend-server",
+        "label": "Product Services & Event Producers",
+        "description": "Create authenticated notification commands from committed business events.",
+        "position": {
+          "x": 0,
+          "y": 400
+        },
+        "properties": {
+          "componentName": "Product Services & Event Producers",
+          "purpose": "Emit committed domain events with stable event_id, recipient_id, category, template_key, and idempotency key; never call delivery vendors inline."
+        },
+        "highlightReason": "The notification system should integrate with domain events, not couple every product service to each delivery vendor."
+      }
+    },
+    {
+      "id": "notif_03",
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:4"],
+      "stepNumber": 3,
+      "phase": "1. Accept safely and persist intent",
+      "title": "Add the campaign and template console",
+      "type": "add_component",
+      "content": "Operators manage versioned templates and marketing experiments through a restricted console. It is a control-plane client; sends still use the same validated API and durable delivery path.",
+      "component": {
+        "nodeId": "notif_admin",
+        "componentType": "admin-console",
+        "label": "Notification Admin Console",
+        "description": "Manage templates, campaigns, experiments, and delivery reports.",
+        "position": {
+          "x": 0,
+          "y": 120
+        },
+        "properties": {
+          "componentName": "Notification Admin Console",
+          "purpose": "Role-restricted control plane for drafting, validating, approving, and publishing versioned channel templates and marketing experiments; no direct provider credentials or recipient exports.",
+          "accessControl": "RBAC",
+          "auditLogging": true
+        },
+        "highlightReason": "Content and experiment edits need authorization and an auditable publication history."
+      }
+    },
+    {
+      "id": "notif_04",
+      "requirementIds": ["legacy-requirement:6"],
+      "stepNumber": 4,
+      "phase": "1. Accept safely and persist intent",
+      "title": "Add the public API and callback boundary",
+      "type": "add_component",
+      "content": "Use one authenticated ingress for product commands, admin control-plane requests, and signed provider delivery callbacks. Separate endpoint scopes and validate provider signatures; callbacks must not be able to enqueue arbitrary sends.",
+      "component": {
+        "nodeId": "notif_gateway",
+        "componentType": "api-gateway",
+        "label": "Notification API & Webhook Gateway",
+        "description": "Authenticate commands, enforce coarse quotas, and verify provider callbacks.",
+        "position": {
+          "x": 320,
+          "y": 400
+        },
+        "properties": {
+          "componentName": "Notification API & Webhook Gateway",
+          "purpose": "Validate command and callback schemas, authenticate product/admin callers, verify signed provider webhooks, and route send versus status-event endpoints.",
+          "inputValidation": true,
+          "authentication": "OAuth 2.0",
+          "rateLimiting": true,
+          "tlsTermination": true,
+          "deduplication": true,
+          "throttling": true
+        },
+        "highlightReason": "The gateway is the trust boundary and the first coarse rate limiter, not the delivery engine."
+      }
+    },
+    {
+      "id": "notif_05",
+      "stepNumber": 5,
+      "phase": "1. Accept safely and persist intent",
+      "title": "Connect product events to the API",
+      "type": "add_connection",
+      "content": "Product services submit an idempotent notification command after their business transaction commits. The command includes only a recipient reference, category, template key, requested channels, and event ID.",
+      "connection": {
+        "edgeId": "notif_e_producers_gateway",
+        "sourceNodeId": "notif_producers",
+        "targetNodeId": "notif_gateway",
+        "connectionType": "http",
+        "label": "Authenticated notification command",
+        "description": "Submit a validated event ID and recipient reference over HTTPS."
+      }
+    },
+    {
+      "id": "notif_06",
+      "stepNumber": 6,
+      "phase": "1. Accept safely and persist intent",
+      "title": "Connect the admin console to the API",
+      "type": "add_connection",
+      "content": "The console uses its scoped identity for template and campaign changes; the gateway applies stronger admin authorization and audit policy.",
+      "connection": {
+        "edgeId": "notif_e_admin_gateway",
+        "sourceNodeId": "notif_admin",
+        "targetNodeId": "notif_gateway",
+        "connectionType": "http",
+        "label": "Scoped admin and campaign API",
+        "description": "Manage versioned content through the same authenticated boundary."
+      }
+    },
+    {
+      "id": "notif_07",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6"],
+      "stepNumber": 7,
+      "phase": "1. Accept safely and persist intent",
+      "title": "Add the notification policy and orchestration service",
+      "type": "add_component",
+      "content": "This service validates notification category and requested channels, applies tenant/user quotas, performs an initial consent check, assigns a stable experiment variant when eligible, and records idempotency before acknowledging. A subsequent worker check is still required because consent can change while a message waits.",
+      "component": {
+        "nodeId": "notif_core",
+        "componentType": "notification-service",
+        "label": "Notification Policy & Orchestrator",
+        "description": "Validate, classify, deduplicate, and persist delivery intent.",
+        "position": {
+          "x": 640,
+          "y": 400
+        },
+        "properties": {
+          "componentName": "Notification Policy & Orchestrator",
+          "purpose": "Normalize marketing, transactional, and alert requests; enforce tenant and per-user/channel limits; perform an initial category/channel consent check; assign one stable campaign variant; persist idempotent intent before returning 202.",
+          "channels": "All",
+          "fanout": true,
+          "batching": true
+        },
+        "highlightReason": "A single policy owner keeps channel selection, priority, idempotency, and consent rules consistent."
+      }
+    },
+    {
+      "id": "notif_08",
+      "stepNumber": 8,
+      "phase": "1. Accept safely and persist intent",
+      "title": "Route commands into the orchestrator",
+      "type": "add_connection",
+      "content": "Only validated and authorized commands reach the policy service. It returns an accepted/pending state after durable intent is recorded, not a claim that every provider delivered the message.",
+      "connection": {
+        "edgeId": "notif_e_gateway_core",
+        "sourceNodeId": "notif_gateway",
+        "targetNodeId": "notif_core",
+        "connectionType": "api-call",
+        "label": "Validated notification command",
+        "description": "Pass caller identity, idempotency key, category, and requested channels."
+      }
+    },
+    {
+      "id": "notif_09",
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:3"],
+      "stepNumber": 9,
+      "phase": "1. Accept safely and persist intent",
+      "title": "Add the preferences and consent store",
+      "type": "add_component",
+      "content": "Key records by recipient, channel, and notification category. Store opt-out state, quiet hours, locale, and opaque destination/device references; encrypt data and make opt-out changes immediately visible to the final send check.",
+      "component": {
+        "nodeId": "notif_preferences",
+        "componentType": "database",
+        "label": "Preference, Consent & Device Registry",
+        "description": "Current channel/category choices and protected destination references.",
+        "position": {
+          "x": 960,
+          "y": 60
+        },
+        "properties": {
+          "componentName": "Preference, Consent & Device Registry",
+          "purpose": "Strongly consistent lookup by recipient_id + channel + category for opt-in/opt-out, quiet hours, locale, and opaque address/device-token references; encrypt sensitive values, audit changes, and propagate opt-outs immediately.",
+          "type": "NoSQL",
+          "engine": "dynamodb",
+          "workload": "OLTP",
+          "sharding": "Hash-based",
+          "shards": 32,
+          "replication": 3,
+          "multiAZ": true,
+          "encryption": true,
+          "rbac": true,
+          "auditLog": true
+        },
+        "highlightReason": "Do not infer consent from a stale cache or from the fact that a notification was previously requested."
+      }
+    },
+    {
+      "id": "notif_10",
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:3"],
+      "stepNumber": 10,
+      "phase": "1. Accept safely and persist intent",
+      "title": "Read consent before accepting work",
+      "type": "add_connection",
+      "content": "The orchestrator uses the preference store to reject or suppress disallowed channel/category combinations before creating delivery intents. A marketing opt-out is honored even when another channel remains enabled.",
+      "connection": {
+        "edgeId": "notif_e_core_preferences",
+        "sourceNodeId": "notif_core",
+        "targetNodeId": "notif_preferences",
+        "connectionType": "database-connection",
+        "label": "Category and channel consent lookup",
+        "description": "Read the current user choice and policy before creating channel work."
+      }
+    },
+    {
+      "id": "notif_11",
+      "requirementIds": ["legacy-requirement:5"],
+      "stepNumber": 11,
+      "phase": "1. Accept safely and persist intent",
+      "title": "Add the idempotency and outbox ledger",
+      "type": "add_component",
+      "content": "Persist a unique request key and transactional outbox record together. This avoids the database/queue dual-write gap: either the accepted request and publish intent both exist, or neither does.",
+      "component": {
+        "nodeId": "notif_ledger",
+        "componentType": "database",
+        "label": "Idempotency, Outbox & Delivery Ledger",
+        "description": "Durable request dedupe, dispatch intent, and delivery state.",
+        "position": {
+          "x": 960,
+          "y": 760
+        },
+        "properties": {
+          "componentName": "Idempotency, Outbox & Delivery Ledger",
+          "purpose": "Atomically store unique (tenant_id, event_id, recipient_id, channel) request keys and outbox intents; retain per-channel attempt state, provider message reference, terminal status, and timestamps without storing rendered body or raw recipient address.",
+          "type": "NoSQL",
+          "engine": "dynamodb",
+          "workload": "OLTP",
+          "sharding": "Hash-based",
+          "shards": 32,
+          "replication": 3,
+          "multiAZ": true,
+          "encryption": true,
+          "rbac": true,
+          "auditLog": true
+        },
+        "highlightReason": "At-least-once queues become safe when every logical delivery has a durable idempotency key and attempt record."
+      }
+    },
+    {
+      "id": "notif_12",
+      "stepNumber": 12,
+      "phase": "1. Accept safely and persist intent",
+      "title": "Commit the accepted command and outbox intent",
+      "type": "add_connection",
+      "content": "The core writes the idempotency result and all requested channel intents in one ledger transaction. A retry with the same key returns the existing pending/result state rather than creating duplicate deliveries.",
+      "connection": {
+        "edgeId": "notif_e_core_ledger",
+        "sourceNodeId": "notif_core",
+        "targetNodeId": "notif_ledger",
+        "connectionType": "database-connection",
+        "label": "Idempotency record + transactional outbox",
+        "description": "Persist the accepted command and dispatch intents atomically."
+      }
+    },
+    {
+      "id": "notif_13",
+      "stepNumber": 13,
+      "phase": "1. Accept safely and persist intent",
+      "title": "Make retries safe at the request boundary",
+      "type": "update_component",
+      "content": "A retried client command must not multiply sends. Use a bounded retention period for idempotency keys, return the original request status, and keep channel attempt IDs separate from the user-facing notification ID.",
+      "componentUpdate": {
+        "nodeId": "notif_core",
+        "properties": {
+          "purpose": "Normalize marketing, transactional, and alert requests; enforce tenant and per-user/channel limits; perform an initial category/channel consent check; assign one stable campaign variant; persist idempotent intent before returning 202. Deduplicate on tenant_id + event_id + recipient_id + channel and return the prior status for duplicate commands."
+        }
+      }
+    },
+    {
+      "id": "notif_14",
+      "stepNumber": 14,
+      "phase": "1. Accept safely and persist intent",
+      "title": "Add the outbox relay",
+      "type": "add_component",
+      "content": "A separate worker polls committed outbox rows, publishes each selected channel intent to its isolated queue, and marks the row dispatched only after queue acknowledgment. Replaying a row is safe because both outbox and consumer operations are idempotent.",
+      "component": {
+        "nodeId": "notif_outbox_relay",
+        "componentType": "processing-worker",
+        "label": "Transactional Outbox Relay",
+        "description": "Publish committed intents to channel queues with checkpoints.",
+        "position": {
+          "x": 960,
+          "y": 540
+        },
+        "properties": {
+          "componentName": "Transactional Outbox Relay",
+          "purpose": "Poll committed outbox rows in order per notification; publish selected, already-authorized channel intents; mark dispatched only after durable queue acknowledgment; replay uncheckpointed rows idempotently.",
+          "tasks": "Data Processing",
+          "concurrency": 50,
+          "autoscale": true
+        },
+        "highlightReason": "The relay closes the crash window between committing intent and publishing asynchronous work."
+      }
+    },
+    {
+      "id": "notif_15",
+      "stepNumber": 15,
+      "phase": "1. Accept safely and persist intent",
+      "title": "Read and checkpoint outbox records",
+      "type": "add_connection",
+      "content": "The relay reads durable outbox records and checkpoints only after the channel queue confirms publication. On restart it replays uncheckpointed intents, relying on the same stable message ID.",
+      "connection": {
+        "edgeId": "notif_e_ledger_relay",
+        "sourceNodeId": "notif_ledger",
+        "targetNodeId": "notif_outbox_relay",
+        "connectionType": "database-connection",
+        "label": "Committed outbox polling and checkpoint",
+        "description": "Publish only committed intents; replay safely after a crash."
+      }
+    },
+    {
+      "id": "notif_16",
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:4"],
+      "stepNumber": 16,
+      "phase": "2. Enforce preferences and manage content",
+      "title": "Add the versioned template and experiment registry",
+      "type": "add_component",
+      "content": "Store channel-specific templates by notification category, locale, and immutable version. Marketing campaigns may define two or more variants; transactional and alert templates remain fixed and are excluded from content experiments.",
+      "component": {
+        "nodeId": "notif_templates",
+        "componentType": "database",
+        "label": "Template & Experiment Registry",
+        "description": "Versioned templates, locale variants, campaign rules, and experiment definitions.",
+        "position": {
+          "x": 960,
+          "y": 260
+        },
+        "properties": {
+          "componentName": "Template & Experiment Registry",
+          "purpose": "Store immutable, reviewed templates by channel + category + locale + version, plus campaign eligibility and A/B variants; keep transactional and alert content outside marketing experiments.",
+          "type": "RDBMS",
+          "engine": "postgresql",
+          "workload": "OLTP",
+          "multiAZ": true,
+          "backups": true,
+          "encryption": true,
+          "rbac": true,
+          "auditLog": true
+        },
+        "highlightReason": "Versioning prevents retries from rendering different content after a template edit."
+      }
+    },
+    {
+      "id": "notif_17",
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:4"],
+      "stepNumber": 17,
+      "phase": "2. Enforce preferences and manage content",
+      "title": "Connect orchestration to the registry",
+      "type": "add_connection",
+      "content": "The core resolves an approved template/version and experiment policy; admin changes flow through the API and never write around authorization.",
+      "connection": {
+        "edgeId": "notif_e_core_templates",
+        "sourceNodeId": "notif_core",
+        "targetNodeId": "notif_templates",
+        "connectionType": "database-connection",
+        "label": "Approved template and experiment lookup",
+        "description": "Resolve channel/category/locale-specific content and immutable version."
+      }
+    },
+    {
+      "id": "notif_18",
+      "stepNumber": 18,
+      "phase": "2. Enforce preferences and manage content",
+      "title": "Cache immutable template versions",
+      "type": "add_component",
+      "content": "Cache immutable published versions with a short TTL; publication invalidates the version pointer. Never use a cache entry as the source of truth for consent or opt-out.",
+      "component": {
+        "nodeId": "notif_template_cache",
+        "componentType": "cache",
+        "label": "Published Template Cache",
+        "description": "Fast reads for immutable approved template versions.",
+        "position": {
+          "x": 960,
+          "y": 420
+        },
+        "properties": {
+          "componentName": "Published Template Cache",
+          "purpose": "Cache immutable published template versions and campaign configuration; invalidate on publication; never cache user consent as an authoritative send decision.",
+          "engine": "redis",
+          "cacheStrategy": "cache-aside",
+          "ttl": 300,
+          "inMemory": true,
+          "eviction": "lru",
+          "replication": true,
+          "clusterMode": true,
+          "encryption": true
+        },
+        "highlightReason": "Template caching improves rendering latency without weakening the consent boundary."
+      }
+    },
+    {
+      "id": "notif_19",
+      "stepNumber": 19,
+      "phase": "2. Enforce preferences and manage content",
+      "title": "Read hot templates from cache",
+      "type": "add_connection",
+      "content": "The core reads a versioned template through cache-aside; a miss loads the exact approved version from the registry. A retry keeps the original template version.",
+      "connection": {
+        "edgeId": "notif_e_core_template_cache",
+        "sourceNodeId": "notif_core",
+        "targetNodeId": "notif_template_cache",
+        "connectionType": "cache-lookup",
+        "label": "Immutable template version read",
+        "description": "Use the exact version pinned to the notification intent."
+      }
+    },
+    {
+      "id": "notif_20",
+      "stepNumber": 20,
+      "phase": "2. Enforce preferences and manage content",
+      "title": "Fill the cache from the registry",
+      "type": "add_connection",
+      "content": "Cache misses load only published registry versions. Draft content is never visible to live sends.",
+      "connection": {
+        "edgeId": "notif_e_cache_template_store",
+        "sourceNodeId": "notif_template_cache",
+        "targetNodeId": "notif_templates",
+        "connectionType": "database-connection",
+        "label": "Published-version cache miss",
+        "description": "Load an approved immutable template from the registry."
+      }
+    },
+    {
+      "id": "notif_21",
+      "requirementIds": ["legacy-constraint:4"],
+      "stepNumber": 21,
+      "phase": "2. Enforce preferences and manage content",
+      "title": "Assign A/B variants deterministically",
+      "type": "update_component",
+      "content": "For eligible marketing campaigns, derive the variant from a stable hash of recipient and campaign ID, then persist that variant in the outbox/ledger. Retries reuse the same variant; transactional and safety alerts never enter the experiment.",
+      "componentUpdate": {
+        "nodeId": "notif_core",
+        "properties": {
+          "purpose": "Resolve immutable template versions and localized content; for eligible marketing only, assign variant = stable_hash(recipient_id, campaign_id) and persist it with the outbox intent so retries cannot switch variants. Never A/B test transactional or alert copy."
+        }
+      }
+    },
+    {
+      "id": "notif_22",
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:4"],
+      "stepNumber": 22,
+      "phase": "2. Enforce preferences and manage content",
+      "title": "Publish content through an audited control plane",
+      "type": "update_component",
+      "content": "Templates move through draft, validation, approval, and published immutable versions. Record who changed a template or experiment and when; restrict recipient data access to the smallest operational role.",
+      "componentUpdate": {
+        "nodeId": "notif_admin",
+        "properties": {
+          "purpose": "Role-restricted control plane for drafting, validating, approving, and publishing versioned channel templates and marketing experiments; audit every change and report query; no direct provider credentials or recipient exports.",
+          "accessControl": "RBAC",
+          "auditLogging": true
+        }
+      }
+    },
+    {
+      "id": "notif_23",
+      "stepNumber": 23,
+      "phase": "2. Enforce preferences and manage content",
+      "title": "Keep consent fresh and personal data minimal",
+      "type": "explanation",
+      "content": "Check category/channel preference once when accepting and again immediately before each external send; if the user opted out while work was queued, suppress the job and emit a suppression status. Marketing opt-out is always honored. For transactional and alert categories, follow explicitly configured legal/product policy rather than treating them as marketing. Keep addresses/device tokens in protected references, not analytics events; erase or rotate them under the product retention policy."
+    },
+    {
+      "id": "notif_24",
+      "stepNumber": 24,
+      "phase": "3. Fan out through isolated channels",
+      "title": "Isolate every channel before provider calls",
+      "type": "explanation",
+      "content": "Do not let an SMS provider slowdown stall email, push, or in-app delivery. The relay emits only selected channels; each queue group has separate urgent/transactional and bulk-marketing lanes, independent retries, and a provider-specific throughput cap. Protect fast delivery with a provisional goal that 95% of eligible, non-throttled attempts start within five seconds; provider acceptance and final recipient delivery are separate measurements."
+    },
+    {
+      "id": "notif_25",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"],
+      "stepNumber": 25,
+      "phase": "3. Fan out through isolated channels",
+      "title": "Add the email delivery queue",
+      "type": "add_component",
+      "content": "Durably buffer email work independently; include notification ID, category, template version, locale, variant ID (marketing only), idempotency key, and opaque recipient reference—not raw content in queue metadata.",
+      "component": {
+        "nodeId": "notif_email_queue",
+        "componentType": "queue",
+        "label": "Email Delivery Queue",
+        "description": "Isolated email work with bounded retries and a marketing/urgent lane.",
+        "position": {
+          "x": 1280,
+          "y": 120
+        },
+        "properties": {
+          "componentName": "Email Delivery Queue",
+          "purpose": "Durable per-email work lane with separate urgent/transactional and bulk-marketing scheduling; payload carries opaque recipient reference, immutable template/version, category, locale, and idempotency key only.",
+          "visibilityTimeout": 60,
+          "maxRetries": 6,
+          "durable": true,
+          "backoff": "exponential"
+        },
+        "highlightReason": "A separate queue bounds one provider's backlog and makes its retry policy observable."
+      }
+    },
+    {
+      "id": "notif_26",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"],
+      "stepNumber": 26,
+      "phase": "3. Fan out through isolated channels",
+      "title": "Add the SMS delivery queue",
+      "type": "add_component",
+      "content": "Keep SMS work isolated because carrier/provider quotas and costs differ from email. The worker may defer non-urgent marketing when the provider is throttling.",
+      "component": {
+        "nodeId": "notif_sms_queue",
+        "componentType": "queue",
+        "label": "SMS Delivery Queue",
+        "description": "Independent SMS throughput, priority, and retry lane.",
+        "position": {
+          "x": 1280,
+          "y": 400
+        },
+        "properties": {
+          "componentName": "SMS Delivery Queue",
+          "purpose": "Durable SMS work lane with urgent/transactional ahead of bulk marketing, carrier-specific throughput caps, opaque destination reference, stable delivery ID, and no raw phone number in analytics metadata.",
+          "visibilityTimeout": 90,
+          "maxRetries": 6,
+          "durable": true,
+          "backoff": "exponential"
+        },
+        "highlightReason": "A slow or quota-limited SMS provider must not block other delivery channels."
+      }
+    },
+    {
+      "id": "notif_27",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"],
+      "stepNumber": 27,
+      "phase": "3. Fan out through isolated channels",
+      "title": "Add the push delivery queue",
+      "type": "add_component",
+      "content": "Use a separate push lane so device-token invalidation and APNs/FCM throttles do not affect other channels.",
+      "component": {
+        "nodeId": "notif_push_queue",
+        "componentType": "queue",
+        "label": "Push Delivery Queue",
+        "description": "Partition push work by application/region with independent retries.",
+        "position": {
+          "x": 1280,
+          "y": 680
+        },
+        "properties": {
+          "componentName": "Push Delivery Queue",
+          "purpose": "Durable push work lane partitioned by app/region; include opaque device reference and message ID, remove invalid tokens safely, and enforce provider quotas independently.",
+          "visibilityTimeout": 60,
+          "maxRetries": 8,
+          "durable": true,
+          "backoff": "exponential"
+        },
+        "highlightReason": "Push retries must not keep sending to invalid device tokens."
+      }
+    },
+    {
+      "id": "notif_28",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"],
+      "stepNumber": 28,
+      "phase": "3. Fan out through isolated channels",
+      "title": "Add the in-app delivery queue",
+      "type": "add_component",
+      "content": "In-app notifications are persisted to a user inbox; they do not depend on a mobile push provider and can be read later.",
+      "component": {
+        "nodeId": "notif_inapp_queue",
+        "componentType": "queue",
+        "label": "In-App Inbox Queue",
+        "description": "Durable work for inbox persistence and unread-state updates.",
+        "position": {
+          "x": 1280,
+          "y": 960
+        },
+        "properties": {
+          "componentName": "In-App Inbox Queue",
+          "purpose": "Durable in-app inbox work lane; persist a deduplicated notification row and unread state before acknowledging in-app delivery.",
+          "visibilityTimeout": 60,
+          "maxRetries": 6,
+          "durable": true,
+          "backoff": "exponential"
+        },
+        "highlightReason": "An inbox write is durable application state, not a best-effort device delivery."
+      }
+    },
+    {
+      "id": "notif_29",
+      "stepNumber": 29,
+      "phase": "3. Fan out through isolated channels",
+      "title": "Fan out email intents",
+      "type": "add_connection",
+      "content": "The outbox relay publishes email only when selected by policy and currently eligible. The queue message contains no provider secret or raw recipient address.",
+      "connection": {
+        "edgeId": "notif_e_relay_email",
+        "sourceNodeId": "notif_outbox_relay",
+        "targetNodeId": "notif_email_queue",
+        "connectionType": "message-queue",
+        "label": "Selected email delivery intent",
+        "description": "Publish a version-pinned, idempotent email job."
+      }
+    },
+    {
+      "id": "notif_30",
+      "stepNumber": 30,
+      "phase": "3. Fan out through isolated channels",
+      "title": "Fan out SMS intents",
+      "type": "add_connection",
+      "content": "Apply the SMS-specific quota and priority lane; keep marketing traffic deferrable under carrier throttling.",
+      "connection": {
+        "edgeId": "notif_e_relay_sms",
+        "sourceNodeId": "notif_outbox_relay",
+        "targetNodeId": "notif_sms_queue",
+        "connectionType": "message-queue",
+        "label": "Selected SMS delivery intent",
+        "description": "Publish an isolated job under SMS rate and consent policy."
+      }
+    },
+    {
+      "id": "notif_31",
+      "stepNumber": 31,
+      "phase": "3. Fan out through isolated channels",
+      "title": "Fan out push intents",
+      "type": "add_connection",
+      "content": "Send only to registered devices with an active push preference; provider tokens remain behind an opaque reference.",
+      "connection": {
+        "edgeId": "notif_e_relay_push",
+        "sourceNodeId": "notif_outbox_relay",
+        "targetNodeId": "notif_push_queue",
+        "connectionType": "message-queue",
+        "label": "Selected push delivery intent",
+        "description": "Publish an app/region-scoped job with opaque device reference."
+      }
+    },
+    {
+      "id": "notif_32",
+      "stepNumber": 32,
+      "phase": "3. Fan out through isolated channels",
+      "title": "Fan out in-app intents",
+      "type": "add_connection",
+      "content": "Persist inbox notifications asynchronously, retaining the originating category and deduplication key.",
+      "connection": {
+        "edgeId": "notif_e_relay_inapp",
+        "sourceNodeId": "notif_outbox_relay",
+        "targetNodeId": "notif_inapp_queue",
+        "connectionType": "message-queue",
+        "label": "Selected in-app delivery intent",
+        "description": "Publish an idempotent inbox-write job."
+      }
+    },
+    {
+      "id": "notif_33",
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"],
+      "stepNumber": 33,
+      "phase": "3. Fan out through isolated channels",
+      "title": "Add independent channel consumer pools",
+      "type": "add_component",
+      "content": "One logical worker service hosts separate consumer groups and autoscaling pools for each channel. Each pool rechecks current preferences immediately before sending, applies provider quotas, renders only the pinned template version, and records attempts. A single slow provider does not monopolize all consumer capacity.",
+      "component": {
+        "nodeId": "notif_delivery_workers",
+        "componentType": "processing-worker",
+        "label": "Channel Delivery Workers",
+        "description": "Independent email, SMS, push, and inbox consumer groups.",
+        "position": {
+          "x": 1600,
+          "y": 540
+        },
+        "properties": {
+          "componentName": "Channel Delivery Workers",
+          "purpose": "Run isolated consumer groups per channel; before each action re-read current opt-out/quiet-hour state, load pinned template/variant, enforce provider token-bucket quota, write attempt state, and retry only transient errors with jitter.",
+          "tasks": "Data Processing",
+          "concurrency": 300,
+          "autoscale": true
+        },
+        "highlightReason": "Independent consumer groups let the platform scale each channel without violating vendor quotas."
+      }
+    },
+    {
+      "id": "notif_34",
+      "stepNumber": 34,
+      "phase": "3. Fan out through isolated channels",
+      "title": "Consume email work",
+      "type": "add_connection",
+      "content": "The email consumer checks current consent and address suppression, then invokes only the email adapter. A permanent invalid-address response is terminal, not retried.",
+      "connection": {
+        "edgeId": "notif_e_email_worker",
+        "sourceNodeId": "notif_email_queue",
+        "targetNodeId": "notif_delivery_workers",
+        "connectionType": "message-queue",
+        "label": "Email consumer group",
+        "description": "Consume with channel-specific retry and provider limits."
+      }
+    },
+    {
+      "id": "notif_35",
+      "stepNumber": 35,
+      "phase": "3. Fan out through isolated channels",
+      "title": "Consume SMS work",
+      "type": "add_connection",
+      "content": "The SMS consumer checks current preferences and destination validity; temporary carrier failures retry, while permanent failures stop.",
+      "connection": {
+        "edgeId": "notif_e_sms_worker",
+        "sourceNodeId": "notif_sms_queue",
+        "targetNodeId": "notif_delivery_workers",
+        "connectionType": "message-queue",
+        "label": "SMS consumer group",
+        "description": "Consume under SMS-specific throughput and retry policy."
+      }
+    },
+    {
+      "id": "notif_36",
+      "stepNumber": 36,
+      "phase": "3. Fan out through isolated channels",
+      "title": "Consume push work",
+      "type": "add_connection",
+      "content": "The push consumer checks the device registration and permission at send time; invalid device tokens are tombstoned and not retried.",
+      "connection": {
+        "edgeId": "notif_e_push_worker",
+        "sourceNodeId": "notif_push_queue",
+        "targetNodeId": "notif_delivery_workers",
+        "connectionType": "message-queue",
+        "label": "Push consumer group",
+        "description": "Consume app-scoped work and retire invalid device tokens."
+      }
+    },
+    {
+      "id": "notif_37",
+      "stepNumber": 37,
+      "phase": "3. Fan out through isolated channels",
+      "title": "Consume inbox work",
+      "type": "add_connection",
+      "content": "The in-app consumer checks current inbox/privacy policy and inserts by a unique delivery ID so redrives cannot create duplicate inbox rows.",
+      "connection": {
+        "edgeId": "notif_e_inapp_worker",
+        "sourceNodeId": "notif_inapp_queue",
+        "targetNodeId": "notif_delivery_workers",
+        "connectionType": "message-queue",
+        "label": "In-app consumer group",
+        "description": "Persist user-visible inbox state idempotently."
+      }
+    },
+    {
+      "id": "notif_38",
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:3"],
+      "stepNumber": 38,
+      "phase": "3. Fan out through isolated channels",
+      "title": "Recheck consent at the send boundary",
+      "type": "add_connection",
+      "content": "The worker reads the preference store immediately before invoking any external provider. A revoked consent suppresses queued marketing work; that suppression itself becomes a tracked terminal outcome.",
+      "connection": {
+        "edgeId": "notif_e_worker_preferences",
+        "sourceNodeId": "notif_delivery_workers",
+        "targetNodeId": "notif_preferences",
+        "connectionType": "database-connection",
+        "label": "Just-in-time consent and suppression check",
+        "description": "Fail closed when the current preference cannot be verified."
+      }
+    },
+    {
+      "id": "notif_39",
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:2"],
+      "stepNumber": 39,
+      "phase": "3. Fan out through isolated channels",
+      "title": "Record each attempt and terminal result",
+      "type": "add_connection",
+      "content": "The worker updates the delivery ledger using a conditional idempotent transition: queued → attempted → accepted/provider-pending → delivered, bounced, suppressed, or permanently failed. Provider callbacks may arrive later or out of order, so state updates are monotonic and keyed by provider event ID.",
+      "connection": {
+        "edgeId": "notif_e_worker_ledger",
+        "sourceNodeId": "notif_delivery_workers",
+        "targetNodeId": "notif_ledger",
+        "connectionType": "database-connection",
+        "label": "Idempotent attempt and status update",
+        "description": "Persist attempt count and current delivery state without raw message bodies."
+      }
+    },
+    {
+      "id": "notif_40",
+      "stepNumber": 40,
+      "phase": "3. Fan out through isolated channels",
+      "title": "Add the email provider adapter",
+      "type": "add_component",
+      "content": "Use an adapter boundary so the core workflow is not tied to one email vendor. This pilot chooses SendGrid from the existing palette, enables provider delivery/bounce reports, and requires suppression handling.",
+      "component": {
+        "nodeId": "notif_email_provider",
+        "componentType": "email-service",
+        "label": "Email Provider Adapter",
+        "description": "Provider-neutral email contract with delivery and bounce feedback.",
+        "position": {
+          "x": 1920,
+          "y": 120
+        },
+        "properties": {
+          "componentName": "Email Provider Adapter",
+          "purpose": "Adapt the internal delivery contract to the selected email provider; report accepted/delivered/bounced/complaint outcomes; honor suppression and expose no provider credentials to product services.",
+          "provider": "SendGrid",
+          "templates": true,
+          "tracking": true,
+          "bounceHandling": true
+        },
+        "highlightReason": "Email is a provider integration with explicit bounce/complaint feedback, not a database write."
+      }
+    },
+    {
+      "id": "notif_41",
+      "stepNumber": 41,
+      "phase": "3. Fan out through isolated channels",
+      "title": "Add the SMS provider adapter",
+      "type": "add_component",
+      "content": "This pilot chooses Twilio through the existing SMS component; the adapter hides provider-specific payloads and normalizes delivery reports.",
+      "component": {
+        "nodeId": "notif_sms_provider",
+        "componentType": "sms-service",
+        "label": "SMS Provider Adapter",
+        "description": "Normalize SMS sends, carrier limits, and delivery reports.",
+        "position": {
+          "x": 1920,
+          "y": 400
+        },
+        "properties": {
+          "componentName": "SMS Provider Adapter",
+          "purpose": "Adapt the internal delivery contract to the selected SMS provider; enforce carrier/provider quotas and normalize accepted, delivered, undeliverable, and rejected reports.",
+          "provider": "Twilio",
+          "otp": false,
+          "deliveryReports": true
+        },
+        "highlightReason": "Provider quotas and cost controls belong at the SMS adapter boundary."
+      }
+    },
+    {
+      "id": "notif_42",
+      "stepNumber": 42,
+      "phase": "3. Fan out through isolated channels",
+      "title": "Add the push provider adapter",
+      "type": "add_component",
+      "content": "Use the existing notification component as the push boundary; keep APNs/FCM token formats behind the adapter and normalize provider receipts.",
+      "component": {
+        "nodeId": "notif_push_provider",
+        "componentType": "notification-service",
+        "label": "Push Provider Adapter",
+        "description": "APNs/FCM-compatible push adapter and invalid-token handling.",
+        "position": {
+          "x": 1920,
+          "y": 680
+        },
+        "properties": {
+          "componentName": "Push Provider Adapter",
+          "purpose": "Provider-neutral push adapter over APNs/FCM; accept opaque device references, honor app/environment scope, normalize receipts, and tombstone invalid tokens.",
+          "channels": "Push",
+          "fanout": true,
+          "batching": true
+        },
+        "highlightReason": "The palette has a supported notification service; no new push component type is needed."
+      }
+    },
+    {
+      "id": "notif_43",
+      "stepNumber": 43,
+      "phase": "3. Fan out through isolated channels",
+      "title": "Add the in-app inbox API",
+      "type": "add_component",
+      "content": "In-app delivery creates a durable, permission-checked inbox entry. The client later reads and marks it seen; push is a separate optional channel.",
+      "component": {
+        "nodeId": "notif_inapp_api",
+        "componentType": "backend-server",
+        "label": "In-App Inbox API",
+        "description": "Serve durable in-app notifications with recipient authorization.",
+        "position": {
+          "x": 1920,
+          "y": 960
+        },
+        "properties": {
+          "componentName": "In-App Inbox API",
+          "purpose": "Create and serve recipient-scoped inbox entries, unread counts, and read/seen updates; authorize every read and never treat push receipt as proof that the in-app item was seen."
+        },
+        "highlightReason": "The in-app channel needs a durable inbox and read state, which is distinct from device push."
+      }
+    },
+    {
+      "id": "notif_44",
+      "stepNumber": 44,
+      "phase": "3. Fan out through isolated channels",
+      "title": "Send email through its adapter",
+      "type": "add_connection",
+      "content": "Only the email consumer may call the email integration, using a short-lived credential and idempotent provider reference where supported.",
+      "connection": {
+        "edgeId": "notif_e_worker_email_provider",
+        "sourceNodeId": "notif_delivery_workers",
+        "targetNodeId": "notif_email_provider",
+        "connectionType": "service-call",
+        "label": "Email send request",
+        "description": "Render the pinned channel template and invoke the email adapter."
+      }
+    },
+    {
+      "id": "notif_45",
+      "stepNumber": 45,
+      "phase": "3. Fan out through isolated channels",
+      "title": "Send SMS through its adapter",
+      "type": "add_connection",
+      "content": "The SMS adapter applies destination formatting and provider-level throttling. It returns a normalized provider message ID and acceptance state.",
+      "connection": {
+        "edgeId": "notif_e_worker_sms_provider",
+        "sourceNodeId": "notif_delivery_workers",
+        "targetNodeId": "notif_sms_provider",
+        "connectionType": "service-call",
+        "label": "SMS send request",
+        "description": "Invoke the SMS adapter only after consent and quota checks."
+      }
+    },
+    {
+      "id": "notif_46",
+      "stepNumber": 46,
+      "phase": "3. Fan out through isolated channels",
+      "title": "Send push through its adapter",
+      "type": "add_connection",
+      "content": "The push adapter resolves the opaque device reference and invokes APNs/FCM behind a provider-neutral contract.",
+      "connection": {
+        "edgeId": "notif_e_worker_push_provider",
+        "sourceNodeId": "notif_delivery_workers",
+        "targetNodeId": "notif_push_provider",
+        "connectionType": "service-call",
+        "label": "Push send request",
+        "description": "Deliver to registered devices and normalize provider responses."
+      }
+    },
+    {
+      "id": "notif_47",
+      "stepNumber": 47,
+      "phase": "3. Fan out through isolated channels",
+      "title": "Write the in-app inbox item",
+      "type": "add_connection",
+      "content": "The in-app path persists an inbox record keyed by recipient and delivery ID; expiry/retention is explicit and recipient reads are authorized.",
+      "connection": {
+        "edgeId": "notif_e_worker_inapp_api",
+        "sourceNodeId": "notif_delivery_workers",
+        "targetNodeId": "notif_inapp_api",
+        "connectionType": "service-call",
+        "label": "Create inbox notification",
+        "description": "Persist a deduplicated user-visible item and return its inbox ID."
+      }
+    },
+    {
+      "id": "notif_48",
+      "stepNumber": 48,
+      "phase": "3. Fan out through isolated channels",
+      "title": "Add the in-app inbox store",
+      "type": "add_component",
+      "content": "Store notification ID, recipient ID, category, rendered item/reference, read state, and retention expiry. Apply access controls and deletion policy; do not expose another user's inbox through a guessed identifier.",
+      "component": {
+        "nodeId": "notif_inbox_store",
+        "componentType": "database",
+        "label": "Recipient In-App Inbox Store",
+        "description": "Durable, recipient-partitioned in-app notifications and read state.",
+        "position": {
+          "x": 2240,
+          "y": 960
+        },
+        "properties": {
+          "componentName": "Recipient In-App Inbox Store",
+          "purpose": "Persist inbox rows partitioned by recipient_id and keyed by delivery_id; store minimal rendered content/reference, category, read state, and TTL/retention; enforce row-level recipient authorization and deletion policy.",
+          "type": "NoSQL",
+          "engine": "dynamodb",
+          "workload": "OLTP",
+          "sharding": "Hash-based",
+          "shards": 32,
+          "replication": 3,
+          "multiAZ": true,
+          "encryption": true,
+          "rbac": true,
+          "auditLog": true
+        },
+        "highlightReason": "In-app delivery is complete when the authorized inbox row is durable, not when a push was attempted."
+      }
+    },
+    {
+      "id": "notif_49",
+      "stepNumber": 49,
+      "phase": "3. Fan out through isolated channels",
+      "title": "Persist inbox state",
+      "type": "add_connection",
+      "content": "The API writes the item before reporting it available; duplicate queue replays hit the same delivery key.",
+      "connection": {
+        "edgeId": "notif_e_inapp_store",
+        "sourceNodeId": "notif_inapp_api",
+        "targetNodeId": "notif_inbox_store",
+        "connectionType": "database-connection",
+        "label": "Recipient-scoped inbox row",
+        "description": "Persist a unique in-app item and read/unread state."
+      }
+    },
+    {
+      "id": "notif_50",
+      "stepNumber": 50,
+      "phase": "3. Fan out through isolated channels",
+      "title": "Keep category and channel policy explicit",
+      "type": "update_component",
+      "content": "A marketing opt-out suppresses that recipient's marketing across the opted-out channels. Transactional and alert jobs use their configured product/legal policy, but still respect the recipient's channel permissions and security settings. An unavailable consent read fails closed for promotional traffic.",
+      "componentUpdate": {
+        "nodeId": "notif_core",
+        "properties": {
+          "purpose": "Classify each intent as marketing, transactional, or alert; apply category-specific preference policy, tenant and per-user/channel token buckets, and priority lanes. Marketing opt-out is never overridden; if current consent is unavailable, suppress promotional send rather than guessing."
+        }
+      }
+    },
+    {
+      "id": "notif_51",
+      "requirementIds": ["legacy-constraint:2"],
+      "stepNumber": 51,
+      "phase": "4. Retry, measure, and absorb spikes",
+      "title": "Add a shared dead-letter queue",
+      "type": "add_component",
+      "content": "After bounded retries, quarantine the delivery ID, channel, error class, and safe diagnostic metadata. Redrive requires operator review and reuses the original idempotency key; never dump full message bodies or addresses into the DLQ.",
+      "component": {
+        "nodeId": "notif_dlq",
+        "componentType": "queue",
+        "label": "Delivery Dead-Letter Queue",
+        "description": "Quarantine terminal delivery failures for reviewed idempotent replay.",
+        "position": {
+          "x": 1280,
+          "y": 1220
+        },
+        "properties": {
+          "componentName": "Delivery Dead-Letter Queue",
+          "purpose": "Durable quarantine for terminal errors after bounded retries; store delivery ID, channel, attempt count, error class, and redacted diagnostics; require reviewed, idempotent redrive.",
+          "visibilityTimeout": 300,
+          "maxRetries": 1,
+          "durable": true,
+          "backoff": "exponential"
+        },
+        "highlightReason": "A DLQ prevents poison messages from retrying forever while preserving a safe recovery path."
+      }
+    },
+    {
+      "id": "notif_52",
+      "requirementIds": ["legacy-constraint:2"],
+      "stepNumber": 52,
+      "phase": "4. Retry, measure, and absorb spikes",
+      "title": "Route exhausted email work to the DLQ",
+      "type": "add_connection",
+      "content": "Only transient errors are retried; after the queue's bounded attempt budget, preserve the delivery for reviewed repair/redrive.",
+      "connection": {
+        "edgeId": "notif_e_email_dlq",
+        "sourceNodeId": "notif_delivery_workers",
+        "targetNodeId": "notif_dlq",
+        "connectionType": "message-queue",
+        "label": "Email retry exhaustion",
+        "description": "Quarantine terminal email failures after bounded backoff."
+      }
+    },
+    {
+      "id": "notif_53",
+      "requirementIds": ["legacy-constraint:2"],
+      "stepNumber": 53,
+      "phase": "4. Retry, measure, and absorb spikes",
+      "title": "Route exhausted SMS work to the DLQ",
+      "type": "add_connection",
+      "content": "Do not retry invalid destinations or permanent carrier rejection; keep the failure auditable and safely redrivable only after correction.",
+      "connection": {
+        "edgeId": "notif_e_sms_dlq",
+        "sourceNodeId": "notif_delivery_workers",
+        "targetNodeId": "notif_dlq",
+        "connectionType": "message-queue",
+        "label": "SMS retry exhaustion",
+        "description": "Quarantine terminal SMS failures with redacted diagnostics."
+      }
+    },
+    {
+      "id": "notif_54",
+      "requirementIds": ["legacy-constraint:2"],
+      "stepNumber": 54,
+      "phase": "4. Retry, measure, and absorb spikes",
+      "title": "Route exhausted push work to the DLQ",
+      "type": "add_connection",
+      "content": "Invalid device tokens are suppressed/tombstoned; repeated transient provider failures use bounded backoff before quarantine.",
+      "connection": {
+        "edgeId": "notif_e_push_dlq",
+        "sourceNodeId": "notif_delivery_workers",
+        "targetNodeId": "notif_dlq",
+        "connectionType": "message-queue",
+        "label": "Push retry exhaustion",
+        "description": "Quarantine terminal push failures without exposing device tokens."
+      }
+    },
+    {
+      "id": "notif_55",
+      "requirementIds": ["legacy-constraint:2"],
+      "stepNumber": 55,
+      "phase": "4. Retry, measure, and absorb spikes",
+      "title": "Route exhausted in-app work to the DLQ",
+      "type": "add_connection",
+      "content": "Database outages retry with bounded backoff; malformed or unauthorized payloads are quarantined rather than retried indefinitely.",
+      "connection": {
+        "edgeId": "notif_e_inapp_dlq",
+        "sourceNodeId": "notif_delivery_workers",
+        "targetNodeId": "notif_dlq",
+        "connectionType": "message-queue",
+        "label": "Inbox retry exhaustion",
+        "description": "Quarantine invalid inbox jobs with recipient data redacted."
+      }
+    },
+    {
+      "id": "notif_56",
+      "stepNumber": 56,
+      "phase": "4. Retry, measure, and absorb spikes",
+      "title": "Scale on backlog age without breaking provider quotas",
+      "type": "scale_trigger",
+      "content": "Measure oldest-message age and queue depth independently for email, SMS, push, and in-app. Set each channel's scale threshold from its agreed freshness objective and provider quota; define the queue-depth measurement window explicitly, and scale only after sustained backlog growth. During sustained spikes, keep urgent alerts and transactional sends flowing, defer bulk marketing, and show queued/delayed status rather than silently dropping work. If a provider is unhealthy, open a circuit breaker and retry transient failures with full-jitter exponential backoff.",
+      "componentUpdate": {
+        "nodeId": "notif_delivery_workers",
+        "properties": {
+          "purpose": "Run isolated autoscaling consumer groups per channel; scale from per-channel queue age/depth but never above provider quotas. Before each action re-read consent/quiet-hour state, use the pinned template/variant, enforce token-bucket limits and circuit breakers, write attempt state, and retry only transient errors with full-jitter exponential backoff."
+        }
+      },
+      "scaleTrigger": {
+        "metric": "per_channel_oldest_eligible_message_age_seconds nearing configured freshness objective or queue_depth_growth across consecutive configured measurement windows",
+        "action": "Scale only that channel's consumer group up to its configured provider quota; prioritize transactional/alert lanes, defer bulk marketing during sustained overload, trip unhealthy-provider circuit breakers, and preserve all accepted intents in durable queues.",
+        "impact": "Absorbs bursts without cross-channel head-of-line blocking, vendor-limit violations, message loss, or misleading delivery promises."
+      }
+    },
+    {
+      "id": "notif_57",
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:3"],
+      "stepNumber": 57,
+      "phase": "4. Retry, measure, and absorb spikes",
+      "title": "Add the delivery event stream",
+      "type": "add_component",
+      "content": "Normalize synchronous provider acceptance, asynchronous delivery/bounce/complaint callbacks, push receipts, in-app creation, suppression, and permanent failures as append-only events. Partition and deduplicate by event ID; omit message bodies and raw addresses/tokens.",
+      "component": {
+        "nodeId": "notif_event_bus",
+        "componentType": "message-broker",
+        "label": "Delivery Status Event Stream",
+        "description": "Durable events for attempts, provider receipts, suppression, and failures.",
+        "position": {
+          "x": 2240,
+          "y": 520
+        },
+        "properties": {
+          "componentName": "Delivery Status Event Stream",
+          "purpose": "Durably stream normalized attempt, accepted, delivered, bounced, complaint, suppressed, failed, and inbox-created events; partition by delivery ID, deduplicate provider event IDs, retain redacted metadata only.",
+          "partitions": 24,
+          "replication": 3,
+          "durable": true,
+          "retention": 168
+        },
+        "highlightReason": "An event stream decouples delivery execution from reporting and handles delayed/out-of-order callbacks."
+      }
+    },
+    {
+      "id": "notif_58",
+      "stepNumber": 58,
+      "phase": "4. Retry, measure, and absorb spikes",
+      "title": "Receive signed email delivery callbacks",
+      "type": "add_connection",
+      "content": "The email provider sends signed delivery, bounce, and complaint events through the webhook gateway. Verify signatures and deduplicate callback IDs before publication.",
+      "connection": {
+        "edgeId": "notif_e_email_callback",
+        "sourceNodeId": "notif_email_provider",
+        "targetNodeId": "notif_gateway",
+        "connectionType": "http",
+        "label": "Signed email delivery callback",
+        "description": "Verify and normalize email provider delivery feedback."
+      }
+    },
+    {
+      "id": "notif_59",
+      "stepNumber": 59,
+      "phase": "4. Retry, measure, and absorb spikes",
+      "title": "Receive signed SMS delivery callbacks",
+      "type": "add_connection",
+      "content": "Normalize carrier delivery reports and provider rejection codes; callback retries must not increment a send attempt twice.",
+      "connection": {
+        "edgeId": "notif_e_sms_callback",
+        "sourceNodeId": "notif_sms_provider",
+        "targetNodeId": "notif_gateway",
+        "connectionType": "http",
+        "label": "Signed SMS delivery report",
+        "description": "Verify and normalize SMS provider receipt/status."
+      }
+    },
+    {
+      "id": "notif_60",
+      "stepNumber": 60,
+      "phase": "4. Retry, measure, and absorb spikes",
+      "title": "Receive signed push delivery callbacks",
+      "type": "add_connection",
+      "content": "Record APNs/FCM outcomes and invalid-token signals without exposing device tokens to analytics consumers.",
+      "connection": {
+        "edgeId": "notif_e_push_callback",
+        "sourceNodeId": "notif_push_provider",
+        "targetNodeId": "notif_gateway",
+        "connectionType": "http",
+        "label": "Signed push provider receipt",
+        "description": "Verify receipts and normalize invalid-device feedback."
+      }
+    },
+    {
+      "id": "notif_61",
+      "stepNumber": 61,
+      "phase": "4. Retry, measure, and absorb spikes",
+      "title": "Publish verified provider callbacks",
+      "type": "add_connection",
+      "content": "After signature verification and event-ID deduplication, the gateway publishes only normalized, redacted status events.",
+      "connection": {
+        "edgeId": "notif_e_gateway_events",
+        "sourceNodeId": "notif_gateway",
+        "targetNodeId": "notif_event_bus",
+        "connectionType": "event-stream",
+        "label": "Verified normalized delivery events",
+        "description": "Publish callbacks after verification and deduplication."
+      }
+    },
+    {
+      "id": "notif_62",
+      "stepNumber": 62,
+      "phase": "4. Retry, measure, and absorb spikes",
+      "title": "Publish in-app creation events",
+      "type": "add_connection",
+      "content": "The inbox service emits a minimal event after its database write commits; the event means item-created, not item-read.",
+      "connection": {
+        "edgeId": "notif_e_inbox_events",
+        "sourceNodeId": "notif_inapp_api",
+        "targetNodeId": "notif_event_bus",
+        "connectionType": "event-stream",
+        "label": "Inbox-created and read-state events",
+        "description": "Emit only after durable inbox state changes."
+      }
+    },
+    {
+      "id": "notif_63",
+      "requirementIds": ["legacy-requirement:5"],
+      "stepNumber": 63,
+      "phase": "4. Retry, measure, and absorb spikes",
+      "title": "Update delivery state from receipts",
+      "type": "add_connection",
+      "content": "The core consumes verified events and conditionally advances the delivery ledger. Ignore duplicate callbacks and prevent an old 'accepted' event from overwriting a later terminal delivery state.",
+      "connection": {
+        "edgeId": "notif_e_events_core",
+        "sourceNodeId": "notif_event_bus",
+        "targetNodeId": "notif_core",
+        "connectionType": "event-stream",
+        "label": "Delivery state reconciliation",
+        "description": "Apply monotonic, idempotent delivery-state transitions."
+      }
+    },
+    {
+      "id": "notif_64",
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:4"],
+      "stepNumber": 64,
+      "phase": "4. Retry, measure, and absorb spikes",
+      "title": "Add delivery and experiment analytics",
+      "type": "add_component",
+      "content": "Aggregate attempted, accepted, delivered, bounced, complaint, suppressed, failed, latency, and opt-out metrics by channel/category/campaign/variant. Measure open/click signals only where policy and user consent permit; do not retain raw IP/device identifiers or message bodies.",
+      "component": {
+        "nodeId": "notif_analytics",
+        "componentType": "analytics",
+        "label": "Delivery & Experiment Analytics",
+        "description": "Privacy-safe channel outcomes, latency, campaign and variant results.",
+        "position": {
+          "x": 2560,
+          "y": 520
+        },
+        "properties": {
+          "componentName": "Delivery & Experiment Analytics",
+          "purpose": "Consume deduplicated delivery events; materialize channel/category/campaign/variant attempt, delivery, bounce, complaint, suppression, failure, latency, and consent-permitted engagement aggregates. Exclude raw addresses, device tokens, IPs, and message bodies; expose cohort reports only.",
+          "retentionDays": 90,
+          "samplingRate": 100,
+          "realTime": true,
+          "storage": "s3"
+        },
+        "highlightReason": "Delivery status is not the same as successful delivery; analytics must distinguish every terminal state."
+      }
+    },
+    {
+      "id": "notif_65",
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:4"],
+      "stepNumber": 65,
+      "phase": "4. Retry, measure, and absorb spikes",
+      "title": "Build reports from the event stream",
+      "type": "add_connection",
+      "content": "Asynchronous consumers update analytics without slowing send/accept paths. Variant reports use the persisted stable assignment and exclude transactional/alert content.",
+      "connection": {
+        "edgeId": "notif_e_events_analytics",
+        "sourceNodeId": "notif_event_bus",
+        "targetNodeId": "notif_analytics",
+        "connectionType": "event-stream",
+        "label": "Normalized delivery and experiment events",
+        "description": "Aggregate asynchronously by channel, category, campaign, variant, and time."
+      }
+    },
+    {
+      "id": "notif_66",
+      "stepNumber": 66,
+      "phase": "4. Retry, measure, and absorb spikes",
+      "title": "Serve reports through the authenticated API",
+      "type": "add_connection",
+      "content": "The admin console queries reports through a scoped API, not directly from event storage. Authorization and audit logs apply to report access.",
+      "connection": {
+        "edgeId": "notif_e_gateway_analytics",
+        "sourceNodeId": "notif_gateway",
+        "targetNodeId": "notif_analytics",
+        "connectionType": "api-call",
+        "label": "Authorized campaign and delivery reports",
+        "description": "Read aggregate reports without exposing recipient-level event data."
+      }
+    },
+    {
+      "id": "notif_67",
+      "requirementIds": ["legacy-requirement:5"],
+      "stepNumber": 67,
+      "phase": "4. Retry, measure, and absorb spikes",
+      "title": "Keep request counts and delivery attempts distinct",
+      "type": "update_component",
+      "content": "A single accepted notification request may create multiple channel delivery attempts, each with its own retry history and final status. Report both counts and report queue delay separately from provider delivery latency; do not label queue acceptance as delivered.",
+      "componentUpdate": {
+        "nodeId": "notif_core",
+        "properties": {
+          "purpose": "Track parent notification request separately from per-channel delivery IDs and attempts; expose accepted, queued, attempted, provider-accepted, delivered, bounced, suppressed, failed, and delayed states with event timestamps. Never report queue acceptance as recipient delivery."
+        }
+      }
+    },
+    {
+      "id": "notif_68",
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"],
+      "stepNumber": 68,
+      "phase": "4. Retry, measure, and absorb spikes",
+      "title": "Add operational monitoring",
+      "type": "add_component",
+      "content": "Alert on request p95, per-channel oldest queue age/depth, consumer throughput, provider throttles/circuit state, retry rate, DLQ growth, callback lag, suppression count, and analytics freshness. Dashboards must separate the provisional enqueue goal from provider delivery outcomes.",
+      "component": {
+        "nodeId": "notif_monitor",
+        "componentType": "monitoring",
+        "label": "Notification Delivery Monitoring",
+        "description": "SLOs, provider health, queue lag, retries, DLQ, and freshness.",
+        "position": {
+          "x": 1920,
+          "y": 1160
+        },
+        "properties": {
+          "componentName": "Notification Delivery Monitoring",
+          "purpose": "Monitor request p95, per-channel queue age/depth and catch-up rate, worker throughput, provider throttles/circuit breakers, retry/DLQ growth, callback lag, suppression, and analytics freshness; distinguish provisional enqueue p95 <100ms from delivery latency.",
+          "stack": "Prometheus + Grafana",
+          "metrics": true,
+          "alerts": true,
+          "retention": 30
+        },
+        "highlightReason": "A healthy API can hide a stalled queue or a provider that stopped delivering."
+      }
+    },
+    {
+      "id": "notif_69",
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"],
+      "stepNumber": 69,
+      "phase": "4. Retry, measure, and absorb spikes",
+      "title": "Monitor every channel queue",
+      "type": "add_connection",
+      "content": "Export each queue's oldest eligible item age, ready/in-flight depth, retry counts, and redrive counts.",
+      "connection": {
+        "edgeId": "notif_e_email_monitor",
+        "sourceNodeId": "notif_email_queue",
+        "targetNodeId": "notif_monitor",
+        "connectionType": "observability",
+        "label": "Email queue health signals",
+        "description": "Alert before the provisional delivery-start target is missed."
+      }
+    },
+    {
+      "id": "notif_70",
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"],
+      "stepNumber": 70,
+      "phase": "4. Retry, measure, and absorb spikes",
+      "title": "Monitor SMS backlog separately",
+      "type": "add_connection",
+      "content": "Track carrier throttle responses and the SMS lane's own catch-up rate.",
+      "connection": {
+        "edgeId": "notif_e_sms_monitor",
+        "sourceNodeId": "notif_sms_queue",
+        "targetNodeId": "notif_monitor",
+        "connectionType": "observability",
+        "label": "SMS queue and provider health",
+        "description": "Scale within SMS quotas and defer only eligible bulk traffic."
+      }
+    },
+    {
+      "id": "notif_71",
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"],
+      "stepNumber": 71,
+      "phase": "4. Retry, measure, and absorb spikes",
+      "title": "Monitor push backlog separately",
+      "type": "add_connection",
+      "content": "Track invalid-token rate and app/region queue age to identify platform-specific incidents.",
+      "connection": {
+        "edgeId": "notif_e_push_monitor",
+        "sourceNodeId": "notif_push_queue",
+        "targetNodeId": "notif_monitor",
+        "connectionType": "observability",
+        "label": "Push queue and token health",
+        "description": "Detect app-specific provider failures without affecting other channels."
+      }
+    },
+    {
+      "id": "notif_72",
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"],
+      "stepNumber": 72,
+      "phase": "4. Retry, measure, and absorb spikes",
+      "title": "Monitor inbox durability",
+      "type": "add_connection",
+      "content": "Track in-app write latency, permission failures, duplicate suppression, and inbox-store errors.",
+      "connection": {
+        "edgeId": "notif_e_inapp_monitor",
+        "sourceNodeId": "notif_inapp_queue",
+        "targetNodeId": "notif_monitor",
+        "connectionType": "observability",
+        "label": "In-app queue and persistence health",
+        "description": "Alert on inbox delay or failed durable writes."
+      }
+    },
+    {
+      "id": "notif_73",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"],
+      "stepNumber": 73,
+      "phase": "4. Retry, measure, and absorb spikes",
+      "title": "Monitor event and worker health",
+      "type": "add_connection",
+      "content": "Track consumer lag, provider callback lag, worker saturation, and event deduplication so late receipts cannot silently distort reports.",
+      "connection": {
+        "edgeId": "notif_e_events_monitor",
+        "sourceNodeId": "notif_event_bus",
+        "targetNodeId": "notif_monitor",
+        "connectionType": "observability",
+        "label": "Event-stream and consumer lag",
+        "description": "Observe reconciliation and analytics freshness end to end."
+      }
+    },
+    {
+      "id": "notif_74",
+      "stepNumber": 74,
+      "phase": "4. Retry, measure, and absorb spikes",
+      "title": "Review the complete delivery lifecycle",
+      "type": "explanation",
+      "content": "**Command:** product event/admin console → authenticated gateway → policy/orchestrator → current consent and template/experiment rules → idempotency + transactional outbox → channel relay. **Delivery:** isolated email/SMS/push/in-app queues → quota-aware workers → just-in-time consent recheck → adapter or durable inbox write. **Status:** provider callbacks are signature-verified, normalized, and deduplicated → event stream → delivery ledger reconciliation and privacy-safe analytics. Marketing A/B assignments are stable across retries; opt-outs suppress queued marketing; bounded retries end in reviewed DLQ redrive; traffic spikes add per-channel backlog without cross-channel blocking. The numeric volume and latency targets are explicit planning assumptions to validate, not facts in the prompt. Numeric component settings—including shard and replica counts, worker concurrency, cache TTL, queue visibility and retry budgets, event partitions and retention, analytics sampling and retention, and monitoring retention—are illustrative configuration assumptions, not values supplied by the brief; validate them against load tests, provider quotas, recovery objectives, and privacy policy."
+    }
+  ]
+}

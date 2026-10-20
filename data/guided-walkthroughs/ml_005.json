@@ -1,0 +1,625 @@
+{
+  "problem_id": "ml_005",
+  "version": "1.0.0-review-draft",
+  "totalSteps": 46,
+  "phases": [
+    {
+      "name": "Define the signal contract and ingestion",
+      "stepRange": [1, 8],
+      "description": "Separate the scale and quality targets from assumptions, then establish metric sources, configuration, streaming intake, and replayable buffering."
+    },
+    {
+      "name": "Preserve history and separate online from offline ML",
+      "stepRange": [9, 18],
+      "description": "Add hot and durable history, a controlled training path, versioned models, online scoring, correlation, alert delivery, query service, and operations."
+    },
+    {
+      "name": "Connect the ingest, configuration, and learning paths",
+      "stepRange": [19, 30],
+      "description": "Wire ingestion and replay, serve metric-specific policy, and train from point-in-time historical data without putting batch work on the detection path."
+    },
+    {
+      "name": "Complete scoring, query, and alert flows",
+      "stepRange": [31, 42],
+      "description": "Correlate detections with recent signals, route alerts reliably, support historical investigations, and expose health telemetry."
+    },
+    {
+      "name": "Validate operational targets and failure behavior",
+      "stepRange": [43, 46],
+      "description": "Make latency and false-positive targets measurable and test missing data, overload, recovery, and model rollback before relying on automation."
+    }
+  ],
+  "steps": [
+    {
+      "id": "ts_scope",
+      "stepNumber": 1,
+      "phase": "Define the signal contract and ingestion",
+      "title": "Turn the brief into measurable acceptance criteria",
+      "type": "explanation",
+      "content": "The brief requires point, contextual, and collective anomaly detection; seasonality-aware adaptive thresholds; 100k+ concurrent time-series; millions of metrics; explanations from correlated signals; per-metric rules; smart grouping; and alert/incident integration. The <1 minute detection-latency and <1% false-positive-rate values are acceptance targets, not achieved results. Treat 100k+ concurrent time-series and scale to millions of metrics as separate capacity dimensions; the brief does not specify sample cadence or a points-per-second target. Preserve source timestamps, tenant/service identity, unit, cadence, and rule/model version on every point.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "ts_sources",
+      "stepNumber": 2,
+      "phase": "Define the signal contract and ingestion",
+      "title": "Collect measurements without erasing their context",
+      "type": "add_component",
+      "content": "Represent agents and monitoring exporters at the boundary. They batch and compress samples, authenticate the tenant, and attach timestamps, metric identity, units, declared cadence, and source health. Preserve gaps and late samples as data-quality signals rather than synthesizing zero values. Do not collapse labels such as region or service if they are needed for diagnosis; enforce a cardinality policy before accepting arbitrary dimensions.",
+      "requirementIds": ["legacy-constraint:3", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "ts_sources",
+        "componentType": "edge-server",
+        "label": "Metric Collectors",
+        "description": "Authenticated monitoring agents and exporters that batch samples and preserve source timestamps and dimensions.",
+        "position": {"x": 0, "y": 260},
+        "highlightReason": "The ingestion boundary is where timestamp, tenant, units, and cardinality must remain trustworthy.",
+        "properties": {"componentName": "Metric Collectors", "purpose": "Collect and batch metric samples with source timestamps, tenant/service labels, units, and declared cadence; expose missing or delayed samples and bound arbitrary dimensions without converting absence to zero."}
+      }
+    },
+    {
+      "id": "ts_api",
+      "stepNumber": 3,
+      "phase": "Define the signal contract and ingestion",
+      "title": "Expose a protected control and query entry point",
+      "type": "add_component",
+      "content": "Use one authenticated API boundary for metric definitions, anomaly rules, and investigation queries. The high-volume sample stream uses its streaming intake path rather than sending every point through synchronous CRUD handlers.",
+      "requirementIds": ["legacy-requirement:6"],
+      "component": {
+        "nodeId": "ts_api",
+        "componentType": "api-gateway",
+        "label": "Rules & Query API",
+        "description": "Authenticated, tenant-scoped entry for metric policy management and anomaly investigation queries.",
+        "position": {"x": 230, "y": 40},
+        "highlightReason": "Control-plane and investigator access need explicit authentication, quotas, and tenant boundaries.",
+        "properties": {"componentName": "Rules & Query API", "purpose": "Expose authenticated, tenant-scoped rule CRUD and anomaly/history queries with request validation, quotas, and audit context; do not proxy every telemetry point synchronously."}
+      }
+    },
+    {
+      "id": "ts_rules",
+      "stepNumber": 4,
+      "phase": "Define the signal contract and ingestion",
+      "title": "Validate per-metric definitions and policy versions",
+      "type": "add_component",
+      "content": "Validate units, declared cadence, dimensions, detector types, adaptive-threshold policy, suppression windows, and retention before a per-metric rule becomes active. Version changes and retain who changed them so an incident can be explained using the policy that was active at detection time. A configured policy is not evidence that the false-positive target has been met.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "ts_rules",
+        "componentType": "backend-server",
+        "label": "Metric Policy Service",
+        "description": "Validates tenant-scoped metric definitions and publishes immutable policy versions.",
+        "position": {"x": 470, "y": 30},
+        "highlightReason": "Custom definitions must be safe, versioned, and interpretable at the time an alert was produced.",
+        "properties": {"componentName": "Metric Policy Service", "purpose": "Validate detector, unit, cadence, dimensions, thresholds, suppression, and retention; publish immutable per-tenant policy versions with change audit."}
+      }
+    },
+    {
+      "id": "ts_config",
+      "stepNumber": 5,
+      "phase": "Define the signal contract and ingestion",
+      "title": "Persist rule versions and detector state",
+      "type": "add_component",
+      "content": "Store definitions and activation history separately from transient stream windows. A rule update must be atomic and carry a version; online workers should see either the prior complete rule or the new complete rule, never a partially written configuration.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "ts_config",
+        "componentType": "database",
+        "label": "Metric Rules & State",
+        "description": "Versioned tenant policies, detector state, and alert-group deduplication metadata.",
+        "position": {"x": 700, "y": 30},
+        "highlightReason": "Rule history and keyed state make customized detection reproducible across deployments.",
+        "properties": {"componentName": "Metric Rules & State", "purpose": "Persist atomic per-metric rule versions, activation timestamps, declared cadence, adaptive-threshold state, and idempotent group keys; scope every key by tenant and metric identity."}
+      }
+    },
+    {
+      "id": "ts_ingest",
+      "stepNumber": 6,
+      "phase": "Define the signal contract and ingestion",
+      "title": "Partition and normalize the streaming intake",
+      "type": "add_component",
+      "content": "Partition by a stable tenant and series key so one series has ordered updates while unrelated series scale horizontally. Treat the stated 100k+ concurrent time-series requirement separately from the millions-of-metrics scale constraint: active-series concurrency and total metric cardinality are different measurements. Preserve each metric's declared cadence, detect gaps against it, normalize units and timestamps, and use event-time watermarks so late samples remain visible instead of being silently treated as current. Measure intake and processing against the <1 minute end-to-end detection-latency target; reject malformed records with a bounded dead-letter path.",
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "ts_ingest",
+        "componentType": "stream-processor",
+        "label": "Normalize & Window Stream",
+        "description": "Horizontally partitioned event-time pipeline for validation, normalization, bounded windows, and keyed state.",
+        "position": {"x": 700, "y": 270},
+        "highlightReason": "Streaming event-time processing handles burst load and irregular samples without blocking on model training.",
+        "properties": {"componentName": "Normalize & Window Stream", "purpose": "Partition by tenant/series for the stated 100k+ concurrent-series requirement; measure separately from total metric cardinality; preserve each metric cadence, detect gaps, normalize units, maintain event-time windows, expose late/missing samples, and bound state with a dead-letter path."}
+      }
+    },
+    {
+      "id": "ts_buffer",
+      "stepNumber": 7,
+      "phase": "Define the signal contract and ingestion",
+      "title": "Buffer accepted events for backpressure and replay",
+      "type": "add_component",
+      "content": "A durable partitioned buffer absorbs short consumer outages and supports bounded replay. It is not permission to accumulate unbounded lag: measure oldest-event age as one contribution to the <1 minute end-to-end detection-latency target, and cap retention. Partition and admission policies must also support the scale-to-millions-of-metrics constraint; validate this separately from active-series concurrency. Meeting a buffer-age or scale test alone does not prove the end-to-end latency target.",
+      "requirementIds": ["legacy-constraint:1", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "ts_buffer",
+        "componentType": "queue",
+        "label": "Durable Sample Buffer",
+        "description": "Partitioned replayable event buffer with bounded retention and consumer-lag monitoring.",
+        "position": {"x": 940, "y": 270},
+        "highlightReason": "Replay and explicit backpressure protect detection from transient consumer failures.",
+        "properties": {"componentName": "Durable Sample Buffer", "purpose": "Retain validated telemetry for bounded replay; preserve per-series partition order; expose oldest-event age and apply explicit quotas/backpressure before lag consumes the detection SLO."}
+      }
+    },
+    {
+      "id": "ts_hot",
+      "stepNumber": 8,
+      "phase": "Define the signal contract and ingestion",
+      "title": "Keep recent history available for contextual scoring",
+      "type": "add_component",
+      "content": "Maintain a bounded hot history for recent windows, neighboring series, and investigation queries. Store cadence, unit, missingness, and policy version with each observation. This store supports explanation and correlation; it should not become the only durable copy of raw measurements.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "ts_hot",
+        "componentType": "database",
+        "label": "Recent Series Store",
+        "description": "Time-bounded queryable history and keyed features used by online detection and investigations.",
+        "position": {"x": 1180, "y": 270},
+        "highlightReason": "Contextual and collective detectors need aligned recent history, while retention and cardinality must remain bounded.",
+        "properties": {"componentName": "Recent Series Store", "purpose": "Keep bounded recent points, missingness markers, units, cadence, and versioned features for contextual scoring and investigations; partition and expire by tenant/time."}
+      }
+    },
+    {
+      "id": "ts_archive",
+      "stepNumber": 9,
+      "phase": "Preserve history and separate online from offline ML",
+      "title": "Retain immutable history for backtests and recovery",
+      "type": "add_component",
+      "content": "Write compacted, time-partitioned source records and rule/model references to durable object storage. Keep a governed retention policy and encryption keys by tenant or data class. Historical replay must preserve what was known at each prediction time so later data cannot leak into training or backtests.",
+      "requirementIds": ["legacy-requirement:2"],
+      "component": {
+        "nodeId": "ts_archive",
+        "componentType": "object-storage",
+        "label": "Immutable Metric History",
+        "description": "Encrypted, lifecycle-managed compacted samples and point-in-time policy/model references.",
+        "position": {"x": 1180, "y": 560},
+        "highlightReason": "Durable, point-in-time history supports reproducible models, historical queries, and replay after corruption.",
+        "properties": {"componentName": "Immutable Metric History", "purpose": "Store encrypted, time-partitioned compacted samples plus event-time, tenant, rule/model versions, and retention metadata for leakage-safe backtests and replay."}
+      }
+    },
+    {
+      "id": "ts_training",
+      "stepNumber": 10,
+      "phase": "Preserve history and separate online from offline ML",
+      "title": "Train and evaluate outside the live scoring path",
+      "type": "add_component",
+      "content": "Use delayed, reviewed labels where available and time-ordered train/validation splits. Compare point, contextual, and collective detectors and seasonal/trend baselines by metric cohort. Evaluate false-positive rate against the brief's <1% target and report recall separately; the brief defines no recall threshold. Stratify results by declared metric cadence and missing/irregular-data conditions. Record the evaluation window, gap-handling policy, and detector configuration. Keep offline training out of the live detection path.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "ts_training",
+        "componentType": "model-training",
+        "label": "Offline Detector Training",
+        "description": "Time-aware training and cohort backtesting for seasonal, adaptive, and learned detectors.",
+        "position": {"x": 1450, "y": 560},
+        "highlightReason": "Offline evaluation reduces leakage and lets teams measure quality before online rollout.",
+        "properties": {"componentName": "Offline Detector Training", "purpose": "Train and time-split backtest detector candidates by metric cohort using reviewed labels and point-in-time features; compare seasonal baselines, calibration, detection delay, and false-positive rate."}
+      }
+    },
+    {
+      "id": "ts_registry",
+      "stepNumber": 11,
+      "phase": "Preserve history and separate online from offline ML",
+      "title": "Version and approve detector artifacts",
+      "type": "add_component",
+      "content": "Register the model together with its feature schema, training range, threshold calibration, evaluation report, and compatible per-metric policy version. Promotion requires measured false-positive rate to be evaluated against the brief's <1% target for relevant cohorts, plus a rollback target; a single aggregate metric can hide a failing tenant or seasonal segment. Registration is not evidence the target has passed.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:2"],
+      "component": {
+        "nodeId": "ts_registry",
+        "componentType": "model-registry",
+        "label": "Detector Registry",
+        "description": "Approved immutable model and calibration artifacts with cohort evaluation and rollback metadata.",
+        "position": {"x": 1710, "y": 560},
+        "highlightReason": "Immutable versions make every detection reproducible and allow safe rollback.",
+        "properties": {"componentName": "Detector Registry", "purpose": "Store immutable detector, feature-schema, calibration, training-data window, cohort metrics, policy compatibility, approval, and rollback references."}
+      }
+    },
+    {
+      "id": "ts_scorer",
+      "stepNumber": 12,
+      "phase": "Preserve history and separate online from offline ML",
+      "title": "Score online with bounded and explainable work",
+      "type": "add_component",
+      "content": "Combine point checks, seasonal/trend baselines, and contextual or collective detectors only when their required history is present. Apply the active per-metric adaptive-threshold policy and cadence-specific windows; keep missing or irregular observations explicit rather than silently imputing them. Return a score, reason codes, correlated signal references, model/rule versions, and confidence. Measure the full path against the <1 minute detection-latency target; timeout or insufficient history must produce an explicit degraded result, not a fabricated normal reading. These are design behaviors to validate, not proof that latency or quality targets are achieved.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "ts_scorer",
+        "componentType": "model-serving",
+        "label": "Online Anomaly Scorer",
+        "description": "Versioned low-latency detector ensemble with explicit missing-history and stale-model behavior.",
+        "position": {"x": 1970, "y": 300},
+        "highlightReason": "The online path must meet the one-minute budget and explain what evidence caused a score.",
+        "properties": {"componentName": "Online Anomaly Scorer", "purpose": "Run bounded point, seasonal/contextual, and collective detectors against current features; emit scores, reason codes, contributing signal references, confidence, and exact rule/model versions; mark insufficient history explicitly."}
+      }
+    },
+    {
+      "id": "ts_correlator",
+      "stepNumber": 13,
+      "phase": "Preserve history and separate online from offline ML",
+      "title": "Correlate signals and group related detections",
+      "type": "add_component",
+      "content": "Join detections only across bounded time and dependency scopes, then group by stable incident keys with deduplication and expiry. Attach the related metric windows and causal candidates as evidence, not as proven root cause. A group update must be idempotent so replay does not create a second incident.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7"],
+      "component": {
+        "nodeId": "ts_correlator",
+        "componentType": "backend-server",
+        "label": "Correlation & Grouping",
+        "description": "Bounded cross-signal correlation with stable deduplication keys and evidence-linked explanations.",
+        "position": {"x": 2230, "y": 300},
+        "highlightReason": "Grouping reduces alert fatigue while preserving evidence and avoiding claims that correlation proves causality.",
+        "properties": {"componentName": "Correlation & Grouping", "purpose": "Correlate versioned detections over bounded event-time and dependency scopes; group with stable idempotency keys; attach contributing windows and confidence as evidence, not definitive root cause."}
+      }
+    },
+    {
+      "id": "ts_alert_queue",
+      "stepNumber": 14,
+      "phase": "Preserve history and separate online from offline ML",
+      "title": "Make alert handoff durable and deduplicated",
+      "type": "add_component",
+      "content": "Persist alert delivery intent before sending to external incident systems. Retry transient errors with backoff and a dead-letter path, use stable incident/event IDs, and record delivery outcomes. This protects against a process crash between detection and notification without promising exactly-once delivery from downstream providers.",
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8"],
+      "component": {
+        "nodeId": "ts_alert_queue",
+        "componentType": "queue",
+        "label": "Alert Delivery Outbox",
+        "description": "Durable, retryable alert events with idempotency keys and bounded dead-letter handling.",
+        "position": {"x": 2490, "y": 300},
+        "highlightReason": "A durable handoff prevents transient integration failures from silently losing actionable detections.",
+        "properties": {"componentName": "Alert Delivery Outbox", "purpose": "Persist alert intent with stable incident/event IDs, retry transient failures with backoff, surface dead letters, and track downstream acknowledgment without claiming exactly-once provider delivery."}
+      }
+    },
+    {
+      "id": "ts_integrations",
+      "stepNumber": 15,
+      "phase": "Preserve history and separate online from offline ML",
+      "title": "Integrate with alert and incident destinations",
+      "type": "add_component",
+      "content": "Fan out to configured alerting and incident systems using destination-specific authentication and rate limits. Respect silences and maintenance windows at delivery time while retaining the original detection and suppression decision for audit.",
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8"],
+      "component": {
+        "nodeId": "ts_integrations",
+        "componentType": "backend-server",
+        "label": "Alert & Incident Integrations",
+        "description": "Destination adapters for paging, notification, and incident-management systems.",
+        "position": {"x": 2750, "y": 300},
+        "highlightReason": "Integration retries, silences, and destination failures need explicit, observable handling.",
+        "properties": {"componentName": "Alert & Incident Integrations", "purpose": "Deliver versioned alert groups to configured paging and incident systems using scoped credentials, destination quotas, maintenance/silence checks, idempotent updates, and delivery receipts."}
+      }
+    },
+    {
+      "id": "ts_query",
+      "stepNumber": 16,
+      "phase": "Preserve history and separate online from offline ML",
+      "title": "Serve investigations from bounded query paths",
+      "type": "add_component",
+      "content": "Provide tenant-scoped queries for metric history, anomaly evidence, and group membership. Enforce time-range and result-size limits so interactive investigations cannot starve the streaming detection path.",
+      "requirementIds": ["legacy-requirement:5"],
+      "component": {
+        "nodeId": "ts_query",
+        "componentType": "backend-server",
+        "label": "Investigation Query Service",
+        "description": "Tenant-isolated, bounded history and anomaly-evidence queries for dashboards and incident tools.",
+        "position": {"x": 1450, "y": 30},
+        "highlightReason": "Historical investigation needs query limits and isolation from ingestion and online scoring.",
+        "properties": {"componentName": "Investigation Query Service", "purpose": "Serve tenant-scoped anomaly evidence and historical time ranges with pagination, retention checks, query budgets, and no synchronous dependency on model training."}
+      }
+    },
+    {
+      "id": "ts_monitoring",
+      "stepNumber": 17,
+      "phase": "Preserve history and separate online from offline ML",
+      "title": "Observe service health and model quality separately",
+      "type": "add_component",
+      "content": "Measure point/contextual/collective detector quality, seasonal/trend cohorts, adaptive-threshold behavior, per-metric policy coverage, correlated-signal explanation evidence, alert-group quality, and integration delivery. Track active concurrent time-series separately against the 100k+ requirement and total metric cardinality against the millions-of-metrics scale constraint. Measure end-to-end detection latency against <1 minute and false-positive rate against <1% as separate targets; neither is implied by healthy infrastructure. Break results out by metric cadence and missing/irregular-data conditions, and keep business-quality labels distinct from platform availability.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "ts_monitoring",
+        "componentType": "monitoring",
+        "label": "Pipeline & Model Observability",
+        "description": "Service telemetry, data quality, SLOs, alert delivery, and cohort-level detector evaluation.",
+        "position": {"x": 1970, "y": 600},
+        "highlightReason": "Reliability includes detection quality and freshness, not just process uptime.",
+        "properties": {"componentName": "Pipeline & Model Observability", "purpose": "Track freshness, lag, data quality, scoring latency, cohort false positives/recall, model coverage, alert receipts, and SLO burn; separate service health from detector quality."}
+      }
+    },
+    {
+      "id": "ts_online_offline",
+      "stepNumber": 18,
+      "phase": "Preserve history and separate online from offline ML",
+      "title": "Choose bounded detectors before adding model complexity",
+      "type": "decision_point",
+      "content": "Start with point checks, seasonal/trend baselines, and metric-specific adaptive-threshold policies; add contextual or collective detectors only when backtests justify them. Choose windows using each metric's declared cadence rather than forcing one global granularity. Keep scoring bounded and return an explicit unknown/degraded result for missing, irregular, or insufficient history instead of filling every gap with zero. Measure the live path against the <1 minute detection-latency target without treating the design choice as proof it is met.",
+      "decision": {
+        "question": "How should the platform combine statistical rules and machine-learned detectors?",
+        "chosen": "Use a versioned ensemble with cheap point/seasonal checks on the hot path and selectively invoke bounded contextual/collective scoring when the needed history exists.",
+        "chosenReason": "It preserves a predictable latency budget, supports heterogeneous metric cadences, and makes quality measurable by detector cohort.",
+        "alternatives": [
+          {"option": "Use only fixed thresholds", "tradeoff": "Simple and cheap, but misses changing baselines, seasonality, and contextual/collective behavior."},
+          {"option": "Use one complex model for every point", "tradeoff": "Can increase cost and latency, complicate explanations, and fail when history or labels are sparse."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ts_edge_collect",
+      "stepNumber": 19,
+      "phase": "Connect the ingest, configuration, and learning paths",
+      "title": "Send timestamped samples to the stream",
+      "type": "add_connection",
+      "content": "Collectors deliver batched samples with stable per-series keys, source timestamps, units, declared cadence, and explicit quality markers. This keyed path is exercised against the 100k+ concurrent time-series requirement and separately against the millions-of-metrics cardinality constraint. The receiver rejects invalid timestamps, preserves missing or irregular samples, and records source delay so late or clock-skewed data can be handled explicitly.",
+      "connection": {"edgeId": "ts_e01", "sourceNodeId": "ts_sources", "targetNodeId": "ts_ingest", "connectionType": "event-stream", "label": "Timestamped metric batches", "description": "Authenticated, keyed samples with source time, units, tenant, and bounded dimensions."},
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "ts_edge_api_rules",
+      "stepNumber": 20,
+      "phase": "Connect the ingest, configuration, and learning paths",
+      "title": "Route rule changes through validation",
+      "type": "add_connection",
+      "content": "Only validated, authorized, versioned policy changes reach the policy service; query traffic is handled separately from the sample stream.",
+      "connection": {"edgeId": "ts_e02", "sourceNodeId": "ts_api", "targetNodeId": "ts_rules", "connectionType": "http", "label": "Authenticated policy requests", "description": "Tenant-scoped rule CRUD, validation, and audit context."},
+      "requirementIds": ["legacy-requirement:6"]
+    },
+    {
+      "id": "ts_edge_rules_config",
+      "stepNumber": 21,
+      "phase": "Connect the ingest, configuration, and learning paths",
+      "title": "Commit complete rule versions atomically",
+      "type": "add_connection",
+      "content": "The service stores an immutable per-metric policy version, adaptive-threshold state, declared cadence, and activation time so workers can consistently select the configuration applicable to an event.",
+      "connection": {"edgeId": "ts_e03", "sourceNodeId": "ts_rules", "targetNodeId": "ts_config", "connectionType": "database-connection", "label": "Validated policy version", "description": "Atomic rule versions, detector state, and idempotent group metadata."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "ts_edge_policy_stream",
+      "stepNumber": 22,
+      "phase": "Connect the ingest, configuration, and learning paths",
+      "title": "Apply policy without making the stream depend on CRUD latency",
+      "type": "add_connection",
+      "content": "Distribute versioned per-metric adaptive-threshold and cadence policies as events or bounded snapshots; cache the last known good version and report stale policy instead of blocking ingestion on a database read per sample. This keeps rule lookup off the latency-sensitive path and supports the millions-of-metrics scale constraint without asserting a throughput figure.",
+      "connection": {"edgeId": "ts_e04", "sourceNodeId": "ts_rules", "targetNodeId": "ts_ingest", "connectionType": "data-flow", "label": "Versioned metric policies", "description": "Validated cadence, units, detector selection, and cardinality rules."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "ts_edge_buffer",
+      "stepNumber": 23,
+      "phase": "Connect the ingest, configuration, and learning paths",
+      "title": "Persist accepted records before downstream processing",
+      "type": "add_connection",
+      "content": "Use bounded retention and stable partition keys; publish oldest-event age and apply admission control when downstream processing cannot keep up. Validate buffering at the stated 100k+ concurrent time-series requirement separately from total metric cardinality in the millions; the brief specifies neither a sampling cadence nor a queue-throughput number.",
+      "connection": {"edgeId": "ts_e05", "sourceNodeId": "ts_ingest", "targetNodeId": "ts_buffer", "connectionType": "event-stream", "label": "Validated replayable samples", "description": "Per-series ordered telemetry with a visible enqueue timestamp."},
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "ts_edge_replay",
+      "stepNumber": 24,
+      "phase": "Connect the ingest, configuration, and learning paths",
+      "title": "Replay from a checkpoint after consumer failure",
+      "type": "add_connection",
+      "content": "The stream processor resumes from committed offsets and deduplicates by tenant, series, and source event identity. Replayed points must not create duplicate alert groups.",
+      "connection": {"edgeId": "ts_e06", "sourceNodeId": "ts_buffer", "targetNodeId": "ts_ingest", "connectionType": "message-queue", "label": "Checkpointed replay", "description": "Bounded retry and recovery path with per-key ordering and idempotent processing."},
+      "requirementIds": ["legacy-requirement:7"]
+    },
+    {
+      "id": "ts_edge_hot",
+      "stepNumber": 25,
+      "phase": "Connect the ingest, configuration, and learning paths",
+      "title": "Update recent history and window features",
+      "type": "add_connection",
+      "content": "Write bounded recent samples and feature windows with event time, each metric's declared cadence, missingness, and policy version. Keep cadence-specific windows distinct and avoid treating an absent point as zero unless the metric contract explicitly defines that behavior.",
+      "connection": {"edgeId": "ts_e07", "sourceNodeId": "ts_ingest", "targetNodeId": "ts_hot", "connectionType": "data-flow", "label": "Recent points & window features", "description": "Time-bounded, versioned context for scoring, correlation, and investigations."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ts_edge_archive",
+      "stepNumber": 26,
+      "phase": "Connect the ingest, configuration, and learning paths",
+      "title": "Archive point-in-time source data",
+      "type": "add_connection",
+      "content": "Persist compressed samples and their source timestamps and policy references independently of hot retention.",
+      "connection": {"edgeId": "ts_e08", "sourceNodeId": "ts_ingest", "targetNodeId": "ts_archive", "connectionType": "data-flow", "label": "Compacted durable history", "description": "Encrypted point-in-time telemetry for retention, backfill, and reproducible evaluation."},
+      "requirementIds": ["legacy-requirement:2"]
+    },
+    {
+      "id": "ts_edge_train_archive",
+      "stepNumber": 27,
+      "phase": "Connect the ingest, configuration, and learning paths",
+      "title": "Backtest from historical data without future leakage",
+      "type": "add_connection",
+      "content": "Training reads event-time partitions and reconstructs the features, label availability, rule versions, missingness, and metric cadence that were knowable at each historical cutoff; backtests preserve gaps and irregular intervals rather than silently filling them.",
+      "connection": {"edgeId": "ts_e09", "sourceNodeId": "ts_archive", "targetNodeId": "ts_training", "connectionType": "data-flow", "label": "Point-in-time training windows", "description": "Historical data for time-ordered splits, replay, and cohort backtests."},
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ts_edge_train_hot",
+      "stepNumber": 28,
+      "phase": "Connect the ingest, configuration, and learning paths",
+      "title": "Use hot state only for bounded recent evaluation",
+      "type": "add_connection",
+      "content": "Recent windows can support online calibration and short backtests, but immutable archive partitions remain the source for reproducible model evaluation.",
+      "connection": {"edgeId": "ts_e10", "sourceNodeId": "ts_hot", "targetNodeId": "ts_training", "connectionType": "data-flow", "label": "Recent feature samples", "description": "Bounded recent windows for drift checks and short-horizon evaluation."},
+      "requirementIds": ["legacy-requirement:2"]
+    },
+    {
+      "id": "ts_edge_registry",
+      "stepNumber": 29,
+      "phase": "Connect the ingest, configuration, and learning paths",
+      "title": "Publish only evaluated immutable models",
+      "type": "add_connection",
+      "content": "A model is eligible for serving only after cohort-level validation and explicit approval; bind it to the compatible per-metric policy versions and preserve a known-good artifact for immediate rollback.",
+      "connection": {"edgeId": "ts_e11", "sourceNodeId": "ts_training", "targetNodeId": "ts_registry", "connectionType": "data-flow", "label": "Approved detector artifacts", "description": "Model, feature schema, calibration, cohort metrics, and rollback metadata."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6"]
+    },
+    {
+      "id": "ts_edge_model",
+      "stepNumber": 30,
+      "phase": "Connect the ingest, configuration, and learning paths",
+      "title": "Deploy a pinned detector version to online scoring",
+      "type": "add_connection",
+      "content": "The serving fleet pins an approved model, feature schema, and compatible per-metric policy versions; rollouts are canaried by cohort and can revert without changing historical records.",
+      "connection": {"edgeId": "ts_e12", "sourceNodeId": "ts_registry", "targetNodeId": "ts_scorer", "connectionType": "data-flow", "label": "Pinned model & calibration", "description": "Immutable approved detector version with cohort-specific thresholds."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6"]
+    },
+    {
+      "id": "ts_edge_config_score",
+      "stepNumber": 31,
+      "phase": "Complete scoring, query, and alert flows",
+      "title": "Select the applicable metric rule at event time",
+      "type": "add_connection",
+      "content": "Resolve the per-metric adaptive-threshold policy version effective for the sample timestamp, preserve the metric's declared cadence, and include both policy version and cadence in score context.",
+      "connection": {"edgeId": "ts_e13", "sourceNodeId": "ts_config", "targetNodeId": "ts_scorer", "connectionType": "database-connection", "label": "Versioned rule & threshold", "description": "Tenant-scoped detector policy and explicit activation interval."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "ts_edge_score",
+      "stepNumber": 32,
+      "phase": "Complete scoring, query, and alert flows",
+      "title": "Score windows inside the freshness budget",
+      "type": "add_connection",
+      "content": "Use each metric's cadence to form scoring windows, preserve gaps and irregular intervals, and bound feature lookup and scoring work. Measure the full end-to-end detection path against the brief's <1 minute latency target. If context is unavailable or stale, emit a detectable degraded state rather than silently classifying the series as normal; the design does not itself prove the target is met.",
+      "connection": {"edgeId": "ts_e14", "sourceNodeId": "ts_ingest", "targetNodeId": "ts_scorer", "connectionType": "api-call", "label": "Window features for scoring", "description": "Point, contextual, and collective detector input with freshness metadata."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ts_edge_correlation",
+      "stepNumber": 33,
+      "phase": "Complete scoring, query, and alert flows",
+      "title": "Attach correlated evidence before grouping",
+      "type": "add_connection",
+      "content": "Send the detector score, reason codes, version, and bounded evidence references to the grouping service. Correlation output is a candidate explanation with confidence, not a causal guarantee.",
+      "connection": {"edgeId": "ts_e15", "sourceNodeId": "ts_scorer", "targetNodeId": "ts_correlator", "connectionType": "data-flow", "label": "Versioned detections & evidence", "description": "Scores, reason codes, confidence, and source-window references."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:7"]
+    },
+    {
+      "id": "ts_edge_context",
+      "stepNumber": 34,
+      "phase": "Complete scoring, query, and alert flows",
+      "title": "Compare detections against neighboring signals",
+      "type": "add_connection",
+      "content": "Fetch only bounded, authorized neighboring series and dependency metadata; compare cadence-compatible windows, preserve missingness and granularity, and attach the matched time range so an operator can inspect why signals were grouped.",
+      "connection": {"edgeId": "ts_e16", "sourceNodeId": "ts_hot", "targetNodeId": "ts_correlator", "connectionType": "database-connection", "label": "Recent correlated signal windows", "description": "Time-bounded context for explanation and alert grouping."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ts_edge_alert_outbox",
+      "stepNumber": 35,
+      "phase": "Complete scoring, query, and alert flows",
+      "title": "Persist grouped alert intent idempotently",
+      "type": "add_connection",
+      "content": "Create or update a stable group event before integration delivery; replay must update the same incident rather than create duplicates.",
+      "connection": {"edgeId": "ts_e17", "sourceNodeId": "ts_correlator", "targetNodeId": "ts_alert_queue", "connectionType": "message-queue", "label": "Deduplicated incident events", "description": "Durable alert intent with stable group and event identifiers."},
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "ts_edge_integration",
+      "stepNumber": 36,
+      "phase": "Complete scoring, query, and alert flows",
+      "title": "Retry destination delivery and track acknowledgments",
+      "type": "add_connection",
+      "content": "Deliver through scoped adapters with bounded exponential retry and dead-letter handling. Record provider receipt and final disposition so alert success is observable.",
+      "connection": {"edgeId": "ts_e18", "sourceNodeId": "ts_alert_queue", "targetNodeId": "ts_integrations", "connectionType": "message-queue", "label": "Retryable alert groups", "description": "Versioned events with idempotency keys, destination policy, and delivery state."},
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "ts_edge_api_query",
+      "stepNumber": 37,
+      "phase": "Complete scoring, query, and alert flows",
+      "title": "Keep investigations tenant-scoped and bounded",
+      "type": "add_connection",
+      "content": "The API authenticates and authorizes every query before the service applies retention, pagination, and time-range limits.",
+      "connection": {"edgeId": "ts_e19", "sourceNodeId": "ts_api", "targetNodeId": "ts_query", "connectionType": "http", "label": "Authorized investigation query", "description": "Tenant-scoped anomaly, group, and history request with bounded range."},
+      "requirementIds": ["legacy-requirement:5"]
+    },
+    {
+      "id": "ts_edge_query_hot",
+      "stepNumber": 38,
+      "phase": "Complete scoring, query, and alert flows",
+      "title": "Serve recent context from the hot store",
+      "type": "add_connection",
+      "content": "Return bounded recent history and the exact evidence window referenced by a detection.",
+      "connection": {"edgeId": "ts_e20", "sourceNodeId": "ts_query", "targetNodeId": "ts_hot", "connectionType": "database-connection", "label": "Recent series & evidence lookup", "description": "Paginated recent windows under per-tenant query budgets."},
+      "requirementIds": ["legacy-requirement:5"]
+    },
+    {
+      "id": "ts_edge_query_archive",
+      "stepNumber": 39,
+      "phase": "Complete scoring, query, and alert flows",
+      "title": "Serve older history from durable partitions",
+      "type": "add_connection",
+      "content": "Cold queries support long-range seasonality and trend investigations; keep them asynchronous or separately rate-limited so scans cannot consume online scoring capacity.",
+      "connection": {"edgeId": "ts_e21", "sourceNodeId": "ts_query", "targetNodeId": "ts_archive", "connectionType": "data-flow", "label": "Historical partition reads", "description": "Retention-governed older metric data for investigations and export."},
+      "requirementIds": ["legacy-requirement:2"]
+    },
+    {
+      "id": "ts_edge_monitor_ingest",
+      "stepNumber": 40,
+      "phase": "Complete scoring, query, and alert flows",
+      "title": "Measure ingestion freshness and stream backlog",
+      "type": "add_connection",
+      "content": "Measure active concurrent series against the 100k+ requirement separately from total distinct metric cardinality against the millions-of-metrics constraint; neither count substitutes for the other. Break latency, missing/gap, and late-sample signals out by declared metric cadence, and page on oldest-event age rather than queue depth alone because a small queue of old samples can violate the <1 minute detection-latency target.",
+      "connection": {"edgeId": "ts_e22", "sourceNodeId": "ts_ingest", "targetNodeId": "ts_monitoring", "connectionType": "data-flow", "label": "Freshness, lag & data quality", "description": "Watermark delay, rejected/late samples, cardinality, and stage latency."},
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "ts_edge_monitor_model",
+      "stepNumber": 41,
+      "phase": "Complete scoring, query, and alert flows",
+      "title": "Measure detection quality by cohort",
+      "type": "add_connection",
+      "content": "Compare point/contextual/collective detector results and observed labels by cadence, tenant, and season. Measure latency against the <1 minute target and false-positive rate against the <1% target as separate quality measures; aggregate only after verifying cohort sample sizes. These are acceptance thresholds, not claims that a cohort has passed.",
+      "connection": {"edgeId": "ts_e23", "sourceNodeId": "ts_scorer", "targetNodeId": "ts_monitoring", "connectionType": "data-flow", "label": "Quality & scoring telemetry", "description": "Latency, model coverage, calibration, reviewed false positives, and recall."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "ts_edge_monitor_delivery",
+      "stepNumber": 42,
+      "phase": "Complete scoring, query, and alert flows",
+      "title": "Track delivery outcomes and incident feedback",
+      "type": "add_connection",
+      "content": "Measure alert-group size, deduplicated and repeated notifications, queue age, attempts, destination receipts, and operator dispositions so smart grouping and integration delivery effectiveness are visible end to end.",
+      "connection": {"edgeId": "ts_e24", "sourceNodeId": "ts_integrations", "targetNodeId": "ts_monitoring", "connectionType": "data-flow", "label": "Receipts & operator outcomes", "description": "Delivery success, retries, dead letters, and reviewed incident feedback."},
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "ts_missing_data",
+      "stepNumber": 43,
+      "phase": "Validate operational targets and failure behavior",
+      "title": "Make missing and irregular samples explicit",
+      "type": "explanation",
+      "content": "For each metric definition, specify expected cadence, allowed lateness, gap behavior, and whether interpolation is permitted. Do not impute zero by default: for a CPU gauge, an absent point means unknown; for a counter, a reset is different from a negative delta. Mark insufficient context, preserve gap duration, and test detector behavior with irregular intervals before enabling alerts.",
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ts_budget",
+      "stepNumber": 44,
+      "phase": "Validate operational targets and failure behavior",
+      "title": "Measure the full detection path against one minute",
+      "type": "explanation",
+      "content": "Measure from source timestamp through ingestion, window closure, and anomaly-decision emission as the detection-latency path. Track grouping and destination delivery separately; the brief defines no separate notification-latency target. Attribute observed delay to each detection stage using the actual workload; the brief does not define a stage-by-stage budget or sampling cadence. Report the end-to-end detection-latency distribution and the fraction exceeding the <1 minute target by detector cohort.",
+      "requirementIds": ["legacy-constraint:1"]
+    },
+    {
+      "id": "ts_quality_gate",
+      "stepNumber": 45,
+      "phase": "Validate operational targets and failure behavior",
+      "title": "Treat sub-one-percent false positives as a measured gate",
+      "type": "explanation",
+      "content": "Define the denominator and label window for false-positive rate, account for delayed operator adjudication, and report confidence intervals by relevant cohort. A model score alone does not prove the <1% target; report the measured outcome and uncertainty without implying the acceptance criterion has been met.",
+      "requirementIds": ["legacy-constraint:2"]
+    },
+    {
+      "id": "ts_recovery_tests",
+      "stepNumber": 46,
+      "phase": "Validate operational targets and failure behavior",
+      "title": "Exercise replay, overload, and model rollback",
+      "type": "explanation",
+      "content": "Test point, contextual, and collective detection; seasonal/trend behavior; adaptive thresholds and custom per-metric anomaly definitions; correlated-signal explanations; smart grouping; and alert/incident delivery. Load-test the stated 100k+ concurrent time-series requirement separately from the scale-to-millions-of-metrics constraint. Inject missing and delayed points, irregular intervals, cadence differences, hot keys, queue lag, store failures, and alert-provider timeouts. Measure detection latency against <1 minute and false-positive rate against <1% as independent targets; verify replay, grouping idempotency, tenant isolation, recovery, and rollback to the prior detector when measured targets regress, without treating the design or test setup as evidence that either target has passed.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

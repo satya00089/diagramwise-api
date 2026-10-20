@@ -1,0 +1,803 @@
+{
+  "problem_id": "68d7013f6f42e23bb16a2230",
+  "version": "1.3-review",
+  "totalSteps": 43,
+  "phases": [
+    {
+      "name": "1. Accept a trip safely",
+      "stepRange": [1, 10],
+      "description": "Separate rider and driver actions, persist trip state, and make state transitions idempotent."
+    },
+    {
+      "name": "2. Locate and match drivers",
+      "stepRange": [11, 20],
+      "description": "Stream fresh driver locations into a geospatial index and reserve one eligible driver atomically."
+    },
+    {
+      "name": "3. Route, price, and settle",
+      "stepRange": [21, 28],
+      "description": "Calculate route and fare separately from matching, then process payment with a durable ledger."
+    },
+    {
+      "name": "4. Notify, protect, and scale",
+      "stepRange": [29, 43],
+      "description": "Deliver trip updates, prevent stale-location and fraud failures, and scale the measured peak paths."
+    }
+  ],
+  "steps": [
+    {
+      "id": "ride_01",
+      "stepNumber": 1,
+      "phase": "1. Accept a trip safely",
+      "title": "Turn the brief into invariants",
+      "type": "explanation",
+      "content": "The brief asks for rider-driver matching, live location, route optimization, fare and payment, ratings, history and receipts, surge pricing, and 10M rides per day. Matching should complete within seconds, location must stay accurate, and peak hours, vehicle types, and fraud matter. Treat the ride record as the source of truth; a location ping is ephemeral and an accepted trip must not silently assign the same driver twice. For the underspecified timing, use p95 matching <=5s, a 5s driver heartbeat, and a 15s freshness lease as provisional design assumptions only; confirm them with product before treating them as SLOs. The brief gives no peak multiplier."
+    },
+    {
+      "id": "ride_02",
+      "stepNumber": 2,
+      "phase": "1. Accept a trip safely",
+      "title": "Add the rider app",
+      "type": "add_component",
+      "content": "Riders request a pickup, specify a vehicle class, receive a quote, and track trip state. Give each create-trip action a stable idempotency key so a network retry does not create two rides.",
+      "component": {
+        "nodeId": "guided_ride_rider",
+        "componentType": "mobile-app",
+        "label": "Rider App",
+        "description": "Request rides, view quotes, and track an assigned trip",
+        "position": { "x": 0, "y": 130 },
+        "properties": {
+          "componentName": "Rider App",
+          "purpose": "Submit idempotent ride requests, choose a vehicle type, see fare and trip state, and receive location updates."
+        },
+        "highlightReason": "The rider flow is the entry to matching and must show the requested vehicle and current trip state."
+      }
+    },
+    {
+      "id": "ride_03",
+      "stepNumber": 3,
+      "phase": "1. Accept a trip safely",
+      "title": "Add the driver app",
+      "type": "add_component",
+      "content": "Drivers publish consented location updates and accept or decline offers. A driver's availability and last location expire; the app must not be considered available forever after it disconnects.",
+      "component": {
+        "nodeId": "guided_ride_driver",
+        "componentType": "mobile-app",
+        "label": "Driver App",
+        "description": "Publish availability and location; accept or decline offers",
+        "position": { "x": 0, "y": 390 },
+        "properties": {
+          "componentName": "Driver App",
+          "purpose": "Publish fresh, consented location and vehicle type, then accept or decline a time-bounded trip offer."
+        },
+        "highlightReason": "Driver supply and location freshness are independent of the rider request path."
+      }
+    },
+    {
+      "id": "ride_04",
+      "stepNumber": 4,
+      "phase": "1. Accept a trip safely",
+      "title": "Add an authenticated API gateway",
+      "type": "add_component",
+      "content": "Validate rider requests and driver updates, enforce per-user limits, and route both into their owning services. Do not trust a client-supplied fare or driver eligibility decision.",
+      "component": {
+        "nodeId": "guided_ride_gateway",
+        "componentType": "api-gateway",
+        "label": "Ride API Gateway",
+        "description": "Identity, validation, quotas, and request routing",
+        "position": { "x": 300, "y": 260 },
+        "properties": {
+          "componentName": "Ride API Gateway",
+          "purpose": "Authenticate rider and driver operations, validate payloads, enforce abuse limits, and route trip and location requests.",
+          "inputValidation": true,
+          "authentication": "OAuth 2.0",
+          "rateLimiting": true,
+          "tlsTermination": true
+        },
+        "highlightReason": "Different callers share an edge but require authenticated, validated operations."
+      }
+    },
+    {
+      "id": "ride_05",
+      "stepNumber": 5,
+      "phase": "1. Accept a trip safely",
+      "title": "Connect rider requests",
+      "type": "add_connection",
+      "content": "Rider commands use HTTPS and carry an idempotency key. After a trip is completed, the rider can submit one rating for the assigned driver through this authenticated API path, keyed to that trip. The gateway returns server-owned trip state rather than assuming a request was accepted just because it reached the edge.",
+      "connection": {
+        "edgeId": "guided_ride_rider_gateway",
+        "sourceNodeId": "guided_ride_rider",
+        "targetNodeId": "guided_ride_gateway",
+        "connectionType": "https",
+        "label": "Rider commands & completed-trip ratings",
+        "description": "Create a ride request, retrieve a quote and status, and submit one idempotent rating for the assigned driver after a completed trip over HTTPS."
+      }
+    },
+    {
+      "id": "ride_06",
+      "stepNumber": 6,
+      "phase": "1. Accept a trip safely",
+      "title": "Connect driver updates",
+      "type": "add_connection",
+      "content": "Driver availability, location, and offer responses are authenticated and timestamped. After a completed trip, the driver can submit one rating for that trip's rider through this same gateway path. Reject replayed or out-of-order updates instead of moving a driver back to an older position.",
+      "connection": {
+        "edgeId": "guided_ride_driver_gateway",
+        "sourceNodeId": "guided_ride_driver",
+        "targetNodeId": "guided_ride_gateway",
+        "connectionType": "https",
+        "label": "Driver updates, offers & ratings",
+        "description": "Authenticated, timestamped driver location and offer responses, plus one idempotent post-trip rating of the rider for a completed trip."
+      }
+    },
+    {
+      "id": "ride_07",
+      "stepNumber": 7,
+      "phase": "1. Accept a trip safely",
+      "title": "Add the trip lifecycle service",
+      "type": "add_component",
+      "content": "Own the state machine from requested to matched, accepted, picked up, completed, or cancelled. Enforce legal transitions and use conditional writes so concurrent matchers cannot assign multiple drivers.",
+      "component": {
+        "nodeId": "guided_ride_trip_service",
+        "componentType": "backend-server",
+        "label": "Trip Lifecycle Service",
+        "description": "Authoritative ride state and transition rules",
+        "position": { "x": 600, "y": 260 },
+        "properties": {
+          "componentName": "Trip Lifecycle Service",
+          "purpose": "Own idempotent trip creation and conditional state transitions from request through match, pickup, completion, and cancellation; authorize post-trip ratings only for completed trips and their assigned participants.",
+          "retry": true
+        },
+        "highlightReason": "A single authoritative trip state machine prevents duplicate assignment and inconsistent receipts."
+      }
+    },
+    {
+      "id": "ride_08",
+      "stepNumber": 8,
+      "phase": "1. Accept a trip safely",
+      "title": "Route rider commands to trip state",
+      "type": "add_connection",
+      "content": "The service checks rider authorization and vehicle choice, creates the pending trip once, and returns its durable identifier before asynchronous matching proceeds. For rating submissions, it verifies the caller is the rider or driver assigned to that completed trip, accepts at most one rating per participant, and handles retries idempotently.",
+      "connection": {
+        "edgeId": "guided_ride_gateway_trip",
+        "sourceNodeId": "guided_ride_gateway",
+        "targetNodeId": "guided_ride_trip_service",
+        "connectionType": "https",
+        "label": "Trip state & eligible rating commands",
+        "description": "Create or transition trips and route ratings through the trip service; validate completed-trip participant eligibility and idempotently accept one rating per participant."
+      }
+    },
+    {
+      "id": "ride_09",
+      "stepNumber": 9,
+      "phase": "1. Accept a trip safely",
+      "title": "Persist trip history, receipts, ratings, and driver leases",
+      "type": "add_component",
+      "content": "Store canonical trip transitions, immutable fare/receipt facts, and one rating per completed-trip participant under a unique trip-and-author key. In the same transactional store, keep a driver-reservation row keyed by driver ID so a driver cannot be leased to two active trips.",
+      "component": {
+        "nodeId": "guided_ride_trip_store",
+        "componentType": "database",
+        "label": "Trip History & Rating Store",
+        "description": "Trip state, receipts, participant ratings, and driver leases",
+        "position": { "x": 900, "y": 260 },
+        "properties": {
+          "componentName": "Trip History & Rating Store",
+          "purpose": "Persist trip state and immutable fare/receipt facts; store one rating per authorized trip participant only after completion, uniquely keyed by trip and rating author. Keep active driver leases under a unique driver key in this same transactional database so trip and driver reservation conditions commit or roll back together.",
+          "multiAZ": true,
+          "encryption": true,
+          "backups": true,
+          "rbac": true
+        },
+        "highlightReason": "History, receipts, ratings, and atomic trip/driver reservation need durable ownership beyond ephemeral location state."
+      }
+    },
+    {
+      "id": "ride_10",
+      "stepNumber": 10,
+      "phase": "1. Accept a trip safely",
+      "title": "Commit trip and rating records",
+      "type": "add_connection",
+      "content": "Commit each valid state transition with an expected version. The same database transaction writes the conditional trip transition and unique driver lease, or rolls both back. Persist ratings by completed trip and author; derive receipts from committed fare terms, not client retry payloads.",
+      "connection": {
+        "edgeId": "guided_ride_trip_store_service",
+        "sourceNodeId": "guided_ride_trip_service",
+        "targetNodeId": "guided_ride_trip_store",
+        "connectionType": "database",
+        "label": "Atomic trip, lease, and rating commits",
+        "description": "Transactionally commit versioned trip state and a unique active driver lease; persist history, accepted fare facts, receipts, and unique post-completion participant ratings."
+      }
+    },
+    {
+      "id": "ride_11",
+      "stepNumber": 11,
+      "phase": "2. Locate and match drivers",
+      "title": "Add a location event stream",
+      "type": "add_component",
+      "content": "Location updates can be frequent and bursty. Buffer them durably enough to recover consumers, partition by geographic cell or driver, and keep them separate from the strongly controlled trip state machine.",
+      "component": {
+        "nodeId": "guided_ride_location_events",
+        "componentType": "message-broker",
+        "label": "Driver Location Stream",
+        "description": "Partitioned location updates and replayable consumer offsets",
+        "position": { "x": 300, "y": 650 },
+        "properties": {
+          "componentName": "Driver Location Stream",
+          "purpose": "Buffer timestamped driver location and availability events for geo-index updates and operational analysis.",
+          "durable": true,
+          "partitions": 24,
+          "replication": 3
+        },
+        "highlightReason": "Separating location ingestion from trip writes protects both paths during demand spikes."
+      }
+    },
+    {
+      "id": "ride_12",
+      "stepNumber": 12,
+      "phase": "2. Locate and match drivers",
+      "title": "Send driver telemetry to the stream",
+      "type": "add_connection",
+      "content": "Driver updates include sequence/time, accuracy, vehicle type, and availability. Apply rate limits and privacy retention; location is sensitive data, not a permanent public record.",
+      "connection": {
+        "edgeId": "guided_ride_driver_events",
+        "sourceNodeId": "guided_ride_driver",
+        "targetNodeId": "guided_ride_location_events",
+        "connectionType": "event",
+        "label": "Timestamped location updates",
+        "description": "Consent-scoped driver coordinates, accuracy, vehicle class, and availability."
+      }
+    },
+    {
+      "id": "ride_13",
+      "stepNumber": 13,
+      "phase": "2. Locate and match drivers",
+      "title": "Add a location stream processor",
+      "type": "add_component",
+      "content": "Normalize out-of-order updates using a monotonic per-driver sequence and server receive time. A 5s heartbeat and 15s freshness lease are provisional assumptions; if stream lag makes the indexed position older than the lease, fail closed and mark that cell unavailable to matching.",
+      "component": {
+        "nodeId": "guided_ride_location_processor",
+        "componentType": "stream-processor",
+        "label": "Location Normalizer",
+        "description": "Freshness checks and geospatial state updates",
+        "position": { "x": 600, "y": 650 },
+        "properties": {
+          "componentName": "Location Normalizer",
+          "purpose": "Accept only increasing per-driver sequence numbers; reject expired positions using server time and a provisional 15-second lease (5-second heartbeat assumption). If consumer lag exceeds the freshness window, do not refresh availability until replay catches up.",
+          "stateful": true,
+          "windowing": true
+        },
+        "highlightReason": "Accurate matching depends on fresh ordered state; stale or lagging cells must fail closed rather than dispatch from old coordinates."
+      }
+    },
+    {
+      "id": "ride_14",
+      "stepNumber": 14,
+      "phase": "2. Locate and match drivers",
+      "title": "Process location updates",
+      "type": "add_connection",
+      "content": "The processor consumes replayable events and checks monotonic per-driver sequence/version. If a cell's consumer watermark is more than the provisional 15s freshness window behind, exclude the cell from new matching, recover from its committed offset, and re-enable it only after the geo index is fresh.",
+      "connection": {
+        "edgeId": "guided_ride_events_location_processor",
+        "sourceNodeId": "guided_ride_location_events",
+        "targetNodeId": "guided_ride_location_processor",
+        "connectionType": "stream",
+        "label": "Ordered events with lag gate",
+        "description": "Replayable location stream with per-driver sequence checks; lagging cells stay unavailable until their index is rebuilt inside the freshness lease."
+      }
+    },
+    {
+      "id": "ride_15",
+      "stepNumber": 15,
+      "phase": "2. Locate and match drivers",
+      "title": "Add a geospatial availability index",
+      "type": "add_component",
+      "content": "Maintain active drivers by spatial cell and vehicle type with a freshness timestamp and expiry lease. This is a rebuildable matching index, not the durable source of trip state or payment history; exclude a cell when its stream watermark is stale.",
+      "component": {
+        "nodeId": "guided_ride_geo_store",
+        "componentType": "database",
+        "label": "Driver Geo & Availability Index",
+        "description": "Short-lived, cell-partitioned candidate state",
+        "position": { "x": 900, "y": 650 },
+        "properties": {
+          "componentName": "Driver Geo & Availability Index",
+          "purpose": "Index fresh available drivers by geographic cell and vehicle type; store lastFreshAt/leaseUntil, expire stale presence, mark lagging cells unavailable, and rebuild from replayable location events.",
+          "multiAZ": true
+        },
+        "highlightReason": "Spatial indexing narrows search, while an explicit freshness lease prevents dispatching stale coordinates."
+      }
+    },
+    {
+      "id": "ride_16",
+      "stepNumber": 16,
+      "phase": "2. Locate and match drivers",
+      "title": "Refresh current driver positions",
+      "type": "add_connection",
+      "content": "Update the geo index only after sequence, timestamp, accuracy, and partition-watermark checks. Keep the stream as replay source; publish freshness/lag status so the matcher can fail closed during recovery.",
+      "connection": {
+        "edgeId": "guided_ride_processor_geo",
+        "sourceNodeId": "guided_ride_location_processor",
+        "targetNodeId": "guided_ride_geo_store",
+        "connectionType": "database",
+        "label": "Fresh position and watermark",
+        "description": "Update the rebuildable cell index only after validation; carry freshness lease and partition lag so stale cells are excluded."
+      }
+    },
+    {
+      "id": "ride_17",
+      "stepNumber": 17,
+      "phase": "2. Locate and match drivers",
+      "title": "Add the dispatch matcher",
+      "type": "add_component",
+      "content": "Find nearby drivers only in fresh cells, filter by requested vehicle class and eligibility, then issue a time-bounded offer. Use p95 request-to-match <=5s as a provisional interpretation of 'within seconds'; confirm the target with product. Autoscale from queue age and p95 latency, not only CPU.",
+      "component": {
+        "nodeId": "guided_ride_matcher",
+        "componentType": "processing-worker",
+        "label": "Driver Matching & Dispatch",
+        "description": "Spatial candidate ranking and offer reservation",
+        "position": { "x": 1200, "y": 650 },
+        "properties": {
+          "componentName": "Driver Matching & Dispatch",
+          "purpose": "Rank nearby fresh drivers by eligibility and requested vehicle class; meet a provisional p95 <=5s match objective; ask the trip service to atomically lease one driver for one trip.",
+          "autoscale": true
+        },
+        "highlightReason": "The brief says 'within seconds' but omits an exact SLO; make the 5s p95 interpretation visible and measurable instead of silently assuming it."
+      }
+    },
+    {
+      "id": "ride_18",
+      "stepNumber": 18,
+      "phase": "2. Locate and match drivers",
+      "title": "Search only fresh eligible drivers",
+      "type": "add_connection",
+      "content": "The matcher queries a bounded set of nearby cells and excludes stale, offline, incompatible, or already-reserved drivers before ranking candidates.",
+      "connection": {
+        "edgeId": "guided_ride_geo_matcher",
+        "sourceNodeId": "guided_ride_geo_store",
+        "targetNodeId": "guided_ride_matcher",
+        "connectionType": "query",
+        "label": "Nearby fresh candidates",
+        "description": "Bounded spatial lookup filtered by freshness, availability, and vehicle type."
+      }
+    },
+    {
+      "id": "ride_19",
+      "stepNumber": 19,
+      "phase": "2. Locate and match drivers",
+      "title": "Dispatch committed trip requests",
+      "type": "add_connection",
+      "content": "Only a durably created pending trip enters matching. The matcher sends candidate offers back through the trip service so one conditional trip transition owns acceptance.",
+      "connection": {
+        "edgeId": "guided_ride_trip_matcher",
+        "sourceNodeId": "guided_ride_trip_service",
+        "targetNodeId": "guided_ride_matcher",
+        "connectionType": "async",
+        "label": "Pending trip to match",
+        "description": "Dispatch a committed trip request with pickup area, requested vehicle type, and deadline."
+      }
+    },
+    {
+      "id": "ride_20",
+      "stepNumber": 20,
+      "phase": "2. Locate and match drivers",
+      "title": "Reserve one driver atomically",
+      "type": "add_connection",
+      "content": "The trip service executes one database transaction: update the trip only if status is PENDING and its expected version matches, then insert/renew the driver-keyed lease only if no unexpired active lease exists. Both conditions commit or roll back together. Return an offer ID, fencing token, and expiry; driver acceptance must match all three. A timeout releases only that token, and losing matchers try the next fresh candidate.",
+      "connection": {
+        "edgeId": "guided_ride_matcher_trip",
+        "sourceNodeId": "guided_ride_matcher",
+        "targetNodeId": "guided_ride_trip_service",
+        "connectionType": "https",
+        "label": "Transactional driver lease and offer",
+        "description": "Atomically condition the pending trip version and unique driver lease in the trip store; return a fenced, expiring offer so concurrent matchers cannot double-assign either side."
+      }
+    },
+    {
+      "id": "ride_21",
+      "stepNumber": 21,
+      "phase": "3. Route, price, and settle",
+      "title": "Add routing and fare calculation",
+      "type": "add_component",
+      "content": "Compute an initial route/ETA and a versioned fare quote, then support a separate in-trip guidance path. Recalculate guidance from fresh driver positions when a configured deviation, traffic, or closure trigger occurs; coalesce updates rather than routing every GPS ping. Keep route versions separate from accepted quote ID, amount, currency, policy version, and expiry, and never silently change the fare.",
+      "component": {
+        "nodeId": "guided_ride_route_pricing",
+        "componentType": "backend-server",
+        "label": "Route, ETA & Pricing Service",
+        "description": "Initial quotes, ETA, and active-trip route guidance",
+        "position": { "x": 1500, "y": 650 },
+        "properties": {
+          "componentName": "Route, ETA & Pricing Service",
+          "purpose": "Compute initial routes, ETA, and expiring fare quotes with quote ID, currency, fare breakdown, vehicle class, and versioned supply-demand policy. For active trips, recalculate map-matched guidance from fresh trip-scoped locations on configured deviation, traffic, or closure triggers, coalescing requests rather than routing every ping. Return monotonic route versions separately from accepted fare terms; repricing requires rider confirmation."
+        },
+        "highlightReason": "Use one existing service for routing and in-trip guidance while keeping route updates separate from the accepted fare contract."
+      }
+    },
+    {
+      "id": "ride_22",
+      "stepNumber": 22,
+      "phase": "3. Route, price, and settle",
+      "title": "Request a route and quote",
+      "type": "add_connection",
+      "content": "The trip service uses this existing request path twice: first for a vehicle-specific quote, and later for active-trip navigation. An in-trip request includes the active trip/version and a fresh, sequence-checked position from the location processor; call routing only on a configured deviation, traffic, or closure signal. Coalesce triggers, keep route-provider latency off the match deadline, and do not treat a route update as permission to reprice.",
+      "connection": {
+        "edgeId": "guided_ride_trip_route",
+        "sourceNodeId": "guided_ride_trip_service",
+        "targetNodeId": "guided_ride_route_pricing",
+        "connectionType": "https",
+        "label": "Initial quote and in-trip route request",
+        "description": "Request the initial route/ETA and versioned fare quote; during an active trip, request coalesced rerouting using the active trip version and fresh location. Route guidance updates never silently alter accepted fare terms."
+      }
+    },
+    {
+      "id": "ride_23",
+      "stepNumber": 23,
+      "phase": "3. Route, price, and settle",
+      "title": "Use current supply for surge pricing",
+      "type": "add_connection",
+      "content": "Pricing consumes an aggregate of nearby demand and eligible supply rather than raw GPS updates. Record the policy version and show it before rider confirmation. A later supply/surge change never silently changes an accepted quote; issue a new quote and get confirmation before changing the fare.",
+      "connection": {
+        "edgeId": "guided_ride_geo_pricing",
+        "sourceNodeId": "guided_ride_geo_store",
+        "targetNodeId": "guided_ride_route_pricing",
+        "connectionType": "query",
+        "label": "Fresh supply signal",
+        "description": "Read bounded nearby availability for a versioned surge calculation; accepted fare terms remain pinned until expiry or rider reconfirmation."
+      }
+    },
+    {
+      "id": "ride_24",
+      "stepNumber": 24,
+      "phase": "3. Route, price, and settle",
+      "title": "Return and pin the accepted quote",
+      "type": "add_connection",
+      "content": "For pricing, persist acceptedQuoteId, amount, currency, pricingPolicyVersion, and expiresAt before matching; payment uses those pinned terms. Separately, apply only a newer routeVersion/path/ETA to the same active trip. A route deviation does not change the fare; any disclosed adjustment requires rider confirmation. On route-provider failure, retain the last confirmed guidance and surface a retry/unavailable state rather than inventing a route or price.",
+      "connection": {
+        "edgeId": "guided_ride_route_trip",
+        "sourceNodeId": "guided_ride_route_pricing",
+        "targetNodeId": "guided_ride_trip_service",
+        "connectionType": "https",
+        "label": "Versioned quote and guidance response",
+        "description": "Return either an expiring quote or a monotonic in-trip route/ETA update. The trip service stores accepted quote ID/version/amount separately from current routeVersion and requires rider confirmation for repricing."
+      }
+    },
+    {
+      "id": "ride_25",
+      "stepNumber": 25,
+      "phase": "3. Route, price, and settle",
+      "title": "Add payment and fraud controls",
+      "type": "add_component",
+      "content": "Tokenize credentials and authorize/capture/refund through idempotent operations keyed by trip ID plus operation. Apply fraud screening without exposing payment data to drivers. An uncertain provider timeout is reconciled by provider reference before retrying; it is never a blind second charge.",
+      "component": {
+        "nodeId": "guided_ride_payment",
+        "componentType": "payment-service",
+        "label": "Payment & Fraud Service",
+        "description": "Tokenized authorization, capture, refund, and risk checks",
+        "position": { "x": 1800, "y": 650 },
+        "properties": {
+          "componentName": "Payment & Fraud Service",
+          "purpose": "Tokenize credentials, run fraud checks, and process idempotent authorization/capture/refund with stable tripId+operation keys; reconcile uncertain provider outcomes before retrying.",
+          "pciDss": true,
+          "tokenization": true,
+          "retry": true
+        },
+        "highlightReason": "Idempotency and provider reconciliation prevent duplicate charges during retries."
+      }
+    },
+    {
+      "id": "ride_26",
+      "stepNumber": 26,
+      "phase": "3. Route, price, and settle",
+      "title": "Authorize payment for the accepted fare",
+      "type": "add_connection",
+      "content": "The trip service sends a trip-scoped payment intent containing acceptedQuoteId/version/amount and a stable tripId+operation idempotency key, never raw card data. Authorize the confirmed fare; capture only the completed trip's accepted amount or an explicitly consented adjustment. Apply provider results with an idempotent versioned trip transition.",
+      "connection": {
+        "edgeId": "guided_ride_trip_payment",
+        "sourceNodeId": "guided_ride_trip_service",
+        "targetNodeId": "guided_ride_payment",
+        "connectionType": "https",
+        "label": "Idempotent accepted-fare intent",
+        "description": "Authorize/capture against the accepted quote version and amount with stable trip-operation idempotency and fraud checks."
+      }
+    },
+    {
+      "id": "ride_27",
+      "stepNumber": 27,
+      "phase": "3. Route, price, and settle",
+      "title": "Keep a payment ledger and outbox",
+      "type": "add_component",
+      "content": "Store provider references, authorization/capture/refund states, and reconciliation facts separately from location. Write the ledger state and a versioned result-outbox event in one local transaction so a crash cannot lose the payment outcome before notifying trip state.",
+      "component": {
+        "nodeId": "guided_ride_payment_ledger",
+        "componentType": "database",
+        "label": "Payment Ledger",
+        "description": "Durable payment intent, outbox, and reconciliation records",
+        "position": { "x": 2100, "y": 650 },
+        "properties": {
+          "componentName": "Payment Ledger",
+          "purpose": "Persist payment intent, provider reference, auth/capture/refund status, versioned result outbox, and reconciliation events without raw card data; uniquely key trip-operation intents.",
+          "multiAZ": true,
+          "encryption": true,
+          "backups": true,
+          "auditLog": true
+        },
+        "highlightReason": "A transactional outbox and durable ledger recover delayed or duplicate provider callbacks."
+      }
+    },
+    {
+      "id": "ride_28",
+      "stepNumber": 28,
+      "phase": "3. Route, price, and settle",
+      "title": "Persist payment transitions",
+      "type": "add_connection",
+      "content": "Record each provider result with the stable trip-operation key and append-only audit context. Commit ledger status and outbox event together. If the provider times out, query/reconcile by provider reference before retrying; never create a new charge because the response was lost.",
+      "connection": {
+        "edgeId": "guided_ride_payment_ledger_service",
+        "sourceNodeId": "guided_ride_payment",
+        "targetNodeId": "guided_ride_payment_ledger",
+        "connectionType": "database",
+        "label": "Idempotent ledger and result outbox",
+        "description": "Atomically persist authorization/capture/refund state and a versioned result event for retryable trip reconciliation."
+      }
+    },
+    {
+      "id": "ride_29",
+      "stepNumber": 29,
+      "phase": "4. Notify, protect, and scale",
+      "title": "Add trip notifications",
+      "type": "add_component",
+      "content": "Notify riders and drivers about offers, acceptance, arrival, cancellations, receipts, and committed in-trip route/ETA changes. Notifications are at-least-once and carry both trip and route versions so clients can ignore stale messages and refresh authoritative trip state after reconnect.",
+      "component": {
+        "nodeId": "guided_ride_notifications",
+        "componentType": "notification-service",
+        "label": "Trip Updates & Receipts",
+        "description": "Push and in-app updates for trip lifecycle",
+        "position": { "x": 1800, "y": 950 },
+        "properties": {
+          "componentName": "Trip Updates & Receipts",
+          "purpose": "Deliver versioned trip status, driver arrival, cancellation, receipt-ready events, and committed route/ETA guidance updates through supported channels; clients deduplicate by trip and route version.",
+          "fanout": true,
+          "batching": true
+        },
+        "highlightReason": "Live tracking and receipts must reach both trip participants without blocking the trip commit."
+      }
+    },
+    {
+      "id": "ride_30",
+      "stepNumber": 30,
+      "phase": "4. Notify, protect, and scale",
+      "title": "Publish committed trip changes",
+      "type": "add_connection",
+      "content": "Emit notifications only after the trip service commits its conditional state transition or accepts a newer routeVersion. Include trip and route versions so retries or delayed events cannot move status or navigation backwards; keep the accepted fare immutable unless the rider confirms an adjustment.",
+      "connection": {
+        "edgeId": "guided_ride_trip_notifications",
+        "sourceNodeId": "guided_ride_trip_service",
+        "targetNodeId": "guided_ride_notifications",
+        "connectionType": "event",
+        "label": "Committed trip and route event",
+        "description": "Publish versioned offer, trip status, in-trip route/ETA guidance, cancellation, and receipt events only after the authoritative trip transition commits."
+      }
+    },
+    {
+      "id": "ride_31",
+      "stepNumber": 31,
+      "phase": "4. Notify, protect, and scale",
+      "title": "Update the rider",
+      "type": "add_connection",
+      "content": "Deliver committed trip progress plus the newest routeVersion, path, and ETA to the rider. The map ignores older versions; reconnect reads authoritative trip and route state instead of assuming every push arrived.",
+      "connection": {
+        "edgeId": "guided_ride_notifications_rider",
+        "sourceNodeId": "guided_ride_notifications",
+        "targetNodeId": "guided_ride_rider",
+        "connectionType": "push",
+        "label": "Rider trip and navigation updates",
+        "description": "Deliver offers, driver arrival, committed live trip state, versioned route guidance/ETA changes, and receipt-ready notifications."
+      }
+    },
+    {
+      "id": "ride_32",
+      "stepNumber": 32,
+      "phase": "4. Notify, protect, and scale",
+      "title": "Update the driver",
+      "type": "add_connection",
+      "content": "Drivers receive time-bounded offers, current trip state, and versioned route guidance/reroute instructions. A notification is not acceptance; the driver must confirm through an authenticated command that wins the trip state transition.",
+      "connection": {
+        "edgeId": "guided_ride_notifications_driver",
+        "sourceNodeId": "guided_ride_notifications",
+        "targetNodeId": "guided_ride_driver",
+        "connectionType": "push",
+        "label": "Driver offers, trip, and navigation changes",
+        "description": "Deliver offers, committed status, and versioned route guidance; acceptance remains an authenticated conditional command."
+      }
+    },
+    {
+      "id": "ride_33",
+      "stepNumber": 33,
+      "phase": "4. Notify, protect, and scale",
+      "title": "Add operational monitoring",
+      "type": "add_component",
+      "content": "Measure request-to-match latency, stale-location rate, offer acceptance, duplicate state transitions, payment uncertainty, fraud outcomes, and notification lag. Partition metrics by region and vehicle type without exposing exact personal locations.",
+      "component": {
+        "nodeId": "guided_ride_monitoring",
+        "componentType": "monitoring",
+        "label": "Dispatch & Trip Operations",
+        "description": "Matching, location freshness, payment, and notification health",
+        "position": { "x": 2400, "y": 650 },
+        "properties": {
+          "componentName": "Dispatch & Trip Operations",
+          "purpose": "Track match latency, location freshness, trip-state conflicts, payment reconciliation, fraud, and notification delivery.",
+          "metrics": true,
+          "alerts": true
+        },
+        "highlightReason": "Operational signals expose whether the within-seconds match and accurate-location promises are being met."
+      }
+    },
+    {
+      "id": "ride_34",
+      "stepNumber": 34,
+      "phase": "4. Notify, protect, and scale",
+      "title": "Observe trip transitions",
+      "type": "add_connection",
+      "content": "Alert on duplicate-match conflicts, trip state stuck between transitions, and receipt/payment reconciliation backlog.",
+      "connection": {
+        "edgeId": "guided_ride_trip_monitoring",
+        "sourceNodeId": "guided_ride_trip_service",
+        "targetNodeId": "guided_ride_monitoring",
+        "connectionType": "metrics",
+        "label": "Trip lifecycle health",
+        "description": "Conditional-transition failures, match time, and state-machine backlog."
+      }
+    },
+    {
+      "id": "ride_35",
+      "stepNumber": 35,
+      "phase": "4. Notify, protect, and scale",
+      "title": "Observe location stream health",
+      "type": "add_connection",
+      "content": "Track event lag, rejected stale positions, geo-index freshness, and processor recovery time. Aggregate or coarsen location telemetry for operations and enforce retention limits.",
+      "connection": {
+        "edgeId": "guided_ride_location_monitoring",
+        "sourceNodeId": "guided_ride_location_events",
+        "targetNodeId": "guided_ride_monitoring",
+        "connectionType": "metrics",
+        "label": "Location freshness and lag",
+        "description": "Measure stream lag, stale updates, geo-index freshness, and consumer recovery."
+      }
+    },
+    {
+      "id": "ride_36",
+      "stepNumber": 36,
+      "phase": "4. Notify, protect, and scale",
+      "title": "Observe payment and fraud outcomes",
+      "type": "add_connection",
+      "content": "Track authorization latency, duplicate suppression, uncertain provider responses, chargeback/fraud rates, and ledger reconciliation without logging card data.",
+      "connection": {
+        "edgeId": "guided_ride_payment_monitoring",
+        "sourceNodeId": "guided_ride_payment",
+        "targetNodeId": "guided_ride_monitoring",
+        "connectionType": "metrics",
+        "label": "Payment and risk telemetry",
+        "description": "Privacy-safe payment latency, idempotency, risk, and reconciliation signals."
+      }
+    },
+    {
+      "id": "ride_37",
+      "stepNumber": 37,
+      "phase": "4. Notify, protect, and scale",
+      "title": "Expire stale driver locations",
+      "type": "decision_point",
+      "content": "A driver who stops sending updates must age out of matching quickly. Use server-observed freshness and availability leases; an illustrative 5s heartbeat with a 15s lease is only a provisional assumption to validate, not a value specified by the brief. If partition lag makes freshness uncertain, fail closed: exclude that cell until replay and index refresh restore a current watermark.",
+      "decision": {
+        "question": "How should the matcher treat a driver's last known location?",
+        "chosen": "Use monotonic per-driver sequence and a server-time freshness lease; provisionally expire after 15s (assuming a 5s heartbeat), and exclude any lagging cell until current",
+        "chosenReason": "A stale coordinate can dispatch a rider to a driver who is no longer there. Make the provisional timing visible and confirm it with product; never trade location safety for apparent supply.",
+        "alternatives": [
+          {
+            "option": "Keep the last location indefinitely",
+            "tradeoff": "Improves apparent supply but creates inaccurate matches and safety risk."
+          },
+          {
+            "option": "Accept any arriving update regardless of order",
+            "tradeoff": "A delayed packet can overwrite a newer position and distort nearby results."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "guided_ride_geo_store",
+        "properties": {
+          "purpose": "Index fresh available drivers by geographic cell and vehicle type; enforce a provisional 15-second server-time lease (5-second heartbeat assumption), expose per-cell stream watermark, exclude expired or lagging cells, and rebuild this read model from replayable events."
+        }
+      }
+    },
+    {
+      "id": "ride_38",
+      "stepNumber": 38,
+      "phase": "4. Notify, protect, and scale",
+      "title": "Keep matching within seconds at peak",
+      "type": "scale_trigger",
+      "content": "Measure end-to-end request-to-match p95 and keep the provisional p95 <=5s interpretation of 'within seconds' visible for product confirmation. Scale location processors and matcher workers from p95 latency, queue age, partition lag, and candidate count; partition by cell, isolate hot cells, and cap candidate fan-out. If the objective is missed or location freshness is uncertain, return a retryable status rather than dispatch from stale state.",
+      "scaleTrigger": {
+        "metric": "Provisional p95 match latency <=5s, location event lag, queue age, and candidate count per cell",
+        "action": "Scale workers and split/isolate hot partitions when latency or lag approaches the confirmed objective; stop matching from stale cells",
+        "impact": "The vague seconds-level target becomes measurable without claiming the provisional 5s threshold was specified by the problem."
+      }
+    },
+    {
+      "id": "ride_39",
+      "stepNumber": 39,
+      "phase": "4. Notify, protect, and scale",
+      "title": "Size for ten million daily rides",
+      "type": "scale_trigger",
+      "content": "10,000,000 rides / 86,400 seconds is about 116 average ride starts per second; use this as a baseline capacity floor, not a peak estimate. The brief gives no peak multiplier or driver update cadence, so confirm regional burst factors and heartbeat policy with product. Load-test trip writes at the baseline plus the measured peak factor, then budget location events from measured active-driver/update rates and keep route calls, retries, and payment-provider quotas separate.",
+      "scaleTrigger": {
+        "metric": "116 average ride starts/s baseline; measured regional peak factor, active drivers, location event rate, retries, and provider quotas",
+        "action": "Load-test baseline plus an agreed peak multiplier; capacity-plan trip commits, geo ingestion, routing, and payments independently",
+        "impact": "Quantifies what the 10M/day brief supports while explicitly leaving peak concurrency and update rate for product clarification."
+      },
+      "componentUpdate": {
+        "nodeId": "guided_ride_monitoring",
+        "properties": {
+          "purpose": "Track the 116 average ride-starts/second baseline implied by 10M/day, plus measured peak factor, request-to-match p95, location-stream lag, retry load, and payment-provider quotas. Peak multiplier and update cadence remain product-confirmed assumptions."
+        }
+      }
+    },
+    {
+      "id": "ride_40",
+      "stepNumber": 40,
+      "phase": "4. Notify, protect, and scale",
+      "title": "Reconcile payment outcomes with trip state",
+      "type": "add_connection",
+      "content": "The payment service writes provider outcome and a versioned outbox event with the ledger. It retries the event until the trip service conditionally applies that paymentIntentId/version once. If the provider result is uncertain, reconcile by provider reference before any retry; do not issue a second charge. Notifications and receipts follow the committed trip transition, so a crash between capture and trip persistence is recoverable.",
+      "connection": {
+        "edgeId": "guided_ride_payment_trip_result",
+        "sourceNodeId": "guided_ride_payment",
+        "targetNodeId": "guided_ride_trip_service",
+        "connectionType": "https",
+        "label": "Idempotent payment result and trip recovery",
+        "description": "Retry versioned auth/capture/refund outcomes from the ledger outbox; apply each payment intent once with a conditional trip update, reconcile uncertain provider status before retrying, and notify only after commit."
+      }
+    },
+    {
+      "id": "ride_41",
+      "stepNumber": 41,
+      "phase": "4. Notify, protect, and scale",
+      "title": "Send fresh active-trip locations to routing",
+      "type": "add_connection",
+      "content": "The location normalizer forwards only fresh, trip-scoped, sequence-monotonic positions to routing when a configured deviation, traffic, or closure trigger requires recalculation. Coalesce updates instead of calling the route provider for every GPS ping. Reject stale or out-of-order positions, keep route-provider work off the match deadline, and never let a reroute mutate the accepted fare.",
+      "connection": {
+        "edgeId": "guided_ride_location_route",
+        "sourceNodeId": "guided_ride_location_processor",
+        "targetNodeId": "guided_ride_route_pricing",
+        "connectionType": "https",
+        "label": "Fresh active-trip position for rerouting",
+        "description": "On a configured deviation, traffic, or closure trigger, pass a fresh trip-scoped map-matched position and sequence to routing; coalesce triggers, reject stale data, and keep fare terms separate."
+      }
+    },
+    {
+      "id": "ride_42",
+      "stepNumber": 42,
+      "phase": "4. Notify, protect, and scale",
+      "title": "Apply versioned navigation updates to the active trip",
+      "type": "add_connection",
+      "content": "Routing returns a new routeVersion, path, and ETA to the trip service. Apply it only if the trip is still active and the route version is newer, then publish it through the already-built committed trip event and notification paths to both apps. Clients ignore stale versions and recover from missed pushes with an authoritative read. This route update is not a fare change; any adjustment to accepted terms requires rider confirmation.",
+      "connection": {
+        "edgeId": "guided_ride_route_trip_guidance",
+        "sourceNodeId": "guided_ride_route_pricing",
+        "targetNodeId": "guided_ride_trip_service",
+        "connectionType": "https",
+        "label": "Versioned in-trip route guidance",
+        "description": "Return routeVersion, path, and ETA; conditionally apply only to the active trip when newer than its current routeVersion, then publish after commit. Never mutate the accepted quote."
+      },
+      "componentUpdate": {
+        "nodeId": "guided_ride_trip_service",
+        "properties": {
+          "purpose": "Own idempotent trip creation and conditional state transitions from request through match, pickup, completion, and cancellation; authorize post-trip ratings only for completed trips and their assigned participants. Store accepted quote terms separately from current routeVersion/path/ETA, and apply in-trip navigation updates only for the active trip and a newer route version."
+        }
+      }
+    },
+    {
+      "id": "ride_43",
+      "stepNumber": 43,
+      "phase": "4. Notify, protect, and scale",
+      "title": "Review the safety and recovery boundaries",
+      "type": "explanation",
+      "content": "Trip state, reservation leases, accepted fare terms, route versions, ratings, and payment facts have durable authorities; driver positions and offers expire; stream indexes, callbacks, and notifications are rebuildable/retryable. During outages, preserve committed state, stop dispatch from stale cells, retain the last confirmed route and fare, let riders refresh authoritative status, and reconcile uncertain payment operations before charging again. This avoids duplicate rides, unsafe or stale navigation, silent fare changes, and double billing."
+    }
+  ]
+}

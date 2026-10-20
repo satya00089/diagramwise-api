@@ -1,0 +1,1232 @@
+{
+  "problem_id": "aiops_011",
+  "version": "1.0.0-review-draft",
+  "totalSteps": 60,
+  "phases": [
+    {
+      "name": "Define boundaries and the trust contract",
+      "stepRange": [1, 10],
+      "description": "Separate the brief's outcomes from deployment assumptions, then establish the tenant-facing control plane and its durable policy state."
+    },
+    {
+      "name": "Ingest and normalize multi-cloud evidence",
+      "stepRange": [11, 27],
+      "description": "Bring AWS, Azure, and GCP billing exports and resource-usage evidence into a versioned, normalized cost ledger without conflating estimates with finalized charges."
+    },
+    {
+      "name": "Attribute spend and detect opportunities",
+      "stepRange": [28, 39],
+      "description": "Derive team/service views, infer missing ownership cautiously, and detect anomalies and workload patterns from cost and utilization evidence."
+    },
+    {
+      "name": "Optimize resources, commitments, and forecasts",
+      "stepRange": [40, 51],
+      "description": "Generate evidence-backed rightsizing and commitment scenarios, then forecast by team and service while preserving uncertainty and approval boundaries."
+    },
+    {
+      "name": "Govern recommendations and expose outcomes",
+      "stepRange": [52, 60],
+      "description": "Evaluate recommendations against versioned policies, make any cloud-side action explicitly opt-in, and expose auditable results to the teams that own the spend."
+    }
+  ],
+  "steps": [
+    {
+      "id": "cost_01",
+      "stepNumber": 1,
+      "phase": "Define boundaries and the trust contract",
+      "title": "Keep brief facts separate from design assumptions",
+      "type": "explanation",
+      "content": "Provided by the brief: analyze cloud spending across providers; detect idle and underutilized resources; recommend rightsizing; optimize reserved-instance and savings-plan coverage; forecast by team and service; identify cost anomalies; automate cost-governance policies; and provide allocation/showback/chargeback. Its stated targets are recommendation accuracy above 90%, anomaly detection within 1 hour, AWS/Azure/GCP billing support, 10k+ resources across accounts, and forecast accuracy within 10%. These are acceptance targets, not proven results. Design assumptions (not supplied facts): each provider can deliver billing exports plus sufficiently fresh usage or estimated-cost signals; organizations connect accounts explicitly; the product proposes purchases and changes by default, with cloud-side execution only after an administrator opts in; forecast horizon, granularity, and accuracy definitions must be agreed with product owners. React, JWT, PostgreSQL, Flink, S3 as a central landing choice, Snowflake, Prometheus/Grafana, Scikit-learn, and XGBoost are replaceable implementation examples selected for the diagram, not facts or requirements from the brief. Do not treat any assumption as a requirement.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "cost_02",
+      "stepNumber": 2,
+      "phase": "Define boundaries and the trust contract",
+      "title": "Give teams a cost workspace",
+      "type": "add_component",
+      "content": "The workspace is an inferred product surface for reviewing allocations, recommendations, anomalies, and forecasts; it is not an additional scale or availability requirement.",
+      "component": {
+        "nodeId": "cost_portal",
+        "componentType": "web-app",
+        "label": "FinOps Workspace",
+        "description": "Tenant-aware workspace for finance and engineering teams to inspect allocated spend, evidence-backed recommendations, anomalies, and forecasts.",
+        "position": {"x": 0, "y": 300},
+        "properties": {
+          "componentName": "FinOps Workspace",
+          "purpose": "Tenant-aware workspace for finance and engineering teams to inspect allocated spend, evidence-backed recommendations, anomalies, and forecasts.",
+          "framework": "React",
+          "ssl": true
+        },
+        "highlightReason": "Make cost decisions reviewable by the teams accountable for the spend rather than presenting an opaque savings score."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8"]
+    },
+    {
+      "id": "cost_03",
+      "stepNumber": 3,
+      "phase": "Define boundaries and the trust contract",
+      "title": "Protect the public application boundary",
+      "type": "add_component",
+      "content": "Authenticate organization and team access before exposing billing detail or accepting policy changes. JWT is a replaceable implementation choice, not a brief requirement.",
+      "component": {
+        "nodeId": "cost_gateway",
+        "componentType": "api-gateway",
+        "label": "Authenticated Cost API",
+        "description": "Validates tenant identity, request shape, TLS, and per-tenant rate limits before forwarding workspace requests.",
+        "position": {"x": 300, "y": 300},
+        "properties": {
+          "componentName": "Authenticated Cost API",
+          "purpose": "Validates tenant identity, request shape, TLS, and per-tenant rate limits before forwarding workspace requests.",
+          "authentication": "JWT",
+          "inputValidation": true,
+          "rateLimiting": true,
+          "tlsTermination": true
+        },
+        "highlightReason": "Cost and allocation data are sensitive; identity and tenant scoping must be enforced before reads and writes."
+      },
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "cost_04",
+      "stepNumber": 4,
+      "phase": "Define boundaries and the trust contract",
+      "title": "Workspace requests enter through the authenticated boundary",
+      "type": "add_connection",
+      "content": "Keep browser credentials and tenant context at the gateway; never let a client select another organization's account IDs without server-side authorization.",
+      "connection": {
+        "edgeId": "cost_portal_gateway",
+        "sourceNodeId": "cost_portal",
+        "targetNodeId": "cost_gateway",
+        "connectionType": "api-call",
+        "label": "Authenticated workspace requests",
+        "description": "Send scoped report, recommendation, forecast, and policy-review requests over TLS."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8"]
+    },
+    {
+      "id": "cost_05",
+      "stepNumber": 5,
+      "phase": "Define boundaries and the trust contract",
+      "title": "Add the tenant-scoped application service",
+      "type": "add_component",
+      "content": "Keep product APIs, saved views, review workflows, and authorization checks behind one service boundary; split it only when measured ownership or load requires it.",
+      "component": {
+        "nodeId": "cost_api",
+        "componentType": "backend-server",
+        "label": "Cost Platform API",
+        "description": "Tenant-scoped API for cost views, forecast and recommendation retrieval, policy configuration, and approval records.",
+        "position": {"x": 620, "y": 300},
+        "properties": {
+          "componentName": "Cost Platform API",
+          "purpose": "Tenant-scoped API for cost views, forecast and recommendation retrieval, policy configuration, and approval records.",
+          "architecture": "Microservices",
+          "retry": true,
+          "bulkOps": true
+        },
+        "highlightReason": "Separate the user-facing contract from provider ingestion and optimization jobs so retries or backfills do not block interactive review."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "cost_06",
+      "stepNumber": 6,
+      "phase": "Define boundaries and the trust contract",
+      "title": "Forward validated requests to the platform API",
+      "type": "add_connection",
+      "content": "The API rechecks tenant permissions for every data path; gateway authentication alone does not authorize a specific account, team, or policy mutation.",
+      "connection": {
+        "edgeId": "cost_gateway_api",
+        "sourceNodeId": "cost_gateway",
+        "targetNodeId": "cost_api",
+        "connectionType": "api-call",
+        "label": "Tenant-scoped API calls",
+        "description": "Pass validated identity and request context for authorization, reporting, and review operations."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "cost_07",
+      "stepNumber": 7,
+      "phase": "Define boundaries and the trust contract",
+      "title": "Persist control-plane state separately from cost facts",
+      "type": "add_component",
+      "content": "Store tenant/account mappings, versioned policies, approvals, recommendation status, and audit references here. Large time-series cost facts belong in the analytical store, not this OLTP database.",
+      "component": {
+        "nodeId": "cost_control_db",
+        "componentType": "database",
+        "label": "Policies, Reviews & Audit Store",
+        "description": "Encrypted OLTP state for tenant/account mapping, versioned governance policies, recommendation review status, approvals, and audit references.",
+        "position": {"x": 920, "y": 500},
+        "properties": {
+          "componentName": "Policies, Reviews & Audit Store",
+          "purpose": "Encrypted OLTP state for tenant/account mapping, versioned governance policies, recommendation review status, approvals, and audit references.",
+          "type": "RDBMS",
+          "engine": "postgresql",
+          "workload": "OLTP",
+          "multiAZ": true,
+          "backups": true,
+          "pitr": true,
+          "encryption": true,
+          "connectionPooling": true,
+          "rbac": true,
+          "auditLog": true
+        },
+        "highlightReason": "Keep approval and policy history durable and tenant-scoped without putting the high-volume analytical ledger into an OLTP access pattern."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "cost_08",
+      "stepNumber": 8,
+      "phase": "Define boundaries and the trust contract",
+      "title": "Persist policy and review transitions",
+      "type": "add_connection",
+      "content": "Version every policy change and keep approver, scope, timestamp, and before/after state so a later chargeback or automated action can be explained.",
+      "connection": {
+        "edgeId": "cost_api_control_db",
+        "sourceNodeId": "cost_api",
+        "targetNodeId": "cost_control_db",
+        "connectionType": "database-connection",
+        "label": "Versioned control-plane state",
+        "description": "Read and write tenant-scoped account mappings, policy versions, approvals, and recommendation review records."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "cost_09",
+      "stepNumber": 9,
+      "phase": "Define boundaries and the trust contract",
+      "title": "Choose a safe starting mode",
+      "type": "decision_point",
+      "content": "Start with explainable recommendations and policy enforcement before allowing provider-side mutations. The brief asks for automated governance, but does not grant authority to purchase commitments or resize production resources.",
+      "decision": {
+        "question": "What should the platform do when a recommendation meets a configured policy?",
+        "chosen": "Persist the recommendation and policy result; permit cloud-side changes only for explicitly opted-in, scoped actions with an approval and rollback path.",
+        "chosenReason": "This delivers automated evaluation and governance while keeping financial purchases and workload changes under organization-controlled authority.",
+        "alternatives": [
+          {
+            "option": "Automatically execute every savings recommendation",
+            "tradeoff": "Can cause availability or financial harm when utilization evidence is stale or a workload has an unobserved constraint."
+          },
+          {
+            "option": "Never automate any policy outcome",
+            "tradeoff": "Reduces risk but leaves configured budget and governance rules dependent on manual review."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:7"]
+    },
+    {
+      "id": "cost_10",
+      "stepNumber": 10,
+      "phase": "Define boundaries and the trust contract",
+      "title": "Scale the ingestion design from the stated resource floor",
+      "type": "scale_trigger",
+      "content": "The brief explicitly requires 10k+ cloud resources across accounts. It does not give account count, event rate, tenant count, or growth curve, so do not invent those values as sizing facts.",
+      "scaleTrigger": {
+        "metric": "Observed resource count, per-account ingestion lag, and warehouse partition/query pressure",
+        "action": "Partition ingestion and analytical access by provider, tenant, and account; add independent workers only when measured backlog or query latency requires it.",
+        "impact": "Improves isolation and horizontal capacity while adding cross-partition query and operational complexity."
+      },
+      "requirementIds": ["legacy-constraint:4"]
+    },
+    {
+      "id": "cost_11",
+      "stepNumber": 11,
+      "phase": "Ingest and normalize multi-cloud evidence",
+      "title": "Land AWS billing exports",
+      "type": "add_component",
+      "content": "Treat provider billing exports as source evidence and preserve their original period, account, currency, and export identity for reconciliation.",
+      "component": {
+        "nodeId": "cost_aws_exports",
+        "componentType": "object-storage",
+        "label": "AWS Billing Export Landing",
+        "description": "Versioned landing location for AWS cost and usage exports, retained with provider/account/period identity before normalization.",
+        "position": {"x": 0, "y": 20},
+        "properties": {
+          "componentName": "AWS Billing Export Landing",
+          "purpose": "Versioned landing location for AWS cost and usage exports, retained with provider/account/period identity before normalization.",
+          "provider": "S3",
+          "versioning": true,
+          "checksumValidation": true
+        },
+        "highlightReason": "Preserve the raw provider record so transformed spend can be traced back to a reproducible export."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "cost_12",
+      "stepNumber": 12,
+      "phase": "Ingest and normalize multi-cloud evidence",
+      "title": "Land Azure billing exports",
+      "type": "add_component",
+      "content": "Use the provider's corresponding billing export format, but map it into the same canonical ledger only after recording its original schema and currency semantics.",
+      "component": {
+        "nodeId": "cost_azure_exports",
+        "componentType": "object-storage",
+        "label": "Azure Billing Export Landing",
+        "description": "Versioned landing location for Azure Cost Management billing exports, retaining original account, period, currency, and schema metadata.",
+        "position": {"x": 0, "y": 160},
+        "properties": {
+          "componentName": "Azure Billing Export Landing",
+          "purpose": "Versioned landing location for Azure Cost Management billing exports, retaining original account, period, currency, and schema metadata.",
+          "provider": "Azure Blob",
+          "versioning": true,
+          "checksumValidation": true
+        },
+        "highlightReason": "Provider-specific billing fields differ; retain the source representation for reconciliation and parser upgrades."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "cost_13",
+      "stepNumber": 13,
+      "phase": "Ingest and normalize multi-cloud evidence",
+      "title": "Land Google Cloud billing exports",
+      "type": "add_component",
+      "content": "Preserve the export's billing account, project, service, SKU, usage interval, and currency fields before mapping them to canonical dimensions.",
+      "component": {
+        "nodeId": "cost_gcp_exports",
+        "componentType": "object-storage",
+        "label": "GCP Billing Export Landing",
+        "description": "Versioned landing location for Google Cloud billing export data with original billing-account, project, service, SKU, period, and currency context.",
+        "position": {"x": 0, "y": 440},
+        "properties": {
+          "componentName": "GCP Billing Export Landing",
+          "purpose": "Versioned landing location for Google Cloud billing export data with original billing-account, project, service, SKU, period, and currency context.",
+          "provider": "GCS",
+          "versioning": true,
+          "checksumValidation": true
+        },
+        "highlightReason": "Keep the provider's source fields intact so service and project attribution can be audited after normalization."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "cost_14",
+      "stepNumber": 14,
+      "phase": "Ingest and normalize multi-cloud evidence",
+      "title": "Add the multi-cloud provider adapter",
+      "type": "add_component",
+      "content": "No dedicated multi-cloud billing-and-resource adapter exists in the catalog, so use its supported generic custom component. Keep provider-specific authentication, schema adapters, read-only inventory, usage signals, and explicitly enabled write operations behind this replaceable boundary.",
+      "component": {
+        "nodeId": "cost_provider_adapter",
+        "componentType": "custom-component",
+        "label": "Multi-cloud Account Adapter",
+        "description": "Provider boundary for AWS, Azure, and GCP billing export discovery, read-only resource inventory and utilization signals, and separately gated opt-in policy actions.",
+        "position": {"x": 300, "y": 280},
+        "properties": {
+          "componentName": "Multi-cloud Account Adapter",
+          "subtitle": "AWS · Azure · GCP",
+          "purpose": "Provider boundary for AWS, Azure, and GCP billing export discovery, read-only resource inventory and utilization signals, and separately gated opt-in policy actions.",
+          "componentType": "Cloud Provider Integration",
+          "technology": "AWS billing exports, Azure Cost Management, Google Cloud Billing",
+          "notes": "Use tenant-scoped credentials and least privilege. Writes remain disabled unless the account owner configures an allow-listed policy and explicit approval path."
+        },
+        "highlightReason": "Isolate provider-specific schemas and credentials while preserving the three named billing sources and a separately controlled execution boundary."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "cost_15",
+      "stepNumber": 15,
+      "phase": "Ingest and normalize multi-cloud evidence",
+      "title": "Read AWS exports through the provider adapter",
+      "type": "add_connection",
+      "content": "Validate export identity and completeness before acknowledging a new billing period; retries must not create duplicate cost facts.",
+      "connection": {
+        "edgeId": "cost_aws_adapter",
+        "sourceNodeId": "cost_aws_exports",
+        "targetNodeId": "cost_provider_adapter",
+        "connectionType": "data-flow",
+        "label": "AWS billing and usage records",
+        "description": "Discover versioned AWS export objects and pass provider/account/period metadata for idempotent parsing."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "cost_16",
+      "stepNumber": 16,
+      "phase": "Ingest and normalize multi-cloud evidence",
+      "title": "Read Azure exports through the same contract",
+      "type": "add_connection",
+      "content": "Keep Azure-specific meter and resource identifiers alongside normalized fields so provider reconciliation remains possible.",
+      "connection": {
+        "edgeId": "cost_azure_adapter",
+        "sourceNodeId": "cost_azure_exports",
+        "targetNodeId": "cost_provider_adapter",
+        "connectionType": "data-flow",
+        "label": "Azure billing and usage records",
+        "description": "Read versioned Cost Management exports and map provider fields without discarding their source identifiers."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "cost_17",
+      "stepNumber": 17,
+      "phase": "Ingest and normalize multi-cloud evidence",
+      "title": "Read GCP exports through the same contract",
+      "type": "add_connection",
+      "content": "Preserve billing-account, project, service, and SKU dimensions even when some records arrive later as adjustments or credits.",
+      "connection": {
+        "edgeId": "cost_gcp_adapter",
+        "sourceNodeId": "cost_gcp_exports",
+        "targetNodeId": "cost_provider_adapter",
+        "connectionType": "data-flow",
+        "label": "GCP billing and usage records",
+        "description": "Read versioned export rows and retain their original billing/project identity for later reconciliation."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "cost_18",
+      "stepNumber": 18,
+      "phase": "Ingest and normalize multi-cloud evidence",
+      "title": "Buffer arrivals and provider retries",
+      "type": "add_component",
+      "content": "Queue export notifications and inventory deltas so provider outages, backfills, and bursts do not block parsing. Use idempotency keys derived from tenant, provider, account, export identity, and record identity.",
+      "component": {
+        "nodeId": "cost_ingest_queue",
+        "componentType": "queue",
+        "label": "Billing & Usage Intake Queue",
+        "description": "Durable asynchronous buffer for export-arrival notifications, inventory changes, usage signals, and retryable provider ingestion work.",
+        "position": {"x": 620, "y": 80},
+        "properties": {
+          "componentName": "Billing & Usage Intake Queue",
+          "purpose": "Durable asynchronous buffer for export-arrival notifications, inventory changes, usage signals, and retryable provider ingestion work.",
+          "backoff": "exponential"
+        },
+        "highlightReason": "Decouple provider freshness and retry behavior from normalization and analytical queries."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "cost_19",
+      "stepNumber": 19,
+      "phase": "Ingest and normalize multi-cloud evidence",
+      "title": "Publish provider work for asynchronous ingestion",
+      "type": "add_connection",
+      "content": "Queue a pointer and source metadata rather than copying large billing files into a message; retry and dead-letter behavior should be observable.",
+      "connection": {
+        "edgeId": "cost_adapter_queue",
+        "sourceNodeId": "cost_provider_adapter",
+        "targetNodeId": "cost_ingest_queue",
+        "connectionType": "message-queue",
+        "label": "Export and usage work items",
+        "description": "Enqueue versioned source references and account-scoped usage events for idempotent processing."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:2"]
+    },
+    {
+      "id": "cost_20",
+      "stepNumber": 20,
+      "phase": "Ingest and normalize multi-cloud evidence",
+      "title": "Normalize cost records without losing provenance",
+      "type": "add_component",
+      "content": "Map provider-specific rows into a canonical fact contract: tenant, provider, account, resource, service, team tags, usage interval, currency, charge kind, estimated/final status, source revision, and adjustment lineage.",
+      "component": {
+        "nodeId": "cost_normalizer",
+        "componentType": "stream-processor",
+        "label": "Cost & Usage Normalizer",
+        "description": "Stateful parser and canonicalizer for provider billing exports, usage events, late adjustments, deduplication, and source-lineage metadata.",
+        "position": {"x": 920, "y": 80},
+        "properties": {
+          "componentName": "Cost & Usage Normalizer",
+          "purpose": "Stateful parser and canonicalizer for provider billing exports, usage events, late adjustments, deduplication, and source-lineage metadata.",
+          "engine": "Apache Flink",
+          "windowing": true,
+          "stateful": true
+        },
+        "highlightReason": "A shared canonical fact shape enables cross-cloud analysis while source revisions and estimate status keep the result auditable."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "cost_21",
+      "stepNumber": 21,
+      "phase": "Ingest and normalize multi-cloud evidence",
+      "title": "Deliver buffered work to the normalizer",
+      "type": "add_connection",
+      "content": "Use replayable offsets or equivalent checkpoints and an idempotent sink; exactly-once claims depend on the full source-to-sink implementation, not the diagram label.",
+      "connection": {
+        "edgeId": "cost_queue_normalizer",
+        "sourceNodeId": "cost_ingest_queue",
+        "targetNodeId": "cost_normalizer",
+        "connectionType": "message-queue",
+        "label": "Replayable normalization work",
+        "description": "Deliver provider work with retry, checkpoint, duplicate detection, and dead-letter visibility."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:2"]
+    },
+    {
+      "id": "cost_22",
+      "stepNumber": 22,
+      "phase": "Ingest and normalize multi-cloud evidence",
+      "title": "Retain immutable normalized source evidence",
+      "type": "add_component",
+      "content": "Use a replaceable central object-storage landing area for normalized snapshots and replay manifests. S3 is an illustrative deployment choice because the catalog requires one provider value; it is not a multi-cloud product requirement.",
+      "component": {
+        "nodeId": "cost_raw_lake",
+        "componentType": "object-storage",
+        "label": "Normalized Cost Evidence Lake",
+        "description": "Versioned central object store for normalized provider snapshots, replay manifests, and reconciliation evidence before analytical aggregation.",
+        "position": {"x": 1220, "y": 80},
+        "properties": {
+          "componentName": "Normalized Cost Evidence Lake",
+          "purpose": "Versioned central object store for normalized provider snapshots, replay manifests, and reconciliation evidence before analytical aggregation.",
+          "provider": "S3",
+          "versioning": true,
+          "checksumValidation": true
+        },
+        "highlightReason": "Retain replayable evidence independently from curated aggregates and user-facing summaries."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "cost_23",
+      "stepNumber": 23,
+      "phase": "Ingest and normalize multi-cloud evidence",
+      "title": "Archive normalized source facts",
+      "type": "add_connection",
+      "content": "Keep source revision, ingestion time, and estimated-versus-final state attached so a late credit or re-export can be reconciled rather than silently overwriting history.",
+      "connection": {
+        "edgeId": "cost_normalizer_lake",
+        "sourceNodeId": "cost_normalizer",
+        "targetNodeId": "cost_raw_lake",
+        "connectionType": "data-flow",
+        "label": "Versioned normalized evidence",
+        "description": "Write canonical records and lineage manifests for replay, reconciliation, and audit."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6"]
+    },
+    {
+      "id": "cost_24",
+      "stepNumber": 24,
+      "phase": "Ingest and normalize multi-cloud evidence",
+      "title": "Collect resource utilization evidence",
+      "type": "add_component",
+      "content": "Rightsizing needs time-series utilization and resource identity, not spend alone. Collect provider metrics through tenant-scoped integrations, preserve collection timestamps, and mark missing or stale signals explicitly.",
+      "component": {
+        "nodeId": "cost_utilization",
+        "componentType": "monitoring",
+        "label": "Cross-cloud Utilization Signals",
+        "description": "Timestamped CPU, memory, storage, network, and resource-lifecycle signals joined to tenant/account/resource identity through provider integrations.",
+        "position": {"x": 620, "y": 520},
+        "properties": {
+          "componentName": "Cross-cloud Utilization Signals",
+          "purpose": "Timestamped CPU, memory, storage, network, and resource-lifecycle signals joined to tenant/account/resource identity through provider integrations.",
+          "stack": "Prometheus + Grafana",
+          "metrics": true,
+          "alerts": true
+        },
+        "highlightReason": "A rightsizing suggestion must be grounded in recent utilization and must not mistake a telemetry gap for an idle resource."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "cost_25",
+      "stepNumber": 25,
+      "phase": "Ingest and normalize multi-cloud evidence",
+      "title": "Collect provider-side signals through the adapter",
+      "type": "add_connection",
+      "content": "The provider adapter fans timestamped resource telemetry and inventory changes into the utilization collector. Metrics remain distinct from invoice facts; align time windows and identity but retain their source and freshness metadata.",
+      "connection": {
+        "edgeId": "cost_adapter_utilization",
+        "sourceNodeId": "cost_provider_adapter",
+        "targetNodeId": "cost_utilization",
+        "connectionType": "event-stream",
+        "label": "Provider inventory and utilization feed",
+        "description": "Collect timestamped cross-cloud resource metrics and lifecycle events with provider/account/resource identity and source freshness."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "cost_26",
+      "stepNumber": 26,
+      "phase": "Ingest and normalize multi-cloud evidence",
+      "title": "Build the analytical cost and usage ledger",
+      "type": "add_component",
+      "content": "Partition analytical facts around provider, tenant/account, service/resource, and usage time so team/service queries and backtests can be measured at the stated 10k+ resource floor. The brief provides no billing-history duration or event-rate number, so size storage from observed retention and growth.",
+      "component": {
+        "nodeId": "cost_warehouse",
+        "componentType": "data-warehouse",
+        "label": "Multi-cloud Cost & Usage Warehouse",
+        "description": "Analytical store for canonical cost facts, resource utilization, tags, account/service dimensions, reconciled actuals, and forecast evaluation history.",
+        "position": {"x": 1520, "y": 280},
+        "properties": {
+          "componentName": "Multi-cloud Cost & Usage Warehouse",
+          "purpose": "Analytical store for canonical cost facts, resource utilization, tags, account/service dimensions, reconciled actuals, and forecast evaluation history.",
+          "platform": "Snowflake",
+          "compression": true,
+          "partitioning": true
+        },
+        "highlightReason": "Separate scan-heavy analytical facts from policy OLTP state and support consistent provider, team, and service rollups."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "cost_27",
+      "stepNumber": 27,
+      "phase": "Ingest and normalize multi-cloud evidence",
+      "title": "Load canonical facts for cross-provider analysis",
+      "type": "add_connection",
+      "content": "Publish idempotent canonical records and late-adjustment lineage. Consumers can then compare providers without adding unlike currencies, billing periods, or estimated and finalized costs as if they were identical.",
+      "connection": {
+        "edgeId": "cost_normalizer_warehouse",
+        "sourceNodeId": "cost_normalizer",
+        "targetNodeId": "cost_warehouse",
+        "connectionType": "data-flow",
+        "label": "Canonical cost and usage facts",
+        "description": "Load provider-tagged cost, usage, resource, and freshness facts for analytical queries and model features."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "cost_28",
+      "stepNumber": 28,
+      "phase": "Attribute spend and detect opportunities",
+      "title": "Create team and service cost views",
+      "type": "add_component",
+      "content": "Apply explicit ownership tags and organization mappings first. Preserve allocation rules and their version so chargeback can be reproduced for a closed period.",
+      "component": {
+        "nodeId": "cost_allocation",
+        "componentType": "analytics",
+        "label": "Allocation & Showback Analytics",
+        "description": "Versioned allocation pipeline for provider/account/service spend, explicit ownership tags, approved tag inference, and team/service showback or chargeback views.",
+        "position": {"x": 1820, "y": 280},
+        "properties": {
+          "componentName": "Allocation & Showback Analytics",
+          "purpose": "Versioned allocation pipeline for provider/account/service spend, explicit ownership tags, approved tag inference, and team/service showback or chargeback views.",
+          "realTime": true
+        },
+        "highlightReason": "Make every allocated amount traceable to a source fact and a versioned ownership rule."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:8"]
+    },
+    {
+      "id": "cost_29",
+      "stepNumber": 29,
+      "phase": "Attribute spend and detect opportunities",
+      "title": "Aggregate spend by the dimensions the brief names",
+      "type": "add_connection",
+      "content": "Materialize or query provider, team, and service totals from canonical facts while retaining a drill-down path to account and resource evidence.",
+      "connection": {
+        "edgeId": "cost_warehouse_allocation",
+        "sourceNodeId": "cost_warehouse",
+        "targetNodeId": "cost_allocation",
+        "connectionType": "data-flow",
+        "label": "Provider-tagged cost facts",
+        "description": "Aggregate canonical actual and estimated spend into auditable account, service, team, and period views."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:8"]
+    },
+    {
+      "id": "cost_30",
+      "stepNumber": 30,
+      "phase": "Attribute spend and detect opportunities",
+      "title": "Profile workloads for safe comparisons",
+      "type": "add_component",
+      "content": "Cluster resource usage patterns to distinguish steady services, bursty jobs, seasonal workloads, and likely idle assets. Treat clusters as evidence for review, not as proof that two resources are interchangeable.",
+      "component": {
+        "nodeId": "cost_workload_profile",
+        "componentType": "ml-model",
+        "label": "Workload Profiling Model",
+        "description": "Clustering model over time-series utilization and resource metadata to group workload behavior for rightsizing and commitment analysis.",
+        "position": {"x": 1820, "y": 520},
+        "properties": {
+          "componentName": "Workload Profiling Model",
+          "purpose": "Clustering model over time-series utilization and resource metadata to group workload behavior for rightsizing and commitment analysis.",
+          "modelType": "Clustering",
+          "framework": "Scikit-learn"
+        },
+        "highlightReason": "Use workload profiles to inform comparable analysis while preserving per-resource evidence and confidence."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1"]
+    },
+    {
+      "id": "cost_31",
+      "stepNumber": 31,
+      "phase": "Attribute spend and detect opportunities",
+      "title": "Build profiles from reconciled cost and usage history",
+      "type": "add_connection",
+      "content": "Join telemetry windows to billed resource identity and exclude missing or stale intervals from recommendations until enough evidence exists.",
+      "connection": {
+        "edgeId": "cost_warehouse_profile",
+        "sourceNodeId": "cost_warehouse",
+        "targetNodeId": "cost_workload_profile",
+        "connectionType": "data-flow",
+        "label": "Resource history and cost context",
+        "description": "Supply time-series usage, provider/resource metadata, and reconciled spend features for workload clustering."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "cost_32",
+      "stepNumber": 32,
+      "phase": "Attribute spend and detect opportunities",
+      "title": "Use approved inference for resources missing ownership tags",
+      "type": "add_connection",
+      "content": "Join workload and service metadata to the allocation pipeline. Store the inference reason and confidence; route low-confidence or conflicting ownership to an explicit unallocated bucket for human review rather than silently charging a team.",
+      "connection": {
+        "edgeId": "cost_profile_allocation",
+        "sourceNodeId": "cost_workload_profile",
+        "targetNodeId": "cost_allocation",
+        "connectionType": "data-flow",
+        "label": "Workload and ownership evidence",
+        "description": "Provide profile features for approved tag inference while retaining confidence, lineage, and unresolved ownership state."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:1"]
+    },
+    {
+      "id": "cost_33",
+      "stepNumber": 33,
+      "phase": "Attribute spend and detect opportunities",
+      "title": "Detect unexpected cost changes",
+      "type": "add_component",
+      "content": "Score cost and usage series for unusual shifts with provider, account, service, and workload context. Keep anomaly evidence, baseline window, and model version with each alert so a spike is explainable.",
+      "component": {
+        "nodeId": "cost_anomaly_model",
+        "componentType": "ml-model",
+        "label": "Cost Anomaly Detector",
+        "description": "Anomaly-detection model for unexpected spend and usage changes, emitting explainable evidence, baseline context, and model version.",
+        "position": {"x": 2120, "y": 40},
+        "properties": {
+          "componentName": "Cost Anomaly Detector",
+          "purpose": "Anomaly-detection model for unexpected spend and usage changes, emitting explainable evidence, baseline context, and model version.",
+          "modelType": "Anomaly Detection",
+          "framework": "Scikit-learn"
+        },
+        "highlightReason": "Identify anomalous spend or usage and make the detection evidence reviewable instead of presenting an unexplained score."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:2"]
+    },
+    {
+      "id": "cost_34",
+      "stepNumber": 34,
+      "phase": "Attribute spend and detect opportunities",
+      "title": "Score anomalies against cost history",
+      "type": "add_connection",
+      "content": "Separate finalized billed changes from early estimated-cost alerts, then reconcile the alert when provider actuals arrive.",
+      "connection": {
+        "edgeId": "cost_warehouse_anomaly",
+        "sourceNodeId": "cost_warehouse",
+        "targetNodeId": "cost_anomaly_model",
+        "connectionType": "data-flow",
+        "label": "Cost and usage time series",
+        "description": "Supply versioned provider/account/service series with actual-versus-estimated status and baseline features."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:2"]
+    },
+    {
+      "id": "cost_35",
+      "stepNumber": 35,
+      "phase": "Attribute spend and detect opportunities",
+      "title": "Use fresh telemetry for early warning",
+      "type": "add_connection",
+      "content": "Billing exports may arrive later than the one-hour detection target. Use fresh usage or estimated-spend signals for provisional alerts, label them as estimates, and reconcile them when billing data is finalized; validate provider-specific freshness before claiming the target is met.",
+      "connection": {
+        "edgeId": "cost_utilization_anomaly",
+        "sourceNodeId": "cost_utilization",
+        "targetNodeId": "cost_anomaly_model",
+        "connectionType": "event-stream",
+        "label": "Fresh usage and lifecycle signals",
+        "description": "Feed timestamped cross-cloud signals for early anomaly detection while preserving estimated status and source freshness."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:2"]
+    },
+    {
+      "id": "cost_36",
+      "stepNumber": 36,
+      "phase": "Attribute spend and detect opportunities",
+      "title": "Surface explainable anomalies beside allocated spend",
+      "type": "add_connection",
+      "content": "A team should see the affected provider, service, expected baseline, observed change, and whether the amount is estimated or finalized.",
+      "connection": {
+        "edgeId": "cost_anomaly_allocation",
+        "sourceNodeId": "cost_anomaly_model",
+        "targetNodeId": "cost_allocation",
+        "connectionType": "data-flow",
+        "label": "Anomaly findings with ownership context",
+        "description": "Attach model evidence to the relevant account, team, and service cost views for investigation."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:2"]
+    },
+    {
+      "id": "cost_37",
+      "stepNumber": 37,
+      "phase": "Attribute spend and detect opportunities",
+      "title": "Define the anomaly operating point with evidence",
+      "type": "decision_point",
+      "content": "The brief sets a one-hour detection target but not an acceptable false-positive rate or exact start/end timestamps. Set those with users and measure end-to-end from the earliest supported source signal to a visible, actionable finding.",
+      "decision": {
+        "question": "How should the platform trade anomaly sensitivity against alert fatigue?",
+        "chosen": "Use separate, versioned policies for early estimated signals and reconciled billed anomalies; tune thresholds from reviewed outcomes and report both detection latency and false-positive rate.",
+        "chosenReason": "It preserves the one-hour target as a measurable objective without treating provisional estimates as booked spend or inventing an error budget.",
+        "alternatives": [
+          {
+            "option": "Alert on every deviation from a fixed baseline",
+            "tradeoff": "Can create alert fatigue when seasonality, credits, or normal deployment events shift spend."
+          },
+          {
+            "option": "Wait for finalized invoices only",
+            "tradeoff": "May miss the stated detection window when a provider's billing export is not fresh enough."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:2"]
+    },
+    {
+      "id": "cost_38",
+      "stepNumber": 38,
+      "phase": "Attribute spend and detect opportunities",
+      "title": "Trigger capacity work from measured lag, not guessed throughput",
+      "type": "scale_trigger",
+      "content": "Use the stated one-hour anomaly target as the end-to-end objective. The brief does not specify provider export freshness or ingest volume, so the source freshness distribution must be measured separately from model runtime.",
+      "scaleTrigger": {
+        "metric": "Source-event age, queue age, normalization lag, model-evaluation lag, and time-to-visible finding",
+        "action": "Scale or isolate provider/account workers when measured lag threatens the one-hour objective; show a degraded-data warning when the upstream source itself is late.",
+        "impact": "Separating ingestion from scoring contains provider-specific delays but increases operational paths and alerting responsibilities."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "cost_39",
+      "stepNumber": 39,
+      "phase": "Attribute spend and detect opportunities",
+      "title": "Choose a defensible ownership rule",
+      "type": "decision_point",
+      "content": "Use deterministic tags and approved organization mappings when present. Inference may suggest an owner for untagged spend, but chargeback should not silently turn a probabilistic suggestion into a financial fact.",
+      "decision": {
+        "question": "What happens when a resource has no reliable team or service owner?",
+        "chosen": "Retain the spend in an explicit unallocated bucket, show the inferred owner and evidence separately, and require an organization-approved confidence policy before assigning chargeback.",
+        "chosenReason": "This preserves total spend visibility and gives owners a correction path without fabricating attribution certainty.",
+        "alternatives": [
+          {
+            "option": "Assign every untagged resource to the most likely team",
+            "tradeoff": "Improves apparent allocation coverage while risking incorrect financial attribution."
+          },
+          {
+            "option": "Exclude untagged resources from team reports",
+            "tradeoff": "Understates total spend and hides the cost of missing ownership metadata."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "cost_40",
+      "stepNumber": 40,
+      "phase": "Optimize resources, commitments, and forecasts",
+      "title": "Estimate usage-based rightsizing candidates",
+      "type": "add_component",
+      "content": "Use time-series utilization, resource family/region constraints, and observed workload profiles to produce candidate instance sizes and expected cost deltas. Keep recommendation generation separate from execution.",
+      "component": {
+        "nodeId": "cost_rightsize_model",
+        "componentType": "ml-model",
+        "label": "Rightsizing Candidate Model",
+        "description": "Regression model over time-series utilization and provider resource metadata to rank feasible instance-size candidates with estimated savings and evidence.",
+        "position": {"x": 2120, "y": 280},
+        "properties": {
+          "componentName": "Rightsizing Candidate Model",
+          "purpose": "Regression model over time-series utilization and provider resource metadata to rank feasible instance-size candidates with estimated savings and evidence.",
+          "modelType": "Regression",
+          "framework": "XGBoost"
+        },
+        "highlightReason": "Recommend instance rightsizing from observed time-series usage and present an expected saving with its evidence and uncertainty."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "cost_41",
+      "stepNumber": 41,
+      "phase": "Optimize resources, commitments, and forecasts",
+      "title": "Feed rightsizing from cost and resource history",
+      "type": "add_connection",
+      "content": "Exclude resources with insufficient or stale samples and retain the reason a candidate was withheld, so silence is not confused with a verified no-opportunity result.",
+      "connection": {
+        "edgeId": "cost_warehouse_rightsize",
+        "sourceNodeId": "cost_warehouse",
+        "targetNodeId": "cost_rightsize_model",
+        "connectionType": "data-flow",
+        "label": "Time-series usage and provider constraints",
+        "description": "Provide historical usage, resource catalog, charge rates, and workload metadata for candidate scoring."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "cost_42",
+      "stepNumber": 42,
+      "phase": "Optimize resources, commitments, and forecasts",
+      "title": "Validate candidates against fresh telemetry",
+      "type": "add_connection",
+      "content": "A low average can hide peaks or a recent workload change. Include peak/percentile context selected with operators and suppress a recommendation when the evidence window is incomplete.",
+      "connection": {
+        "edgeId": "cost_utilization_rightsize",
+        "sourceNodeId": "cost_utilization",
+        "targetNodeId": "cost_rightsize_model",
+        "connectionType": "event-stream",
+        "label": "Fresh utilization and lifecycle evidence",
+        "description": "Supply timestamped telemetry and staleness markers to validate candidate sizes against actual workload behavior."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1"]
+    },
+    {
+      "id": "cost_43",
+      "stepNumber": 43,
+      "phase": "Optimize resources, commitments, and forecasts",
+      "title": "Optimize reserved-instance and savings-plan coverage",
+      "type": "add_component",
+      "content": "Use a constrained portfolio optimizer to compare eligible usage, rates, term, flexibility, and demand uncertainty. The catalog has no dedicated RI/SP optimizer, so the general backend service is the closest supported analog; the optimization domain logic remains explicit in its description.",
+      "component": {
+        "nodeId": "cost_commitment_optimizer",
+        "componentType": "backend-server",
+        "label": "Commitment Portfolio Optimizer",
+        "description": "Constrained what-if optimizer for provider-specific reserved-instance and savings-plan coverage, eligibility, term, flexibility, utilization risk, and estimated net savings.",
+        "position": {"x": 2420, "y": 280},
+        "properties": {
+          "componentName": "Commitment Portfolio Optimizer",
+          "purpose": "Constrained what-if optimizer for provider-specific reserved-instance and savings-plan coverage, eligibility, term, flexibility, utilization risk, and estimated net savings.",
+          "architecture": "Microservices",
+          "retry": true,
+          "bulkOps": true
+        },
+        "highlightReason": "Compare commitment alternatives as a portfolio and expose underutilization risk rather than maximizing nominal discount in isolation."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "cost_44",
+      "stepNumber": 44,
+      "phase": "Optimize resources, commitments, and forecasts",
+      "title": "Combine rightsizing candidates with commitment planning",
+      "type": "add_connection",
+      "content": "A rightsizing decision can change the demand base used for a commitment plan. Compare both sequences in what-if scenarios and show assumptions rather than double-counting savings.",
+      "connection": {
+        "edgeId": "cost_rightsize_commitment",
+        "sourceNodeId": "cost_rightsize_model",
+        "targetNodeId": "cost_commitment_optimizer",
+        "connectionType": "data-flow",
+        "label": "Feasible post-rightsize demand",
+        "description": "Pass candidate demand profiles and estimated deltas to the commitment portfolio optimizer for joint scenario evaluation."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "cost_45",
+      "stepNumber": 45,
+      "phase": "Optimize resources, commitments, and forecasts",
+      "title": "Compare provider prices and commitment coverage",
+      "type": "add_connection",
+      "content": "Apply each provider's actual eligibility and pricing rules to the scenario. Keep one-off credits, exchange rates, term assumptions, and coverage gaps visible so unlike offers are not compared as equivalent.",
+      "connection": {
+        "edgeId": "cost_warehouse_commitment",
+        "sourceNodeId": "cost_warehouse",
+        "targetNodeId": "cost_commitment_optimizer",
+        "connectionType": "data-flow",
+        "label": "Historical demand and rate evidence",
+        "description": "Supply provider-specific usage history, current rate inputs, and commitment coverage for pricing-model what-if analysis."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "cost_46",
+      "stepNumber": 46,
+      "phase": "Optimize resources, commitments, and forecasts",
+      "title": "Forecast spend over an agreed horizon",
+      "type": "add_component",
+      "content": "Train or evaluate a time-series forecast by team and service, with seasonality and known business events where available. The brief gives an accuracy target but does not define forecast horizon, cadence, or aggregation currency; those remain product decisions.",
+      "component": {
+        "nodeId": "cost_forecast_model",
+        "componentType": "ml-model",
+        "label": "Team & Service Cost Forecaster",
+        "description": "Time-series forecasting model for future cloud costs by team and service, with backtest evidence, data freshness, and uncertainty context.",
+        "position": {"x": 2420, "y": 520},
+        "properties": {
+          "componentName": "Team & Service Cost Forecaster",
+          "purpose": "Time-series forecasting model for future cloud costs by team and service, with backtest evidence, data freshness, and uncertainty context.",
+          "modelType": "Forecasting",
+          "framework": "XGBoost"
+        },
+        "highlightReason": "Produce the requested forward view with explicit backtest and uncertainty evidence rather than implying that a model name guarantees accuracy."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "cost_47",
+      "stepNumber": 47,
+      "phase": "Optimize resources, commitments, and forecasts",
+      "title": "Train and backtest against reconciled actuals",
+      "type": "add_connection",
+      "content": "Use time-ordered evaluation to avoid training on future information. Compare the agreed error metric across teams/services and report sparse-history segments separately.",
+      "connection": {
+        "edgeId": "cost_warehouse_forecast",
+        "sourceNodeId": "cost_warehouse",
+        "targetNodeId": "cost_forecast_model",
+        "connectionType": "data-flow",
+        "label": "Reconciled team and service history",
+        "description": "Supply time-series actuals, allocation dimensions, and historical forecast evaluation data."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "cost_48",
+      "stepNumber": 48,
+      "phase": "Optimize resources, commitments, and forecasts",
+      "title": "Expose forecasts alongside allocated spend",
+      "type": "add_connection",
+      "content": "Display actuals, estimates, and forecast values distinctly. Allow drill-down to the team/service allocation rule and backtest segment that produced each forecast.",
+      "connection": {
+        "edgeId": "cost_forecast_allocation",
+        "sourceNodeId": "cost_forecast_model",
+        "targetNodeId": "cost_allocation",
+        "connectionType": "data-flow",
+        "label": "Forecasts by team and service",
+        "description": "Join forecast outputs with allocation dimensions and present uncertainty and evaluation context in cost views."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "cost_49",
+      "stepNumber": 49,
+      "phase": "Optimize resources, commitments, and forecasts",
+      "title": "Keep commitment planning separate from purchasing",
+      "type": "decision_point",
+      "content": "Optimizing reserved-instance and savings-plan coverage is not the same as placing a financial order. The architecture produces candidate portfolios, projected utilization, and what-if comparisons; purchase authority stays with the account owner unless explicitly enabled.",
+      "decision": {
+        "question": "Should the optimizer buy a commitment when its modeled savings are positive?",
+        "chosen": "Return ranked, explainable coverage scenarios for review; require explicit account-level authorization and policy approval before any purchase API call.",
+        "chosenReason": "Provider terms and future demand create financial lock-in risk, and the brief does not authorize autonomous purchases.",
+        "alternatives": [
+          {
+            "option": "Automatically purchase the highest predicted-savings plan",
+            "tradeoff": "Can turn forecast error or an eligibility mismatch into an underutilized commitment."
+          },
+          {
+            "option": "Show only current coverage with no scenarios",
+            "tradeoff": "Avoids execution risk but does not deliver the requested optimization or what-if comparison."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:4"]
+    },
+    {
+      "id": "cost_50",
+      "stepNumber": 50,
+      "phase": "Optimize resources, commitments, and forecasts",
+      "title": "Treat the forecast threshold as a backtest gate",
+      "type": "scale_trigger",
+      "content": "The stated target is forecast accuracy within 10%. Define its error metric, horizon, and evaluation population with users before release; none is specified in the brief.",
+      "scaleTrigger": {
+        "metric": "Time-ordered forecast error against reconciled actuals, segmented by team, service, provider, and agreed horizon",
+        "action": "Keep a baseline forecast and flag segments outside the agreed 10% target; add model complexity only when backtests show a repeatable improvement.",
+        "impact": "Segmented evaluation exposes weak data coverage and avoids hiding poor cohorts inside a favorable global average."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "cost_51",
+      "stepNumber": 51,
+      "phase": "Optimize resources, commitments, and forecasts",
+      "title": "Define what recommendation accuracy means",
+      "type": "decision_point",
+      "content": "The brief says cost-savings recommendation accuracy must exceed 90%, but does not specify whether accuracy means realized savings, eligibility precision, predicted-versus-realized error, or another measure. Agree a label and observation window before presenting a pass/fail badge.",
+      "decision": {
+        "question": "How should recommendation quality be evaluated against the stated threshold?",
+        "chosen": "Version a FinOps-approved metric; compare predicted benefit and eligibility with reviewed outcomes after implementation, and publish coverage, denominator, and confidence alongside the measured result.",
+        "chosenReason": "A visible numerator, denominator, and outcome definition make the above-90% target auditable and prevent a model score from masquerading as realized savings.",
+        "alternatives": [
+          {
+            "option": "Use model confidence as recommendation accuracy",
+            "tradeoff": "Confidence is not evidence that a recommendation is feasible or saved the predicted amount."
+          },
+          {
+            "option": "Count only recommendations users accepted",
+            "tradeoff": "Can bias the metric toward easy cases and hide incorrect recommendations that were rejected."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "cost_52",
+      "stepNumber": 52,
+      "phase": "Govern recommendations and expose outcomes",
+      "title": "Evaluate automated cost-governance policies",
+      "type": "add_component",
+      "content": "Evaluate versioned rules against proposed changes and forecasts: account/team scope, budget or policy condition, allowed action class, approval requirement, and effective period. A denied or unresolved action is an explicit outcome, not a silent drop.",
+      "component": {
+        "nodeId": "cost_policy_engine",
+        "componentType": "backend-server",
+        "label": "Cost Governance Policy Engine",
+        "description": "Deterministic evaluator for versioned tenant/account cost policies, budgets, recommendation eligibility, approval requirements, and opt-in automated actions.",
+        "position": {"x": 2720, "y": 520},
+        "properties": {
+          "componentName": "Cost Governance Policy Engine",
+          "purpose": "Deterministic evaluator for versioned tenant/account cost policies, budgets, recommendation eligibility, approval requirements, and opt-in automated actions.",
+          "architecture": "Microservices",
+          "retry": true,
+          "bulkOps": true
+        },
+        "highlightReason": "Make automated governance explicit, versioned, and reviewable while separating a policy decision from authority to mutate cloud resources."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "cost_53",
+      "stepNumber": 53,
+      "phase": "Govern recommendations and expose outcomes",
+      "title": "Apply policy to optimization proposals",
+      "type": "add_connection",
+      "content": "Require the policy result to retain the recommendation/model versions and evidence IDs that were evaluated, so a later re-run cannot rewrite the original decision.",
+      "connection": {
+        "edgeId": "cost_commitment_policy",
+        "sourceNodeId": "cost_commitment_optimizer",
+        "targetNodeId": "cost_policy_engine",
+        "connectionType": "data-flow",
+        "label": "Commitment scenarios for policy review",
+        "description": "Submit eligible coverage scenarios, projected savings, utilization risk, and evidence lineage for governance evaluation."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1"]
+    },
+    {
+      "id": "cost_54",
+      "stepNumber": 54,
+      "phase": "Govern recommendations and expose outcomes",
+      "title": "Check forecasts against team and service policy",
+      "type": "add_connection",
+      "content": "Forecast-based governance should identify the forecast horizon and uncertainty and avoid treating a low-confidence projection as a booked overrun.",
+      "connection": {
+        "edgeId": "cost_forecast_policy",
+        "sourceNodeId": "cost_forecast_model",
+        "targetNodeId": "cost_policy_engine",
+        "connectionType": "data-flow",
+        "label": "Forecast evidence for budget policies",
+        "description": "Evaluate forecasted team/service spend with model version, actual-versus-estimated status, and uncertainty context."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "cost_55",
+      "stepNumber": 55,
+      "phase": "Govern recommendations and expose outcomes",
+      "title": "Persist every policy outcome",
+      "type": "add_connection",
+      "content": "Record allow, deny, needs-approval, and stale-evidence outcomes with the policy version, actor, scope, and reason. Retries must be idempotent and must not repeat a provider-side action.",
+      "connection": {
+        "edgeId": "cost_policy_control_db",
+        "sourceNodeId": "cost_policy_engine",
+        "targetNodeId": "cost_control_db",
+        "connectionType": "database-connection",
+        "label": "Versioned governance decisions",
+        "description": "Persist policy evaluation, approval status, audit references, and idempotency state for each recommendation."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1"]
+    },
+    {
+      "id": "cost_56",
+      "stepNumber": 56,
+      "phase": "Govern recommendations and expose outcomes",
+      "title": "Gate optional provider-side actions",
+      "type": "add_connection",
+      "content": "Keep provider writes disabled unless an organization owner configures credentials, action scopes, approvals, and rollback/compensation behavior. RI/SP purchase calls require separate financial authorization from reversible resource changes.",
+      "connection": {
+        "edgeId": "cost_policy_adapter",
+        "sourceNodeId": "cost_policy_engine",
+        "targetNodeId": "cost_provider_adapter",
+        "connectionType": "api-call",
+        "label": "Explicitly authorized provider action",
+        "description": "Send only allow-listed, approved actions with tenant/account scope, idempotency key, and recorded policy decision."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "cost_57",
+      "stepNumber": 57,
+      "phase": "Govern recommendations and expose outcomes",
+      "title": "Show policy state next to allocated outcomes",
+      "type": "add_connection",
+      "content": "Expose pending approval, applied, denied, and measured-after-action states beside the team's cost view; do not label a proposed saving as realized savings.",
+      "connection": {
+        "edgeId": "cost_policy_allocation",
+        "sourceNodeId": "cost_policy_engine",
+        "targetNodeId": "cost_allocation",
+        "connectionType": "data-flow",
+        "label": "Governance and realized-outcome status",
+        "description": "Join versioned policy outcomes and later measured savings to the owning team/service allocation view."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1"]
+    },
+    {
+      "id": "cost_58",
+      "stepNumber": 58,
+      "phase": "Govern recommendations and expose outcomes",
+      "title": "Serve reviewed allocations and forecasts to users",
+      "type": "add_connection",
+      "content": "The API returns tenant-authorized team/service views with source freshness, actual/estimate/forecast status, allocation provenance, recommendation evidence, and policy outcome.",
+      "connection": {
+        "edgeId": "cost_allocation_api",
+        "sourceNodeId": "cost_allocation",
+        "targetNodeId": "cost_api",
+        "connectionType": "data-flow",
+        "label": "Auditable team and service cost views",
+        "description": "Serve allocated spend, forecast context, anomaly findings, and recommendation/policy state to authorized workspace requests."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8"]
+    },
+    {
+      "id": "cost_59",
+      "stepNumber": 59,
+      "phase": "Govern recommendations and expose outcomes",
+      "title": "Keep drill-downs tied to the analytical evidence",
+      "type": "add_connection",
+      "content": "Apply tenant and account filters before analytical reads and carry them through every join; never rely on the browser to enforce data isolation.",
+      "connection": {
+        "edgeId": "cost_warehouse_api",
+        "sourceNodeId": "cost_warehouse",
+        "targetNodeId": "cost_api",
+        "connectionType": "data-flow",
+        "label": "Authorized cost evidence and drill-downs",
+        "description": "Query scoped analytical facts and provenance for report details, reconciliation, and recommendation evidence."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:4"]
+    },
+    {
+      "id": "cost_60",
+      "stepNumber": 60,
+      "phase": "Govern recommendations and expose outcomes",
+      "title": "Release only against measured evidence",
+      "type": "explanation",
+      "content": "The graph provides paths for the supplied requirements; it does not prove them. Before release, measure recommendation accuracy above 90% using the agreed outcome definition, anomaly detection within 1 hour including provider source freshness, support for AWS/Azure/GCP billing data, operation at 10k+ resources across accounts, and forecast accuracy within 10% using the agreed horizon and metric. Validate tenant isolation, adjustment reconciliation, untagged-cost review, and opt-in action safety with representative data. Keep a target marked unverified whenever the evidence is missing.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    }
+  ]
+}

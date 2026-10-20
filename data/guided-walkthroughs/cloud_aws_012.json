@@ -1,0 +1,221 @@
+{
+  "problem_id": "cloud_aws_012",
+  "version": "1.0-review",
+  "totalSteps": 36,
+  "requirementRevision": null,
+  "phases": [
+    {"name": "Freeze the migration contract", "stepRange": [1, 8], "description": "Separate the 100TB+ transfer, zero-loss, and four-hour downtime constraints from workload-specific assumptions and place the source-to-cloud database path."},
+    {"name": "Move databases and file data safely", "stepRange": [9, 22], "description": "Represent heterogeneous schema conversion, continuous database replication, bandwidth-aware file transfer, and offline bulk seeding with existing catalog components."},
+    {"name": "Track, validate, and reconcile", "stepRange": [23, 29], "description": "Observe task progress and prove target integrity before cutover while preserving checkpoints and restartability."},
+    {"name": "Rehearse cutover and protect consistency", "stepRange": [30, 36], "description": "Bound the service interruption, define zero-loss cutover and rollback behavior, and accept only verified migration outcomes."}
+  ],
+  "steps": [
+    {
+      "id": "mig_01", "stepNumber": 1, "phase": "Freeze the migration contract", "title": "Separate stated scale from assumptions", "type": "explanation",
+      "content": "The live brief requires moving on-premises databases and petabytes of files to cloud, minimizing downtime, validating integrity, tracking progress, handling heterogeneous databases, continuously replicating changes, and controlling bandwidth. The constraints are under four hours of downtime, zero data loss, 100TB+ transfers, limited network bandwidth, and consistency. Source engine mix, exact volume by source, link capacity, change rate, target cloud region, retention, and the downtime measurement boundary are not specified; capture them before sizing.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "mig_02", "stepNumber": 2, "phase": "Freeze the migration contract", "title": "Define the four-hour downtime clock", "type": "decision_point",
+      "content": "Define downtime as the interval from fencing source application writes to verifying the target is serving production reads and writes. Measure this interval in rehearsals; bulk copy and ongoing replication happen before it and must not be counted as cutover downtime.",
+      "decision": {"question": "How should the under-four-hour downtime constraint be proven?", "chosen": "Time the rehearsed write-fence, final replication catch-up, validation, endpoint switch, and production smoke test as one end-to-end cutover window.", "chosenReason": "A short DNS or endpoint switch alone omits the final data catch-up and application verification users depend on.", "alternatives": [{"option": "Count only the endpoint update", "tradeoff": "Understates the period when writes are stopped or the target is not yet trusted."}, {"option": "Include the months-long bulk seed", "tradeoff": "Confuses online migration duration with the bounded service interruption."}]},
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:1"]
+    },
+    {
+      "id": "mig_03", "stepNumber": 3, "phase": "Freeze the migration contract", "title": "Add heterogeneous on-premises databases", "type": "add_component",
+      "content": "Represent the source fleet as a database component. Keep engine-specific behavior in the migration plan because the brief says heterogeneous and does not enumerate engines; do not silently model every source as one vendor.",
+      "component": {"nodeId": "mig_source_db", "componentType": "database", "label": "On-Premises Database Fleet", "description": "Heterogeneous transactional source systems", "position": {"x": 0, "y": 100}, "properties": {"componentName": "On-Premises Database Fleet", "purpose": "Authoritative source databases for the migration. Inventory engine/version, schema, transaction-log access, change rate, consistency requirements, and application dependencies before selecting per-engine migration tasks.", "type": "RDBMS", "workload": "OLTP"}, "highlightReason": "The existing Database catalog type models the source systems without inventing provider-specific source nodes."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "mig_04", "stepNumber": 4, "phase": "Freeze the migration contract", "title": "Add large on-premises file shares", "type": "add_component",
+      "content": "Model the source NAS/file shares separately from database rows so the guide can teach file metadata, directory preservation, checksums, and the offline-seed path.",
+      "component": {"nodeId": "mig_source_files", "componentType": "file-storage", "label": "On-Premises File Shares", "description": "NAS and file repositories totaling 100TB+", "position": {"x": 0, "y": 430}, "properties": {"componentName": "On-Premises File Shares", "purpose": "Source of large file trees and metadata. Inventory total bytes, file count and size distribution, ACLs, change rate, and required preservation semantics before selecting transfer and validation modes.", "type": "NFS"}, "highlightReason": "The built-in File Storage component supports shared file systems and is a direct fit for the on-premises NAS source."},
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "mig_05", "stepNumber": 5, "phase": "Freeze the migration contract", "title": "Use a dedicated, controlled transfer link", "type": "add_component",
+      "content": "The generic catalog has a VPN Gateway, but it does not represent AWS Direct Connect or its bandwidth commitment. Use the existing Custom Component fallback to name the dedicated link; keep encryption, routing, and allowed-source controls explicit rather than presenting Direct Connect as a VPN.",
+      "component": {"nodeId": "mig_link", "componentType": "custom-component", "label": "AWS Direct Connect Path", "description": "Dedicated, monitored source-to-cloud network route", "position": {"x": 320, "y": 260}, "properties": {"componentName": "AWS Direct Connect Path", "subtitle": "Bandwidth-managed private route", "purpose": "Carry database change streams and the online file delta after the bulk seed. Measure available throughput and loss, apply explicit transfer caps and route controls, and retain a tested encrypted fallback if the business approves one.", "componentType": "Private network connection", "technology": "AWS Direct Connect", "notes": "Link capacity and regions are unknown; do not claim Direct Connect itself encrypts traffic."}, "highlightReason": "No existing catalog type represents a dedicated cloud interconnect accurately; VPN Gateway would be semantically wrong."},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "mig_06", "stepNumber": 6, "phase": "Freeze the migration contract", "title": "Add continuous database replication", "type": "add_component",
+      "content": "The exact managed database migration service is not a first-class catalog type, so use the catalog's existing custom component and name AWS DMS explicitly. It performs the initial load and then consumes source transaction logs for change data capture; task configuration is per source/target engine pair.",
+      "component": {"nodeId": "mig_dms", "componentType": "custom-component", "label": "AWS DMS Replication Tasks", "description": "Initial load plus checkpointed database CDC", "position": {"x": 640, "y": 100}, "properties": {"componentName": "AWS DMS Replication Tasks", "subtitle": "Initial load + CDC", "purpose": "Migrate heterogeneous databases using engine-specific full-load and transaction-log CDC tasks. Persist checkpoints, monitor source log retention and replication lag, and resume idempotently after interruption; never cut over while required changes remain unapplied.", "componentType": "Database migration service", "technology": "AWS Database Migration Service", "notes": "Validate supported source/target combinations, LOB behavior, transaction ordering, and engine-specific DDL before production."}, "highlightReason": "The catalog has no database-migration/CDC service type; Custom Component preserves the actual AWS DMS responsibility without creating a new palette node."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "mig_07", "stepNumber": 7, "phase": "Freeze the migration contract", "title": "Route source database traffic privately", "type": "add_connection",
+      "content": "The source database replication traffic crosses the dedicated routed link; restrict it to the required endpoints and migration identities.",
+      "connection": {"edgeId": "mig_db_to_link", "sourceNodeId": "mig_source_db", "targetNodeId": "mig_link", "connectionType": "database-replication-network", "label": "Scoped CDC egress", "description": "Database snapshot and transaction-log traffic use the approved private route"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "mig_08", "stepNumber": 8, "phase": "Freeze the migration contract", "title": "Deliver source changes to DMS", "type": "add_connection",
+      "content": "DMS reads the source snapshot and ordered transaction-log changes over the private route. Preserve per-database checkpoints and alert before source log retention is exhausted.",
+      "connection": {"edgeId": "mig_link_to_dms", "sourceNodeId": "mig_link", "targetNodeId": "mig_dms", "connectionType": "private-cdc-transport", "label": "Snapshot + ordered CDC", "description": "Private transport carries initial-load data and checkpointed source changes to AWS DMS"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "mig_09", "stepNumber": 9, "phase": "Move databases and file data safely", "title": "Add the cloud database targets", "type": "add_component",
+      "content": "Use the existing Database catalog type for the cloud targets. Keep target engine and topology as per-source decisions after SCT assessment and compatibility testing; the brief does not authorize choosing one engine for every heterogeneous source.",
+      "component": {"nodeId": "mig_target_db", "componentType": "database", "label": "Cloud Database Targets", "description": "Engine-compatible targets prepared per migration wave", "position": {"x": 1000, "y": 100}, "properties": {"componentName": "Cloud Database Targets", "purpose": "Receive initial loads and ordered CDC into validated cloud engines. Separate migration identities from application identities, preserve transaction semantics, and keep targets read-only to production clients until cutover approval.", "type": "RDBMS", "workload": "OLTP"}, "highlightReason": "The existing Database catalog type fits the target persistence role; engine-specific selection is intentionally deferred to the source inventory."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "mig_10", "stepNumber": 10, "phase": "Move databases and file data safely", "title": "Apply replication to cloud targets", "type": "add_connection",
+      "content": "The target remains isolated from application writes during synchronization. Track applied source position and lag for every database before the final write fence.",
+      "connection": {"edgeId": "mig_dms_to_target", "sourceNodeId": "mig_dms", "targetNodeId": "mig_target_db", "connectionType": "database-load-and-cdc", "label": "Initial load + ordered changes", "description": "DMS applies source data and checkpointed changes to the matching target engine"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "mig_11", "stepNumber": 11, "phase": "Move databases and file data safely", "title": "Add schema assessment and migration tracking", "type": "add_component",
+      "content": "Neither AWS Schema Conversion Tool nor Migration Hub is a dedicated type in the base catalog. Use the existing custom component to represent schema assessment/conversion and the migration-wave control plane; retain the real AWS service names in its editable properties.",
+      "component": {"nodeId": "mig_control", "componentType": "custom-component", "label": "Schema Conversion + Migration Hub", "description": "Engine assessment, wave state, and cutover checklist", "position": {"x": 1320, "y": 280}, "properties": {"componentName": "Schema Conversion + Migration Hub", "subtitle": "Per-wave migration control", "purpose": "Assess heterogeneous source schemas with AWS SCT, record conversion exceptions and manual remediation, track database/file migration waves in AWS Migration Hub, and block cutover until validation evidence and owners approve.", "componentType": "Migration control plane", "technology": "AWS Schema Conversion Tool + AWS Migration Hub", "notes": "Schema conversion is not proof of application compatibility; run workload-level tests for every engine pair."}, "highlightReason": "The exact AWS planning and migration-tracking services are absent from the standard palette, so the existing custom node names them transparently."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "mig_12", "stepNumber": 12, "phase": "Move databases and file data safely", "title": "Provide assessed mappings to replication", "type": "add_connection",
+      "content": "The per-engine assessment supplies DMS task mappings, conversion exceptions, and required validation checks. Unsupported objects remain explicit blockers rather than being silently skipped.",
+      "connection": {"edgeId": "mig_control_to_dms", "sourceNodeId": "mig_control", "targetNodeId": "mig_dms", "connectionType": "migration-plan", "label": "Approved mappings + checkpoints", "description": "Schema findings and wave configuration govern each DMS task"},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "mig_13", "stepNumber": 13, "phase": "Move databases and file data safely", "title": "Validate target schema before data cutover", "type": "add_connection",
+      "content": "Apply converted schema and explicit manual fixes to the isolated target. Compare schema objects and application behavior before accepting replicated data as production-ready.",
+      "connection": {"edgeId": "mig_control_to_target", "sourceNodeId": "mig_control", "targetNodeId": "mig_target_db", "connectionType": "schema-and-validation-plan", "label": "Converted schema + checks", "description": "Approved schema mappings and validation rules are applied to the isolated target"},
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "mig_14", "stepNumber": 14, "phase": "Move databases and file data safely", "title": "Treat heterogeneous conversion as a tested decision", "type": "decision_point",
+      "content": "A converted schema can still change types, query plans, stored procedures, collation, and transaction behavior. Classify each conversion as automatic, manually remediated, or unsupported; rehearse the actual application workload against the target before declaring a migration wave ready.",
+      "decision": {"question": "When may a converted database be marked ready?", "chosen": "Only after schema exceptions are resolved or accepted, representative application tests pass, and row-level reconciliation matches the source at a known checkpoint.", "chosenReason": "DDL conversion alone does not establish behavioral compatibility or data completeness.", "alternatives": [{"option": "Accept every automatically converted object", "tradeoff": "Can leave semantic and performance differences undiscovered until production cutover."}, {"option": "Cut over when the initial load finishes", "tradeoff": "Ignores CDC lag, ongoing source changes, and validation evidence."}]},
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "mig_15", "stepNumber": 15, "phase": "Move databases and file data safely", "title": "Add managed file synchronization", "type": "add_component",
+      "content": "Reuse the existing Processing Worker component for the asynchronous DataSync transfer responsibility; no AWS DataSync palette item exists. Keep its purpose focused on checksummed, restartable file transfer and configure throughput at the service/task level, not by treating the generic worker concurrency default as AWS capacity.",
+      "component": {"nodeId": "mig_datasync", "componentType": "processing-worker", "label": "AWS DataSync Tasks", "description": "Restartable bulk and incremental file transfer", "position": {"x": 640, "y": 470}, "properties": {"componentName": "AWS DataSync Tasks", "purpose": "Transfer file trees and metadata in resumable, verified tasks; perform the post-seed delta, preserve required ownership/ACL semantics, and apply a tested bandwidth cap and schedule."}, "highlightReason": "Processing Worker is the closest existing catalog role for asynchronous transfer tasks; the editable name and purpose identify the managed AWS DataSync service."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "mig_16", "stepNumber": 16, "phase": "Move databases and file data safely", "title": "Read the source file tree", "type": "add_connection",
+      "content": "DataSync enumerates and copies the source shares with task checkpoints. Use a consistent manifest of paths, metadata, and expected object count so retries do not create an untraceable second copy.",
+      "connection": {"edgeId": "mig_files_to_sync", "sourceNodeId": "mig_source_files", "targetNodeId": "mig_datasync", "connectionType": "file-enumeration-and-transfer", "label": "Files + metadata", "description": "DataSync reads the source tree and records resumable task progress"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "mig_17", "stepNumber": 17, "phase": "Move databases and file data safely", "title": "Carry online deltas over the managed link", "type": "add_connection",
+      "content": "Use the private interconnect for scheduled DataSync deltas after the offline seed. Throttle the task to the measured available bandwidth and reserve capacity for database CDC and production traffic.",
+      "connection": {"edgeId": "mig_datasync_to_link", "sourceNodeId": "mig_datasync", "targetNodeId": "mig_link", "connectionType": "bandwidth-managed-transfer", "label": "Capped incremental file delta", "description": "Online file changes use the dedicated path under an explicit throughput cap"},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:4"]
+    },
+    {
+      "id": "mig_18", "stepNumber": 18, "phase": "Move databases and file data safely", "title": "Add the cloud object-storage target", "type": "add_component",
+      "content": "Use the existing Object Storage component for the S3 landing and destination layer. Decide prefix layout, encryption, ownership, lifecycle, versioning, and immutability from the data policy rather than assuming one bucket configuration fits every source.",
+      "component": {"nodeId": "mig_s3", "componentType": "object-storage", "label": "Amazon S3 Migration Landing", "description": "Encrypted object destination for 100TB+ file data", "position": {"x": 1000, "y": 470}, "properties": {"componentName": "Amazon S3 Migration Landing", "purpose": "Receive DataSync deltas and Snowball bulk imports into controlled prefixes; enforce encryption, least-privilege roles, checksums, object-versioning/retention policy, and a reconciliation manifest before applications consume the data."}, "highlightReason": "The existing Object Storage component directly represents the S3 destination without adding a provider-specific node type."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "mig_19", "stepNumber": 19, "phase": "Move databases and file data safely", "title": "Write the online file delta to S3", "type": "add_connection",
+      "content": "DataSync writes verified changed files to their deterministic destination keys. Reconcile source and target manifests after each task; do not infer completeness from bytes transferred alone.",
+      "connection": {"edgeId": "mig_link_to_s3", "sourceNodeId": "mig_link", "targetNodeId": "mig_s3", "connectionType": "private-object-transfer", "label": "Throttled DataSync writes", "description": "Online file deltas reach the S3 landing zone over the private route"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "mig_20", "stepNumber": 20, "phase": "Move databases and file data safely", "title": "Add an offline bulk-seed appliance", "type": "add_component",
+      "content": "The base catalog has no physical AWS Snowball import appliance. Use the existing Custom Component fallback to represent the offline seed path; keep DataSync for incremental changes and final reconciliation rather than treating appliance import as the only copy.",
+      "component": {"nodeId": "mig_snowball", "componentType": "custom-component", "label": "AWS Snowball Bulk Seed", "description": "Offline transfer path for the large initial file set", "position": {"x": 320, "y": 650}, "properties": {"componentName": "AWS Snowball Bulk Seed", "subtitle": "Offline initial copy", "purpose": "Seed the 100TB+ baseline without saturating the constrained WAN link. Maintain a source manifest and checksums, chain returned-device import to the expected destination, then run DataSync for source changes and final reconciliation.", "componentType": "Offline bulk-transfer appliance", "technology": "AWS Snowball", "notes": "Capacity, device model, shipping time, and supported regions must be confirmed from the actual migration plan."}, "highlightReason": "No existing catalog component represents an offline physical transfer appliance; the supported custom type names Snowball without inventing a palette node."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "mig_21", "stepNumber": 21, "phase": "Move databases and file data safely", "title": "Prepare the offline seed from a manifest", "type": "add_connection",
+      "content": "Capture the source file set and approved metadata at a known time, then load that baseline to the appliance. Continue recording subsequent changes so the offline copy can be brought forward after cloud import.",
+      "connection": {"edgeId": "mig_files_to_snowball", "sourceNodeId": "mig_source_files", "targetNodeId": "mig_snowball", "connectionType": "offline-seed", "label": "Manifested bulk baseline", "description": "A known source snapshot is staged for physical transfer"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "mig_22", "stepNumber": 22, "phase": "Move databases and file data safely", "title": "Import the baseline into S3", "type": "add_connection",
+      "content": "After the appliance is imported, validate the expected job and object manifest in S3. Then apply DataSync's changed-file pass from the source checkpoint to the target manifest.",
+      "connection": {"edgeId": "mig_snowball_to_s3", "sourceNodeId": "mig_snowball", "targetNodeId": "mig_s3", "connectionType": "offline-import", "label": "Imported baseline + checksum manifest", "description": "Snowball seed becomes the S3 baseline for subsequent verified deltas"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "mig_23", "stepNumber": 23, "phase": "Track, validate, and reconcile", "title": "Add migration health and progress monitoring", "type": "add_component",
+      "content": "Reuse the Monitoring component with its supported CloudWatch option to observe task-level lag, bytes and objects completed, retries, errors, and transfer throttling. Migration Hub remains the wave tracker in the control-plane component; CloudWatch provides operational signals and alerts.",
+      "component": {"nodeId": "mig_monitor", "componentType": "monitoring", "label": "CloudWatch Migration Telemetry", "description": "Replication, transfer, validation, and cutover signals", "position": {"x": 1640, "y": 280}, "properties": {"componentName": "CloudWatch Migration Telemetry", "purpose": "Track DMS CDC lag and task errors, DataSync bytes/files/checksums and throttling, Snowball import state, validation failures, and cutover readiness. Alert owners before source logs expire or the downtime rehearsal misses its bound.", "stack": "CloudWatch", "metrics": true, "alerts": true}, "highlightReason": "CloudWatch is an existing supported Monitoring stack option and directly covers the brief's migration-progress requirement."},
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "mig_24", "stepNumber": 24, "phase": "Track, validate, and reconcile", "title": "Observe CDC lag and source-log headroom", "type": "add_connection",
+      "content": "Emit per-task source position, applied position, lag, and retained-log headroom. Alert early enough to pause or throttle safely before source logs roll off.",
+      "connection": {"edgeId": "mig_dms_monitor", "sourceNodeId": "mig_dms", "targetNodeId": "mig_monitor", "connectionType": "replication-telemetry", "label": "CDC lag + task health", "description": "Per-database progress and source-log safety are visible to migration operators"},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "mig_25", "stepNumber": 25, "phase": "Track, validate, and reconcile", "title": "Observe large-file transfer and throttling", "type": "add_connection",
+      "content": "Report completed and failed files, bytes, checksums, retries, task checkpoint, and current bandwidth use. Progress should distinguish scanned, copied, verified, and reconciled objects.",
+      "connection": {"edgeId": "mig_sync_monitor", "sourceNodeId": "mig_datasync", "targetNodeId": "mig_monitor", "connectionType": "file-transfer-telemetry", "label": "Bytes, files, checksums, throttle", "description": "Operators can track transfer completion and its network impact"},
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "mig_26", "stepNumber": 26, "phase": "Track, validate, and reconcile", "title": "Publish migration-wave evidence", "type": "add_connection",
+      "content": "The migration control plane consumes task outcomes and validation artifacts. A wave remains blocked while conversion exceptions, missing files, replication lag, or integrity mismatches remain unresolved.",
+      "connection": {"edgeId": "mig_control_monitor", "sourceNodeId": "mig_control", "targetNodeId": "mig_monitor", "connectionType": "wave-status", "label": "Wave state + approval evidence", "description": "Migration Hub progress and schema exceptions are visible alongside operational metrics"},
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6"]
+    },
+    {
+      "id": "mig_27", "stepNumber": 27, "phase": "Track, validate, and reconcile", "title": "Validate databases at matching checkpoints", "type": "explanation",
+      "content": "At a known source transaction position, compare table row counts and partitioned checksums, validate referential and application invariants, and reconcile any excluded or transformed records. Keep validation repeatable and identify the exact source/target checkpoint; a global count alone can hide compensating omissions and duplicates.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "mig_28", "stepNumber": 28, "phase": "Track, validate, and reconcile", "title": "Reconcile files beyond transferred-byte counts", "type": "explanation",
+      "content": "Compare deterministic source and destination manifests: normalized path, object count, size, metadata, and checksum where supported. Re-run failed ranges from task checkpoints, record intentional exclusions, and verify Snowball-imported objects before applying the incremental delta.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "mig_29", "stepNumber": 29, "phase": "Track, validate, and reconcile", "title": "Use the physical seed and network together", "type": "decision_point",
+      "content": "For very large initial file sets, shipping the baseline can reduce WAN saturation, but the time to prepare, ship, import, verify, and then catch up changes must be included in the migration schedule. DataSync remains necessary for incremental convergence and reconciliation.",
+      "decision": {"question": "How should a 100TB+ file corpus cross a constrained link?", "chosen": "Use a manifested Snowball baseline where regional and schedule constraints permit, then DataSync for changed data and final checksum reconciliation; throttle online transfer to protect production and CDC traffic.", "chosenReason": "The offline seed reduces bulk WAN demand without treating a physical import as a consistent final copy.", "alternatives": [{"option": "Send the entire baseline over the shared WAN", "tradeoff": "May exceed available bandwidth, delay the migration, or harm production traffic."}, {"option": "Use Snowball and skip incremental sync", "tradeoff": "Files changed after the seed remain missing or stale."}]},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "mig_30", "stepNumber": 30, "phase": "Rehearse cutover and protect consistency", "title": "Rehearse the complete four-hour cutover", "type": "explanation",
+      "content": "Run the exact production checklist against a representative wave: verify CDC lag and source-log position, stop source writes, wait for the final checkpoint, run bounded final validation, switch the application endpoint, and complete read/write smoke tests. Measure each stage and retain margin under four hours; if rehearsal misses the bound, redesign or reduce wave scope before production.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "mig_31", "stepNumber": 31, "phase": "Rehearse cutover and protect consistency", "title": "Fence writes before declaring zero loss", "type": "decision_point",
+      "content": "Zero loss requires one authoritative writer during the transition. Freeze or fence source writes, record the final committed source position, wait until the target applies that position, and only then enable target writes. Prevent split-brain by keeping source writes disabled after the endpoint switch.",
+      "decision": {"question": "When can production writes move to the cloud target?", "chosen": "After an enforced source write fence, target CDC has applied the recorded final commit position, integrity checks pass, and the cutover owner authorizes the endpoint switch.", "chosenReason": "A lag number close to zero is not proof that the final acknowledged source transaction reached the target.", "alternatives": [{"option": "Switch when replication lag is small but nonzero", "tradeoff": "Can lose acknowledged source writes or create divergent histories."}, {"option": "Allow writes to both source and target", "tradeoff": "Creates conflicting authoritative versions with no safe automatic reconciliation."}]},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "mig_32", "stepNumber": 32, "phase": "Rehearse cutover and protect consistency", "title": "Rollback without reopening a split-brain source", "type": "explanation",
+      "content": "If target smoke tests fail before target writes are accepted, route clients back to the still-fenced source after confirming its final state. Once target writes begin, rollback requires a separately rehearsed reverse-replication or recovery plan; do not simply re-enable stale source writes. Define the point of no return in the cutover runbook.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "mig_33", "stepNumber": 33, "phase": "Rehearse cutover and protect consistency", "title": "Protect transfer credentials and data", "type": "explanation",
+      "content": "Use short-lived, least-privilege migration identities; scope access by source, task, and destination prefix; encrypt data in transit and at rest; protect Snowball custody and import controls; and audit operator approvals. Keep secrets out of task logs and migration manifests.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "mig_34", "stepNumber": 34, "phase": "Rehearse cutover and protect consistency", "title": "Test restart, throttling, and incomplete-copy recovery", "type": "explanation",
+      "content": "Interrupt a representative DMS task and DataSync task, then resume from their checkpoints and prove duplicate delivery is reconciled rather than double-applied. Test constrained bandwidth, expired source-log headroom, a failed checksum, a partial Snowball import, and target validation rollback before approving a wave.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "mig_35", "stepNumber": 35, "phase": "Rehearse cutover and protect consistency", "title": "Set evidence-based migration acceptance", "type": "explanation",
+      "content": "Accept a wave only when all in-scope database objects and files are reconciled at known checkpoints, continuous replication is caught up to the fenced source position, the target passes application tests, transfer impact stays within the approved bandwidth budget, progress is visible, and the rehearsed production interruption remains under four hours. Any unresolved mismatch blocks cutover.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "mig_36", "stepNumber": 36, "phase": "Rehearse cutover and protect consistency", "title": "Confirm the migration facts still missing", "type": "conclusion",
+      "content": "Before final sizing, inventory source engines, data volume and churn per wave, file count/size distribution, transaction-log access, application consistency rules, source and target regions, available link capacity, permitted Snowball schedule, data residency, target recovery objectives, and retention. These determine task design, bandwidth shaping, wave size, and whether a four-hour cutover is achievable; the brief does not supply them.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4"]
+    }
+  ]
+}

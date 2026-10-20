@@ -1,0 +1,891 @@
+{
+  "problem_id": "cloud_azure_001",
+  "version": "1.0.0-review-draft",
+  "totalSteps": 48,
+  "phases": [
+    {
+      "name": "Frame fleet scale and target semantics",
+      "stepRange": [1, 7],
+      "description": "Separate the supplied 10M+ device, 1M+ message/second, under-five-second processing, five-year retention, and device-security targets from the missing workload distribution, regional, and query assumptions."
+    },
+    {
+      "name": "Enroll devices and secure the IoT ingress",
+      "stepRange": [8, 17],
+      "description": "Use per-device provisioning and identity, route high-volume telemetry directly through IoT Hub, and keep low-volume lifecycle events distinct from the telemetry data plane."
+    },
+    {
+      "name": "Process, detect, query, and retain telemetry",
+      "stepRange": [18, 27],
+      "description": "Process partitioned device streams, derive anomaly signals and queryable time-series views, and independently preserve raw telemetry in a lifecycle-managed five-year archive."
+    },
+    {
+      "name": "Expose operations and deliver bounded commands",
+      "stepRange": [28, 40],
+      "description": "Provide authenticated operator APIs and dashboards, and send device commands through a durable bounded workflow with expiry, idempotency, and acknowledgement tracking."
+    },
+    {
+      "name": "Instrument capacity and prove acceptance",
+      "stepRange": [41, 48],
+      "description": "Observe ingestion, processing, storage, command, and user-facing behavior; verify each supplied target under load and failure injection rather than treating this draft as proof."
+    }
+  ],
+  "steps": [
+    {
+      "id": "iot_01",
+      "stepNumber": 1,
+      "phase": "Frame fleet scale and target semantics",
+      "title": "Record the supplied targets and unresolved workload inputs",
+      "type": "explanation",
+      "content": "The frozen brief requires 10M+ connected devices, 1M+ ingested messages per second, processing latency under five seconds, five years of time-series retention, and authenticated devices. It does not define message size or rate distribution, burst profile, regions, device protocol mix, query patterns, availability target, or retention/legal-hold exceptions. Keep those as discovery questions; do not turn the targets into capacity settings or measured guarantees.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "iot_02",
+      "stepNumber": 2,
+      "phase": "Frame fleet scale and target semantics",
+      "title": "Choose a capacity boundary that can be measured and partitioned",
+      "type": "decision_point",
+      "content": "Treat 10M+ concurrent connections and 1M+ messages per second as separate capacity dimensions. Size the number of IoT Hub units, partitions, and regional deployments from measured device connection limits, message size, bursts, and regional quotas; assign each device to a stable hub/region and define migration. Avoid one global hot partition and verify the selected Azure tier and quotas before committing capacity.",
+      "decision": {
+        "question": "How should the platform scale beyond one hub or one stream partition?",
+        "chosen": "Use a tested regional fleet of capacity-bounded IoT Hub and downstream stream partitions, with stable device assignment and explicit rebalancing; derive counts from the actual message and connection profile.",
+        "chosenReason": "The connection target and message-rate target have different limits, and no per-device rate or message size is supplied to justify a fixed shard count.",
+        "alternatives": [
+          {"option": "Put every device in one hub and one downstream partition", "tradeoff": "A single capacity boundary can become a throughput or failure bottleneck and concentrates hot keys."},
+          {"option": "Choose a fixed number of hubs from the 10M device count alone", "tradeoff": "It ignores message size, burst rate, tier quotas, device distribution, and regional constraints."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "iot_03",
+      "stepNumber": 3,
+      "phase": "Frame fleet scale and target semantics",
+      "title": "Represent the connected device fleet",
+      "type": "add_component",
+      "content": "Use the existing Web App/client catalog node as the diagram's client-side analog and label it as the device fleet. The node represents millions of independently identified sensors and actuators, not one shared client credential or one network connection.",
+      "component": {
+        "nodeId": "device_fleet",
+        "componentType": "web-app",
+        "label": "IoT Device Fleet (10M+)",
+        "description": "Sensors and actuators publishing telemetry and receiving addressed commands",
+        "position": {"x": 60, "y": 260},
+        "properties": {
+          "componentName": "IoT Device Fleet (10M+)",
+          "purpose": "Represent independent devices with per-device identity, reconnect behavior, bounded local buffering, and telemetry sequence metadata. Device protocol and offline-buffer limits depend on the actual fleet." 
+        },
+        "highlightReason": "The fleet is the source of both the connection-scale and telemetry-throughput targets."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:1"]
+    },
+    {
+      "id": "iot_04",
+      "stepNumber": 4,
+      "phase": "Frame fleet scale and target semantics",
+      "title": "Add per-device enrollment and provisioning",
+      "type": "add_component",
+      "content": "Use the catalog Authentication Service as the existing component analog for Azure Device Provisioning Service (DPS). DPS assigns a device to the intended hub using an enrollment policy; it is not the runtime telemetry processor, and enrollment secrets must not be shared across the fleet.",
+      "component": {
+        "nodeId": "device_provisioning",
+        "componentType": "auth-service",
+        "label": "Azure Device Provisioning Service (DPS)",
+        "description": "Enrollment, attestation, and hub assignment for device identities",
+        "position": {"x": 360, "y": 80},
+        "properties": {
+          "componentName": "Azure Device Provisioning Service (DPS)",
+          "purpose": "Enroll devices using unique X.509 credentials or an approved attestation method, assign each device to its capacity-bounded IoT Hub, and support controlled enrollment rotation and revocation. Do not store a shared fleet-wide secret."
+        },
+        "highlightReason": "Device lifecycle management begins with explicit, scalable, individually authenticated enrollment."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "iot_05",
+      "stepNumber": 5,
+      "phase": "Frame fleet scale and target semantics",
+      "title": "Route new devices through provisioning",
+      "type": "add_connection",
+      "content": "Provisioning authenticates the enrollment and returns the assigned hub/bootstrap result. Make enrollment retries safe and observable; a device is not considered active until its assigned hub accepts its runtime identity.",
+      "connection": {
+        "edgeId": "fleet_to_provisioning",
+        "sourceNodeId": "device_fleet",
+        "targetNodeId": "device_provisioning",
+        "connectionType": "device-enrollment",
+        "label": "Per-device attestation and hub assignment",
+        "description": "DPS validates the enrollment method and assigns a device to its intended IoT Hub; credentials and assignment are managed per device."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "iot_06",
+      "stepNumber": 6,
+      "phase": "Frame fleet scale and target semantics",
+      "title": "Add the device connectivity and messaging boundary",
+      "type": "add_component",
+      "content": "Use the existing Message Broker catalog component as the protocol-neutral analog for Azure IoT Hub. IoT Hub owns device identities and twin state and terminates supported device connections; horizontally scale the fleet across supported hubs/units after checking current tier and regional limits.",
+      "component": {
+        "nodeId": "iot_hub",
+        "componentType": "message-broker",
+        "label": "Azure IoT Hub (device gateway)",
+        "description": "Authenticated device ingress, identity/twin boundary, and cloud-to-device delivery",
+        "position": {"x": 720, "y": 260},
+        "properties": {
+          "componentName": "Azure IoT Hub (device gateway)",
+          "purpose": "Terminate TLS-protected MQTT/AMQP device sessions, authenticate each device identity, maintain desired/reported twin state, route telemetry to downstream consumers, and deliver addressed cloud-to-device commands. Validate 10M+ connections and 1M+ messages/second against current tier, unit, and regional quotas; shard by stable device assignment rather than assuming one hub suffices."
+        },
+        "highlightReason": "IoT Hub is the core device-facing boundary named by the frozen Azure hints."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "iot_07",
+      "stepNumber": 7,
+      "phase": "Frame fleet scale and target semantics",
+      "title": "Bind provisioned identities to the assigned hub",
+      "type": "add_connection",
+      "content": "The assignment path establishes the runtime destination, while IoT Hub remains the authoritative device identity and twin boundary. Reject unknown, revoked, or misassigned device certificates rather than accepting a valid network connection as authorization.",
+      "connection": {
+        "edgeId": "provisioning_to_hub",
+        "sourceNodeId": "device_provisioning",
+        "targetNodeId": "iot_hub",
+        "connectionType": "identity-assignment",
+        "label": "Assigned hub and device identity",
+        "description": "Provisioned device identity is registered and validated at the assigned IoT Hub; runtime authorization remains per device."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "iot_08",
+      "stepNumber": 8,
+      "phase": "Enroll devices and secure the IoT ingress",
+      "title": "Send device telemetry directly to IoT Hub",
+      "type": "add_connection",
+      "content": "Devices publish sensor events over authenticated TLS sessions directly to their assigned hub. Include a stable device identifier, event timestamp, schema version, and sequence/idempotency key as appropriate. Keep payload limits and supported protocol behavior aligned with the physical fleet; do not send telemetry through Event Grid or the operator API.",
+      "connection": {
+        "edgeId": "fleet_to_hub_telemetry",
+        "sourceNodeId": "device_fleet",
+        "targetNodeId": "iot_hub",
+        "connectionType": "telemetry-ingest",
+        "label": "TLS device telemetry (MQTT/AMQP)",
+        "description": "Authenticated sensor messages flow directly to the assigned IoT Hub; stable device and sequence metadata supports routing, deduplication, and per-device ordering."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "iot_09",
+      "stepNumber": 9,
+      "phase": "Enroll devices and secure the IoT ingress",
+      "title": "Set a device credential and authorization lifecycle",
+      "type": "decision_point",
+      "content": "Use unique per-device X.509 identity (or another explicitly approved per-device attestation method), TLS in transit, least-privilege device permissions, credential rotation/revocation, and auditable enrollment. Keep device identity separate from operator identity. Restrict cloud-to-device commands by tenant, device scope, command type, and expiry; network reachability alone must not authorize a command.",
+      "decision": {
+        "question": "How will the platform authenticate millions of devices without a shared secret?",
+        "chosen": "Use per-device credentials and hub-enforced identity, provision and rotate them through a controlled lifecycle, and deny unknown or revoked identities by default.",
+        "chosenReason": "A unique identity enables isolation, revocation, and audit at fleet scale; a shared fleet key makes one compromise a fleet-wide incident.",
+        "alternatives": [
+          {"option": "Use one symmetric key for every device", "tradeoff": "A single leaked key impersonates the entire fleet and cannot be selectively revoked."},
+          {"option": "Trust network location as device authentication", "tradeoff": "A reachable device or gateway is not proof of identity or authorization."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "iot_10",
+      "stepNumber": 10,
+      "phase": "Enroll devices and secure the IoT ingress",
+      "title": "Add the low-volume lifecycle event router",
+      "type": "add_component",
+      "content": "Use the existing Message Broker catalog component as the publish/subscribe analog for Azure Event Grid. This is for low-volume device lifecycle notifications and selected anomaly alerts—not the 1M+ messages/second telemetry stream.",
+      "component": {
+        "nodeId": "lifecycle_event_router",
+        "componentType": "message-broker",
+        "label": "Azure Event Grid (lifecycle events)",
+        "description": "Fan-out for low-volume device lifecycle and alert notifications",
+        "position": {"x": 1060, "y": 70},
+        "properties": {
+          "componentName": "Azure Event Grid (lifecycle events)",
+          "purpose": "Route low-volume device-created, connected, disconnected, deleted, and selected anomaly notification events to interested consumers with retry and dead-letter handling. Keep high-volume sensor telemetry on the IoT Hub streaming route."
+        },
+        "highlightReason": "The catalog has a generic broker analog; separating Event Grid's lifecycle plane avoids misusing it as the telemetry firehose."
+      },
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "iot_11",
+      "stepNumber": 11,
+      "phase": "Enroll devices and secure the IoT ingress",
+      "title": "Publish low-volume device lifecycle events",
+      "type": "add_connection",
+      "content": "Route lifecycle notifications separately from sensor payloads. Treat delivery as retryable and potentially duplicated; downstream consumers should be idempotent and tolerate delayed or out-of-order notifications.",
+      "connection": {
+        "edgeId": "hub_to_lifecycle_events",
+        "sourceNodeId": "iot_hub",
+        "targetNodeId": "lifecycle_event_router",
+        "connectionType": "lifecycle-event",
+        "label": "Device lifecycle notifications",
+        "description": "Low-volume connect, disconnect, enrollment, and deletion events are routed independently of the high-rate telemetry data plane."
+      },
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "iot_12",
+      "stepNumber": 12,
+      "phase": "Enroll devices and secure the IoT ingress",
+      "title": "Store the searchable device metadata projection",
+      "type": "add_component",
+      "content": "Use the existing Database catalog node as the Azure Cosmos DB metadata analog. Keep IoT Hub's device identity/twin authoritative; this store is a queryable projection for ownership, model, location, lifecycle status, and operator views, not a second credential authority.",
+      "component": {
+        "nodeId": "device_registry",
+        "componentType": "database",
+        "label": "Azure Cosmos DB (device metadata projection)",
+        "description": "Queryable fleet inventory and lifecycle projection; IoT Hub retains device identity/twin authority",
+        "position": {"x": 1400, "y": 70},
+        "properties": {
+          "componentName": "Azure Cosmos DB (device metadata projection)",
+          "purpose": "Store tenant-scoped device metadata and a versioned lifecycle projection for fleet search and operations. Keep credentials out of the projection and keep IoT Hub authoritative for runtime device identity and desired/reported twin state; make updates idempotent and reconcile from lifecycle events."
+        },
+        "highlightReason": "A metadata read model supports fleet lifecycle and operations without duplicating the identity source of truth."
+      },
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "iot_13",
+      "stepNumber": 13,
+      "phase": "Enroll devices and secure the IoT ingress",
+      "title": "Project lifecycle events into the searchable registry",
+      "type": "add_connection",
+      "content": "Update the metadata projection from versioned lifecycle events. Apply idempotent upserts and stale-event checks so a delayed disconnect cannot overwrite a newer reconnect or decommission state.",
+      "connection": {
+        "edgeId": "lifecycle_events_to_registry",
+        "sourceNodeId": "lifecycle_event_router",
+        "targetNodeId": "device_registry",
+        "connectionType": "metadata-projection",
+        "label": "Versioned device inventory updates",
+        "description": "Idempotently project lifecycle events into searchable metadata while rejecting stale event versions."
+      },
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "iot_14",
+      "stepNumber": 14,
+      "phase": "Enroll devices and secure the IoT ingress",
+      "title": "Define the lifecycle state machine and twin ownership",
+      "type": "decision_point",
+      "content": "Define explicit states such as enrolled, active, quarantined, rotating, and decommissioned. Use IoT Hub identity/twin APIs for device credentials and desired/reported state; project only operational metadata to Cosmos DB. Make decommissioning revoke identity and reject future commands, and reconcile missed lifecycle events from the authoritative hub state.",
+      "decision": {
+        "question": "Which store owns device identity and desired/reported state?",
+        "chosen": "Keep hub identity and twin state authoritative, with an idempotent versioned metadata projection for search and fleet workflows.",
+        "chosenReason": "Two independently writable identity authorities can diverge; a projection can be rebuilt and reconciled from the authoritative device boundary.",
+        "alternatives": [
+          {"option": "Treat the metadata database as a second writable credential authority", "tradeoff": "Credential and lifecycle changes can disagree with the hub's runtime authorization decision."},
+          {"option": "Use lifecycle events as the only source of truth", "tradeoff": "Events can be delayed or missed, so reconciliation against authoritative state is still necessary."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "iot_15",
+      "stepNumber": 15,
+      "phase": "Enroll devices and secure the IoT ingress",
+      "title": "Add the real-time stream processing stage",
+      "type": "add_component",
+      "content": "Use the existing Stream Processor catalog node as the Azure Stream Analytics analog. Perform schema validation, unit normalization, event-time windowing, filtering, and derived metrics here. Keep the under-five-second target end-to-end and reserve latency for routing, processing, durable writes, and query visibility.",
+      "component": {
+        "nodeId": "telemetry_processor",
+        "componentType": "stream-processor",
+        "label": "Azure Stream Analytics (telemetry processing)",
+        "description": "Partitioned, event-time processing for validated telemetry and derived signals",
+        "position": {"x": 1060, "y": 350},
+        "properties": {
+          "componentName": "Azure Stream Analytics (telemetry processing)",
+          "purpose": "Consume partitioned IoT Hub telemetry, validate schema/version and device identity context, normalize units, handle event-time windows and late data, and emit queryable aggregates and anomaly features. Measure event-to-durable-output latency against the under-five-second target; preserve replayability and backpressure behavior."
+        },
+        "highlightReason": "A dedicated stream stage addresses real-time processing and creates a place to enforce the latency budget."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "iot_16",
+      "stepNumber": 16,
+      "phase": "Enroll devices and secure the IoT ingress",
+      "title": "Route the telemetry data plane into stream processing",
+      "type": "add_connection",
+      "content": "Use IoT Hub message routing or its supported event-compatible endpoint to feed the stream processor. Partition by a stable device key to preserve per-device ordering where needed, while testing for hot devices and skew. This path carries the high-rate sensor stream; Event Grid remains outside it.",
+      "connection": {
+        "edgeId": "hub_to_stream_processor",
+        "sourceNodeId": "iot_hub",
+        "targetNodeId": "telemetry_processor",
+        "connectionType": "partitioned-telemetry-stream",
+        "label": "Partitioned telemetry route",
+        "description": "IoT Hub routes high-volume sensor events to partitioned stream consumers; partition choice balances per-device ordering against hot-key risk."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "iot_17",
+      "stepNumber": 17,
+      "phase": "Enroll devices and secure the IoT ingress",
+      "title": "Specify duplicate, late, and malformed event behavior",
+      "type": "decision_point",
+      "content": "Use event time and bounded windows for time-sensitive patterns, define a watermark/late-arrival policy, and make sinks idempotent using device identity plus a stable event key. Quarantine invalid schema or unauthenticated-device events with bounded retention and alerts. Do not promise exactly-once effects across the entire pipeline unless each sink's transaction and deduplication behavior proves it.",
+      "decision": {
+        "question": "How can retries and delayed sensor messages be processed without corrupting aggregates?",
+        "chosen": "Use bounded event-time windows, explicit late-event handling, per-device sequence/idempotency metadata, and replayable outputs with deduplication at stateful sinks.",
+        "chosenReason": "Devices can reconnect and resend data; processing guarantees must include the sink and replay path, not just the stream engine.",
+        "alternatives": [
+          {"option": "Assume device events arrive once and in order", "tradeoff": "Reconnects, retries, clock skew, and partitions can produce duplicates or late data."},
+          {"option": "Accept all late events into unbounded windows", "tradeoff": "State and output delay can grow without limit and violate the processing target."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "iot_18",
+      "stepNumber": 18,
+      "phase": "Process, detect, query, and retain telemetry",
+      "title": "Add anomaly and pattern evaluation",
+      "type": "add_component",
+      "content": "Use the existing Analytics catalog node for rules, statistical baselines, and pattern detection over normalized stream features. Start with explainable per-device or cohort thresholds and evaluate model-based detection only where labels, drift monitoring, and operator response are defined.",
+      "component": {
+        "nodeId": "anomaly_analytics",
+        "componentType": "analytics",
+        "label": "Anomaly & Pattern Analytics",
+        "description": "Windowed rules and evaluated anomaly signals over normalized telemetry",
+        "position": {"x": 1400, "y": 310},
+        "properties": {
+          "componentName": "Anomaly & Pattern Analytics",
+          "purpose": "Evaluate normalized stream features using versioned rules or calibrated anomaly models; emit severity, device/cohort, evidence window, and rule/model version. Track false-positive rate and alert volume, and keep automated actions behind an explicit safety policy."
+        },
+        "highlightReason": "Anomaly detection is a separate product capability with observable evidence and alert quality."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "iot_19",
+      "stepNumber": 19,
+      "phase": "Process, detect, query, and retain telemetry",
+      "title": "Evaluate patterns on normalized stream features",
+      "type": "add_connection",
+      "content": "Pass only the features and window context required by the selected detector. Version rules/models and attach an explanation to each alert so operators can investigate rather than receiving an opaque anomaly flag.",
+      "connection": {
+        "edgeId": "processor_to_anomaly_analytics",
+        "sourceNodeId": "telemetry_processor",
+        "targetNodeId": "anomaly_analytics",
+        "connectionType": "anomaly-features",
+        "label": "Windowed features and pattern inputs",
+        "description": "Normalized event-time features feed versioned rules/models; detection output retains the evaluation window and rule/model version."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "iot_20",
+      "stepNumber": 20,
+      "phase": "Process, detect, query, and retain telemetry",
+      "title": "Route only selected anomaly alerts to event subscribers",
+      "type": "add_connection",
+      "content": "Publish compact alert notifications, not raw sensor messages, through Event Grid to subscribed operational consumers. Set alert deduplication keys, severity, and retry/dead-letter behavior to prevent notification storms.",
+      "connection": {
+        "edgeId": "anomaly_to_lifecycle_events",
+        "sourceNodeId": "anomaly_analytics",
+        "targetNodeId": "lifecycle_event_router",
+        "connectionType": "alert-notification",
+        "label": "Selected low-volume anomaly alerts",
+        "description": "Compact, deduplicated anomaly notifications use the event router; the raw/high-rate telemetry stream stays on its partitioned data path."
+      },
+      "requirementIds": ["legacy-requirement:5"]
+    },
+    {
+      "id": "iot_21",
+      "stepNumber": 21,
+      "phase": "Process, detect, query, and retain telemetry",
+      "title": "Add the hot time-series query store",
+      "type": "add_component",
+      "content": "Use the existing Database catalog node as the time-series store analog. Select the Azure query service only after checking current product availability, regional support, retention, and query characteristics; the frozen hints name Time Series Insights, but the logical design should remain replaceable. Keep the hot query model distinct from the five-year raw archive.",
+      "component": {
+        "nodeId": "timeseries_store",
+        "componentType": "database",
+        "label": "Azure Time-Series Query Store",
+        "description": "Queryable recent telemetry, aggregates, and anomaly evidence",
+        "position": {"x": 1740, "y": 350},
+        "properties": {
+          "componentName": "Azure Time-Series Query Store",
+          "purpose": "Serve bounded time-range queries over normalized telemetry, rollups, and anomaly evidence. Choose the Azure time-series service after verifying product/region fit; partition by device or tenant and time based on measured query patterns. This hot query store is not the sole five-year system of record."
+        },
+        "highlightReason": "Separating the query-optimized recent view from the long-term archive keeps dashboard reads bounded and retention economical."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "iot_22",
+      "stepNumber": 22,
+      "phase": "Process, detect, query, and retain telemetry",
+      "title": "Persist queryable telemetry and rollups",
+      "type": "add_connection",
+      "content": "Write normalized samples and aggregates to the query store with event-time and device/tenant keys. Keep dashboard queries scoped by tenant and time range, downsample older hot data where product needs permit, and avoid scanning the five-year archive synchronously for common visualizations.",
+      "connection": {
+        "edgeId": "processor_to_timeseries_store",
+        "sourceNodeId": "telemetry_processor",
+        "targetNodeId": "timeseries_store",
+        "connectionType": "time-series-write",
+        "label": "Normalized samples and time-bucketed rollups",
+        "description": "The processor writes idempotent event-time samples/aggregates for bounded telemetry queries and dashboard visualization."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "iot_23",
+      "stepNumber": 23,
+      "phase": "Process, detect, query, and retain telemetry",
+      "title": "Add durable object storage for the five-year record",
+      "type": "add_component",
+      "content": "Use the existing Object Storage catalog node as the Azure Blob/Data Lake analog for long-term telemetry. Preserve the raw or canonical event record independently of the hot query projection so downstream logic can be corrected and historical data replayed under governed access.",
+      "component": {
+        "nodeId": "telemetry_archive",
+        "componentType": "object-storage",
+        "label": "Azure Blob/Data Lake (five-year telemetry archive)",
+        "description": "Durable partitioned raw telemetry with lifecycle-managed retention tiers",
+        "position": {"x": 1400, "y": 650},
+        "properties": {
+          "componentName": "Azure Blob/Data Lake (five-year telemetry archive)",
+          "purpose": "Retain the governed raw/canonical telemetry record for at least five years using time-partitioned, compressed columnar objects and lifecycle tiers. Apply encryption, access auditing, deletion/hold policy, and integrity checks; calculate capacity and cost from measured bytes and retention rules."
+        },
+        "highlightReason": "Five-year retention at million-message-per-second scale requires a durable archive separate from the hot query path."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:4"]
+    },
+    {
+      "id": "iot_24",
+      "stepNumber": 24,
+      "phase": "Process, detect, query, and retain telemetry",
+      "title": "Archive telemetry independently of stream-derived views",
+      "type": "add_connection",
+      "content": "Route an archival copy from the IoT Hub-supported storage/event route so a stream-processing outage or query-model change does not erase the retained source. Validate completeness and reconcile counts/checksums; use lifecycle policies only after retention, legal hold, and deletion requirements are agreed.",
+      "connection": {
+        "edgeId": "hub_to_telemetry_archive",
+        "sourceNodeId": "iot_hub",
+        "targetNodeId": "telemetry_archive",
+        "connectionType": "durable-telemetry-archive",
+        "label": "Independent raw/canonical archive route",
+        "description": "Persist a recoverable telemetry copy for five-year retention independently of derived hot-store writes; reconcile completeness and apply governed lifecycle tiers."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "iot_25",
+      "stepNumber": 25,
+      "phase": "Process, detect, query, and retain telemetry",
+      "title": "Resolve the five-year cost and data-governance policy",
+      "type": "decision_point",
+      "content": "Estimate archive bytes from measured event size, 1M+ messages/second, compression, schema overhead, and retention; then model hot/cool/archive retrieval cost and restore time. Define regional replication, encryption/key ownership, tenant isolation, privacy deletion, legal holds, and whether raw payload fields may be retained for five years. A five-year duration alone does not specify accessible hot retention or query latency.",
+      "decision": {
+        "question": "How can five years of telemetry be retained without making every record a hot database row?",
+        "chosen": "Keep a durable time-partitioned object archive with policy-approved lifecycle tiers, and retain only the recent/query-serving projection and aggregates required by measured dashboard and operational needs.",
+        "chosenReason": "The archive satisfies the long retention boundary while the time-series store is sized for interactive access; actual capacity and tiering need workload and compliance data.",
+        "alternatives": [
+          {"option": "Keep all five years in the hot query store", "tradeoff": "Can make storage and indexing costs excessive and does not define archive integrity or legal-hold behavior."},
+          {"option": "Delete old raw events after rollup", "tradeoff": "Breaks the explicit five-year retention requirement and prevents replay of corrected processing logic."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:4"]
+    },
+    {
+      "id": "iot_26",
+      "stepNumber": 26,
+      "phase": "Process, detect, query, and retain telemetry",
+      "title": "Scale connection and message throughput from measured quotas",
+      "type": "scale_trigger",
+      "content": "The 10M+ connection and 1M+ message/second thresholds are supplied targets, not per-hub settings. Load-test realistic message sizes, device reconnect storms, geographic skew, and bursts against the selected Azure tier and current service quotas.",
+      "scaleTrigger": {
+        "metric": "Connected devices and reconnect rate by hub/region; accepted messages/second, throttles, routing backlog, and partition skew",
+        "action": "Before any hub or downstream partition approaches its tested connection/throughput/quota limit, add capacity or a regional shard, rebalance stable device assignments, and re-run soak and failover tests.",
+        "impact": "Proactive sharding protects the 10M+ connection and 1M+ message/second targets; untested capacity assumptions can cause throttling, reconnect storms, or dropped telemetry."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "iot_27",
+      "stepNumber": 27,
+      "phase": "Process, detect, query, and retain telemetry",
+      "title": "Budget and measure end-to-end processing latency",
+      "type": "scale_trigger",
+      "content": "Define the under-five-second interval precisely—for example, device event timestamp/ingress to durable processed output visible to the named consumer—and record clock-skew treatment. Split the budget across ingress/routing, stream queueing and computation, sink commit, and query visibility; leave room for bursts and retries.",
+      "scaleTrigger": {
+        "metric": "End-to-end p50/p95/p99 event-to-durable-output latency, consumer lag, late-event rate, sink commit time, and dropped/retried events",
+        "action": "When the agreed percentile consumes its budget, identify the slow stage, scale or repartition the constrained processor/sink, and bound expensive windows or enrichment before expanding the total latency budget.",
+        "impact": "A fast stream engine alone cannot prove the under-five-second requirement if routing, storage, retries, or query visibility dominate."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:3"]
+    },
+    {
+      "id": "iot_28",
+      "stepNumber": 28,
+      "phase": "Expose operations and deliver bounded commands",
+      "title": "Add an authenticated operations API boundary",
+      "type": "add_component",
+      "content": "Use the existing API Gateway catalog component for the operator and application-facing control plane, not for device telemetry ingress. Authenticate workforce/service callers, authorize tenant and device scopes, validate command and query requests, apply quotas, and audit security-sensitive operations.",
+      "component": {
+        "nodeId": "operations_gateway",
+        "componentType": "api-gateway",
+        "label": "Device Operations API Gateway",
+        "description": "Authenticated fleet management, command submission, and telemetry query entry",
+        "position": {"x": 360, "y": 710},
+        "properties": {
+          "componentName": "Device Operations API Gateway",
+          "purpose": "Authenticate operator/service callers, enforce tenant and device-level authorization, validate command/query payloads, rate-limit control-plane requests, and audit access. Keep bulk device telemetry off this gateway and separate read/query load from device ingress."
+        },
+        "highlightReason": "Operator identity and authorization need a distinct boundary from device certificates and telemetry sessions."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "iot_29",
+      "stepNumber": 29,
+      "phase": "Expose operations and deliver bounded commands",
+      "title": "Add the fleet operations and command service",
+      "type": "add_component",
+      "content": "Use the existing Backend Server component for fleet queries, lifecycle workflows, and command orchestration. Keep request authorization and business policy here; the service should submit a durable command intent, not hold an HTTP request open while waiting for millions of devices.",
+      "component": {
+        "nodeId": "operations_service",
+        "componentType": "backend-server",
+        "label": "Fleet Operations & Command Service",
+        "description": "Tenant-scoped fleet workflows, query orchestration, and command intent",
+        "position": {"x": 720, "y": 710},
+        "properties": {
+          "componentName": "Fleet Operations & Command Service",
+          "purpose": "Authorize fleet lifecycle actions, query metadata and time-series projections, and create durable command intents with command IDs, device scope, expiry, and audit context. Return an accepted command/status reference rather than synchronously waiting for device delivery."
+        },
+        "highlightReason": "A separate service owns fleet policy and orchestration without coupling control requests to the ingest data plane."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "iot_30",
+      "stepNumber": 30,
+      "phase": "Expose operations and deliver bounded commands",
+      "title": "Add durable bounded command dispatch",
+      "type": "add_component",
+      "content": "Use the existing Queue catalog component for asynchronous command intents. Bound retries, queue age, and per-device in-flight commands; expire commands that are no longer safe to execute and route exhausted failures to an operator-visible dead-letter path.",
+      "component": {
+        "nodeId": "command_queue",
+        "componentType": "queue",
+        "label": "Durable Device Command Queue",
+        "description": "Retryable command intents with expiry, deduplication, and dead-letter handling",
+        "position": {"x": 1060, "y": 710},
+        "properties": {
+          "componentName": "Durable Device Command Queue",
+          "purpose": "Persist command ID, tenant/device scope, authorization reference, expiry, idempotency key, and attempt state. Bound retries and queue age, serialize commands where device semantics require it, and dead-letter terminal failures for operator review."
+        },
+        "highlightReason": "Asynchronous dispatch absorbs temporary disconnects while expiry and bounded retries prevent stale or unbounded work."
+      },
+      "requirementIds": ["legacy-requirement:6"]
+    },
+    {
+      "id": "iot_31",
+      "stepNumber": 31,
+      "phase": "Expose operations and deliver bounded commands",
+      "title": "Add the telemetry visualization client",
+      "type": "add_component",
+      "content": "Use the existing Web App catalog component for the operator dashboard. It reads tenant-authorized time-series and fleet projections through the operations API; do not let browsers query IoT Hub credentials or scan the long-term archive directly.",
+      "component": {
+        "nodeId": "operator_console",
+        "componentType": "web-app",
+        "label": "Fleet & Telemetry Dashboard",
+        "description": "Authorized device inventory, time-series visualization, alerts, and command status",
+        "position": {"x": 60, "y": 710},
+        "properties": {
+          "componentName": "Fleet & Telemetry Dashboard",
+          "purpose": "Visualize tenant-scoped device status, bounded time-range telemetry, anomaly evidence, lifecycle state, and command acknowledgements through the authorized operations API. Avoid unbounded queries and never expose device credentials in the browser."
+        },
+        "highlightReason": "A dedicated client makes the telemetry visualization and operator command experience explicit."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "iot_32",
+      "stepNumber": 32,
+      "phase": "Expose operations and deliver bounded commands",
+      "title": "Route dashboard requests through the API boundary",
+      "type": "add_connection",
+      "content": "The dashboard presents authorized device and telemetry views and submits commands as explicit operations. Apply tenant scoping to every read and write; do not treat a hidden UI control as authorization.",
+      "connection": {
+        "edgeId": "console_to_operations_gateway",
+        "sourceNodeId": "operator_console",
+        "targetNodeId": "operations_gateway",
+        "connectionType": "authenticated-operator-api",
+        "label": "Authenticated fleet and telemetry requests",
+        "description": "The dashboard uses scoped API calls for fleet search, telemetry visualization, and command submission."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "iot_33",
+      "stepNumber": 33,
+      "phase": "Expose operations and deliver bounded commands",
+      "title": "Pass validated requests to fleet operations",
+      "type": "add_connection",
+      "content": "The gateway enforces the external API contract and forwards validated, authenticated operations. The backend must still enforce resource-level authorization and idempotency because gateway policies are not a substitute for domain checks.",
+      "connection": {
+        "edgeId": "gateway_to_operations_service",
+        "sourceNodeId": "operations_gateway",
+        "targetNodeId": "operations_service",
+        "connectionType": "authorized-control-request",
+        "label": "Validated, tenant-scoped requests",
+        "description": "The operations service rechecks device/tenant permissions and applies command/query domain rules."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "iot_34",
+      "stepNumber": 34,
+      "phase": "Expose operations and deliver bounded commands",
+      "title": "Read the versioned device metadata projection",
+      "type": "add_connection",
+      "content": "Use the registry projection for fleet search and lifecycle operations, but verify security-sensitive actions against authoritative IoT Hub identity/twin state when required. Handle projection lag explicitly in operator status.",
+      "connection": {
+        "edgeId": "operations_to_registry",
+        "sourceNodeId": "operations_service",
+        "targetNodeId": "device_registry",
+        "connectionType": "fleet-metadata-query",
+        "label": "Tenant-scoped fleet inventory",
+        "description": "The service queries lifecycle metadata while preserving the hub as the identity/twin authority and exposing projection freshness."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "iot_35",
+      "stepNumber": 35,
+      "phase": "Expose operations and deliver bounded commands",
+      "title": "Serve bounded telemetry visualization queries",
+      "type": "add_connection",
+      "content": "Expose downsampled or bounded time-range data from the query store through the authorized service. Use tenant/device filters and query limits, and report when data is delayed or the requested range requires an archive restore rather than silently returning incomplete data.",
+      "connection": {
+        "edgeId": "operations_to_timeseries_store",
+        "sourceNodeId": "operations_service",
+        "targetNodeId": "timeseries_store",
+        "connectionType": "authorized-timeseries-query",
+        "label": "Scoped telemetry and aggregate reads",
+        "description": "The API serves bounded time-series queries from the hot projection with explicit freshness and retention boundaries."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "iot_36",
+      "stepNumber": 36,
+      "phase": "Expose operations and deliver bounded commands",
+      "title": "Persist a command intent before asynchronous dispatch",
+      "type": "add_connection",
+      "content": "Write an authorized command intent to the durable queue before reporting acceptance. Include a unique command ID, idempotency key, expiry, desired state/version, and device scope so retries cannot silently issue a different action.",
+      "connection": {
+        "edgeId": "operations_to_command_queue",
+        "sourceNodeId": "operations_service",
+        "targetNodeId": "command_queue",
+        "connectionType": "durable-command-intent",
+        "label": "Authorized command with idempotency and expiry",
+        "description": "Accepted commands are durably queued with device scope, command identity, expiry, retry state, and audit reference."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "iot_37",
+      "stepNumber": 37,
+      "phase": "Expose operations and deliver bounded commands",
+      "title": "Dispatch commands through the device hub",
+      "type": "add_connection",
+      "content": "A dispatcher consumes eligible commands and asks the assigned IoT Hub to deliver them to the addressed device. Do not bypass hub device authorization or assume an offline device received the command; the queue and command record own retry/expiry/status semantics.",
+      "connection": {
+        "edgeId": "command_queue_to_hub",
+        "sourceNodeId": "command_queue",
+        "targetNodeId": "iot_hub",
+        "connectionType": "cloud-to-device-dispatch",
+        "label": "Bounded command dispatch to assigned hub",
+        "description": "Only unexpired, authorized command intents are dispatched through the hub assigned to the target device."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "iot_38",
+      "stepNumber": 38,
+      "phase": "Expose operations and deliver bounded commands",
+      "title": "Deliver addressed cloud-to-device commands",
+      "type": "add_connection",
+      "content": "IoT Hub sends an authorized command or desired-state update only to its target device. Define command semantics, maximum age, duplicate handling, and whether execution is safe after reconnection; use device acknowledgement or reported twin state to establish outcome.",
+      "connection": {
+        "edgeId": "hub_to_fleet_commands",
+        "sourceNodeId": "iot_hub",
+        "targetNodeId": "device_fleet",
+        "connectionType": "cloud-to-device-command",
+        "label": "Addressed command / desired-state update",
+        "description": "The assigned hub delivers authorized, unexpired commands to a specific device; disconnected devices are not reported as having executed them."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "iot_39",
+      "stepNumber": 39,
+      "phase": "Expose operations and deliver bounded commands",
+      "title": "Return command acknowledgements and device-reported state",
+      "type": "add_connection",
+      "content": "Devices acknowledge execution or rejection with command ID and observed state; IoT Hub exposes reported state/twin updates for reconciliation. Distinguish queued, delivered, executed, expired, and failed states in the UI rather than treating a successful enqueue as successful device execution.",
+      "connection": {
+        "edgeId": "hub_to_operations_command_ack",
+        "sourceNodeId": "iot_hub",
+        "targetNodeId": "operations_service",
+        "connectionType": "device-command-acknowledgement",
+        "label": "Command result and reported twin state",
+        "description": "The device reports command ID, execution result, and state through its authenticated hub session for end-to-end status reconciliation."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "iot_40",
+      "stepNumber": 40,
+      "phase": "Expose operations and deliver bounded commands",
+      "title": "Define safe retry, expiry, and reconciliation for commands",
+      "type": "decision_point",
+      "content": "Make command execution idempotent where possible and require a device-side deduplication key for retryable non-idempotent operations. Expire stale commands, cap retries, dead-letter permanent failures, and reconcile the hub-reported result with the command record. Return an asynchronous operation/status ID to callers.",
+      "decision": {
+        "question": "What does a successful command API response mean when a device is disconnected?",
+        "chosen": "Return accepted/queued with a command ID; report delivered/executed only after device acknowledgement or versioned reported state, and expire commands whose safety window closes.",
+        "chosenReason": "The command path is asynchronous and the device can be offline; an HTTP success only proves the platform accepted a durable intent.",
+        "alternatives": [
+          {"option": "Return success as soon as a command is enqueued", "tradeoff": "Callers may believe an actuator changed state when it never received the command."},
+          {"option": "Retry every command forever", "tradeoff": "A stale physical action may execute much later and consume unbounded queue capacity."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "iot_41",
+      "stepNumber": 41,
+      "phase": "Instrument capacity and prove acceptance",
+      "title": "Add end-to-end IoT platform monitoring",
+      "type": "add_component",
+      "content": "Use the existing Monitoring catalog component as the Azure Monitor/Application Insights analog. Instrument user-visible SLOs and data integrity as well as resource utilization; correlate device, hub, stream, storage, and command IDs without logging credential or sensitive payload material.",
+      "component": {
+        "nodeId": "platform_monitoring",
+        "componentType": "monitoring",
+        "label": "Azure Monitor / Application Insights",
+        "description": "Fleet, ingestion, processing, storage, security, and command health",
+        "position": {"x": 1740, "y": 710},
+        "properties": {
+          "componentName": "Azure Monitor / Application Insights",
+          "purpose": "Track active devices, auth failures, connection churn, accepted/throttled messages, consumer lag, event-to-output latency, dropped/late records, archive completeness/retention, query latency, anomaly quality, command age/acknowledgement, and cost. Correlate operations with non-sensitive IDs and alert on target breaches."
+        },
+        "highlightReason": "The numeric targets and asynchronous command flow need operational evidence, not diagram-only assurances."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "iot_42",
+      "stepNumber": 42,
+      "phase": "Instrument capacity and prove acceptance",
+      "title": "Observe device connection and ingress health",
+      "type": "add_connection",
+      "content": "Export per-hub connection, authentication, throttling, route, and regional health signals. Alert before capacity limits and detect reconnect storms separately from steady-state throughput.",
+      "connection": {
+        "edgeId": "hub_to_monitoring",
+        "sourceNodeId": "iot_hub",
+        "targetNodeId": "platform_monitoring",
+        "connectionType": "ingress-observability",
+        "label": "Connections, auth, throughput, and throttles",
+        "description": "Per-hub and regional signals show whether device and message targets remain within measured service quotas."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "iot_43",
+      "stepNumber": 43,
+      "phase": "Instrument capacity and prove acceptance",
+      "title": "Observe stream lag, processing time, and anomaly quality",
+      "type": "add_connection",
+      "content": "Measure queue/partition lag, p95/p99 event-to-output time, late and dropped events, sink retries, and anomaly false positives. Alert on budget consumption before the under-five-second objective is breached.",
+      "connection": {
+        "edgeId": "processor_to_monitoring",
+        "sourceNodeId": "telemetry_processor",
+        "targetNodeId": "platform_monitoring",
+        "connectionType": "processing-observability",
+        "label": "Lag, end-to-end latency, and data quality",
+        "description": "Processing and anomaly quality signals reveal latency-budget consumption, loss, late data, and alert noise."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "iot_44",
+      "stepNumber": 44,
+      "phase": "Instrument capacity and prove acceptance",
+      "title": "Observe query freshness and time-series serving",
+      "type": "add_connection",
+      "content": "Track query latency by range and tenant, freshness lag, hot-store capacity, and dashboard errors. Surface stale or unavailable data explicitly instead of presenting it as current telemetry.",
+      "connection": {
+        "edgeId": "timeseries_to_monitoring",
+        "sourceNodeId": "timeseries_store",
+        "targetNodeId": "platform_monitoring",
+        "connectionType": "query-store-observability",
+        "label": "Query latency, freshness, and capacity",
+        "description": "Signals verify that visualized telemetry is bounded, current enough for its declared use, and within the selected store capacity."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "iot_45",
+      "stepNumber": 45,
+      "phase": "Instrument capacity and prove acceptance",
+      "title": "Verify archive completeness and five-year policy",
+      "type": "add_connection",
+      "content": "Monitor archived event counts, partition manifests, checksums, retention-policy execution, retrieval tests, and storage-tier cost. Periodically prove a historical restore and ensure deletion/legal-hold policy is enforced for the full retention lifecycle.",
+      "connection": {
+        "edgeId": "archive_to_monitoring",
+        "sourceNodeId": "telemetry_archive",
+        "targetNodeId": "platform_monitoring",
+        "connectionType": "retention-integrity-observability",
+        "label": "Archive completeness, integrity, and retention",
+        "description": "Reconciliation and restore checks demonstrate the five-year archive is complete and governed, not merely configured."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:4"]
+    },
+    {
+      "id": "iot_46",
+      "stepNumber": 46,
+      "phase": "Instrument capacity and prove acceptance",
+      "title": "Observe command backlog and acknowledgement state",
+      "type": "add_connection",
+      "content": "Alert on oldest command age, expired/dead-letter counts, per-device retry pressure, and acknowledgement delay. Ensure the dashboard distinguishes queued from executed commands and does not mark a timeout as device success.",
+      "connection": {
+        "edgeId": "command_queue_to_monitoring",
+        "sourceNodeId": "command_queue",
+        "targetNodeId": "platform_monitoring",
+        "connectionType": "command-path-observability",
+        "label": "Queue age, retries, expiry, and acknowledgements",
+        "description": "Command telemetry makes delayed or failed device actions visible and supports safe bounded retry operations."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "iot_47",
+      "stepNumber": 47,
+      "phase": "Instrument capacity and prove acceptance",
+      "title": "Define the acceptance tests for every numeric target",
+      "type": "decision_point",
+      "content": "Test realistic fleet connection and reconnect distributions at 10M+, sustained and burst ingestion at 1M+ messages/second, and end-to-end event-to-durable-output latency under five seconds at an agreed percentile. Verify the archive retains and restores five years of representative data, device identity/rotation/revocation works, unauthorized commands are denied, and authorized commands reconcile from acceptance through device acknowledgement. Record workload, tier/region, service quota, percentiles, failures, and data-loss checks.",
+      "decision": {
+        "question": "What evidence is needed before claiming the IoT platform meets the supplied constraints?",
+        "chosen": "Use repeatable scale, latency, retention/restore, credential lifecycle, unauthorized-access, reconnect, regional-failure, and command-acknowledgement tests with recorded outcomes and explicit pass thresholds.",
+        "chosenReason": "A component graph or configured capacity does not prove service quotas, end-to-end latency, five-year retention, or device security behavior.",
+        "alternatives": [
+          {"option": "Treat cloud service limits and a successful demo as proof", "tradeoff": "The target workload, regional quota, failure mode, and data integrity have not been exercised."},
+          {"option": "Measure only average throughput and latency", "tradeoff": "Averages hide bursts, tail latency, reconnect storms, hot partitions, and long-running retention defects."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "iot_48",
+      "stepNumber": 48,
+      "phase": "Instrument capacity and prove acceptance",
+      "title": "Close with failure and recovery behavior, not a guarantee",
+      "type": "explanation",
+      "content": "Exercise hub/region loss, stream consumer lag, storage throttling, Event Grid delivery delay, a disconnected device fleet, expired commands, credential revocation, and archive restore. Bound local device buffering and cloud retries, make replay idempotent, and document which commands/data are delayed or unavailable. This structural review draft describes a proposed design; it is not evidence that any quota, latency, availability, retention, or security target has passed.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

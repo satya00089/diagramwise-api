@@ -1,0 +1,1068 @@
+{
+  "problem_id": "ml_011",
+  "version": "1.0",
+  "totalSteps": 52,
+  "phases": [
+    {
+      "name": "Brief and acceptance targets",
+      "stepRange": [1, 1],
+      "description": "Keep the supplied quality, latency, scale, and freshness targets explicit and measurable."
+    },
+    {
+      "name": "Ingestion, extraction, and resolution",
+      "stepRange": [2, 9],
+      "description": "Build a durable path from source text through extraction, entity linking, and versioned schema checks."
+    },
+    {
+      "name": "Graph persistence and link prediction",
+      "stepRange": [10, 14],
+      "description": "Persist provenance-aware temporal facts and train/version graph models off the online write path."
+    },
+    {
+      "name": "Query experience and observability",
+      "stepRange": [15, 19],
+      "description": "Expose bounded graph queries, safe natural-language planning, visualization, and measurable service health."
+    },
+    {
+      "name": "Connect the end-to-end paths",
+      "stepRange": [20, 47],
+      "description": "Replay the ingestion, graph update, model, query, and observability connections."
+    },
+    {
+      "name": "Decisions and validation gates",
+      "stepRange": [48, 52],
+      "description": "Make quality, schema evolution, temporal semantics, query safety, and freshness operational."
+    }
+  ],
+  "steps": [
+    {
+      "id": "kg_scope",
+      "stepNumber": 1,
+      "phase": "Brief and acceptance targets",
+      "title": "Start from the supplied brief and measurable targets",
+      "type": "explanation",
+      "content": "Title: Design a Knowledge Graph Construction and Query System\nDescription: Design a system that automatically constructs knowledge graphs from unstructured data, performs entity resolution, supports graph-based reasoning, and answers complex queries over the graph.\nRequirements:\n- Extract entities and relations from text\n- Perform entity resolution and deduplication\n- Build and update graph schema dynamically\n- Support graph-based queries and traversals\n- Implement graph embeddings for link prediction\n- Visualize graph relationships\n- Handle temporal and versioned facts\n- Integrate with LLMs for natural language querying\nConstraints:\n- Entity resolution precision above 95%\n- Relation extraction F1-score above 80%\n- Query latency under 500ms\n- Scale to 100M+ nodes and edges\n- Handle real-time graph updates\nHints:\n- Use NER + relation extraction pipelines for graph construction\n- Implement graph databases (Neo4j, ArangoDB) for storage\n- Use TransE/RotatE for knowledge graph embeddings\n- Implement entity linking with candidate generation + re-ranking\n- Use GNN (Graph Neural Networks) for node classification\n- Implement Text-to-Cypher/SPARQL for natural language queries\n\nTreat the listed percentages, latency, scale, and real-time behavior as acceptance targets to verify, not results the architecture can promise by itself. Traffic mix, document volume, tenant boundaries, graph-degree skew, and the freshness objective behind “real-time” are not specified; confirm them before final capacity planning. Any numeric component settings later in the guide are illustrative examples to benchmark, not sizing recommendations. The graph-store engine and partition plan should be selected by representative traversal, write, and recovery benchmarks.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "kg_ingestion_api",
+      "stepNumber": 2,
+      "phase": "Ingestion, extraction, and resolution",
+      "title": "Create a validated ingestion boundary",
+      "type": "add_component",
+      "content": "Accept documents and source metadata through an authenticated, schema-validated interface. Assign an idempotency key and immutable source reference before acknowledging work; reject malformed or unauthorized submissions rather than silently dropping them.",
+      "component": {
+        "nodeId": "kg_ingestion_api",
+        "componentType": "api-gateway",
+        "label": "Knowledge Ingestion API",
+        "description": "Authenticated entry point for text and source metadata, with validation and idempotent submission.",
+        "position": { "x": 0, "y": 0 },
+        "properties": {
+          "componentName": "Knowledge Ingestion API",
+          "purpose": "Validate source identity and document metadata, enforce caller authorization and request limits, and accept each submitted source idempotently before asynchronous graph construction."
+        },
+        "highlightReason": "A bounded ingestion contract separates source-system retries and validation from graph mutation."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "kg_source_archive",
+      "stepNumber": 3,
+      "phase": "Ingestion, extraction, and resolution",
+      "title": "Retain source versions and provenance",
+      "type": "add_component",
+      "content": "Keep immutable source versions or durable references, checksums, source identifiers, and ingestion timestamps so extracted facts can be traced back and reprocessed. Apply retention and access policy to the source material; do not use the archive as the graph query store.",
+      "component": {
+        "nodeId": "kg_source_archive",
+        "componentType": "object-storage",
+        "label": "Versioned Source Archive",
+        "description": "Durable, versioned source documents and model/evaluation artifacts with integrity metadata.",
+        "position": { "x": 240, "y": 250 },
+        "properties": {
+          "componentName": "Versioned Source Archive",
+          "purpose": "Retain immutable source-document versions, checksums, extraction references, and reproducible model artifacts for provenance, replay, and audit; enforce lifecycle and least-privilege access policies.",
+          "versioning": true,
+          "checksumValidation": true
+        },
+        "highlightReason": "Versioned source evidence makes extracted and corrected facts auditable and reproducible."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7"]
+    },
+    {
+      "id": "kg_ingest_queue",
+      "stepNumber": 4,
+      "phase": "Ingestion, extraction, and resolution",
+      "title": "Buffer work with a durable queue",
+      "type": "add_component",
+      "content": "Decouple source acceptance from variable extraction and graph-write rates. Carry document-version IDs rather than large document bodies where practical; use bounded retries, a dead-letter path, and idempotent consumers so a replay cannot create duplicate facts.",
+      "component": {
+        "nodeId": "kg_ingest_queue",
+        "componentType": "queue",
+        "label": "Durable Ingestion Queue",
+        "description": "Back-pressure boundary for document extraction and graph updates.",
+        "position": { "x": 250, "y": 0 },
+        "properties": {
+          "componentName": "Durable Ingestion Queue",
+          "purpose": "Buffer versioned document work, absorb bursty arrivals, and support bounded retry and dead-letter handling while consumers remain idempotent.",
+          "durable": true,
+          "maxRetries": 5,
+          "backoff": "Exponential with jitter"
+        },
+        "highlightReason": "A durable queue protects the online request path from variable NLP and graph-store throughput."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "kg_extraction_worker",
+      "stepNumber": 5,
+      "phase": "Ingestion, extraction, and resolution",
+      "title": "Extract candidate mentions and relations",
+      "type": "add_component",
+      "content": "Chunk documents with source offsets and version IDs, run NER and relation extraction, normalize outputs to a typed candidate format, and preserve confidence and evidence spans. Evaluate relation extraction on a separately labeled holdout set; the supplied F1 target is not satisfied merely by deploying a model.",
+      "component": {
+        "nodeId": "kg_extraction_worker",
+        "componentType": "processing-worker",
+        "label": "NER & Relation Extraction Worker",
+        "description": "Scalable, replayable text extraction with evidence spans and calibrated candidate confidence.",
+        "position": { "x": 500, "y": 0 },
+        "properties": {
+          "componentName": "NER & Relation Extraction Worker",
+          "purpose": "Consume document-version references, chunk text with stable offsets, invoke NER and relation models, and emit typed entity/relation candidates with evidence spans, confidence, and idempotent processing keys.",
+          "tasks": "Chunking, NER, relation extraction, normalization, evidence-span capture",
+          "concurrency": 16,
+          "autoscale": true
+        },
+        "highlightReason": "The worker makes extraction replayable and separates model inference from durable graph writes."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "kg_extraction_model",
+      "stepNumber": 6,
+      "phase": "Ingestion, extraction, and resolution",
+      "title": "Serve extraction models behind a versioned boundary",
+      "type": "add_component",
+      "content": "Version the NER and relation-extraction models and their label schema. Compare model releases on the same gold set; gate rollout on relation F1 above 80% and segment-level regressions, and retain the previous model for rollback.",
+      "component": {
+        "nodeId": "kg_extraction_model",
+        "componentType": "model-serving",
+        "label": "Extraction Model Service",
+        "description": "Versioned NER and relation inference with measurable quality and rollback.",
+        "position": { "x": 750, "y": 0 },
+        "properties": {
+          "componentName": "Extraction Model Service",
+          "purpose": "Serve versioned NER and relation-extraction models; expose calibrated candidate confidence and model version so the worker can measure relation F1 above 80% on a labeled holdout and roll back regressions.",
+          "platform": "Containerized inference service",
+          "autoscaling": true
+        },
+        "highlightReason": "A separately versioned inference boundary enables repeatable quality evaluation and safe model rollout."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "kg_entity_resolution",
+      "stepNumber": 7,
+      "phase": "Ingestion, extraction, and resolution",
+      "title": "Resolve entities with candidate generation and abstention",
+      "type": "add_component",
+      "content": "Generate plausible canonical-entity candidates from identifiers, aliases, lexical indexes, and graph context, then rerank using typed evidence. Automatically merge only above a calibrated threshold; send ambiguous matches for human review or leave them unresolved. Measure precision above 95% on a labeled, leakage-free holdout rather than optimizing only for a high merge rate.",
+      "component": {
+        "nodeId": "kg_entity_resolution",
+        "componentType": "processing-worker",
+        "label": "Entity Linking & Resolution Worker",
+        "description": "Candidate generation, contextual reranking, confidence thresholds, and an explicit abstention path.",
+        "position": { "x": 1000, "y": 0 },
+        "properties": {
+          "componentName": "Entity Linking & Resolution Worker",
+          "purpose": "Generate entity-link candidates from identifiers, aliases, lexical indexes, and graph context; rerank with typed evidence, merge only above calibrated thresholds, and route uncertain matches to review to protect precision above 95%.",
+          "tasks": "Candidate generation, reranking, deduplication, confidence calibration, review queue",
+          "concurrency": 16,
+          "autoscale": true
+        },
+        "highlightReason": "An abstention and review path protects the stated precision target when evidence is ambiguous."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:1"]
+    },
+    {
+      "id": "kg_schema_registry",
+      "stepNumber": 8,
+      "phase": "Ingestion, extraction, and resolution",
+      "title": "Version the ontology and graph-write contract",
+      "type": "add_component",
+      "content": "Store entity types, relation types, validation rules, aliases, and schema versions independently from a particular worker release. Each candidate event carries its schema version; validate it before graph mutation and make compatibility and migration status visible to consumers.",
+      "component": {
+        "nodeId": "kg_schema_registry",
+        "componentType": "database",
+        "label": "Ontology & Schema Registry",
+        "description": "Versioned entity/relation ontology, aliases, validation rules, and consumer compatibility state.",
+        "position": { "x": 1000, "y": 270 },
+        "properties": {
+          "componentName": "Ontology & Schema Registry",
+          "purpose": "Persist versioned entity and relation types, aliases, validation rules, schema compatibility, and migration state so extraction and graph updates can evolve without silently changing existing facts.",
+          "type": "NoSQL",
+          "engine": "mongodb",
+          "workload": "OLTP",
+          "encryption": true,
+          "rbac": true,
+          "auditLog": true,
+          "backups": true,
+          "pitr": true
+        },
+        "highlightReason": "A versioned registry enables dynamic schema evolution while keeping writes and consumers interpretable."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7"]
+    },
+    {
+      "id": "kg_graph_update_processor",
+      "stepNumber": 9,
+      "phase": "Ingestion, extraction, and resolution",
+      "title": "Validate and apply graph updates idempotently",
+      "type": "add_component",
+      "content": "Consume resolved candidates, validate their schema version and evidence, and write idempotent upserts keyed by source version and extraction run. Record corrections and superseding facts instead of overwriting history; monitor event age end to end because “real-time” has no numeric freshness bound in the brief.",
+      "component": {
+        "nodeId": "kg_graph_update_processor",
+        "componentType": "stream-processor",
+        "label": "Graph Update Processor",
+        "description": "Schema-aware, idempotent event processing with provenance and correction handling.",
+        "position": { "x": 1250, "y": 0 },
+        "properties": {
+          "componentName": "Graph Update Processor",
+          "purpose": "Validate schema-versioned entity and relation events, deduplicate retries, apply idempotent graph upserts, preserve corrections and provenance, and expose end-to-end update lag for the real-time requirement.",
+          "engine": "Managed stream processing",
+          "throughput": "Benchmark against measured document and graph-write rates",
+          "windowing": "Event-time with late-event correction"
+        },
+        "highlightReason": "A dedicated update processor separates real-time graph mutations from document extraction and model training."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "kg_graph_store",
+      "stepNumber": 10,
+      "phase": "Graph persistence and link prediction",
+      "title": "Persist a versioned, provenance-aware graph",
+      "type": "add_component",
+      "content": "Use a graph-native store for canonical entities, typed edges, adjacency/traversal indexes, and source provenance. Keep valid-time and recorded-time separately, retain superseded assertions, and benchmark Neo4j/ArangoDB or equivalent engines against the actual traversal mix and 100M+ node-and-edge target. The catalog provides a Graph database type but no graph-engine selector; do not imply a vendor or capacity result here.",
+      "component": {
+        "nodeId": "kg_graph_store",
+        "componentType": "database",
+        "label": "Temporal Knowledge Graph Store",
+        "description": "Graph-native entity and relation storage with provenance, temporal validity, and a benchmarked partition strategy.",
+        "position": { "x": 1500, "y": 0 },
+        "properties": {
+          "componentName": "Temporal Knowledge Graph Store",
+          "purpose": "Store canonical entities, typed relationships, source-document provenance, schema/model versions, and valid-time plus recorded-time facts; benchmark graph-native engines and partitioning for 100M+ nodes and edges before fixing capacity.",
+          "type": "Graph",
+          "workload": "Hybrid",
+          "sharding": "Hash-based",
+          "shards": 16,
+          "replication": 3,
+          "replicationMode": "Async",
+          "multiAZ": true,
+          "crossRegion": false,
+          "encryption": true,
+          "rbac": true,
+          "auditLog": true,
+          "backups": true,
+          "pitr": true,
+          "connectionPooling": true
+        },
+        "highlightReason": "Graph-native storage supports relationship traversal while temporal fields preserve historical and corrected facts."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "kg_embedding_training",
+      "stepNumber": 11,
+      "phase": "Graph persistence and link prediction",
+      "title": "Train graph embeddings outside the online update path",
+      "type": "add_component",
+      "content": "Build versioned graph snapshots for TransE/RotatE or a measured GNN approach, then evaluate link-prediction quality and optional node classification on time-aware splits. A training run must identify its graph snapshot, schema, feature, and model versions so it cannot leak future facts into evaluation.",
+      "component": {
+        "nodeId": "kg_embedding_training",
+        "componentType": "model-training",
+        "label": "Graph Embedding Training Pipeline",
+        "description": "Offline TransE/RotatE or GNN training with reproducible graph snapshots and temporal evaluation.",
+        "position": { "x": 1750, "y": 270 },
+        "properties": {
+          "componentName": "Graph Embedding Training Pipeline",
+          "purpose": "Train and evaluate versioned TransE/RotatE embeddings or a GNN on reproducible graph snapshots; measure link prediction and optional node-classification quality with temporal splits and no future-edge leakage.",
+          "computeType": "Distributed CPU/GPU, selected by benchmark",
+          "batchSize": 4096,
+          "epochs": 20
+        },
+        "highlightReason": "Offline training avoids coupling graph ingestion latency to embedding refreshes and model experimentation."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "kg_embedding_store",
+      "stepNumber": 12,
+      "phase": "Graph persistence and link prediction",
+      "title": "Store embeddings with model and graph versions",
+      "type": "add_component",
+      "content": "Index entity embeddings with canonical entity IDs, graph snapshot, model version, and dimensionality. Keep stale-vector cleanup and refresh semantics explicit; estimate raw vector and index footprint from measured node count and dimensions before sizing replicas.",
+      "component": {
+        "nodeId": "kg_embedding_store",
+        "componentType": "vector-database",
+        "label": "Versioned Entity Embedding Index",
+        "description": "Vector index for graph embeddings keyed by canonical entities and model/snapshot version.",
+        "position": { "x": 2000, "y": 270 },
+        "properties": {
+          "componentName": "Versioned Entity Embedding Index",
+          "purpose": "Index canonical-entity embeddings with graph snapshot and model version metadata for link-prediction retrieval; quantify raw vector and index footprint and remove stale versions under an explicit refresh policy.",
+          "engine": "Benchmark graph-embedding vector index",
+          "dimensions": 256,
+          "indexType": "HNSW"
+        },
+        "highlightReason": "A dedicated vector index supports nearest-neighbor retrieval without overloading graph traversal storage."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "kg_model_registry",
+      "stepNumber": 13,
+      "phase": "Graph persistence and link prediction",
+      "title": "Register approved embedding and prediction models",
+      "type": "add_component",
+      "content": "Store immutable model artifacts and evaluation metadata, including the graph snapshot, ontology, feature definitions, and quality results. Promote only a model that passes the agreed offline checks; retain the prior version for rollback and reproducible explanations.",
+      "component": {
+        "nodeId": "kg_model_registry",
+        "componentType": "model-registry",
+        "label": "Graph Model Registry",
+        "description": "Versioned artifacts and evaluation records for embedding and link-prediction releases.",
+        "position": { "x": 2000, "y": 0 },
+        "properties": {
+          "componentName": "Graph Model Registry",
+          "purpose": "Track immutable embedding and link-prediction artifacts with graph snapshot, ontology, features, evaluation results, approval state, and rollback lineage.",
+          "platform": "Provider-neutral model registry",
+          "models": "Versioned embeddings and link-prediction models"
+        },
+        "highlightReason": "Registry provenance makes model outputs reproducible against the exact graph and schema versions used."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7"]
+    },
+    {
+      "id": "kg_link_predictor",
+      "stepNumber": 14,
+      "phase": "Graph persistence and link prediction",
+      "title": "Serve link predictions as evidence-backed candidates",
+      "type": "add_component",
+      "content": "Return ranked candidate links with model version and confidence, not unreviewed graph mutations. The query layer can explain candidate evidence and route accepted corrections through the same validated update pipeline.",
+      "component": {
+        "nodeId": "kg_link_predictor",
+        "componentType": "model-serving",
+        "label": "Link Prediction Service",
+        "description": "Versioned graph-embedding inference that returns scored candidates without silently changing facts.",
+        "position": { "x": 2250, "y": 130 },
+        "properties": {
+          "componentName": "Link Prediction Service",
+          "purpose": "Serve registered graph-embedding models against versioned entity vectors and return ranked, confidence-scored link candidates with model provenance; do not mutate canonical facts automatically.",
+          "platform": "Containerized inference service",
+          "autoscaling": true
+        },
+        "highlightReason": "Keeping predictions separate from asserted facts protects graph quality and makes human acceptance auditable."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:2"]
+    },
+    {
+      "id": "kg_query_gateway",
+      "stepNumber": 15,
+      "phase": "Query experience and observability",
+      "title": "Expose an authenticated query interface",
+      "type": "add_component",
+      "content": "Authenticate callers, apply tenant/data-access policy, validate query requests, and enforce request budgets before work reaches graph traversal. Measure the under-500ms target on the agreed query mix; do not count only the database portion if the product target is end to end.",
+      "component": {
+        "nodeId": "kg_query_gateway",
+        "componentType": "api-gateway",
+        "label": "Graph Query API",
+        "description": "Authorized entry point with query validation, caller limits, and end-to-end latency instrumentation.",
+        "position": { "x": 0, "y": 520 },
+        "properties": {
+          "componentName": "Graph Query API",
+          "purpose": "Authenticate and authorize graph-query callers, validate request shape, enforce per-caller rate and traversal budgets, and record end-to-end latency against the under-500ms target.",
+          "inputValidation": true,
+          "authentication": true,
+          "rateLimiting": true,
+          "tlsTermination": true
+        },
+        "highlightReason": "A protected query boundary is essential before exposing graph traversals or LLM-assisted query planning."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "kg_query_service",
+      "stepNumber": 16,
+      "phase": "Query experience and observability",
+      "title": "Plan bounded traversals and shape graph results",
+      "type": "add_component",
+      "content": "Resolve a safe query plan against the active ontology, apply tenant filters, bounded depth, result limits, and a deadline, then execute supported traversals. Return stable entity IDs, relation evidence, temporal qualifiers, and a bounded visualization payload rather than an unbounded subgraph dump.",
+      "component": {
+        "nodeId": "kg_query_service",
+        "componentType": "backend-server",
+        "label": "Graph Query & Traversal Service",
+        "description": "Ontology-aware query planning, bounded traversal, temporal filtering, and visualization response shaping.",
+        "position": { "x": 280, "y": 520 },
+        "properties": {
+          "componentName": "Graph Query & Traversal Service",
+          "purpose": "Resolve safe query plans against the active ontology, enforce tenant and temporal filters plus depth/result/deadline budgets, execute graph traversals, and return bounded evidence-backed results for visualization within the under-500ms target.",
+          "architecture": "Stateless API service",
+          "instances": 3,
+          "retry": "Retry only safe reads within the caller deadline"
+        },
+        "highlightReason": "A dedicated query service centralizes access controls, traversal limits, temporal semantics, and response shape."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "kg_nl_query_planner",
+      "stepNumber": 17,
+      "phase": "Query experience and observability",
+      "title": "Translate natural language into a constrained query plan",
+      "type": "add_component",
+      "content": "Use the LLM to produce a typed, allowlisted intermediate plan grounded in the active schema, then compile that plan to Cypher/SPARQL in trusted application code. Never execute model-produced query text directly; reject unsupported predicates, cross-tenant access, unbounded traversals, and plans that exceed the latency budget.",
+      "component": {
+        "nodeId": "kg_nl_query_planner",
+        "componentType": "llm-api",
+        "label": "Natural-Language Query Planner",
+        "description": "LLM-assisted intent parsing into a validated graph-query plan, never direct query execution.",
+        "position": { "x": 520, "y": 760 },
+        "properties": {
+          "componentName": "Natural-Language Query Planner",
+          "purpose": "Translate user intent into a typed, allowlisted plan grounded in the current ontology; trusted code compiles it to Cypher/SPARQL and rejects unsafe, unbounded, unauthorized, or over-budget traversals.",
+          "provider": "Configurable LLM provider",
+          "model": "Low-latency model selected by benchmark",
+          "maxTokens": 1024
+        },
+        "highlightReason": "Constrained planning supports natural-language questions without treating generated query text as trusted code."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-requirement:4", "legacy-constraint:3"]
+    },
+    {
+      "id": "kg_visualization_app",
+      "stepNumber": 18,
+      "phase": "Query experience and observability",
+      "title": "Visualize bounded results and their evidence",
+      "type": "add_component",
+      "content": "Render returned entities and relationships with pagination or progressive expansion. Show provenance, fact-validity dates, and link-prediction status distinctly so inferred candidates are not presented as asserted facts; fetch further neighborhoods through explicit bounded queries.",
+      "component": {
+        "nodeId": "kg_visualization_app",
+        "componentType": "web-app",
+        "label": "Knowledge Graph Explorer",
+        "description": "Interactive graph visualization with bounded neighborhood expansion, temporal context, and provenance.",
+        "position": { "x": 520, "y": 520 },
+        "properties": {
+          "componentName": "Knowledge Graph Explorer",
+          "purpose": "Render paginated graph results and bounded neighborhood expansions with source provenance, valid-time context, and a visible distinction between asserted relationships and predicted candidates.",
+          "framework": "Web client",
+          "instances": 3,
+          "cdn": true,
+          "ssl": true
+        },
+        "highlightReason": "The visualization is a first-class requirement and must preserve the distinction between facts and predictions."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "kg_observability",
+      "stepNumber": 19,
+      "phase": "Query experience and observability",
+      "title": "Measure quality, latency, scale, and freshness",
+      "type": "add_component",
+      "content": "Track entity-resolution precision and abstention/review rates, relation precision/recall/F1, queue age, graph update lag, graph-store capacity, query p50/p95/p99 by query class, and natural-language planning latency. Alert on quality regressions and target misses using agreed windows and representative labeled data.",
+      "component": {
+        "nodeId": "kg_observability",
+        "componentType": "monitoring",
+        "label": "Graph Quality & Service Observability",
+        "description": "Quality and service-level signals from extraction through graph updates and user queries.",
+        "position": { "x": 1250, "y": 520 },
+        "properties": {
+          "componentName": "Graph Quality & Service Observability",
+          "purpose": "Measure entity-resolution precision and abstentions, relation extraction F1, queue age, end-to-end graph freshness, graph capacity, and p50/p95/p99 query latency split by query class; alert on target misses and model-quality regressions.",
+          "stack": "Metrics, traces, and quality dashboards",
+          "metrics": "Resolution precision, relation F1, update lag, graph capacity, query latency",
+          "alerts": true,
+          "retention": 90
+        },
+        "highlightReason": "The stated numerical constraints are only trustworthy when measured continuously on representative traffic and labeled data."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "kg_edge_archive",
+      "stepNumber": 20,
+      "phase": "Connect the end-to-end paths",
+      "title": "Archive the submitted source before processing",
+      "type": "add_connection",
+      "content": "Persist the source version and integrity metadata so retries, corrections, and future model evaluations can resolve the exact input that produced a fact.",
+      "connection": {
+        "edgeId": "kg_ingestion_to_archive",
+        "sourceNodeId": "kg_ingestion_api",
+        "targetNodeId": "kg_source_archive",
+        "connectionType": "data-flow",
+        "label": "Versioned source + checksum",
+        "description": "Store the immutable source version and return a stable reference before asynchronous processing."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7"]
+    },
+    {
+      "id": "kg_edge_ingest_queue",
+      "stepNumber": 21,
+      "phase": "Connect the end-to-end paths",
+      "title": "Queue the durable source reference",
+      "type": "add_connection",
+      "content": "Publish the source ID, version, checksum, and idempotency key; keep the document body out of the queue when the archive reference is sufficient.",
+      "connection": {
+        "edgeId": "kg_ingestion_to_queue",
+        "sourceNodeId": "kg_ingestion_api",
+        "targetNodeId": "kg_ingest_queue",
+        "connectionType": "event-stream",
+        "label": "Idempotent document event",
+        "description": "Durably enqueue a reference to each accepted source version for asynchronous extraction."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "kg_edge_queue_extractor",
+      "stepNumber": 22,
+      "phase": "Connect the end-to-end paths",
+      "title": "Deliver work to extraction consumers",
+      "type": "add_connection",
+      "content": "Scale consumers against queue age and processing throughput, while preserving per-document idempotency and bounded retry behavior.",
+      "connection": {
+        "edgeId": "kg_queue_to_extractor",
+        "sourceNodeId": "kg_ingest_queue",
+        "targetNodeId": "kg_extraction_worker",
+        "connectionType": "event-stream",
+        "label": "Versioned work reference",
+        "description": "Deliver durable source references to horizontally scalable extraction workers."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "kg_edge_extractor_model",
+      "stepNumber": 23,
+      "phase": "Connect the end-to-end paths",
+      "title": "Invoke the versioned extraction models",
+      "type": "add_connection",
+      "content": "Pass chunks with document-version IDs and offsets to inference; capture model version and confidence in every result so the quality gate can be reproduced.",
+      "connection": {
+        "edgeId": "kg_extractor_to_model",
+        "sourceNodeId": "kg_extraction_worker",
+        "targetNodeId": "kg_extraction_model",
+        "connectionType": "api-call",
+        "label": "NER + relation inference",
+        "description": "Request candidate mentions and relations with source spans, confidence, and model-version metadata."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "kg_edge_model_resolution",
+      "stepNumber": 24,
+      "phase": "Connect the end-to-end paths",
+      "title": "Rerank extracted entities against canonical candidates",
+      "type": "add_connection",
+      "content": "Send normalized mentions, relation candidates, evidence spans, and extraction versions into candidate generation and contextual reranking.",
+      "connection": {
+        "edgeId": "kg_model_to_resolution",
+        "sourceNodeId": "kg_extraction_model",
+        "targetNodeId": "kg_entity_resolution",
+        "connectionType": "data-flow",
+        "label": "Mention + relation candidates",
+        "description": "Provide confidence-scored extraction results to entity linking and deduplication."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "kg_edge_resolution_schema",
+      "stepNumber": 25,
+      "phase": "Connect the end-to-end paths",
+      "title": "Resolve aliases against the active ontology",
+      "type": "add_connection",
+      "content": "Read canonical identifiers, aliases, relation definitions, and compatible schema versions before accepting a match or emitting graph changes.",
+      "connection": {
+        "edgeId": "kg_resolution_to_schema",
+        "sourceNodeId": "kg_entity_resolution",
+        "targetNodeId": "kg_schema_registry",
+        "connectionType": "database-connection",
+        "label": "Aliases + schema version",
+        "description": "Look up canonical entity aliases and the active, versioned ontology contract."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1"]
+    },
+    {
+      "id": "kg_edge_resolution_processor",
+      "stepNumber": 26,
+      "phase": "Connect the end-to-end paths",
+      "title": "Publish only resolved, evidence-bearing candidates",
+      "type": "add_connection",
+      "content": "Carry canonical IDs where confidence is sufficient; preserve unresolved candidates and review decisions rather than forcing a merge that would reduce precision.",
+      "connection": {
+        "edgeId": "kg_resolution_to_processor",
+        "sourceNodeId": "kg_entity_resolution",
+        "targetNodeId": "kg_graph_update_processor",
+        "connectionType": "event-stream",
+        "label": "Resolved fact candidates",
+        "description": "Publish schema-versioned entity and relation assertions with confidence, evidence, and idempotency keys."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "kg_edge_schema_processor",
+      "stepNumber": 27,
+      "phase": "Connect the end-to-end paths",
+      "title": "Validate changes against the schema version",
+      "type": "add_connection",
+      "content": "Require the processor to reject or quarantine incompatible schema versions and expose migration failures instead of partially applying an event.",
+      "connection": {
+        "edgeId": "kg_schema_to_processor",
+        "sourceNodeId": "kg_schema_registry",
+        "targetNodeId": "kg_graph_update_processor",
+        "connectionType": "api-call",
+        "label": "Versioned validation contract",
+        "description": "Resolve the schema version and validation rules before graph mutation."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "kg_edge_processor_graph",
+      "stepNumber": 28,
+      "phase": "Connect the end-to-end paths",
+      "title": "Apply idempotent temporal graph writes",
+      "type": "add_connection",
+      "content": "Upsert canonical entities and sourced relationships while retaining valid-time, recorded-time, source version, schema version, and correction lineage.",
+      "connection": {
+        "edgeId": "kg_processor_to_graph",
+        "sourceNodeId": "kg_graph_update_processor",
+        "targetNodeId": "kg_graph_store",
+        "connectionType": "database-connection",
+        "label": "Validated temporal upserts",
+        "description": "Persist idempotent, provenance-bearing graph facts and superseding corrections."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "kg_edge_graph_training",
+      "stepNumber": 29,
+      "phase": "Connect the end-to-end paths",
+      "title": "Train from reproducible graph snapshots",
+      "type": "add_connection",
+      "content": "Create immutable, time-bounded training snapshots and document their ontology and fact cutoffs so embeddings and link-prediction results can be reproduced without future-data leakage.",
+      "connection": {
+        "edgeId": "kg_graph_to_training",
+        "sourceNodeId": "kg_graph_store",
+        "targetNodeId": "kg_embedding_training",
+        "connectionType": "data-flow",
+        "label": "Versioned graph snapshot",
+        "description": "Export a consistent, time-bounded graph view for offline embedding and GNN training."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "kg_edge_training_vectors",
+      "stepNumber": 30,
+      "phase": "Connect the end-to-end paths",
+      "title": "Publish embeddings with snapshot metadata",
+      "type": "add_connection",
+      "content": "Write vectors by stable entity ID and attach the exact embedding model and graph snapshot version; make index refresh atomic or safely dual-versioned.",
+      "connection": {
+        "edgeId": "kg_training_to_vectors",
+        "sourceNodeId": "kg_embedding_training",
+        "targetNodeId": "kg_embedding_store",
+        "connectionType": "data-flow",
+        "label": "Versioned entity vectors",
+        "description": "Load embedding batches and their graph/model version into the vector index."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "kg_edge_training_registry",
+      "stepNumber": 31,
+      "phase": "Connect the end-to-end paths",
+      "title": "Register evaluation results before promotion",
+      "type": "add_connection",
+      "content": "Publish artifacts only with reproducible quality results and source snapshot metadata; gate promotion on link-prediction metrics and any product-specific acceptance criteria.",
+      "connection": {
+        "edgeId": "kg_training_to_registry",
+        "sourceNodeId": "kg_embedding_training",
+        "targetNodeId": "kg_model_registry",
+        "connectionType": "data-flow",
+        "label": "Artifact + evaluation lineage",
+        "description": "Register immutable model artifacts together with graph, schema, feature, and evaluation versions."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7"]
+    },
+    {
+      "id": "kg_edge_registry_predictor",
+      "stepNumber": 32,
+      "phase": "Connect the end-to-end paths",
+      "title": "Load only an approved prediction model",
+      "type": "add_connection",
+      "content": "Pin each serving deployment to an approved registry version and retain a tested rollback path.",
+      "connection": {
+        "edgeId": "kg_registry_to_predictor",
+        "sourceNodeId": "kg_model_registry",
+        "targetNodeId": "kg_link_predictor",
+        "connectionType": "data-flow",
+        "label": "Approved model version",
+        "description": "Deploy a registry-approved link-prediction artifact with its evaluation and rollback metadata."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7"]
+    },
+    {
+      "id": "kg_edge_vectors_predictor",
+      "stepNumber": 33,
+      "phase": "Connect the end-to-end paths",
+      "title": "Retrieve version-matched vectors for inference",
+      "type": "add_connection",
+      "content": "Reject or refresh vectors that do not match the serving model and graph snapshot; return ranked candidate links with provenance rather than mutating canonical edges.",
+      "connection": {
+        "edgeId": "kg_vectors_to_predictor",
+        "sourceNodeId": "kg_embedding_store",
+        "targetNodeId": "kg_link_predictor",
+        "connectionType": "api-call",
+        "label": "Version-matched nearest neighbors",
+        "description": "Retrieve candidate entity vectors for the registered model's link-prediction request."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:2"]
+    },
+    {
+      "id": "kg_edge_gateway_query",
+      "stepNumber": 34,
+      "phase": "Connect the end-to-end paths",
+      "title": "Route authorized requests to query planning",
+      "type": "add_connection",
+      "content": "Pass the caller identity, tenant scope, query class, and remaining deadline through the trusted service boundary.",
+      "connection": {
+        "edgeId": "kg_gateway_to_query_service",
+        "sourceNodeId": "kg_query_gateway",
+        "targetNodeId": "kg_query_service",
+        "connectionType": "api-call",
+        "label": "Authorized bounded query",
+        "description": "Forward a validated query with caller scope, rate budget, and end-to-end deadline."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "kg_edge_app_gateway",
+      "stepNumber": 35,
+      "phase": "Connect the end-to-end paths",
+      "title": "Submit graph and natural-language questions",
+      "type": "add_connection",
+      "content": "Send a natural-language question or supported structured query together with paging and temporal filters; the client never connects directly to the graph store.",
+      "connection": {
+        "edgeId": "kg_app_to_gateway",
+        "sourceNodeId": "kg_visualization_app",
+        "targetNodeId": "kg_query_gateway",
+        "connectionType": "api-call",
+        "label": "Question + bounded query options",
+        "description": "Submit authenticated questions and request bounded graph results for rendering."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "kg_edge_query_llm",
+      "stepNumber": 36,
+      "phase": "Connect the end-to-end paths",
+      "title": "Ask the LLM for a typed query plan",
+      "type": "add_connection",
+      "content": "Provide only the question and the minimum schema context needed to create an allowlisted plan; apply redaction and caller authorization before sending context to the configured provider.",
+      "connection": {
+        "edgeId": "kg_query_to_llm",
+        "sourceNodeId": "kg_query_service",
+        "targetNodeId": "kg_nl_query_planner",
+        "connectionType": "api-call",
+        "label": "Question + minimal ontology context",
+        "description": "Request an intermediate plan under a strict provider timeout and data-minimization policy."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "kg_edge_llm_query",
+      "stepNumber": 37,
+      "phase": "Connect the end-to-end paths",
+      "title": "Validate the returned plan in trusted code",
+      "type": "add_connection",
+      "content": "Treat the model response as untrusted data: validate its schema, resolve entity references, enforce tenant policy and traversal budgets, then compile supported operations to the selected graph query language.",
+      "connection": {
+        "edgeId": "kg_llm_to_query",
+        "sourceNodeId": "kg_nl_query_planner",
+        "targetNodeId": "kg_query_service",
+        "connectionType": "data-flow",
+        "label": "Untrusted typed plan for validation",
+        "description": "Return a candidate plan that the query service validates and compiles before execution."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-requirement:4", "legacy-constraint:3"]
+    },
+    {
+      "id": "kg_edge_query_graph",
+      "stepNumber": 38,
+      "phase": "Connect the end-to-end paths",
+      "title": "Execute bounded, temporally correct traversals",
+      "type": "add_connection",
+      "content": "Apply a query deadline, tenant boundary, maximum depth, and result cap at the server; use valid-time filters when callers ask about historical facts.",
+      "connection": {
+        "edgeId": "kg_query_to_graph",
+        "sourceNodeId": "kg_query_service",
+        "targetNodeId": "kg_graph_store",
+        "connectionType": "database-connection",
+        "label": "Bounded temporal traversal",
+        "description": "Execute an authorized, compiled graph query with depth, result, and time limits."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "kg_edge_query_predictor",
+      "stepNumber": 39,
+      "phase": "Connect the end-to-end paths",
+      "title": "Request optional link-prediction evidence",
+      "type": "add_connection",
+      "content": "Invoke link prediction only when the query requests it and the remaining deadline permits; label results as model suggestions with confidence and model version.",
+      "connection": {
+        "edgeId": "kg_query_to_predictor",
+        "sourceNodeId": "kg_query_service",
+        "targetNodeId": "kg_link_predictor",
+        "connectionType": "api-call",
+        "label": "Optional ranked link candidates",
+        "description": "Retrieve bounded prediction evidence without inserting predicted edges into the asserted graph."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:4", "legacy-constraint:3"]
+    },
+    {
+      "id": "kg_edge_predictor_query",
+      "stepNumber": 40,
+      "phase": "Connect the end-to-end paths",
+      "title": "Return scored candidates with lineage",
+      "type": "add_connection",
+      "content": "Include candidate IDs, confidence, model version, and graph snapshot in the response so consumers can distinguish inferred links from stored relationships.",
+      "connection": {
+        "edgeId": "kg_predictor_to_query",
+        "sourceNodeId": "kg_link_predictor",
+        "targetNodeId": "kg_query_service",
+        "connectionType": "data-flow",
+        "label": "Scored predictions + model lineage",
+        "description": "Return ranked link suggestions as separate evidence, not canonical graph facts."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:2", "legacy-requirement:7"]
+    },
+    {
+      "id": "kg_edge_query_gateway_response",
+      "stepNumber": 41,
+      "phase": "Connect the end-to-end paths",
+      "title": "Return a bounded result through the API boundary",
+      "type": "add_connection",
+      "content": "Shape a stable response containing page tokens, temporal context, evidence references, and prediction annotations; enforce the remaining end-to-end deadline before returning.",
+      "connection": {
+        "edgeId": "kg_query_to_gateway_response",
+        "sourceNodeId": "kg_query_service",
+        "targetNodeId": "kg_query_gateway",
+        "connectionType": "data-flow",
+        "label": "Bounded result + evidence",
+        "description": "Return paginated graph data, provenance, and optional prediction annotations to the client boundary."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "kg_edge_gateway_monitoring",
+      "stepNumber": 42,
+      "phase": "Connect the end-to-end paths",
+      "title": "Measure API health and end-to-end query latency",
+      "type": "add_connection",
+      "content": "Emit request traces and latency by structured versus natural-language query class, including gateway and provider time, without placing sensitive document text in telemetry.",
+      "connection": {
+        "edgeId": "kg_gateway_to_monitoring",
+        "sourceNodeId": "kg_query_gateway",
+        "targetNodeId": "kg_observability",
+        "connectionType": "data-flow",
+        "label": "API latency + authorization metrics",
+        "description": "Export query latency, request outcomes, throttling, and safe trace identifiers."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "kg_edge_extraction_monitoring",
+      "stepNumber": 43,
+      "phase": "Connect the end-to-end paths",
+      "title": "Track extraction quality and consumer saturation",
+      "type": "add_connection",
+      "content": "Aggregate labeled-set quality results and operational worker metrics; separate offline evaluation metrics from live production drift signals.",
+      "connection": {
+        "edgeId": "kg_extractor_to_monitoring",
+        "sourceNodeId": "kg_extraction_worker",
+        "targetNodeId": "kg_observability",
+        "connectionType": "data-flow",
+        "label": "Extraction quality + throughput",
+        "description": "Report relation F1 evaluation, worker saturation, retries, and queue processing age."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "kg_edge_resolution_monitoring",
+      "stepNumber": 44,
+      "phase": "Connect the end-to-end paths",
+      "title": "Track entity-resolution precision and abstentions",
+      "type": "add_connection",
+      "content": "Review precision, false-merge rate, confidence calibration, and unresolved/manual-review volume by entity type and source; alert on statistically meaningful degradation.",
+      "connection": {
+        "edgeId": "kg_resolution_to_monitoring",
+        "sourceNodeId": "kg_entity_resolution",
+        "targetNodeId": "kg_observability",
+        "connectionType": "data-flow",
+        "label": "Resolution precision + review signals",
+        "description": "Measure entity-resolution quality and abstention behavior against the labeled evaluation set."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:1"]
+    },
+    {
+      "id": "kg_edge_updates_monitoring",
+      "stepNumber": 45,
+      "phase": "Connect the end-to-end paths",
+      "title": "Measure freshness from source acceptance to graph visibility",
+      "type": "add_connection",
+      "content": "Propagate event timestamps and trace IDs across queueing, extraction, resolution, and graph commit; report end-to-end age and failures rather than using queue depth alone as a freshness proxy.",
+      "connection": {
+        "edgeId": "kg_updates_to_monitoring",
+        "sourceNodeId": "kg_graph_update_processor",
+        "targetNodeId": "kg_observability",
+        "connectionType": "data-flow",
+        "label": "Graph commit lag + correction rate",
+        "description": "Expose end-to-end update freshness, retries, validation failures, and idempotent deduplication counts."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "kg_edge_graph_monitoring",
+      "stepNumber": 46,
+      "phase": "Connect the end-to-end paths",
+      "title": "Observe graph capacity and traversal behavior",
+      "type": "add_connection",
+      "content": "Track node/edge growth, partition skew, write contention, replica health, traversal fan-out, and storage/index footprint; use these measurements to revise the initial shard assumption.",
+      "connection": {
+        "edgeId": "kg_graph_to_monitoring",
+        "sourceNodeId": "kg_graph_store",
+        "targetNodeId": "kg_observability",
+        "connectionType": "data-flow",
+        "label": "Graph capacity + query work metrics",
+        "description": "Measure growth, partition skew, replication, write health, and traversal performance for the 100M+ target."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "kg_edge_models_monitoring",
+      "stepNumber": 47,
+      "phase": "Connect the end-to-end paths",
+      "title": "Monitor model latency and prediction quality",
+      "type": "add_connection",
+      "content": "Measure inference latency and quality by model version; keep prediction suggestions distinguishable from ground-truth relationship metrics.",
+      "connection": {
+        "edgeId": "kg_predictor_to_monitoring",
+        "sourceNodeId": "kg_link_predictor",
+        "targetNodeId": "kg_observability",
+        "connectionType": "data-flow",
+        "label": "Prediction quality + inference latency",
+        "description": "Track link-prediction evaluation and serving performance with model-version labels."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "kg_decision_resolution_gate",
+      "stepNumber": 48,
+      "phase": "Decisions and validation gates",
+      "title": "Prefer abstention over a low-confidence merge",
+      "type": "decision_point",
+      "content": "Entity-resolution precision is a constraint, not a requirement to merge every mention. Calibrate the automatic-merge threshold on labeled examples, report precision and coverage together, and route ambiguous or high-impact entities for review until measured precision is above 95%.",
+      "decision": {
+        "question": "How should an uncertain entity match be handled?",
+        "chosen": "Merge only above a calibrated threshold; otherwise abstain and review",
+        "chosenReason": "A false merge can contaminate many traversals, so measured precision above 95% takes precedence over maximizing automatic coverage.",
+        "alternatives": [
+          { "option": "Force the highest-ranked match", "tradeoff": "Improves apparent automation coverage but risks false merges and graph-wide error propagation." },
+          { "option": "Reject all uncertain mentions", "tradeoff": "Protects precision but lowers recall and creates more unresolved work." }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:1"]
+    },
+    {
+      "id": "kg_decision_schema_migration",
+      "stepNumber": 49,
+      "phase": "Decisions and validation gates",
+      "title": "Evolve schemas with explicit compatibility",
+      "type": "decision_point",
+      "content": "Additive schema changes can roll out after consumers accept the new version. For incompatible entity or relation changes, version the contract, dual-read or dual-write as needed, backfill from provenance, validate counts and queries, then cut over; retain the earlier version for rollback.",
+      "decision": {
+        "question": "How should a breaking ontology change reach a live graph?",
+        "chosen": "Version the schema and use a validated migration with an explicit cutover",
+        "chosenReason": "Schema versioning prevents mixed producers and consumers from silently assigning different meanings to the same graph data.",
+        "alternatives": [
+          { "option": "Mutate the active schema in place", "tradeoff": "Simple initially, but old events and readers can become ambiguous or invalid." },
+          { "option": "Freeze the ontology permanently", "tradeoff": "Avoids migrations but prevents the dynamic schema behavior required by the brief." }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "kg_decision_temporal_facts",
+      "stepNumber": 50,
+      "phase": "Decisions and validation gates",
+      "title": "Keep valid time separate from recorded time",
+      "type": "decision_point",
+      "content": "Store when a fact was true in the source domain separately from when the platform learned or corrected it. Link each assertion to its source document version and extraction/schema versions; represent corrections as superseding assertions so historical queries and audit explanations remain reproducible.",
+      "decision": {
+        "question": "What does a historical graph query mean after a source correction?",
+        "chosen": "Preserve both valid-time and recorded-time history with source provenance",
+        "chosenReason": "Two time axes distinguish a fact's domain validity from the system's knowledge and correction history.",
+        "alternatives": [
+          { "option": "Overwrite the current edge", "tradeoff": "Keeps storage simpler but loses prior beliefs and correction lineage." },
+          { "option": "Store only ingestion timestamps", "tradeoff": "Cannot answer when the source fact was actually valid." }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:7"]
+    },
+    {
+      "id": "kg_decision_query_safety",
+      "stepNumber": 51,
+      "phase": "Decisions and validation gates",
+      "title": "Treat generated plans and latency as acceptance gates",
+      "type": "decision_point",
+      "content": "Compile only validated, allowlisted query plans and enforce caller scope, maximum traversal depth, result size, and deadlines. Benchmark the complete supported query mix—including natural-language planning—against under 500ms. If the LLM path misses that target, the product must narrow or revise the supported query experience; measuring only graph execution would overstate compliance.",
+      "decision": {
+        "question": "Can model-generated Cypher or SPARQL execute directly?",
+        "chosen": "No; validate a typed plan and compile it in trusted code under explicit budgets",
+        "chosenReason": "Generated query text is untrusted input, and bounded execution is necessary for authorization, safety, and the stated latency objective.",
+        "alternatives": [
+          { "option": "Execute model-produced query text", "tradeoff": "May reduce implementation work but creates injection, authorization, and unbounded-query risks." },
+          { "option": "Remove natural-language querying", "tradeoff": "Avoids model latency but drops a functional requirement unless the product scope changes." }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "kg_scale_freshness_gate",
+      "stepNumber": 52,
+      "phase": "Decisions and validation gates",
+      "title": "Scale on measured graph and freshness signals",
+      "type": "scale_trigger",
+      "content": "Define a numeric freshness objective with product stakeholders; “real-time” alone does not specify an acceptable delay. Load-test skewed entity degrees, concurrent traversals, graph updates, and recovery at the 100M+ node-and-edge target before treating the shard count or latency target as validated.",
+      "scaleTrigger": {
+        "metric": "End-to-end source-accepted-to-graph-visible age, partition skew, write saturation, traversal fan-out, and query p95 by class",
+        "action": "Set a freshness SLO; tune consumer parallelism and graph partitioning from representative load tests; add capacity or revise query plans when measured saturation threatens the agreed targets.",
+        "impact": "Preserves the real-time update objective and makes the 100M+ scale and under-500ms query targets testable rather than assumed."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

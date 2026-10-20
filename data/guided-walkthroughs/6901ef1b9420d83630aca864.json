@@ -1,0 +1,1177 @@
+{
+  "problem_id": "6901ef1b9420d83630aca864",
+  "version": "1.0.0-review-draft",
+  "totalSteps": 48,
+  "requirementRevision": null,
+  "phases": [
+    {
+      "name": "Define scope and normalize discovery",
+      "stepRange": [
+        1,
+        6
+      ],
+      "description": "Separate the stated scale goal from missing crawl-policy decisions, then turn seeds and discovered links into canonical, bounded candidates."
+    },
+    {
+      "name": "Distribute a durable priority frontier",
+      "stepRange": [
+        7,
+        14
+      ],
+      "description": "Route host-owned work to a partitioned frontier, prioritize useful pages, and use probabilistic membership only as an accelerator."
+    },
+    {
+      "name": "Gate fetches on policy and origin capacity",
+      "stepRange": [
+        15,
+        30
+      ],
+      "description": "Recheck robots policy and shared per-host rate state immediately before static or browser-based network requests."
+    },
+    {
+      "name": "Process, deduplicate, and store content",
+      "stepRange": [
+        31,
+        45
+      ],
+      "description": "Handle supported media types asynchronously, persist recoverable snapshots, and send links and failures through guarded paths."
+    },
+    {
+      "name": "Recover and scale by measured pressure",
+      "stepRange": [
+        46,
+        48
+      ],
+      "description": "Close the recrawl loop, observe policy and storage pressure, and scale eligible work without exceeding origin limits."
+    }
+  ],
+  "steps": [
+    {
+      "id": "wc_01",
+      "stepNumber": 1,
+      "phase": "Define scope and normalize discovery",
+      "title": "Separate the brief from sizing assumptions",
+      "type": "explanation",
+      "content": "The brief asks for billions of pages and URLs, multiple media types, duplicate control, JavaScript handling, important-page prioritization, distributed crawling, and efficient storage. It does not specify seed coverage, crawl frequency, freshness objectives, per-origin rates, response-size limits, or retention. Treat those as policy inputs to be agreed with owners; do not infer a QPS, concurrency, freshness, or retention target from the word billions.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:7",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "wc_03",
+      "stepNumber": 2,
+      "phase": "Define scope and normalize discovery",
+      "title": "Add seed and crawl-policy inputs",
+      "type": "add_component",
+      "content": "Represent the operators and approved seed/policy inputs that start a crawl or request a recrawl. Keep the seed source and policy version with each scheduled candidate so later changes are auditable.",
+      "component": {
+        "nodeId": "wc_seed_inputs",
+        "componentType": "web-app",
+        "label": "Seed & Crawl Operations",
+        "description": "Approved seed sets and crawl policy inputs",
+        "position": {
+          "x": 0,
+          "y": 180
+        },
+        "properties": {
+          "componentName": "Seed & Crawl Operations",
+          "purpose": "Submit approved seed URLs, permitted host scope, recrawl requests, and versioned crawl policy. Preserve the source and policy version on scheduled work so a later policy change can be audited and applied deliberately."
+        },
+        "highlightReason": "The existing Web App catalog concept can represent the operator-facing source of seeds and crawl policy without adding a custom node."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "wc_04",
+      "stepNumber": 3,
+      "phase": "Define scope and normalize discovery",
+      "title": "Add discovery and recrawl scheduling",
+      "type": "add_component",
+      "content": "The scheduler accepts approved seeds and later recrawl signals, assigns candidate priority, and submits URLs for canonicalization. It tracks due work without treating every link as equally valuable or immediately fetchable.",
+      "component": {
+        "nodeId": "wc_scheduler",
+        "componentType": "backend-server",
+        "label": "Discovery & Recrawl Scheduler",
+        "description": "Seed intake, recrawl timing, and priority assignment",
+        "position": {
+          "x": 340,
+          "y": 180
+        },
+        "properties": {
+          "componentName": "Discovery & Recrawl Scheduler",
+          "purpose": "Accept approved seeds and recrawl candidates, combine seed importance, link signals, observed change, and due time into an explainable priority, and submit candidate URLs for canonicalization. Store schedule state durably and keep priority separate from permission to fetch."
+        },
+        "highlightReason": "A dedicated scheduler coordinates page importance and due work while leaving final host eligibility to the policy gate."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:6",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "wc_05",
+      "stepNumber": 4,
+      "phase": "Define scope and normalize discovery",
+      "title": "Add URL canonicalization and trap guards",
+      "type": "add_component",
+      "content": "Normalize URL identity before queueing: resolve allowed redirects into aliases, remove fragments, normalize host and default-port forms, and apply an owned query/path policy. Reject out-of-scope schemes and known unbounded path patterns; enforce configured depth and crawl-budget rules without hard-coding values absent from the brief.",
+      "component": {
+        "nodeId": "wc_normalizer",
+        "componentType": "backend-server",
+        "label": "URL Canonicalizer & Trap Guard",
+        "description": "Canonical identity, scope checks, and loop prevention",
+        "position": {
+          "x": 680,
+          "y": 180
+        },
+        "properties": {
+          "componentName": "URL Canonicalizer & Trap Guard",
+          "purpose": "Canonicalize scheme, host, port, path, and approved query parameters; record redirect aliases; reject out-of-scope URLs; and apply configured depth and crawl-budget rules. Detect redirect loops and repeated pagination or parameter patterns before a candidate consumes frontier capacity."
+        },
+        "highlightReason": "This catalog-backed backend component makes URL identity and spider-trap policy a required admission step."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-constraint:1",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "wc_06",
+      "stepNumber": 5,
+      "phase": "Define scope and normalize discovery",
+      "title": "Submit approved seeds to the scheduler",
+      "type": "add_connection",
+      "content": "The operations surface sends a seed or a versioned policy change to the scheduler. The scheduler records the source before the URL is admitted to the discovery path.",
+      "connection": {
+        "edgeId": "wc_seed_scheduler",
+        "sourceNodeId": "wc_seed_inputs",
+        "targetNodeId": "wc_scheduler",
+        "connectionType": "http",
+        "label": "Approved seeds + policy version",
+        "description": "Start or adjust discovery using an auditable seed and policy source."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "wc_07",
+      "stepNumber": 6,
+      "phase": "Define scope and normalize discovery",
+      "title": "Canonicalize each scheduled candidate",
+      "type": "add_connection",
+      "content": "The scheduler submits a candidate with its discovery source, current priority, depth metadata, and policy version. The normalizer checks scope and loop rules before the candidate can be distributed.",
+      "connection": {
+        "edgeId": "wc_scheduler_normalizer",
+        "sourceNodeId": "wc_scheduler",
+        "targetNodeId": "wc_normalizer",
+        "connectionType": "api-call",
+        "label": "Candidate URL + provenance",
+        "description": "Apply canonical identity, scope, and spider-trap checks before enqueue."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-constraint:1",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "wc_09",
+      "stepNumber": 7,
+      "phase": "Distribute a durable priority frontier",
+      "title": "Add host-key shard routing",
+      "type": "add_component",
+      "content": "Assign each normalized host to a logical owner with consistent hashing and versioned membership. Keeping a host lane under one owner makes shared politeness state possible; use leases and ownership epochs during movement so old and new owners cannot fetch concurrently.",
+      "component": {
+        "nodeId": "wc_shard_router",
+        "componentType": "loadbalancer",
+        "label": "Consistent-Hash Host Router",
+        "description": "Stable host ownership across crawler shards",
+        "position": {
+          "x": 340,
+          "y": 520
+        },
+        "properties": {
+          "componentName": "Consistent-Hash Host Router",
+          "purpose": "Route each normalized host to a logical crawler shard using consistent hashing and versioned membership. Transfer host state with fenced ownership epochs during rebalance; do not split a hot host across owners in a way that bypasses its shared politeness limit."
+        },
+        "highlightReason": "The existing Load Balancer catalog concept fits shard routing; the consistent-hash behavior is stated in its purpose because the catalog algorithm choices do not include it."
+      },
+      "requirementIds": [
+        "legacy-requirement:7",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "wc_10",
+      "stepNumber": 8,
+      "phase": "Distribute a durable priority frontier",
+      "title": "Add the durable priority frontier",
+      "type": "add_component",
+      "content": "Store due URLs in durable host-owned partitions rather than loading the corpus into worker memory. Keep per-host next-eligible time, priority, attempts, canonical identity, and lease state with each work item; expose due age and backpressure.",
+      "component": {
+        "nodeId": "wc_frontier",
+        "componentType": "queue",
+        "label": "Host-Sharded Priority Frontier",
+        "description": "Durable due-time URL work with priority and host state",
+        "position": {
+          "x": 680,
+          "y": 520
+        },
+        "properties": {
+          "componentName": "Host-Sharded Priority Frontier",
+          "purpose": "Persist canonical URL tasks by host-owned partition with priority, next-eligible time, attempt state, source, and fenced lease metadata. Page through due work instead of materializing billions of URLs in worker memory; apply backpressure when eligible workers or downstream storage are saturated."
+        },
+        "highlightReason": "The existing Queue catalog concept represents durable scheduled work and supports a frontier that can grow beyond memory."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "wc_12",
+      "stepNumber": 9,
+      "phase": "Distribute a durable priority frontier",
+      "title": "Add Bloom membership as a fast precheck",
+      "type": "add_component",
+      "content": "Keep scalable Bloom membership hints for canonical URLs and body fingerprints. A possible hit must be confirmed against exact durable state because Bloom filters can return false positives; a false negative may cause extra work but must not lose unique content.",
+      "component": {
+        "nodeId": "wc_bloom",
+        "componentType": "cache",
+        "label": "URL & Body Bloom Hints",
+        "description": "Memory-efficient membership prechecks",
+        "position": {
+          "x": 1360,
+          "y": 520
+        },
+        "properties": {
+          "componentName": "URL & Body Bloom Hints",
+          "purpose": "Maintain separate Bloom membership hints for canonical URL identities and normalized body fingerprints. Treat a positive result only as a candidate duplicate; Bloom false positives must be confirmed in the exact registry, while false negatives cause redundant work rather than dropping unique pages."
+        },
+        "highlightReason": "Cache is the closest existing catalog concept for a fast probabilistic membership structure; exact correctness remains in the database."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "wc_13",
+      "stepNumber": 10,
+      "phase": "Distribute a durable priority frontier",
+      "title": "Add exact URL and host state",
+      "type": "add_component",
+      "content": "Persist canonical URL identity, redirect aliases, exact content digests, fetch state, host policy version, ownership epoch, and next recrawl time. Use conditional state transitions so two workers cannot both claim the same URL version.",
+      "component": {
+        "nodeId": "wc_registry",
+        "componentType": "database",
+        "label": "Canonical URL & Host Registry",
+        "description": "Exact identity, leases, fingerprints, and recrawl state",
+        "position": {
+          "x": 1700,
+          "y": 520
+        },
+        "properties": {
+          "componentName": "Canonical URL & Host Registry",
+          "purpose": "Store canonical URL identities and redirect aliases, exact content digests, fetch and recrawl state, robots policy version, host ownership epoch, and lease metadata. Use conditional versioned transitions to make URL claims, dedupe confirmation, and recrawl scheduling safe under retries and shard movement."
+        },
+        "highlightReason": "The existing Database component supplies exact durable identity and conditional state; Bloom membership alone cannot establish uniqueness."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:7",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "wc_14",
+      "stepNumber": 11,
+      "phase": "Distribute a durable priority frontier",
+      "title": "Use Bloom results only to shortlist URL checks",
+      "type": "add_connection",
+      "content": "The canonicalizer asks the membership cache whether a candidate may already exist. A likely match proceeds to exact registry confirmation; it is not discarded based on a probabilistic answer.",
+      "connection": {
+        "edgeId": "wc_normalizer_bloom",
+        "sourceNodeId": "wc_normalizer",
+        "targetNodeId": "wc_bloom",
+        "connectionType": "api-call",
+        "label": "Canonical URL membership hint",
+        "description": "Shortlist exact checks while preserving Bloom false-positive safety."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "wc_15",
+      "stepNumber": 12,
+      "phase": "Distribute a durable priority frontier",
+      "title": "Confirm URL identity in durable state",
+      "type": "add_connection",
+      "content": "Check canonical identity and redirect aliases in the registry, then create or update a versioned candidate only if it is not already complete or in flight under a valid lease.",
+      "connection": {
+        "edgeId": "wc_normalizer_registry",
+        "sourceNodeId": "wc_normalizer",
+        "targetNodeId": "wc_registry",
+        "connectionType": "database-connection",
+        "label": "Exact canonical identity check",
+        "description": "Resolve aliases and atomically create or update URL state."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "wc_16",
+      "stepNumber": 13,
+      "phase": "Distribute a durable priority frontier",
+      "title": "Route canonical hosts to their logical owner",
+      "type": "add_connection",
+      "content": "Send the canonical host and URL key through consistent-hash membership. Ownership epochs accompany the task so a shard handoff cannot leave an unfenced old worker active.",
+      "connection": {
+        "edgeId": "wc_scheduler_router",
+        "sourceNodeId": "wc_scheduler",
+        "targetNodeId": "wc_shard_router",
+        "connectionType": "api-call",
+        "label": "Canonical host + shard epoch",
+        "description": "Choose a stable logical owner for each host lane."
+      },
+      "requirementIds": [
+        "legacy-requirement:7",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "wc_17",
+      "stepNumber": 14,
+      "phase": "Distribute a durable priority frontier",
+      "title": "Enqueue durable host-owned work",
+      "type": "add_connection",
+      "content": "The router writes a canonical, exact-state-approved task to its host partition with priority and due time. Queue partitioning limits memory use and lets one delayed origin leave unrelated domains runnable.",
+      "connection": {
+        "edgeId": "wc_router_frontier",
+        "sourceNodeId": "wc_shard_router",
+        "targetNodeId": "wc_frontier",
+        "connectionType": "message-queue",
+        "label": "Host-sharded due URL",
+        "description": "Persist priority, due time, source, and fenced ownership metadata."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:7",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "wc_19",
+      "stepNumber": 15,
+      "phase": "Gate fetches on policy and origin capacity",
+      "title": "Add the robots policy evaluator",
+      "type": "add_component",
+      "content": "Fetch and parse robots.txt per origin, cache the parsed rules with their version and expiry, and evaluate the requested path before page retrieval. Keep allow, deny, stale, and unavailable states distinct so a policy-fetch failure cannot be mistaken for permission.",
+      "component": {
+        "nodeId": "wc_robots_policy",
+        "componentType": "backend-server",
+        "label": "Robots Policy Evaluator",
+        "description": "Versioned robots.txt rules and path decisions",
+        "position": {
+          "x": 340,
+          "y": 900
+        },
+        "properties": {
+          "componentName": "Robots Policy Evaluator",
+          "purpose": "Fetch and parse robots.txt for each origin, cache rules by origin with policy version and expiry, evaluate path permissions, and return explicit allow, deny, stale, or unavailable outcomes. Apply published crawl-delay or request-rate guidance where supported and never convert a policy-fetch failure into page-fetch permission."
+        },
+        "highlightReason": "Backend Server is an existing catalog concept for policy evaluation; it makes robots decisions explicit before the final host gate."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "wc_21",
+      "stepNumber": 16,
+      "phase": "Gate fetches on policy and origin capacity",
+      "title": "Add DNS response caching",
+      "type": "add_component",
+      "content": "Cache DNS answers according to their authoritative TTL and reuse them across workers to reduce lookup latency. Refresh expired or failed entries and revalidate destination addresses after redirects so a cached answer does not become permanent authority.",
+      "component": {
+        "nodeId": "wc_dns_cache",
+        "componentType": "cache",
+        "label": "Origin DNS Cache",
+        "description": "TTL-aware DNS answers shared across crawler workers",
+        "position": {
+          "x": 1020,
+          "y": 900
+        },
+        "properties": {
+          "componentName": "Origin DNS Cache",
+          "purpose": "Cache origin DNS answers using authoritative TTLs, coalesce concurrent lookups, and refresh expired or failed resolutions. Revalidate destination addresses after redirects and do not treat a cached response as valid beyond its DNS lifetime."
+        },
+        "highlightReason": "Cache is an existing catalog concept for reducing repeated DNS lookup latency without adding a DNS-specific custom node."
+      },
+      "requirementIds": [
+        "legacy-requirement:7",
+        "legacy-constraint:2"
+      ]
+    },
+    {
+      "id": "wc_22",
+      "stepNumber": 17,
+      "phase": "Gate fetches on policy and origin capacity",
+      "title": "Add one shared per-host rate gate",
+      "type": "add_component",
+      "content": "Use shared per-host token state and a lease immediately before each request. Combine robots guidance, configured site-specific policy, and Retry-After into the next eligible time; a fleet-wide worker limit alone cannot prevent a single host from receiving a burst.",
+      "component": {
+        "nodeId": "wc_host_rate_gate",
+        "componentType": "rate-limiter",
+        "label": "Shared Host Politeness Gate",
+        "description": "Per-origin tokens, concurrency, and due-time leases",
+        "position": {
+          "x": 1360,
+          "y": 900
+        },
+        "properties": {
+          "componentName": "Shared Host Politeness Gate",
+          "purpose": "Maintain shared token and concurrency state per normalized origin across all crawler workers. Grant a short-lived request lease only when robots policy, configured host limits, next-eligible time, and any Retry-After delay permit the request; schedule denied work for later instead of spinning."
+        },
+        "highlightReason": "Rate Limiter is an existing catalog concept and directly represents the last-mile per-host politeness decision."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:7",
+        "legacy-constraint:3",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "wc_23",
+      "stepNumber": 18,
+      "phase": "Gate fetches on policy and origin capacity",
+      "title": "Add static crawler workers",
+      "type": "add_component",
+      "content": "Workers lease only due URLs, verify the current host and robots versions, resolve DNS, then fetch with configured connect/read deadlines, redirect limits, and response-byte bounds. Persist each outcome before acknowledging work so retries remain idempotent.",
+      "component": {
+        "nodeId": "wc_fetchers",
+        "componentType": "processing-worker",
+        "label": "Polite Static Fetch Fleet",
+        "description": "Host-gated HTTP fetches and typed outcomes",
+        "position": {
+          "x": 1700,
+          "y": 900
+        },
+        "properties": {
+          "componentName": "Polite Static Fetch Fleet",
+          "purpose": "Lease due URLs only after shared host authorization, recheck the robots policy version, resolve the origin, and perform bounded HTTP requests with configured connect/read deadlines, redirect-loop checks, and response-byte limits. Record typed outcomes idempotently before acknowledging frontier work."
+        },
+        "highlightReason": "Processing Worker is the existing catalog concept for horizontally scaled asynchronous page fetching."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:7",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "wc_24",
+      "stepNumber": 19,
+      "phase": "Gate fetches on policy and origin capacity",
+      "title": "Represent remote origin websites",
+      "type": "add_component",
+      "content": "This node represents external websites being crawled, not a service operated by the crawler. Every outbound request and redirect to an origin remains subject to current scope, robots policy, DNS validation, and the shared host lease.",
+      "component": {
+        "nodeId": "wc_origins",
+        "componentType": "web-app",
+        "label": "Public Origin Websites",
+        "description": "External HTTP origins that host pages and media",
+        "position": {
+          "x": 2040,
+          "y": 900
+        },
+        "properties": {
+          "componentName": "Public Origin Websites",
+          "purpose": "Represent the external websites that serve HTML, PDF, and image responses and their robots.txt policies. This is an origin boundary, not a crawler-owned service; all static and browser-rendered requests must pass the crawler's host policy and rate gate."
+        },
+        "highlightReason": "The existing Web App palette concept represents website origins; the label and purpose distinguish external targets from crawler-owned components."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "wc_25",
+      "stepNumber": 20,
+      "phase": "Gate fetches on policy and origin capacity",
+      "title": "Add a bounded JavaScript render pool",
+      "type": "add_component",
+      "content": "Fetch static content first. Queue browser rendering only for pages whose configured eligibility signals indicate that JavaScript is needed; bound browser time, memory, subresources, and output size from policy rather than assigning an unapproved fixed target.",
+      "component": {
+        "nodeId": "wc_js_renderer",
+        "componentType": "processing-worker",
+        "label": "JavaScript Render Pool",
+        "description": "Selective browser rendering behind the same host gate",
+        "position": {
+          "x": 2380,
+          "y": 900
+        },
+        "properties": {
+          "componentName": "JavaScript Render Pool",
+          "purpose": "Render only eligible pages whose useful content requires JavaScript, with configured time, memory, navigation, and subresource budgets. Route every browser request through the same scope, robots, DNS, and per-host rate gate as static fetching; emit a versioned rendered snapshot and outcome."
+        },
+        "highlightReason": "Processing Worker is an existing catalog concept for the isolated asynchronous browser-rendering pool."
+      },
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-constraint:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "wc_27",
+      "stepNumber": 21,
+      "phase": "Gate fetches on policy and origin capacity",
+      "title": "Pass policy decisions into the shared gate",
+      "type": "add_connection",
+      "content": "The rate gate receives the current allow/deny result, policy version, applicable delay, and refresh status. It cannot issue a request lease from stale or unavailable policy state.",
+      "connection": {
+        "edgeId": "wc_policy_rate_gate",
+        "sourceNodeId": "wc_robots_policy",
+        "targetNodeId": "wc_host_rate_gate",
+        "connectionType": "data-flow",
+        "label": "Robots decision + host delay",
+        "description": "Supply policy version and eligibility to the last-mile request gate."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "wc_28",
+      "stepNumber": 22,
+      "phase": "Gate fetches on policy and origin capacity",
+      "title": "Request a lease only for due frontier work",
+      "type": "add_connection",
+      "content": "The frontier offers due work to the shared gate. Work that is early, disallowed, or waiting for policy refresh remains scheduled with its next eligible time; it does not occupy a worker in a retry loop.",
+      "connection": {
+        "edgeId": "wc_frontier_rate_gate",
+        "sourceNodeId": "wc_frontier",
+        "targetNodeId": "wc_host_rate_gate",
+        "connectionType": "message-queue",
+        "label": "Due host-owned URL",
+        "description": "Request a current host-policy and rate lease for eligible work."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "wc_29",
+      "stepNumber": 23,
+      "phase": "Gate fetches on policy and origin capacity",
+      "title": "Dispatch authorized static fetches",
+      "type": "add_connection",
+      "content": "Only a granted, current lease releases a fetch task. The worker checks the lease and policy version again immediately before sending the request.",
+      "connection": {
+        "edgeId": "wc_gate_fetchers",
+        "sourceNodeId": "wc_host_rate_gate",
+        "targetNodeId": "wc_fetchers",
+        "connectionType": "message-queue",
+        "label": "Authorized fetch lease",
+        "description": "Dispatch bounded work only after robots and shared host-rate checks."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-constraint:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "wc_30",
+      "stepNumber": 24,
+      "phase": "Gate fetches on policy and origin capacity",
+      "title": "Gate browser requests and subresources too",
+      "type": "add_connection",
+      "content": "The same shared gate grants render navigation and subsequent subresource requests. A browser context cannot bypass robots, scope, DNS, or per-host limits merely because it is isolated from the static worker pool.",
+      "connection": {
+        "edgeId": "wc_gate_renderer",
+        "sourceNodeId": "wc_host_rate_gate",
+        "targetNodeId": "wc_js_renderer",
+        "connectionType": "message-queue",
+        "label": "Authorized render request",
+        "description": "Apply the same host and policy lease to browser navigation and network subrequests."
+      },
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "wc_31",
+      "stepNumber": 25,
+      "phase": "Gate fetches on policy and origin capacity",
+      "title": "Claim the URL and host lease atomically",
+      "type": "add_connection",
+      "content": "Before network I/O, conditionally claim the canonical URL version and verify its current host ownership epoch and policy version. If a claim is stale or already in flight, release the task without sending another request.",
+      "connection": {
+        "edgeId": "wc_fetchers_registry",
+        "sourceNodeId": "wc_fetchers",
+        "targetNodeId": "wc_registry",
+        "connectionType": "database-connection",
+        "label": "Fenced URL claim + policy version",
+        "description": "Prevent duplicate fetches and stale owners from using expired authorization."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:7",
+        "legacy-constraint:3",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "wc_32",
+      "stepNumber": 26,
+      "phase": "Gate fetches on policy and origin capacity",
+      "title": "Resolve origins through the TTL-aware cache",
+      "type": "add_connection",
+      "content": "Workers reuse a DNS answer only within its authoritative TTL. Refresh failures follow the host's backoff state, and redirect destinations require fresh scope and address validation.",
+      "connection": {
+        "edgeId": "wc_fetchers_dns",
+        "sourceNodeId": "wc_fetchers",
+        "targetNodeId": "wc_dns_cache",
+        "connectionType": "api-call",
+        "label": "Origin address lookup",
+        "description": "Reuse valid DNS answers and refresh expired or failed lookups."
+      },
+      "requirementIds": [
+        "legacy-requirement:7",
+        "legacy-constraint:2"
+      ]
+    },
+    {
+      "id": "wc_33",
+      "stepNumber": 27,
+      "phase": "Gate fetches on policy and origin capacity",
+      "title": "Fetch static pages under the granted lease",
+      "type": "add_connection",
+      "content": "The worker sends the bounded request to the origin only while its host and URL leases remain valid. Recheck redirects against scope and robots policy and detect a redirect loop before following again.",
+      "connection": {
+        "edgeId": "wc_fetchers_origins",
+        "sourceNodeId": "wc_fetchers",
+        "targetNodeId": "wc_origins",
+        "connectionType": "http",
+        "label": "Polite static HTTP fetch",
+        "description": "Request page bytes with current policy, deadline, redirect, and response bounds."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "wc_34",
+      "stepNumber": 28,
+      "phase": "Gate fetches on policy and origin capacity",
+      "title": "Render eligible dynamic pages under the same policy",
+      "type": "add_connection",
+      "content": "Browser navigation and every allowed subresource request use the shared host gate. Stop or classify the render when its configured resource budget expires; do not retry by bypassing the origin's policy.",
+      "connection": {
+        "edgeId": "wc_renderer_origins",
+        "sourceNodeId": "wc_js_renderer",
+        "targetNodeId": "wc_origins",
+        "connectionType": "http",
+        "label": "Policy-gated browser requests",
+        "description": "Render only with host authorization and bounded browser resources."
+      },
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-constraint:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "wc_35",
+      "stepNumber": 29,
+      "phase": "Gate fetches on policy and origin capacity",
+      "title": "Escalate selected pages from static fetch to render",
+      "type": "add_connection",
+      "content": "The static result may request a render when content eligibility rules say client-side JavaScript is needed. The renderer receives a candidate, then obtains its own current host lease before opening a browser context.",
+      "connection": {
+        "edgeId": "wc_fetchers_renderer",
+        "sourceNodeId": "wc_fetchers",
+        "targetNodeId": "wc_js_renderer",
+        "connectionType": "message-queue",
+        "label": "Eligible JavaScript render candidate",
+        "description": "Separate selective browser work from ordinary static fetch capacity."
+      },
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-constraint:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "wc_36",
+      "stepNumber": 30,
+      "phase": "Gate fetches on policy and origin capacity",
+      "title": "Choose a conservative robots and rate policy",
+      "type": "decision_point",
+      "content": "Use a shared per-origin token bucket or equivalent lease state so horizontally scaled workers enforce one effective host rate. Respect robots allow/disallow rules and supported crawl-delay/request-rate guidance; apply a stricter configured host cap when present and honor Retry-After after throttling responses.",
+      "decision": {
+        "question": "What happens when robots policy is missing, stale, or cannot be refreshed?",
+        "chosen": "Hold page fetches for that origin until policy is refreshed or an explicitly approved exception is recorded; robots retrieval itself uses the same host gate and backoff path.",
+        "chosenReason": "This conservative operating assumption avoids treating policy uncertainty as permission. The product owner must confirm the unavailable-policy rule and supported robots directives.",
+        "alternatives": [
+          {
+            "option": "Treat unavailable robots.txt as allow without recording the condition",
+            "tradeoff": "A transient failure can silently bypass an origin policy and becomes difficult to audit."
+          },
+          {
+            "option": "Apply only one global worker limit",
+            "tradeoff": "A global cap can still send a burst to one origin when many workers select it."
+          }
+        ]
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "wc_38",
+      "stepNumber": 31,
+      "phase": "Process, deduplicate, and store content",
+      "title": "Add MIME-aware content processing",
+      "type": "add_component",
+      "content": "Inspect response Content-Type and bounded byte signatures before selecting a processor. Extract sanitized text and links from HTML, text and metadata from PDF, and safe metadata or configured derived signals from images; classify unsupported or malformed types instead of parsing them as HTML.",
+      "component": {
+        "nodeId": "wc_content_processor",
+        "componentType": "processing-worker",
+        "label": "MIME Parser & Link Extractor",
+        "description": "Type-specific HTML, PDF, and image processing",
+        "position": {
+          "x": 680,
+          "y": 1300
+        },
+        "properties": {
+          "componentName": "MIME Parser & Link Extractor",
+          "purpose": "Inspect response Content-Type and bounded byte signatures; sanitize HTML text and extract links, extract text and metadata from PDF, and preserve image metadata or approved derived signals. Version each extractor, cap decompression and parser resources, and classify unsupported or malformed media for safe handling."
+        },
+        "highlightReason": "Processing Worker is an existing catalog concept for isolated parsers with media-specific resource limits."
+      },
+      "requirementIds": [
+        "legacy-requirement:3"
+      ]
+    },
+    {
+      "id": "wc_39",
+      "stepNumber": 32,
+      "phase": "Process, deduplicate, and store content",
+      "title": "Add compressed page snapshot storage",
+      "type": "add_component",
+      "content": "Store bounded raw response or rendered snapshots separately from URL metadata. Use checksums and content-addressed or versioned keys so identical bodies can be reused, and select retention from an approved policy rather than assuming a duration.",
+      "component": {
+        "nodeId": "wc_archive",
+        "componentType": "object-storage",
+        "label": "Compressed Page Snapshot Archive",
+        "description": "Versioned raw and rendered content with checksums",
+        "position": {
+          "x": 1020,
+          "y": 1300
+        },
+        "properties": {
+          "componentName": "Compressed Page Snapshot Archive",
+          "purpose": "Persist bounded compressed response and rendered snapshots under content-addressed or versioned keys with checksums and fetch provenance. Reuse identical bodies where safe and apply lifecycle retention only after an owner approves the required replay and legal-retention policy."
+        },
+        "highlightReason": "Object Storage is an existing catalog component suited to large immutable page bodies and lifecycle-managed snapshots."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:8",
+        "legacy-constraint:2"
+      ]
+    },
+    {
+      "id": "wc_40",
+      "stepNumber": 33,
+      "phase": "Process, deduplicate, and store content",
+      "title": "Add bounded retry and quarantine state",
+      "type": "add_component",
+      "content": "Retain retryable work with its canonical URL, content version, failure class, attempt state, and next eligible time. Quarantine poison or exhausted work for inspection; replay must return through canonicalization, policy, and rate checks.",
+      "component": {
+        "nodeId": "wc_retry_queue",
+        "componentType": "queue",
+        "label": "Crawl Retry & Dead-Letter Queue",
+        "description": "Backoff scheduling and inspectable terminal failures",
+        "position": {
+          "x": 1360,
+          "y": 1300
+        },
+        "properties": {
+          "componentName": "Crawl Retry & Dead-Letter Queue",
+          "purpose": "Persist retryable fetch, render, and extraction failures with canonical URL, content version, failure class, attempt state, and next eligible time. Use bounded exponential backoff and jitter, respect Retry-After, bound retries by approved policy, quarantine exhausted or poison work for review, and require every replay to re-enter URL, robots, and host-rate checks."
+        },
+        "highlightReason": "The existing Queue catalog concept fits delayed recovery and dead-letter inspection without allowing poison work to loop forever."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "wc_42",
+      "stepNumber": 34,
+      "phase": "Process, deduplicate, and store content",
+      "title": "Archive successful static responses",
+      "type": "add_connection",
+      "content": "Write the bounded response snapshot and checksum under a canonical URL version before downstream consumers depend on it. Record fetch time, headers needed for type handling, policy version, and response outcome as metadata.",
+      "connection": {
+        "edgeId": "wc_fetchers_archive",
+        "sourceNodeId": "wc_fetchers",
+        "targetNodeId": "wc_archive",
+        "connectionType": "data-flow",
+        "label": "Bounded response snapshot + checksum",
+        "description": "Persist durable input for reprocessing without refetching the origin."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:8",
+        "legacy-constraint:2"
+      ]
+    },
+    {
+      "id": "wc_43",
+      "stepNumber": 35,
+      "phase": "Process, deduplicate, and store content",
+      "title": "Archive rendered snapshots with provenance",
+      "type": "add_connection",
+      "content": "Store rendered output separately or version it against the static response, preserving the renderer and policy version so a replay can distinguish source bytes from derived DOM content.",
+      "connection": {
+        "edgeId": "wc_renderer_archive",
+        "sourceNodeId": "wc_js_renderer",
+        "targetNodeId": "wc_archive",
+        "connectionType": "data-flow",
+        "label": "Versioned rendered snapshot",
+        "description": "Retain render provenance and checksum for repeatable extraction."
+      },
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:8"
+      ]
+    },
+    {
+      "id": "wc_44",
+      "stepNumber": 36,
+      "phase": "Process, deduplicate, and store content",
+      "title": "Process durable snapshots asynchronously",
+      "type": "add_connection",
+      "content": "Pass snapshot references, response type, canonical URL version, and checksum to the parser. Large bodies stay in object storage instead of being copied through the scheduling queue.",
+      "connection": {
+        "edgeId": "wc_archive_processor",
+        "sourceNodeId": "wc_archive",
+        "targetNodeId": "wc_content_processor",
+        "connectionType": "data-flow",
+        "label": "Snapshot reference + response metadata",
+        "description": "Parse immutable stored input with bounded media-specific work."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:8"
+      ]
+    },
+    {
+      "id": "wc_45",
+      "stepNumber": 37,
+      "phase": "Process, deduplicate, and store content",
+      "title": "Commit exact content identity and metadata",
+      "type": "add_connection",
+      "content": "The parser records normalized body fingerprints, MIME type, extracted metadata, and extractor version against the canonical URL version. Confirm a suspected duplicate against exact digest and registry state before suppressing a distinct page record.",
+      "connection": {
+        "edgeId": "wc_processor_registry",
+        "sourceNodeId": "wc_content_processor",
+        "targetNodeId": "wc_registry",
+        "connectionType": "database-connection",
+        "label": "Exact digest + page metadata",
+        "description": "Persist versioned content identity and extraction state idempotently."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:8",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "wc_46",
+      "stepNumber": 38,
+      "phase": "Process, deduplicate, and store content",
+      "title": "Update probabilistic hints after exact commit",
+      "type": "add_connection",
+      "content": "After durable identity is committed, update the URL and body Bloom hints. A positive hint routes to exact state; only the exact registry can confirm a duplicate, so a Bloom false positive cannot discard a unique page.",
+      "connection": {
+        "edgeId": "wc_processor_bloom",
+        "sourceNodeId": "wc_content_processor",
+        "targetNodeId": "wc_bloom",
+        "connectionType": "api-call",
+        "label": "Committed URL/body fingerprints",
+        "description": "Maintain fast membership hints after exact state is durable."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:8"
+      ]
+    },
+    {
+      "id": "wc_47",
+      "stepNumber": 39,
+      "phase": "Process, deduplicate, and store content",
+      "title": "Return extracted links through admission checks",
+      "type": "add_connection",
+      "content": "The parser emits discovered links and redirect aliases as candidates, not ready-to-fetch tasks. Canonicalization, host routing, exact URL state, and policy checks run again before any candidate reaches an eligible frontier lane.",
+      "connection": {
+        "edgeId": "wc_processor_normalizer",
+        "sourceNodeId": "wc_content_processor",
+        "targetNodeId": "wc_normalizer",
+        "connectionType": "message-queue",
+        "label": "Discovered links + redirect aliases",
+        "description": "Re-enter scope, canonicalization, dedupe, and trap prevention."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-constraint:1",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "wc_priority_feedback",
+      "stepNumber": 40,
+      "phase": "Process, deduplicate, and store content",
+      "title": "Feed link and change signals back to scheduling",
+      "type": "add_connection",
+      "content": "Publish versioned extracted links and content-change signals to the scheduler. It may update importance and recrawl order, while the host policy gate still decides whether a page can be fetched now.",
+      "connection": {
+        "edgeId": "wc_processor_scheduler",
+        "sourceNodeId": "wc_content_processor",
+        "targetNodeId": "wc_scheduler",
+        "connectionType": "data-flow",
+        "label": "Extracted links + change signals",
+        "description": "Update page priority and recrawl state without bypassing host eligibility."
+      },
+      "requirementIds": [
+        "legacy-requirement:6",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "wc_50",
+      "stepNumber": 41,
+      "phase": "Process, deduplicate, and store content",
+      "title": "Schedule transient fetch failures",
+      "type": "add_connection",
+      "content": "Send DNS, connect timeout, read timeout, throttling, and retryable server outcomes with the original URL version and next eligible time. Use bounded exponential backoff and jitter, preserve Retry-After, and prevent a tight retry loop.",
+      "connection": {
+        "edgeId": "wc_fetchers_retry",
+        "sourceNodeId": "wc_fetchers",
+        "targetNodeId": "wc_retry_queue",
+        "connectionType": "message-queue",
+        "label": "Typed fetch failure + backoff state",
+        "description": "Retry transient failures later and quarantine exhausted work."
+      },
+      "requirementIds": [
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "wc_51",
+      "stepNumber": 42,
+      "phase": "Process, deduplicate, and store content",
+      "title": "Schedule bounded render failures",
+      "type": "add_connection",
+      "content": "Record navigation timeout, browser crash, and exhausted render-resource outcomes separately from origin denial. Retry only under approved bounds and with a fresh host lease.",
+      "connection": {
+        "edgeId": "wc_renderer_retry",
+        "sourceNodeId": "wc_js_renderer",
+        "targetNodeId": "wc_retry_queue",
+        "connectionType": "message-queue",
+        "label": "Render failure + page version",
+        "description": "Recover browser work without bypassing origin or resource limits."
+      },
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-constraint:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "wc_52",
+      "stepNumber": 43,
+      "phase": "Process, deduplicate, and store content",
+      "title": "Quarantine poison parser inputs",
+      "type": "add_connection",
+      "content": "Malformed, unsupported, or repeatedly failing documents receive a typed terminal or review state. Do not let one poison payload block a host partition or repeatedly consume parser capacity.",
+      "connection": {
+        "edgeId": "wc_processor_retry",
+        "sourceNodeId": "wc_content_processor",
+        "targetNodeId": "wc_retry_queue",
+        "connectionType": "message-queue",
+        "label": "Parser failure + extractor version",
+        "description": "Isolate poison content and make safe reprocessing inspectable."
+      },
+      "requirementIds": [
+        "legacy-requirement:3"
+      ]
+    },
+    {
+      "id": "wc_53",
+      "stepNumber": 44,
+      "phase": "Process, deduplicate, and store content",
+      "title": "Replay only through the guarded crawl path",
+      "type": "add_connection",
+      "content": "When backoff expires, retry work returns to URL canonicalization and exact-state checks. It must reacquire current robots policy, DNS state, host ownership, and a rate lease; stale queued authorization is never replayed.",
+      "connection": {
+        "edgeId": "wc_retry_normalizer",
+        "sourceNodeId": "wc_retry_queue",
+        "targetNodeId": "wc_normalizer",
+        "connectionType": "message-queue",
+        "label": "Due retry candidate",
+        "description": "Re-enter canonicalization and all current policy gates."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "wc_54",
+      "stepNumber": 45,
+      "phase": "Process, deduplicate, and store content",
+      "title": "Keep duplicate correctness in exact state",
+      "type": "decision_point",
+      "content": "URL identity and body identity solve different problems: canonical URL state avoids repeated fetches, while body fingerprints detect identical content served at different URLs. Probabilistic hints reduce lookup work but never decide that a page is safe to drop.",
+      "decision": {
+        "question": "Can a Bloom-filter hit suppress a URL or body record?",
+        "chosen": "No. Confirm URL aliases and content digests in the durable registry, then commit the snapshot and metadata idempotently before publishing membership hints.",
+        "chosenReason": "The Bloom filter is approximate; exact confirmation prevents false positives from losing unique content and ordered commits make retries recoverable.",
+        "alternatives": [
+          {
+            "option": "Drop every candidate on a Bloom hit",
+            "tradeoff": "A false positive silently removes a unique page or body."
+          },
+          {
+            "option": "Use no fast membership hint at any scale",
+            "tradeoff": "Exact state remains correct but high-volume duplicate lookups may consume avoidable storage and network capacity."
+          }
+        ]
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:8",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "wc_56",
+      "stepNumber": 46,
+      "phase": "Recover and scale by measured pressure",
+      "title": "Schedule recrawls from committed state",
+      "type": "add_connection",
+      "content": "The scheduler reads last-fetch status, observed changes, content version, and next recrawl eligibility from exact registry state. It creates a new candidate version without losing the prior snapshot or bypassing the current host gate.",
+      "connection": {
+        "edgeId": "wc_registry_scheduler",
+        "sourceNodeId": "wc_registry",
+        "targetNodeId": "wc_scheduler",
+        "connectionType": "database-connection",
+        "label": "Fetch history + recrawl due state",
+        "description": "Drive versioned recrawls from durable observations and policy."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:6",
+        "legacy-requirement:8",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "wc_62",
+      "stepNumber": 47,
+      "phase": "Recover and scale by measured pressure",
+      "title": "Scale eligible partitions without violating politeness",
+      "type": "scale_trigger",
+      "content": "Scale crawler workers and frontier consumers only when due work is eligible under host policy and archive/parser capacity can accept the results. Rebalance host shards with fenced leases; never translate a hot-host backlog into a higher site request rate.",
+      "scaleTrigger": {
+        "metric": "Due URL age by host shard, eligible versus policy-delayed work, host lease wait, worker saturation, parser lag, retry age, and archive write pressure",
+        "action": "Add workers to eligible partitions and downstream stages with headroom; rebalance host ownership through an epoch-fenced transfer; preserve each origin's configured robots and rate limits.",
+        "impact": "Increases aggregate crawl capacity across billions of URLs while retaining per-origin politeness and bounded failure recovery."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:7",
+        "legacy-constraint:3",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "wc_64",
+      "stepNumber": 48,
+      "phase": "Recover and scale by measured pressure",
+      "title": "Review the end-to-end crawl path and open assumptions",
+      "type": "explanation",
+      "content": "The path is approved seeds and recrawl signals -> canonicalization and exact URL state -> consistent-hash host owner -> durable priority frontier -> fresh robots decision and shared rate lease -> static fetch or gated JavaScript rendering -> versioned compressed snapshot -> MIME-specific extraction, exact dedupe, and guarded link rediscovery. Before treating this draft as a production design, owners must set crawl scope, rate and retry values, response/resource bounds, freshness expectations, media-derived processing, and retention.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    }
+  ]
+}

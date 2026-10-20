@@ -1,0 +1,288 @@
+{
+  "problem_id": "6901ef1b9420d83630aca879",
+  "version": "1.0-review",
+  "requirementRevision": null,
+  "totalSteps": 47,
+  "phases": [
+    {"name": "Frame the contract and ingress", "stepRange": [1, 8], "description": "Separate stated behavior from operating constraints, record unknowns, and establish authenticated, bounded entry points."},
+    {"name": "Persist and serve comment threads", "stepRange": [9, 17], "description": "Keep durable comment state authoritative, model replies and reactions, and make large reads cursor-based with a cache that can be bypassed."},
+    {"name": "Moderate and publish approved events", "stepRange": [18, 32], "description": "Use durable moderation work and a transactional outbox so only committed, policy-approved changes reach live subscribers."},
+    {"name": "Operate under failures and viral load", "stepRange": [33, 47], "description": "Choose safe outage behavior, scale from measured bottlenecks, and observe moderation, persistence, queueing, cache, and delivery health."}
+  ],
+  "steps": [
+    {
+      "id": "fb_live_01", "stepNumber": 1, "phase": "Frame the contract and ingress", "title": "Separate functional behavior from operating constraints", "type": "explanation",
+      "content": "Functional requirements in the frozen brief are: post and view comments in real time; support nested replies; like and reply to comments; edit and delete comments; filter spam and profanity; and paginate large threads. The brief also calls for viral posts with thousands of comments and millions of comments per day. Treat those as scale requirements, not measured capacity targets. Nonfunctional requirements and constraints are real-time updates, high write throughput, chronological and top ordering, moderation capability, and low-latency updates. No numeric latency, peak rate, availability, retention, or recovery target is supplied, so do not invent one. The requirement and constraint anchors below refer to the fixture's exact array positions.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "fb_live_02", "stepNumber": 2, "phase": "Frame the contract and ingress", "title": "Write down assumptions and questions", "type": "explanation",
+      "content": "Assume the existing Facebook identity and post-visibility systems provide a verified actor and authorize access to each post; the comment service must still check author and moderator permissions for every mutation and subscription. Assume a durable database can commit a comment and its outbox record atomically, but validate the selected engine's transaction and partition behavior. The author may see their own comment as pending; other viewers see only approved comments. The brief does not define top-ranking semantics, maximum reply depth, edit conflict policy, retention, peak traffic, SLOs, or moderation policy. Confirm those with product and operations before sizing or promising behavior. These are explicit design assumptions, not additional problem requirements.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "fb_live_03", "stepNumber": 3, "phase": "Frame the contract and ingress", "title": "Choose stable pagination and defer undefined ranking", "type": "decision_point",
+      "content": "A cursor must remain meaningful while new comments arrive. Use a stable keyset cursor over the selected order and a unique tie-breaker; do not use offset pagination for deep or rapidly changing threads. The prompt names chronological and top ordering but does not define a top score or freshness window.",
+      "decision": {"question": "How should the first version expose ordering?", "chosen": "Offer chronological ordering with a stable keyset cursor; define and validate the top-ranking formula with product before enabling that mode.", "chosenReason": "Chronological order is implementable from the stated brief. Inventing a ranking formula would create an unsupported product promise and unstable cursors.", "alternatives": [{"option": "Sort every page by a live, global score", "tradeoff": "Ranking semantics and write amplification are unspecified, and concurrent score changes can move rows between pages."}, {"option": "Expose chronological order only and close the top-ordering question", "tradeoff": "The constraint explicitly names top ordering, so the unresolved product decision remains visible rather than being silently dropped."}]},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "fb_live_04", "stepNumber": 4, "phase": "Frame the contract and ingress", "title": "Add the comment client", "type": "add_component",
+      "content": "The existing web and mobile clients render approved comments, thread replies, likes, edit/delete controls allowed to the actor, and the current moderation state to the author. They request bounded pages and establish an authenticated live subscription only while the viewer can access the post.",
+      "component": {"nodeId": "comment_client", "componentType": "web-app", "label": "Facebook Comment Clients", "description": "Thread UI, paged reads, mutations, and live subscriptions", "position": {"x": 0, "y": 280}, "properties": {"componentName": "Facebook Comment Clients", "purpose": "Render authorized comment threads and moderation state, submit idempotent create/edit/delete/like actions, page with opaque cursors, and reconnect to live updates only for posts the viewer may access."}, "highlightReason": "Uses the existing Web App catalog component for the customer-facing client."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "fb_live_05", "stepNumber": 5, "phase": "Frame the contract and ingress", "title": "Add the authenticated API boundary", "type": "add_component",
+      "content": "Expose bounded HTTP operations for thread reads and mutations, plus an authenticated WebSocket upgrade or subscription path. Validate post and comment identifiers, payload size, cursor shape, and caller identity; enforce post visibility and mutation permissions in the service as well as at ingress.",
+      "component": {"nodeId": "comment_api", "componentType": "api-gateway", "label": "Comment API Gateway", "description": "Authenticated HTTP and WebSocket ingress", "position": {"x": 320, "y": 280}, "properties": {"componentName": "Comment API Gateway", "purpose": "Terminate TLS, authenticate HTTP and WebSocket requests, validate bounded comment payloads and cursors, apply coarse request limits, and pass verified identity context to the comment service."}, "highlightReason": "Uses the catalog API Gateway; no new protocol-specific component is introduced."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "fb_live_06", "stepNumber": 6, "phase": "Frame the contract and ingress", "title": "Connect the client to the API", "type": "add_connection",
+      "content": "Use HTTPS for page reads and mutations. The create request carries a client-generated idempotency key so a retry after a timeout cannot create a second comment or like.",
+      "connection": {"edgeId": "comment_client_api", "sourceNodeId": "comment_client", "targetNodeId": "comment_api", "connectionType": "http", "label": "HTTPS reads and mutations", "description": "Authenticated, bounded requests with opaque cursors and idempotency keys."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "fb_live_07", "stepNumber": 7, "phase": "Frame the contract and ingress", "title": "Add per-actor and per-post admission controls", "type": "add_component",
+      "content": "Apply limits by authenticated actor and post, with a separate coarse IP limit for unauthenticated connection attempts. Use bounded request sizes and admission control to protect the write path. Rate limiting reduces abuse and overload; it is not a substitute for spam/profanity moderation and must not silently discard accepted comments.",
+      "component": {"nodeId": "comment_limiter", "componentType": "rate-limiter", "label": "Comment Admission Limits", "description": "Actor/post quotas and overload protection", "position": {"x": 640, "y": 280}, "properties": {"componentName": "Comment Admission Limits", "purpose": "Apply configurable actor, post, and connection quotas with bounded request sizes and explicit retry responses; protect hot posts and backend capacity without replacing content moderation or silently dropping accepted writes."}, "highlightReason": "Uses the existing Rate Limiter catalog component for configurable admission control."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:2"]
+    },
+    {
+      "id": "fb_live_08", "stepNumber": 8, "phase": "Frame the contract and ingress", "title": "Pass admitted requests to the service", "type": "add_connection",
+      "content": "The gateway applies the coarse request checks first; actor- and post-aware limits then run with verified identity context before the service performs reads or mutations. Return a clear retry response when admission is denied.",
+      "connection": {"edgeId": "comment_api_limiter", "sourceNodeId": "comment_api", "targetNodeId": "comment_limiter", "connectionType": "api-call", "label": "Verified request context", "description": "Actor/post-aware quotas and explicit overload responses before application work."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:2"]
+    },
+    {
+      "id": "fb_live_09", "stepNumber": 9, "phase": "Persist and serve comment threads", "title": "Add the comment service", "type": "add_component",
+      "content": "Keep the service stateless where practical. Implement create/read/reply/like/edit/delete operations, permission checks, moderation-state transitions, cursor validation, and idempotency. A reply stores its parent and root identifiers; a like is unique per actor and comment. Never report a comment as published before its durable state is committed.",
+      "component": {"nodeId": "comment_service", "componentType": "backend-server", "label": "Comment and Thread Service", "description": "Authorized comment lifecycle and bounded thread queries", "position": {"x": 960, "y": 280}, "properties": {"componentName": "Comment and Thread Service", "purpose": "Enforce post visibility and actor permissions; implement idempotent create, reply, like, edit, delete, and cursor reads; manage moderation status and versioned tombstones; and commit durable state before acknowledging a write."}, "highlightReason": "Uses the catalog Backend Server for the domain API and lifecycle rules."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "fb_live_10", "stepNumber": 10, "phase": "Persist and serve comment threads", "title": "Connect admitted traffic to the comment service", "type": "add_connection",
+      "content": "Forward only requests that pass ingress validation and admission checks. The service remains the final authorization boundary because gateway policies can be stale or incomplete.",
+      "connection": {"edgeId": "comment_limiter_service", "sourceNodeId": "comment_limiter", "targetNodeId": "comment_service", "connectionType": "http", "label": "Admitted comment API", "description": "Validated requests with identity context; service rechecks authorization."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:2"]
+    },
+    {
+      "id": "fb_live_11", "stepNumber": 11, "phase": "Persist and serve comment threads", "title": "Add authoritative comment storage", "type": "add_component",
+      "content": "Persist comments, parent/root links, actor-comment like uniqueness, edit versions, moderation status, and an outbox in the same transaction as each state change. Plan indexes for `(post_id, created_at, comment_id)` and `(post_id, root_id, created_at, comment_id)`. Partition and shard hot posts only after measured peak-rate and query tests; a sharded chronological page needs a deterministic merge and cursor over every participating shard.",
+      "component": {"nodeId": "comment_store", "componentType": "database", "label": "Comment System of Record", "description": "Durable comments, reactions, moderation state, and outbox", "position": {"x": 1280, "y": 280}, "properties": {"componentName": "Comment System of Record", "purpose": "Authoritatively persist comment text and status, post/parent/root identifiers, unique actor-comment likes, versioned edits and tombstones, and transactional outbox rows; support post/time and post/root/time keyset access patterns with measured hot-key partitioning."}, "highlightReason": "Uses the existing Database component and records storage semantics in its supported purpose field."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "fb_live_12", "stepNumber": 12, "phase": "Persist and serve comment threads", "title": "Connect service reads and writes to durable storage", "type": "add_connection",
+      "content": "Commit comment state, moderation state, and the corresponding outbox intent atomically. Use deterministic IDs and conditional writes for idempotency. A cache entry or broker message alone is never proof that a comment was committed.",
+      "connection": {"edgeId": "comment_service_store", "sourceNodeId": "comment_service", "targetNodeId": "comment_store", "connectionType": "database-connection", "label": "Authoritative reads and transactions", "description": "Idempotent comment mutations and transactional outbox; cursor-based thread queries."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "fb_live_13", "stepNumber": 13, "phase": "Persist and serve comment threads", "title": "Keep the data model explicit about thread and order", "type": "decision_point",
+      "content": "Use parent_id and root_id for reply traversal and stable comment IDs as pagination tie-breakers. If a reply-depth limit or top-ranking score is required, confirm the product rule; neither is specified in the brief. Likes need a uniqueness constraint so retries do not inflate counts.",
+      "decision": {"question": "How do we support replies, likes, and changing pages without claiming an unspecified ranking rule?", "chosen": "Persist parent/root links and unique likes; use keyset cursors for chronological reads and keep top ranking gated on a product-defined score and freshness policy.", "chosenReason": "This supports the stated thread and ordering needs while keeping duplicate retries and page movement bounded.", "alternatives": [{"option": "Use offset pagination over a mutable global list", "tradeoff": "Deep pages become expensive and concurrent inserts can repeat or skip comments."}, {"option": "Use nested-set positions as the only reply representation", "tradeoff": "Insertions can require broad position updates; parent/root links are easier to maintain under concurrent replies."}]},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "fb_live_14", "stepNumber": 14, "phase": "Persist and serve comment threads", "title": "Add a bounded thread-page cache", "type": "add_component",
+      "content": "Cache only bounded, versioned thread pages or hot roots, keyed by post, order mode, cursor, and visibility scope. Use short, measured lifetimes and invalidation from committed changes. Do not cache private or pending comments into a public key, and do not make the cache authoritative for likes or comment existence.",
+      "component": {"nodeId": "thread_cache", "componentType": "cache", "label": "Hot Thread Page Cache", "description": "Bounded cache for popular posts and thread pages", "position": {"x": 1280, "y": 20}, "properties": {"componentName": "Hot Thread Page Cache", "purpose": "Cache bounded, versioned approved-thread pages for hot posts by visibility scope, sort mode, and opaque cursor; apply short measured TTLs and invalidation, and allow safe database fallback on miss, staleness, or eviction."}, "highlightReason": "Uses the existing Cache component for replaceable read acceleration."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "fb_live_15", "stepNumber": 15, "phase": "Persist and serve comment threads", "title": "Connect bounded reads to the cache", "type": "add_connection",
+      "content": "Read a matching approved page from cache when its version and visibility key are valid; otherwise fetch from the system of record and repopulate within size and TTL limits. Cache errors must not block a correct page read.",
+      "connection": {"edgeId": "comment_service_cache", "sourceNodeId": "comment_service", "targetNodeId": "thread_cache", "connectionType": "database-connection", "label": "Versioned page lookup and invalidation", "description": "Cache accelerates approved thread reads; durable storage remains authoritative."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "fb_live_16", "stepNumber": 16, "phase": "Persist and serve comment threads", "title": "Define the cache-miss fallback", "type": "explanation",
+      "content": "On a cache timeout, eviction, stale version, or invalidation delay, serve the authorized page from durable storage using the same cursor and ordering contract. If top-order materialization is stale, report its freshness or temporarily fall back to chronological order only if product accepts that behavior; never label a stale rank as current. Apply backpressure before falling back if the database is already saturated.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "fb_live_17", "stepNumber": 17, "phase": "Persist and serve comment threads", "title": "Scale from measured hot-post pressure", "type": "scale_trigger",
+      "content": "Do not choose shard counts from daily volume alone. Measure peak writes, per-post skew, query fan-out, cache hit rate, page latency, and storage limits before selecting partitioning or read replicas.",
+      "scaleTrigger": {"metric": "Per-post write rate, database saturation, cursor-page latency, cache hit rate, and shard skew", "action": "Increase service capacity and add or rebalance measured post/time partitions; preserve deterministic cursor merge and permission checks.", "impact": "Raises throughput while retaining stable page semantics; repartitioning and cross-shard reads add operational and query cost."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "fb_live_18", "stepNumber": 18, "phase": "Moderate and publish approved events", "title": "Add a durable moderation queue", "type": "add_component",
+      "content": "Queue moderation requests from committed outbox rows. Partition by post or another measured key, keep retries bounded, and send poison or exhausted jobs to a dead-letter path for inspection. Queue acknowledgement follows durable handoff to the moderation worker; a queue outage must leave work recoverable in the outbox.",
+      "component": {"nodeId": "moderation_queue", "componentType": "message-broker", "label": "Durable Moderation Queue", "description": "Recoverable, partitioned moderation requests", "position": {"x": 1280, "y": 540}, "properties": {"componentName": "Durable Moderation Queue", "purpose": "Carry idempotent moderation jobs from committed outbox records with bounded retries, per-post ordering where needed, lag visibility, and a dead-letter path; never serve as the durable source of comment state."}, "highlightReason": "Uses the catalog Message Broker for asynchronous durable work."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "fb_live_19", "stepNumber": 19, "phase": "Moderate and publish approved events", "title": "Add the moderation worker", "type": "add_component",
+      "content": "Apply the product-approved spam and profanity policy to a versioned comment. The worker must be idempotent, record the policy/version and outcome, and move uncertain cases to review rather than publishing them. It updates the authoritative comment status before creating a publishable change event.",
+      "component": {"nodeId": "moderation_worker", "componentType": "processing-worker", "label": "Comment Moderation Worker", "description": "Idempotent policy checks and status transitions", "position": {"x": 1600, "y": 540}, "properties": {"componentName": "Comment Moderation Worker", "purpose": "Run the approved spam/profanity policy idempotently, record policy version and reason, move uncertain outcomes to review, update durable status before fanout, and retry transient failures without exposing pending content."}, "highlightReason": "Uses the existing Processing Worker for asynchronous moderation."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "fb_live_20", "stepNumber": 20, "phase": "Moderate and publish approved events", "title": "Deliver moderation jobs to workers", "type": "add_connection",
+      "content": "The worker claims each job with a lease or broker visibility timeout, checks the comment version before applying a result, and acknowledges only after its durable state transition succeeds. Duplicate deliveries are expected and harmless.",
+      "connection": {"edgeId": "moderation_queue_worker", "sourceNodeId": "moderation_queue", "targetNodeId": "moderation_worker", "connectionType": "message-queue", "label": "At-least-once moderation jobs", "description": "Versioned, idempotent work with bounded retries and dead-letter handling."},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "fb_live_21", "stepNumber": 21, "phase": "Moderate and publish approved events", "title": "Commit moderation outcomes to the system of record", "type": "add_connection",
+      "content": "The worker conditionally changes only the expected comment version. Approval, rejection, or hold state and the corresponding event intent commit together, so a stale moderation result cannot resurrect an edited or deleted comment.",
+      "connection": {"edgeId": "moderation_worker_store", "sourceNodeId": "moderation_worker", "targetNodeId": "comment_store", "connectionType": "database-connection", "label": "Conditional status and outbox transaction", "description": "Persist moderation outcome and publish intent atomically against the expected comment version."},
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "fb_live_22", "stepNumber": 22, "phase": "Moderate and publish approved events", "title": "Add an outbox relay", "type": "add_component",
+      "content": "The relay claims committed outbox rows, publishes moderation requests to the durable queue and approved/edit/delete/like events to the live event fabric, then marks each row delivered. Use retry with backoff and idempotent event IDs; keep the database outbox until delivery is confirmed. This avoids a database-plus-broker dual-write gap.",
+      "component": {"nodeId": "comment_outbox_relay", "componentType": "processing-worker", "label": "Comment Outbox Relay", "description": "Retryable publication of committed state changes", "position": {"x": 1600, "y": 160}, "properties": {"componentName": "Comment Outbox Relay", "purpose": "Claim committed transactional outbox rows, publish moderation jobs and versioned visible-change events with stable IDs, retry with backoff, and mark delivery only after broker acknowledgement; recover safely after restart."}, "highlightReason": "Reuses the catalog Processing Worker for reliable publication."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "fb_live_23", "stepNumber": 23, "phase": "Moderate and publish approved events", "title": "Read and checkpoint committed outbox rows", "type": "add_connection",
+      "content": "The relay claims rows in bounded batches and checkpoints delivery per event ID. Expired leases are reclaimable after a crash; retries do not remove the source row or create a second logical event.",
+      "connection": {"edgeId": "comment_outbox_store", "sourceNodeId": "comment_outbox_relay", "targetNodeId": "comment_store", "connectionType": "database-connection", "label": "Leased outbox scan", "description": "Bounded, checkpointed reads and delivery state for committed event intents."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "fb_live_24", "stepNumber": 24, "phase": "Moderate and publish approved events", "title": "Route outbox moderation requests durably", "type": "add_connection",
+      "content": "Only moderation requests are sent to this queue. The relay retries a broker outage from the outbox; it does not mark the row delivered before the queue confirms receipt.",
+      "connection": {"edgeId": "comment_outbox_queue", "sourceNodeId": "comment_outbox_relay", "targetNodeId": "moderation_queue", "connectionType": "message-queue", "label": "Durable moderation requests", "description": "Outbox-backed, idempotent jobs; queue outages are recovered by relay retry."},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "fb_live_25", "stepNumber": 25, "phase": "Moderate and publish approved events", "title": "Add the live event fabric", "type": "add_component",
+      "content": "Publish only committed, visible state changes. Include post ID, comment ID, event ID, entity version, and sequence information needed for deduplication and gap detection. Partition or route by post where ordering is required, and set retention from a product-approved recovery window.",
+      "component": {"nodeId": "comment_events", "componentType": "pubsub", "label": "Approved Comment Event Fabric", "description": "Fanout of committed visible comment changes", "position": {"x": 1920, "y": 160}, "properties": {"componentName": "Approved Comment Event Fabric", "purpose": "Fan out committed approved, edited, deleted, and like-count changes with stable event IDs and entity versions; route by post where ordering is needed and expose lag without becoming the comment system of record."}, "highlightReason": "Uses the catalog Pub/Sub component for event distribution."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "fb_live_26", "stepNumber": 26, "phase": "Moderate and publish approved events", "title": "Publish visible changes after commit", "type": "add_connection",
+      "content": "The relay publishes approved changes only after the database transaction commits. Rejected and pending comments never enter the public post stream; authorized moderation tooling can use a separate access-controlled path.",
+      "connection": {"edgeId": "comment_outbox_events", "sourceNodeId": "comment_outbox_relay", "targetNodeId": "comment_events", "connectionType": "message-queue", "label": "Committed visible-change events", "description": "Versioned event publication from the durable outbox after state commit."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "fb_live_27", "stepNumber": 27, "phase": "Moderate and publish approved events", "title": "Add the WebSocket delivery tier", "type": "add_component",
+      "content": "Terminate authenticated long-lived connections separately from comment storage. Keep connection state replaceable, bound subscriptions and outbound buffers, and recheck post visibility when a subscription is established or access is revoked.",
+      "component": {"nodeId": "comment_websocket", "componentType": "webserver", "label": "Live Comment WebSocket Gateways", "description": "Authenticated subscriptions and bounded event delivery", "position": {"x": 2240, "y": 300}, "properties": {"componentName": "Live Comment WebSocket Gateways", "purpose": "Maintain replaceable authenticated connections, authorize each post subscription, bound per-connection queues and subscription counts, deliver versioned visible events, and support resubscribe plus catch-up after disconnect."}, "highlightReason": "Uses the existing Web Server component to host the WebSocket delivery tier."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "fb_live_28", "stepNumber": 28, "phase": "Moderate and publish approved events", "title": "Fan out events to subscribed gateways", "type": "add_connection",
+      "content": "Gateways subscribe to the event partitions needed by their active post rooms. Enforce a bounded buffer and deduplicate by event ID/version; a disconnected client can recover from its last cursor instead of requiring unbounded server-side buffering.",
+      "connection": {"edgeId": "comment_events_websocket", "sourceNodeId": "comment_events", "targetNodeId": "comment_websocket", "connectionType": "message-queue", "label": "Post-scoped event fanout", "description": "Versioned events delivered to authorized rooms with bounded buffering and deduplication."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "fb_live_29", "stepNumber": 29, "phase": "Moderate and publish approved events", "title": "Open an authorized live subscription", "type": "add_connection",
+      "content": "The client sends its post ID and last applied event cursor after authentication. The gateway validates current post visibility and subscription limits before joining a room; the cursor is a recovery position, not an authorization token.",
+      "connection": {"edgeId": "comment_client_websocket_in", "sourceNodeId": "comment_client", "targetNodeId": "comment_websocket", "connectionType": "api-call", "label": "Authenticated post subscription", "description": "Client provides post ID and last event cursor; gateway rechecks visibility and limits."},
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "fb_live_30", "stepNumber": 30, "phase": "Moderate and publish approved events", "title": "Deliver ordered, deduplicable updates", "type": "add_connection",
+      "content": "Send the event ID and entity version with each update. The client ignores duplicates, detects version gaps, and requests catch-up instead of assuming transport delivery is exactly once.",
+      "connection": {"edgeId": "comment_websocket_client_out", "sourceNodeId": "comment_websocket", "targetNodeId": "comment_client", "connectionType": "data-flow", "label": "Live approved comment updates", "description": "Versioned events; clients deduplicate and detect gaps before rendering."},
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "fb_live_31", "stepNumber": 31, "phase": "Moderate and publish approved events", "title": "Make visibility a deliberate moderation decision", "type": "decision_point",
+      "content": "The brief requires spam and profanity filtering but does not define its policy or review workflow. Keep new comments pending until the approved policy returns an allow result; uncertain and unavailable outcomes remain hidden and can be reviewed. The author may see pending status, but other subscribers receive no content event until approval commits.",
+      "decision": {"question": "What happens before a comment passes moderation?", "chosen": "Persist it as pending, show that state only to its author, and publish content only after a durable approved transition.", "chosenReason": "This makes the moderation boundary explicit and prevents a retry or policy timeout from leaking unreviewed text.", "alternatives": [{"option": "Broadcast immediately and retract rejected comments later", "tradeoff": "Clients can see content that moderation later rejects; deletion cannot undo screenshots or notifications."}, {"option": "Drop uncertain submissions", "tradeoff": "The user receives no recoverable state and retries can create confusion; a held state and review path are auditable."}]},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "fb_live_32", "stepNumber": 32, "phase": "Moderate and publish approved events", "title": "Recover missed live events with a cursor", "type": "explanation",
+      "content": "WebSockets are a low-latency hint channel, not the only way to recover state. On disconnect, the client reconnects with backoff, reauthenticates, resubscribes, and fetches the authorized thread after its last applied cursor. If event retention has expired or a sequence gap cannot be filled, reload a fresh page from the system of record and replace local state.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "fb_live_33", "stepNumber": 33, "phase": "Operate under failures and viral load", "title": "Choose safe behavior for storage and queue outages", "type": "decision_point",
+      "content": "The database is authoritative, and the outbox is the durable bridge to asynchronous work. Define acknowledgements and fallback behavior before tuning retries.",
+      "decision": {"question": "What do users see when storage, the queue, or live delivery is unavailable?", "chosen": "If the database transaction fails, do not acknowledge the write. If storage commits but the queue is down, retain the outbox row and show the comment as pending. If WebSockets are down, provide authorized cursor-based reads and reconnect/catch-up.", "chosenReason": "This avoids false success, lost moderation work, cache-only writes, and dependence on a live socket for correctness.", "alternatives": [{"option": "Acknowledge from cache while storage is unavailable", "tradeoff": "The cache can evict or lose the write, so the user may be told a comment exists when it does not."}, {"option": "Skip moderation or publish directly when the queue is down", "tradeoff": "A transient infrastructure failure would bypass a stated moderation requirement."}]},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "fb_live_34", "stepNumber": 34, "phase": "Operate under failures and viral load", "title": "Make edit and delete races safe", "type": "explanation",
+      "content": "Edits increment a version and re-enter the moderation policy if changed text can affect visibility. Deletes write a tombstone with actor, version, and timestamp rather than removing ordering history immediately. A moderation result for an older version cannot overwrite a newer edit or delete. Emit the committed change through the outbox and invalidate affected cached pages.",
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "fb_live_35", "stepNumber": 35, "phase": "Operate under failures and viral load", "title": "Scale fanout for a viral post", "type": "scale_trigger",
+      "content": "Thousands of comments on one post can create hot partitions and a large live room. Do not fan out to every follower; deliver only to currently authorized viewers who subscribed to that post. Keep write acceptance independent from best-effort presence state.",
+      "scaleTrigger": {"metric": "Per-post publish rate, active authorized subscriptions, gateway buffer growth, hot-partition load, and event lag", "action": "Split hot-post work across measured partitions and gateway shards; coalesce replaceable count/presence updates, while preserving each comment event or making it catch-up discoverable by cursor.", "impact": "Reduces hot-room pressure but adds partition coordination and catch-up work; coalescing must never hide a committed comment."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "fb_live_36", "stepNumber": 36, "phase": "Operate under failures and viral load", "title": "Set a moderation backlog response", "type": "scale_trigger",
+      "content": "Track oldest pending age and moderation queue lag, not just queue depth. Pending content stays hidden from other users while the worker fleet catches up.",
+      "scaleTrigger": {"metric": "Oldest moderation-job age, queue lag, worker error rate, and pending-comment age", "action": "Scale workers within policy limits, alert operators, and apply explicit retry-later admission control if the approved pending-age threshold is exceeded; route exhausted jobs to review.", "impact": "Protects the moderation boundary and makes latency degradation visible; a product-approved threshold is needed before automatic rejection or pause behavior is enabled."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "fb_live_37", "stepNumber": 37, "phase": "Operate under failures and viral load", "title": "Fail closed when moderation is unavailable", "type": "explanation",
+      "content": "A policy service timeout, worker crash, or unknown policy version leaves the comment pending and not publicly broadcast. Retry transient failures with bounded backoff, then route to an authorized review queue. Do not silently approve as a fallback. Any automated policy or human-review threshold is a product decision and should be versioned and audited.",
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "fb_live_38", "stepNumber": 38, "phase": "Operate under failures and viral load", "title": "Protect privacy and mutation integrity", "type": "explanation",
+      "content": "Authorize reads, subscriptions, edits, deletes, and moderation actions against current post visibility and actor roles. Keep credentials out of events and logs; bound comment text, nesting depth if product defines a limit, subscription count, and outbound buffers. Revoke or remove subscriptions when post access changes. These controls are assumed integrations and service responsibilities, not new requirements from the frozen brief.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "fb_live_39", "stepNumber": 39, "phase": "Operate under failures and viral load", "title": "Add end-to-end operational monitoring", "type": "add_component",
+      "content": "Correlate request, comment, event, and post IDs without logging raw comment text. Monitor user-visible latency and correctness, not only process health. Alert on lost-progress signals such as stuck outbox rows, moderation age, event lag, cursor-gap recovery, and cache fallback saturation.",
+      "component": {"nodeId": "comment_monitoring", "componentType": "monitoring", "label": "Comment Reliability Monitoring", "description": "Latency, queue, moderation, cache, and delivery signals", "position": {"x": 1920, "y": 720}, "properties": {"componentName": "Comment Reliability Monitoring", "purpose": "Correlate request, comment, event, and post identifiers while excluding raw text; track read/write latency, moderation age, outbox and event lag, cache fallbacks, WebSocket gaps, throttles, and error rates."}, "highlightReason": "Uses the existing Monitoring component for service-level and pipeline health."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "fb_live_40", "stepNumber": 40, "phase": "Operate under failures and viral load", "title": "Observe comment API health", "type": "add_connection",
+      "content": "Measure end-to-end create/read latency, authorization denials, idempotent retries, and cursor-page size. Avoid recording comment bodies or access tokens in traces.",
+      "connection": {"edgeId": "comment_service_monitoring", "sourceNodeId": "comment_service", "targetNodeId": "comment_monitoring", "connectionType": "data-flow", "label": "Service metrics and traces", "description": "Latency, errors, retries, authorization outcomes, and bounded-cardinality identifiers."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "fb_live_41", "stepNumber": 41, "phase": "Operate under failures and viral load", "title": "Observe durable storage pressure", "type": "add_connection",
+      "content": "Track transaction conflicts, hot partitions, replication health, query latency, and capacity headroom. Alert before the database fallback path saturates during cache trouble.",
+      "connection": {"edgeId": "comment_store_monitoring", "sourceNodeId": "comment_store", "targetNodeId": "comment_monitoring", "connectionType": "data-flow", "label": "Storage health signals", "description": "Transaction, query, replication, partition skew, and capacity telemetry."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "fb_live_42", "stepNumber": 42, "phase": "Operate under failures and viral load", "title": "Observe moderation queue lag", "type": "add_connection",
+      "content": "Measure oldest-job age and retries per partition, and verify dead-letter items have an owned review path. A healthy broker process does not imply that comments are being moderated promptly.",
+      "connection": {"edgeId": "moderation_queue_monitoring", "sourceNodeId": "moderation_queue", "targetNodeId": "comment_monitoring", "connectionType": "data-flow", "label": "Queue lag and retry signals", "description": "Oldest age, per-post lag, retry count, and dead-letter volume."},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "fb_live_43", "stepNumber": 43, "phase": "Operate under failures and viral load", "title": "Observe moderation outcomes", "type": "add_connection",
+      "content": "Track policy version, approval/rejection/hold counts, worker age and errors, and stale-version conflicts. Restrict access to moderation evidence and exclude raw text from general telemetry.",
+      "connection": {"edgeId": "moderation_worker_monitoring", "sourceNodeId": "moderation_worker", "targetNodeId": "comment_monitoring", "connectionType": "data-flow", "label": "Moderation health signals", "description": "Outcome counts, policy version, worker errors, holds, and stale results."},
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "fb_live_44", "stepNumber": 44, "phase": "Operate under failures and viral load", "title": "Observe outbox delivery progress", "type": "add_connection",
+      "content": "Alert on the age of the oldest undelivered row, lease churn, publish retries, and event-ID duplicates. This reveals a broken live path even when comment writes continue succeeding.",
+      "connection": {"edgeId": "comment_outbox_monitoring", "sourceNodeId": "comment_outbox_relay", "targetNodeId": "comment_monitoring", "connectionType": "data-flow", "label": "Outbox progress and publish retries", "description": "Undelivered age, lease recovery, broker acknowledgements, and duplicates."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "fb_live_45", "stepNumber": 45, "phase": "Operate under failures and viral load", "title": "Observe live connection health", "type": "add_connection",
+      "content": "Measure authorized active subscriptions, reconnect rate, event-to-client delay, slow-consumer drops, and catch-up success. Treat a gateway buffer limit as a reason to recover by cursor, not to claim the client received every frame.",
+      "connection": {"edgeId": "comment_websocket_monitoring", "sourceNodeId": "comment_websocket", "targetNodeId": "comment_monitoring", "connectionType": "data-flow", "label": "Connection and delivery metrics", "description": "Subscription counts, delivery delay, reconnects, bounded-buffer pressure, and catch-up."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "fb_live_46", "stepNumber": 46, "phase": "Operate under failures and viral load", "title": "Observe cache fallback pressure", "type": "add_connection",
+      "content": "Track hit rate, stale-version rejects, invalidation delay, evictions, and database fallbacks. Alert on a miss storm before a correct cache bypass turns into an overloaded system-of-record incident.",
+      "connection": {"edgeId": "thread_cache_monitoring", "sourceNodeId": "thread_cache", "targetNodeId": "comment_monitoring", "connectionType": "data-flow", "label": "Cache and fallback signals", "description": "Hit rate, invalidation delay, eviction, stale entry, and fallback volume."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "fb_live_47", "stepNumber": 47, "phase": "Operate under failures and viral load", "title": "Review unresolved product and capacity decisions", "type": "explanation",
+      "content": "Before launch, confirm the top-ranking formula and freshness, maximum nesting depth, peak per-post and aggregate write rates, comment and event retention, numeric latency/availability targets, moderation policy and review ownership, and behavior when moderation age exceeds its threshold. Validate partition and cache choices with skewed viral-post load. The design preserves durable state and recoverable delivery, but the brief alone is not enough to claim a particular throughput, latency, or availability result.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

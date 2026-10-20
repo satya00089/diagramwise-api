@@ -1,0 +1,746 @@
+{
+  "problem_id": "mlops_003",
+  "version": "mlops_003-v1-local-review-draft",
+  "requirementRevision": null,
+  "totalSteps": 43,
+  "phases": [
+    {
+      "name": "Define registry identity, access, and lifecycle",
+      "stepRange": [1, 11],
+      "description": "Keep the supplied brief distinct from assumptions, then establish the authenticated API and the registry as the sole owner of version and lifecycle transitions."
+    },
+    {
+      "name": "Register immutable artifacts with reproducible provenance",
+      "stepRange": [12, 27],
+      "description": "Connect source control and CI/CD to version registration, metadata persistence, large-object upload, and verification without storing model bytes in the metadata database."
+    },
+    {
+      "name": "Compare, approve, audit, and deploy exact versions",
+      "stepRange": [28, 43],
+      "description": "Complete artifact verification and durable change propagation, then make metric comparison, approval, audit, deployment, and failure behavior explicit."
+    }
+  ],
+  "steps": [
+    {
+      "id": "mlops003_live_brief",
+      "stepNumber": 1,
+      "phase": "Define registry identity, access, and lifecycle",
+      "title": "Start from the exact live problem brief",
+      "type": "explanation",
+      "content": "Design a Model Registry and Versioning System. Live description: Design a model registry that tracks model versions and metadata, manages model lifecycle stages, stores model artifacts, and provides approval workflows for production promotion. The stated requirements are: Register and version ML models; Store model artifacts and metadata; Track training parameters and metrics; Manage model lifecycle stages (dev, staging, prod); Implement approval workflows for promotion; Compare model versions side-by-side; Support model lineage (data, code, config); Integrate with CI/CD for automated deployment. The stated constraints are: Support 10k+ model versions; Artifact storage for models up to 100GB; Search and query models by metrics; Role-based access control for model promotion; Audit trail for all model changes. The six supplied hints are carried into the decisions below.",
+      "requirementIds": []
+    },
+    {
+      "id": "mlops003_facts_and_assumptions",
+      "stepNumber": 2,
+      "phase": "Define registry identity, access, and lifecycle",
+      "title": "Separate requirements from choices",
+      "type": "decision_point",
+      "content": "The brief gives a version-count floor, a maximum artifact size, metric-search behavior, promotion RBAC, and a complete audit trail. It does not specify request rate, latency SLO, availability target, retention, cloud provider, model framework, or organizational approval matrix. Do not claim these as supplied facts. For this walkthrough, assume an MLflow-compatible registry API, a relational metadata store, S3-compatible object storage, and an explicit human approval before production promotion; these are replaceable design choices, not extra requirements.",
+      "decision": {
+        "question": "Which statements should determine the first architecture?",
+        "chosen": "Implement every explicit requirement and constraint, and label provider, SLO, retention, and approval-policy details as assumptions until the product owner supplies them.",
+        "chosenReason": "This prevents an illustrative architecture from silently becoming a false product promise.",
+        "alternatives": [
+          {"option": "Invent high traffic and a cloud provider", "tradeoff": "The design becomes tied to targets the prompt never supplied."},
+          {"option": "Ignore scale and governance because exact numbers are absent", "tradeoff": "The stated 10k+ versions, 100GB artifacts, promotion roles, and audit needs would be missed."}
+        ]
+      },
+      "requirementIds": []
+    },
+    {
+      "id": "mlops003_add_console",
+      "stepNumber": 3,
+      "phase": "Define registry identity, access, and lifecycle",
+      "title": "Give model owners a comparison and review surface",
+      "type": "add_component",
+      "content": "The console lists registered models and immutable versions, exposes metric filters and side-by-side comparisons, and presents lineage, model cards, approval evidence, and audit history. It is a client only; authorization and lifecycle rules stay on the server.",
+      "component": {
+        "nodeId": "mlops003_console",
+        "componentType": "web-app",
+        "label": "Model Registry Console",
+        "description": "Browse versions, compare metrics, inspect lineage, and review promotions.",
+        "position": {"x": 50, "y": 300},
+        "properties": {
+          "componentName": "Model Registry Console",
+          "purpose": "Version search, side-by-side metric comparison, model-card and lineage review, and approval UI; never the authorization boundary."
+        },
+        "highlightReason": "Makes the comparison and approval experience visible without trusting client-side roles."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7"]
+    },
+    {
+      "id": "mlops003_add_gateway",
+      "stepNumber": 4,
+      "phase": "Define registry identity, access, and lifecycle",
+      "title": "Create one validated registry API boundary",
+      "type": "add_component",
+      "content": "Use one API boundary for interactive clients and machine identities from training and deployment pipelines. Validate request shape and artifact manifests before registry operations; apply authentication and request limits here, then enforce object-level and stage-level policy in the registry service too.",
+      "component": {
+        "nodeId": "mlops003_api",
+        "componentType": "api-gateway",
+        "label": "Registry API Gateway",
+        "description": "Authenticated, validated entry point for UI and pipeline clients.",
+        "position": {"x": 340, "y": 300},
+        "properties": {
+          "componentName": "Registry API Gateway",
+          "purpose": "Authenticate UI and pipeline calls, validate payloads, and route registry operations.",
+          "inputValidation": true,
+          "authentication": "OAuth 2.0",
+          "rateLimiting": true
+        },
+        "highlightReason": "All model writes and comparisons pass through an explicit API boundary."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:8"]
+    },
+    {
+      "id": "mlops003_add_identity",
+      "stepNumber": 5,
+      "phase": "Define registry identity, access, and lifecycle",
+      "title": "Resolve users and machine identities centrally",
+      "type": "add_component",
+      "content": "Map SSO users and workload identities to registry roles. Authentication proves who called; the registry still evaluates whether that subject may register, approve, or promote this particular model version.",
+      "component": {
+        "nodeId": "mlops003_identity",
+        "componentType": "auth-service",
+        "label": "Identity and Role Service",
+        "description": "Resolves user and workload identity plus model-governance roles.",
+        "position": {"x": 620, "y": 55},
+        "properties": {
+          "componentName": "Identity and Role Service",
+          "purpose": "Resolve SSO and workload subjects and return model-scoped roles for registry authorization.",
+          "oauth": true
+        },
+        "highlightReason": "Promotion authority is a server-verified role, not a UI affordance."
+      },
+      "requirementIds": ["legacy-constraint:4"]
+    },
+    {
+      "id": "mlops003_add_registry",
+      "stepNumber": 6,
+      "phase": "Define registry identity, access, and lifecycle",
+      "title": "Make the registry the lifecycle authority",
+      "type": "add_component",
+      "content": "The service allocates immutable model-version identities, validates metadata manifests, owns dev/staging/prod transitions, runs approval policy, and resolves stage aliases to exact version digests. A stage is a mutable pointer with an audited transition; a version's content and identity do not change.",
+      "component": {
+        "nodeId": "mlops003_registry",
+        "componentType": "model-registry",
+        "label": "Model Registry Service",
+        "description": "Version identity, metadata validation, lifecycle, and promotion policy.",
+        "position": {"x": 620, "y": 325},
+        "properties": {
+          "componentName": "Model Registry Service",
+          "purpose": "Own immutable version IDs, metadata, dev/staging/prod stage transitions, approval policy, and exact-digest aliases.",
+          "platform": "MLflow"
+        },
+        "highlightReason": "One service owns the model version and stage-transition invariants."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5"]
+    },
+    {
+      "id": "mlops003_console_api",
+      "stepNumber": 7,
+      "phase": "Define registry identity, access, and lifecycle",
+      "title": "Route comparison and review through the API",
+      "type": "add_connection",
+      "content": "The same authenticated API supports version listings, metric filters, version comparisons, lineage, and approval actions. Paginate results and avoid returning artifact bytes in metadata responses.",
+      "connection": {
+        "edgeId": "mlops003_console_to_api",
+        "sourceNodeId": "mlops003_console",
+        "targetNodeId": "mlops003_api",
+        "connectionType": "api-call",
+        "label": "Version search, comparison, and review requests",
+        "description": "UI requests use authenticated APIs for metric filters, version comparisons, model cards, lineage, and approval review."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7"]
+    },
+    {
+      "id": "mlops003_api_identity",
+      "stepNumber": 8,
+      "phase": "Define registry identity, access, and lifecycle",
+      "title": "Authenticate before accepting registry operations",
+      "type": "add_connection",
+      "content": "Validate OAuth/OIDC tokens for users and scoped workload credentials for automation. Authentication is not itself permission to promote; the downstream registry makes that policy decision.",
+      "connection": {
+        "edgeId": "mlops003_api_to_identity",
+        "sourceNodeId": "mlops003_api",
+        "targetNodeId": "mlops003_identity",
+        "connectionType": "api-call",
+        "label": "Validated subject and workload identity",
+        "description": "The gateway validates identity tokens and passes a signed subject and scopes to the registry."
+      },
+      "requirementIds": ["legacy-constraint:4", "legacy-requirement:5"]
+    },
+    {
+      "id": "mlops003_api_registry",
+      "stepNumber": 9,
+      "phase": "Define registry identity, access, and lifecycle",
+      "title": "Keep all lifecycle mutations in the registry",
+      "type": "add_connection",
+      "content": "Registration, metadata reads, stage changes, approvals, and comparisons go through the registry service. Clients cannot update database rows or move a production alias directly.",
+      "connection": {
+        "edgeId": "mlops003_api_to_registry",
+        "sourceNodeId": "mlops003_api",
+        "targetNodeId": "mlops003_registry",
+        "connectionType": "api-call",
+        "label": "Register, query, compare, and request transitions",
+        "description": "The registry enforces immutable versions, lifecycle rules, and metric-query contracts for UI and CI/CD callers."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:8"]
+    },
+    {
+      "id": "mlops003_identity_registry",
+      "stepNumber": 10,
+      "phase": "Define registry identity, access, and lifecycle",
+      "title": "Authorize each promotion at the decision point",
+      "type": "add_connection",
+      "content": "Before a stage transition, the registry checks model-scoped permissions, approval evidence, and any separation-of-duties policy against the authenticated subject. The exact role matrix is an assumption to confirm with governance owners.",
+      "connection": {
+        "edgeId": "mlops003_registry_to_identity",
+        "sourceNodeId": "mlops003_registry",
+        "targetNodeId": "mlops003_identity",
+        "connectionType": "api-call",
+        "label": "Check approver and promotion permissions",
+        "description": "Registry asks the identity service for model-scoped authorization before accepting an approval or lifecycle transition."
+      },
+      "requirementIds": ["legacy-constraint:4", "legacy-requirement:5"]
+    },
+    {
+      "id": "mlops003_registry_protocol",
+      "stepNumber": 11,
+      "phase": "Define registry identity, access, and lifecycle",
+      "title": "Reuse a standard registry protocol without hard lock-in",
+      "type": "decision_point",
+      "content": "Use MLflow or Weights & Biases as a base. This draft chooses an MLflow-compatible registry API because the catalog supports it and the hint names it; keep provider-specific storage and lifecycle behavior behind the registry adapter. A compatible API is an implementation choice, not evidence that the problem requires one vendor.",
+      "decision": {
+        "question": "Should model clients depend on a vendor-specific registry implementation?",
+        "chosen": "Expose an MLflow-compatible contract through a replaceable adapter and keep the internal version, approval, and audit invariants provider-neutral.",
+        "chosenReason": "The ecosystem is reused while model data and governance remain portable.",
+        "alternatives": [
+          {"option": "Adopt one managed registry API end-to-end", "tradeoff": "It may reduce operations but can couple metadata, stages, and artifact semantics to that provider."},
+          {"option": "Invent a new client protocol immediately", "tradeoff": "It increases integration work without a stated requirement for a novel API."}
+        ]
+      },
+      "requirementIds": []
+    },
+    {
+      "id": "mlops003_add_git",
+      "stepNumber": 12,
+      "phase": "Register immutable artifacts with reproducible provenance",
+      "title": "Keep training code in version control",
+      "type": "add_component",
+      "content": "Use Git-based versioning for model code. A training run records the immutable commit SHA and configuration reference; the registry stores those identifiers with the model version rather than copying a moving branch name as lineage.",
+      "component": {
+        "nodeId": "mlops003_git",
+        "componentType": "github",
+        "label": "Model Code and Config Repository",
+        "description": "Versioned training code, environment lockfiles, and configuration.",
+        "position": {"x": 1500, "y": 55},
+        "properties": {
+          "componentName": "Model Code and Config Repository",
+          "purpose": "Pin training code and configuration to immutable commits for each registered model version.",
+          "actions": true
+        },
+        "highlightReason": "A branch name alone cannot reproduce the code that produced an artifact."
+      },
+      "requirementIds": ["legacy-requirement:7"]
+    },
+    {
+      "id": "mlops003_add_cicd",
+      "stepNumber": 13,
+      "phase": "Register immutable artifacts with reproducible provenance",
+      "title": "Use CI/CD for repeatable registration and deployment",
+      "type": "add_component",
+      "content": "The pipeline submits a signed manifest after training and evaluation, uploads the artifact using a registry-issued intent, and later consumes only an approved digest for deployment. GitHub Actions is an illustrative platform assumption because no CI/CD vendor is specified.",
+      "component": {
+        "nodeId": "mlops003_cicd",
+        "componentType": "ci-cd-pipeline",
+        "label": "Training and Deployment Pipeline",
+        "description": "Submits provenance, uploads candidates, and deploys approved digests.",
+        "position": {"x": 1500, "y": 325},
+        "properties": {
+          "componentName": "Training and Deployment Pipeline",
+          "purpose": "Register training outputs with provenance, upload candidate artifacts, and deploy only an approved immutable digest.",
+          "platform": "GitHub Actions",
+          "stages": "train -> evaluate -> register -> approve -> deploy"
+        },
+        "highlightReason": "Connects reproducible training outputs to governed automated deployment."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8"]
+    },
+    {
+      "id": "mlops003_add_metadata_db",
+      "stepNumber": 14,
+      "phase": "Register immutable artifacts with reproducible provenance",
+      "title": "Persist searchable version metadata separately from bytes",
+      "type": "add_component",
+      "content": "Store model name and version, digest and object reference, training parameters, named metrics, data/code/config lineage, model-card fields, stage pointers, approval evidence, and append-only audit entries in metadata tables. Use transactions and indexes for version lookup and metric predicates; never place large model binaries in these rows.",
+      "component": {
+        "nodeId": "mlops003_metadata_db",
+        "componentType": "database",
+        "label": "Version, Metrics, Lineage, and Audit Database",
+        "description": "Transactional source of truth for registry metadata and stage history.",
+        "position": {"x": 920, "y": 325},
+        "properties": {
+          "componentName": "Version, Metrics, Lineage, and Audit Database",
+          "purpose": "Transactionally store version manifests, metric values and indexes, lineage, model-card metadata, stage pointers, approvals, audit rows, and the event outbox.",
+          "type": "RDBMS",
+          "engine": "postgresql"
+        },
+        "highlightReason": "A transactional source of truth makes version, approval, and audit changes consistent."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlops003_add_artifact_store",
+      "stepNumber": 15,
+      "phase": "Register immutable artifacts with reproducible provenance",
+      "title": "Store large model files as immutable objects",
+      "type": "add_component",
+      "content": "Store artifacts in object storage with metadata in DB. Use opaque, version-scoped object keys, encryption, object versioning, and checksum verification; registry reads resolve an exact content digest and never a mutable latest key.",
+      "component": {
+        "nodeId": "mlops003_artifacts",
+        "componentType": "object-storage",
+        "label": "Immutable Model Artifact Store",
+        "description": "Private object storage for large, checksummed model artifacts.",
+        "position": {"x": 920, "y": 650},
+        "properties": {
+          "componentName": "Immutable Model Artifact Store",
+          "purpose": "Store model binaries by immutable version and digest; issue scoped upload/download URLs, encrypt objects, and verify checksums.",
+          "provider": "S3",
+          "versioning": true,
+          "checksumValidation": true
+        },
+        "highlightReason": "Separates scalable binary storage from transactional and searchable metadata."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:2"]
+    },
+    {
+      "id": "mlops003_git_cicd",
+      "stepNumber": 16,
+      "phase": "Register immutable artifacts with reproducible provenance",
+      "title": "Pin a training run to an immutable source revision",
+      "type": "add_connection",
+      "content": "The pipeline checks out a commit and records the resolved SHA, lockfile or image digest, and configuration revision in its run manifest. This makes code lineage reproducible even after branches move.",
+      "connection": {
+        "edgeId": "mlops003_git_to_cicd",
+        "sourceNodeId": "mlops003_git",
+        "targetNodeId": "mlops003_cicd",
+        "connectionType": "data-flow",
+        "label": "Pinned commit and training configuration",
+        "description": "CI/CD builds and trains from an immutable source commit and versioned configuration."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "mlops003_cicd_register",
+      "stepNumber": 17,
+      "phase": "Register immutable artifacts with reproducible provenance",
+      "title": "Register metrics and lineage with the artifact manifest",
+      "type": "add_connection",
+      "content": "Submit model name, idempotency key, training parameters, evaluation metrics, data snapshot, code SHA, configuration hash, container digest, model-card metadata, and artifact size/checksum. Reject a reused idempotency key with a different manifest instead of silently creating a conflicting version.",
+      "connection": {
+        "edgeId": "mlops003_cicd_to_api",
+        "sourceNodeId": "mlops003_cicd",
+        "targetNodeId": "mlops003_api",
+        "connectionType": "api-call",
+        "label": "Signed training manifest and deployment receipt",
+        "description": "Workload identity submits immutable code, data, config, parameter, metric, and artifact references; later deployment status is reported through the same API."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "mlops003_registry_upload_intent",
+      "stepNumber": 18,
+      "phase": "Register immutable artifacts with reproducible provenance",
+      "title": "Create the version before accepting artifact bytes",
+      "type": "add_connection",
+      "content": "After validating the manifest and caller, allocate a stable candidate version ID and issue a short-lived, scoped multipart-upload intent. A retry with the same idempotency key returns the same candidate rather than creating another version.",
+      "connection": {
+        "edgeId": "mlops003_registry_to_cicd_upload_intent",
+        "sourceNodeId": "mlops003_registry",
+        "targetNodeId": "mlops003_cicd",
+        "connectionType": "api-call",
+        "label": "Candidate version ID and scoped upload intent",
+        "description": "Registry returns an idempotent version identity and limited upload authorization before the pipeline transfers bytes."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2"]
+    },
+    {
+      "id": "mlops003_cicd_artifact_upload",
+      "stepNumber": 19,
+      "phase": "Register immutable artifacts with reproducible provenance",
+      "title": "Upload a large artifact without proxying it through the API",
+      "type": "add_connection",
+      "content": "The pipeline streams the artifact directly to object storage with multipart upload and a verified checksum; the API carries authorization and metadata, not up to 100GB of model bytes. Abort incomplete uploads and do not make an object readable as a registered version until validation succeeds.",
+      "connection": {
+        "edgeId": "mlops003_cicd_to_artifacts",
+        "sourceNodeId": "mlops003_cicd",
+        "targetNodeId": "mlops003_artifacts",
+        "connectionType": "data-flow",
+        "label": "Multipart artifact upload by candidate and digest",
+        "description": "Direct scoped transfer supports artifacts up to the stated 100GB constraint and records checksum and object-version metadata."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:2"]
+    },
+    {
+      "id": "mlops003_registry_metadata_db",
+      "stepNumber": 20,
+      "phase": "Register immutable artifacts with reproducible provenance",
+      "title": "Commit version metadata and governance evidence atomically",
+      "type": "add_connection",
+      "content": "Persist model/version identity, artifact digest and object version, parameters, metrics, lineage, model-card metadata, lifecycle state, approval records, and an append-only audit event in a transaction. Add unique keys for model/version and idempotency, indexes for common metric filters, and a concurrency-safe stage pointer. The same metadata store handles 10k+ versions without duplicating artifact bytes.",
+      "connection": {
+        "edgeId": "mlops003_registry_to_metadata_db",
+        "sourceNodeId": "mlops003_registry",
+        "targetNodeId": "mlops003_metadata_db",
+        "connectionType": "database-connection",
+        "label": "Version manifest, indexed metrics, lineage, stages, approvals, and audit",
+        "description": "Transactional reads and writes preserve version identity, metric-query indexes, lifecycle history, model lineage, and a same-transaction audit/outbox record."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlops003_artifact_identity",
+      "stepNumber": 21,
+      "phase": "Register immutable artifacts with reproducible provenance",
+      "title": "Bind every version to bytes, not to a mutable name",
+      "type": "decision_point",
+      "content": "Use the artifact digest and immutable object-version identifier as the content identity. A friendly version number remains a registry key, while stage aliases such as prod resolve to a particular digest. Reject attempts to overwrite a registered digest or rebind an existing version to different bytes.",
+      "decision": {
+        "question": "What does a registered model version identify?",
+        "chosen": "One immutable manifest and verified artifact digest, referenced by an immutable object version.",
+        "chosenReason": "Deployments, comparisons, and audit events can all refer to the exact bytes that were approved.",
+        "alternatives": [
+          {"option": "Resolve a mutable latest object key", "tradeoff": "A later upload could change what an approved version means."},
+          {"option": "Store only a user-supplied version label", "tradeoff": "Labels do not prove content identity or prevent collisions."}
+        ]
+      },
+      "requirementIds": []
+    },
+    {
+      "id": "mlops003_artifact_size_trigger",
+      "stepNumber": 22,
+      "phase": "Register immutable artifacts with reproducible provenance",
+      "title": "Treat 100GB as a per-artifact transfer constraint",
+      "type": "scale_trigger",
+      "content": "The brief caps model artifacts at 100GB; it does not give aggregate storage volume or upload concurrency. Use multipart/resumable transfer, checksum each completed object, and keep transfer off the request path. Select part sizing, parallelism, and incomplete-upload retention from measured network and cost behavior rather than inventing a throughput target.",
+      "scaleTrigger": {
+        "metric": "Artifact size reaches the stated maximum of 100GB",
+        "action": "Use resumable multipart upload directly to object storage; validate the final checksum and immutable object version before marking the candidate ready.",
+        "impact": "Large transfers do not consume API memory or hold a registry request open; partial or corrupt objects cannot be promoted."
+      },
+      "requirementIds": ["legacy-constraint:2"]
+    },
+    {
+      "id": "mlops003_lineage_manifest",
+      "stepNumber": 23,
+      "phase": "Register immutable artifacts with reproducible provenance",
+      "title": "Make data, code, and configuration lineage queryable",
+      "type": "explanation",
+      "content": "Support model lineage (data, code, config) by persisting immutable dataset snapshot IDs or digests, the Git commit SHA, configuration hash, training image digest, parameters, and evaluation metric names/values against the exact model version. Missing provenance should be an explicit validation result, not an empty string that appears complete.",
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:3"]
+    },
+    {
+      "id": "mlops003_metric_query_design",
+      "stepNumber": 24,
+      "phase": "Register immutable artifacts with reproducible provenance",
+      "title": "Make metric search an indexed registry operation",
+      "type": "decision_point",
+      "content": "Search and query models by metrics using typed metric names and numeric values, scoped by model, version, evaluation dataset, and evaluation-run ID. Define supported operators and pagination; avoid scanning serialized metric blobs. The prompt does not specify metric cardinality or latency, so start with relational indexes and observe real query plans before adding a separate search system.",
+      "decision": {
+        "question": "Where should metric comparison read its authoritative values?",
+        "chosen": "Use indexed normalized metric records in the metadata database as the source of truth for this stated 10k+ version scale.",
+        "chosenReason": "The required comparison remains consistent with version metadata and avoids introducing a second index with unrequested freshness guarantees.",
+        "alternatives": [
+          {"option": "Scan all version documents and parse JSON metrics", "tradeoff": "Query work grows with every version and makes filtering expensive."},
+          {"option": "Add a separate search index immediately", "tradeoff": "It adds operational and eventual-consistency behavior without a supplied query-rate or latency target."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "mlops003_model_card",
+      "stepNumber": 25,
+      "phase": "Register immutable artifacts with reproducible provenance",
+      "title": "Attach a versioned model card to each candidate",
+      "type": "explanation",
+      "content": "Implement model cards for documentation. Store the card's structured fields and revision with the model version; large supporting reports can be immutable artifact objects referenced by digest. Show the card beside metrics and lineage so reviewers see intended use, evaluation evidence, limitations, and owner before promotion. The brief does not prescribe a model-card template.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7"]
+    },
+    {
+      "id": "mlops003_add_validator",
+      "stepNumber": 26,
+      "phase": "Register immutable artifacts with reproducible provenance",
+      "title": "Verify uploaded bytes before the version becomes promotable",
+      "type": "add_component",
+      "content": "A background worker validates object existence and version, recomputes the digest, checks the manifest/artifact binding, and runs configured format and security checks. It reports a durable result to the registry; an upload-complete notification alone never means that a candidate passed.",
+      "component": {
+        "nodeId": "mlops003_validator",
+        "componentType": "processing-worker",
+        "label": "Artifact Verification Worker",
+        "description": "Verifies artifact digest, manifest binding, format, and configured safety checks.",
+        "position": {"x": 1210, "y": 650},
+        "properties": {
+          "componentName": "Artifact Verification Worker",
+          "purpose": "Verify completed object version and checksum, validate manifest and model format, and return a durable pass/fail result before stage eligibility.",
+          "tasks": "Data Processing",
+          "autoscale": true
+        },
+        "highlightReason": "Prevents incomplete, corrupt, or policy-rejected artifacts from entering a promotable stage."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4"]
+    },
+    {
+      "id": "mlops003_artifacts_validator",
+      "stepNumber": 27,
+      "phase": "Register immutable artifacts with reproducible provenance",
+      "title": "Trigger verification only after an object is finalized",
+      "type": "add_connection",
+      "content": "A finalized-object notification schedules verification. The worker reads the exact object version from the registration manifest and handles duplicate notifications idempotently.",
+      "connection": {
+        "edgeId": "mlops003_artifacts_to_validator",
+        "sourceNodeId": "mlops003_artifacts",
+        "targetNodeId": "mlops003_validator",
+        "connectionType": "event-stream",
+        "label": "Finalized object version and candidate identity",
+        "description": "Object-created events trigger idempotent validation against the exact registered candidate and immutable object version."
+      },
+      "requirementIds": ["legacy-requirement:2"]
+    },
+    {
+      "id": "mlops003_validator_registry",
+      "stepNumber": 28,
+      "phase": "Compare, approve, audit, and deploy exact versions",
+      "title": "Record validation outcome before exposing a candidate",
+      "type": "add_connection",
+      "content": "The worker returns the recomputed checksum, object-version ID, format/policy checks, and a durable pass/fail result. The registry transitions a passing candidate to dev eligibility; failures remain quarantined with a reason and cannot be selected by a stage alias.",
+      "connection": {
+        "edgeId": "mlops003_validator_to_registry",
+        "sourceNodeId": "mlops003_validator",
+        "targetNodeId": "mlops003_registry",
+        "connectionType": "api-call",
+        "label": "Verified digest and validation result",
+        "description": "The registry records a version-bound verification result and only makes passing immutable artifacts eligible for lifecycle transitions."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4"]
+    },
+    {
+      "id": "mlops003_add_event_bus",
+      "stepNumber": 29,
+      "phase": "Compare, approve, audit, and deploy exact versions",
+      "title": "Deliver committed registry changes asynchronously",
+      "type": "add_component",
+      "content": "Use a durable event bus for committed version, approval, stage-transition, and deployment-intent events. Events carry model/version IDs, content digest, event ID, and audit reference—not the artifact bytes or authority to bypass registry policy.",
+      "component": {
+        "nodeId": "mlops003_events",
+        "componentType": "message-broker",
+        "label": "Registry Change Event Bus",
+        "description": "Durable delivery for approved lifecycle and integration events.",
+        "position": {"x": 1210, "y": 325},
+        "properties": {
+          "componentName": "Registry Change Event Bus",
+          "purpose": "Deliver committed registry and approval events to deployment integrations and operational monitoring; consumers deduplicate by event ID.",
+          "durable": true
+        },
+        "highlightReason": "Keeps webhooks and downstream integrations off the registry transaction path."
+      },
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "mlops003_add_monitoring",
+      "stepNumber": 30,
+      "phase": "Compare, approve, audit, and deploy exact versions",
+      "title": "Observe registry health without becoming its source of truth",
+      "type": "add_component",
+      "content": "Monitor API errors and latency, upload and validation failures, database query behavior, outbox age, event-delivery lag, and deployment callback failures. Operational metrics complement the required model-change audit trail; they do not replace it.",
+      "component": {
+        "nodeId": "mlops003_monitoring",
+        "componentType": "monitoring",
+        "label": "Registry Operations Monitoring",
+        "description": "Tracks service health, validation, event delivery, and deployment integration.",
+        "position": {"x": 920, "y": 55},
+        "properties": {
+          "componentName": "Registry Operations Monitoring",
+          "purpose": "Observe registry API, metadata queries, artifact verification, event delivery, and CI/CD callback health.",
+          "metrics": true,
+          "alerts": true
+        },
+        "highlightReason": "Operational visibility surfaces stalled validation or integration without confusing telemetry with audit evidence."
+      },
+      "requirementIds": []
+    },
+    {
+      "id": "mlops003_db_outbox_events",
+      "stepNumber": 31,
+      "phase": "Compare, approve, audit, and deploy exact versions",
+      "title": "Publish from a transactional outbox",
+      "type": "add_connection",
+      "content": "The outbox row is committed in the same database transaction as the version, approval, audit, or stage change. A registry-owned relay publishes and retries it; consumers are idempotent. This avoids losing an integration event if the service crashes after committing state but before sending a webhook.",
+      "connection": {
+        "edgeId": "mlops003_metadata_db_to_events",
+        "sourceNodeId": "mlops003_metadata_db",
+        "targetNodeId": "mlops003_events",
+        "connectionType": "event-stream",
+        "label": "Committed outbox events for versions and approvals",
+        "description": "A retryable outbox relay publishes only events whose registry state and audit record have committed atomically."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlops003_events_cicd",
+      "stepNumber": 32,
+      "phase": "Compare, approve, audit, and deploy exact versions",
+      "title": "Deploy only after the approved transition commits",
+      "type": "add_connection",
+      "content": "Integrate with deployment tools via webhooks. Emit a signed, idempotent event only after the approval and production stage pointer commit; the deployment pipeline fetches the exact approved digest, never a mutable latest tag. Report its deployment result back through the registry API.",
+      "connection": {
+        "edgeId": "mlops003_events_to_cicd",
+        "sourceNodeId": "mlops003_events",
+        "targetNodeId": "mlops003_cicd",
+        "connectionType": "message-queue",
+        "label": "Approved digest deployment webhook",
+        "description": "Durable, signed, idempotent promotion event triggers deployment of the exact approved artifact digest."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-requirement:5"]
+    },
+    {
+      "id": "mlops003_registry_monitoring",
+      "stepNumber": 33,
+      "phase": "Compare, approve, audit, and deploy exact versions",
+      "title": "Measure registry and artifact-path health",
+      "type": "add_connection",
+      "content": "Export service and worker indicators such as registration errors, metric-query latency, checksum mismatch, verification queue age, and stage-transition conflicts. No numeric alert threshold is specified by the prompt; set thresholds after establishing a baseline and a product SLO.",
+      "connection": {
+        "edgeId": "mlops003_registry_to_monitoring",
+        "sourceNodeId": "mlops003_registry",
+        "targetNodeId": "mlops003_monitoring",
+        "connectionType": "event-stream",
+        "label": "Registry, query, and transition health metrics",
+        "description": "Registry and validation operations expose bounded operational metrics and failure counters without placing secrets or model payloads in telemetry."
+      },
+      "requirementIds": []
+    },
+    {
+      "id": "mlops003_events_monitoring",
+      "stepNumber": 34,
+      "phase": "Compare, approve, audit, and deploy exact versions",
+      "title": "Alert on stalled downstream delivery",
+      "type": "add_connection",
+      "content": "Track oldest outbox age, consumer lag, webhook retries, dead-letter count, and deployment receipt freshness. A committed approval remains visible in the registry even while downstream deployment is delayed or failing.",
+      "connection": {
+        "edgeId": "mlops003_events_to_monitoring",
+        "sourceNodeId": "mlops003_events",
+        "targetNodeId": "mlops003_monitoring",
+        "connectionType": "event-stream",
+        "label": "Outbox lag, delivery retries, and dead letters",
+        "description": "Event delivery health is observable and can be alerted on independently of the durable registry state."
+      },
+      "requirementIds": []
+    },
+    {
+      "id": "mlops003_comparison_workflow",
+      "stepNumber": 35,
+      "phase": "Compare, approve, audit, and deploy exact versions",
+      "title": "Compare versions on aligned evaluation evidence",
+      "type": "explanation",
+      "content": "Implement model comparison dashboards. Compare named metrics only when their evaluation dataset, metric definition, and relevant model context are compatible; show missing values rather than treating them as zero. Keep comparisons paginated and link every result back to its immutable version and model card.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7"]
+    },
+    {
+      "id": "mlops003_approval_gate",
+      "stepNumber": 36,
+      "phase": "Compare, approve, audit, and deploy exact versions",
+      "title": "Make production promotion an explicit approval workflow",
+      "type": "decision_point",
+      "content": "A candidate advances through dev, staging, and prod according to a configured policy. For this draft, production requires an authorized human approval with reviewer, timestamp, decision, and evidence; require a distinct approver from the submitter if governance confirms separation of duties. Stage movement uses a compare-and-swap so concurrent approvals cannot silently overwrite a newer production alias.",
+      "decision": {
+        "question": "What does an approval authorize?",
+        "chosen": "A reviewed transition of one exact immutable version to the next permitted stage, recorded with actor, evidence, and expected prior stage-pointer revision.",
+        "chosenReason": "The approval is auditable and cannot accidentally authorize different bytes or overwrite a concurrent promotion.",
+        "alternatives": [
+          {"option": "Let any model writer set the prod label", "tradeoff": "Training credentials gain production authority and the approval requirement is bypassed."},
+          {"option": "Approve a mutable model name without a digest", "tradeoff": "The deployed artifact can differ from the one that reviewers evaluated."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "mlops003_rbac_boundary",
+      "stepNumber": 37,
+      "phase": "Compare, approve, audit, and deploy exact versions",
+      "title": "Keep role checks server-side and scoped",
+      "type": "explanation",
+      "content": "Role-based access control for model promotion is evaluated for the authenticated subject, model scope, requested transition, and approval policy. A hidden or disabled button is only UX; direct API calls must receive the same authorization check. Define read, register, approve, promote, and audit-read permissions separately with least privilege.",
+      "requirementIds": ["legacy-constraint:4", "legacy-requirement:5"]
+    },
+    {
+      "id": "mlops003_audit_atomicity",
+      "stepNumber": 38,
+      "phase": "Compare, approve, audit, and deploy exact versions",
+      "title": "Make the audit trail part of each state change",
+      "type": "decision_point",
+      "content": "Audit trail for all model changes means every create, metadata update, approval, stage transition, and revocation has an append-only record with actor, time, before/after references, reason, version digest, and request/event ID. Commit the audit row and business mutation together. Restrict audit mutation/deletion separately and define retention and export requirements with governance owners; those details are not in the brief.",
+      "decision": {
+        "question": "How can an audit event survive process failure without disagreeing with registry state?",
+        "chosen": "Write the append-only audit record and transactional outbox row in the same database transaction as each governed change.",
+        "chosenReason": "A rollback removes both; a commit preserves both, while asynchronous integrations can retry from the outbox.",
+        "alternatives": [
+          {"option": "Write audit only to application logs", "tradeoff": "Logs can be sampled, expire, or be unavailable when a governed record is reviewed."},
+          {"option": "Publish to the broker before committing the version", "tradeoff": "Consumers can observe a change that later rolls back."}
+        ]
+      },
+      "requirementIds": ["legacy-constraint:5"]
+    },
+    {
+      "id": "mlops003_scale_versions",
+      "stepNumber": 39,
+      "phase": "Compare, approve, audit, and deploy exact versions",
+      "title": "Scale the metadata path against the 10k+ version floor",
+      "type": "scale_trigger",
+      "content": "Support 10k+ model versions by paginating registry listings, indexing model/version and common metric predicates, and keeping artifact payloads in object storage. The version count is a minimum capability, not a stated request rate or maximum catalog size.",
+      "scaleTrigger": {
+        "metric": "Registered versions reach or exceed 10k, or measured metric queries no longer meet the product's eventual SLO",
+        "action": "Review query plans and index selectivity, partition or archive history only under a defined retention policy, and introduce a derived search projection only when observed workload requires it.",
+        "impact": "The relational metadata remains authoritative while the design can expand without prematurely adding a second source of truth."
+      },
+      "requirementIds": ["legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "mlops003_metric_failure_behavior",
+      "stepNumber": 40,
+      "phase": "Compare, approve, audit, and deploy exact versions",
+      "title": "Make incomplete metric evidence visible",
+      "type": "explanation",
+      "content": "If a metric is absent, uses a different definition, or was computed on a different evaluation dataset, mark it incomparable and let the reviewer inspect the context. Do not silently compare unlike runs or coerce missing values. Record metric schema/version changes so older model comparisons remain interpretable.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6"]
+    },
+    {
+      "id": "mlops003_retry_and_recovery",
+      "stepNumber": 41,
+      "phase": "Compare, approve, audit, and deploy exact versions",
+      "title": "Recover safely from duplicate or partial work",
+      "type": "explanation",
+      "content": "Use idempotency keys for registration, artifact validation, approvals, outbox publishing, and webhooks. Retry transient failures with bounded backoff; keep permanent checksum, manifest, or authorization failures visible and non-promotable. If deployment fails after an approved transition, retain the approved digest and report deployment status separately rather than rewriting audit history.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlops003_end_to_end_review",
+      "stepNumber": 42,
+      "phase": "Compare, approve, audit, and deploy exact versions",
+      "title": "Walk one candidate from training to production",
+      "type": "conclusion",
+      "content": "A training run pins code, data, and configuration; submits parameters, metrics, model-card metadata, and an artifact manifest; receives an immutable version ID; uploads up to 100GB directly to object storage; waits for checksum and policy verification; and becomes a dev candidate. Reviewers compare compatible metrics and lineage, an authorized approver commits a staged transition with an audit event, and a durable webhook asks CI/CD to deploy the exact digest. Every retry is idempotent, and a failed downstream deployment does not erase the approved registry state.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlops003_local_draft_gate",
+      "stepNumber": 43,
+      "phase": "Compare, approve, audit, and deploy exact versions",
+      "title": "Verify the release against representative workload",
+      "type": "explanation",
+      "content": "Before release, validate the registry against representative traffic: concurrent artifact uploads up to the stated size, metric search across the stated version count, RBAC denials, approval/audit integrity, and retry/recovery. Agree latency, availability, and retention objectives with owners before claiming them.",
+      "requirementIds": []
+    }
+  ]
+}

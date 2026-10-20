@@ -1,0 +1,887 @@
+{
+  "problem_id": "cloud_aws_004",
+  "version": "1.0-review",
+  "totalSteps": 48,
+  "phases": [
+    {
+      "name": "Frame the workload and separate evidence",
+      "stepRange": [1, 7],
+      "description": "Lock the supplied brief as facts, then surface the sizing and operational questions that still need answers."
+    },
+    {
+      "name": "Schedule and orchestrate the dependency graph",
+      "stepRange": [8, 17],
+      "description": "Create the schedule entry point, durable workflow, Batch boundary, and explicit dependency/status flow."
+    },
+    {
+      "name": "Move data through elastic batch compute",
+      "stepRange": [18, 31],
+      "description": "Keep large data in S3, process partitions on Spot-backed workers, and persist output and restart checkpoints."
+    },
+    {
+      "name": "Make failures recoverable and observable",
+      "stepRange": [32, 42],
+      "description": "Separate transient retries from permanent failures, observe job health, and route actionable notifications."
+    },
+    {
+      "name": "Validate cost, parallelism, and SLA",
+      "stepRange": [43, 48],
+      "description": "Use measured completion and cost signals to tune parallel capacity without promising unverified targets."
+    }
+  ],
+  "steps": [
+    {
+      "id": "batch_01",
+      "stepNumber": 1,
+      "phase": "Frame the workload and separate evidence",
+      "title": "Keep the supplied problem brief as the source of truth",
+      "type": "explanation",
+      "content": "Provided description: Design a batch processing system that can process large datasets efficiently while minimizing compute costs and handling interruptions gracefully. Provided functional requirements: Process large datasets in batches; Minimize compute costs; Handle interruptions gracefully; Schedule batch jobs; Manage job dependencies; Store input/output data efficiently; Monitor job progress; Retry failed jobs automatically. Provided constraints: Reduce costs by 70% compared to on-demand; Handle spot instance interruptions; Complete jobs within SLA timeframes; Support parallel job execution; Maintain job state across failures. Provided hints: Use EC2 Spot Instances for compute; AWS Batch for job orchestration; S3 for input/output storage; Step Functions for workflow; CloudWatch Events for scheduling; SNS for job notifications. These are the brief's facts, not proof that any target has already been met."
+    },
+    {
+      "id": "batch_02",
+      "stepNumber": 2,
+      "phase": "Frame the workload and separate evidence",
+      "title": "List open questions without turning them into requirements",
+      "type": "explanation",
+      "content": "Questions for the interviewer: How large are typical and worst-case datasets, and how do they arrive? What is the schedule cadence and allowed lateness? What event starts and ends the SLA clock? Which jobs depend on earlier outputs, and which partitions may run independently? How long must inputs, outputs, and checkpoints be retained? Which failures are safe to retry? No traffic rate, dataset size, latency target, retention period, retry count, region policy, or SLA duration is specified in the brief."
+    },
+    {
+      "id": "batch_03",
+      "stepNumber": 3,
+      "phase": "Frame the workload and separate evidence",
+      "title": "Mark the data-partition model as an assumption to validate",
+      "type": "decision_point",
+      "content": "Assumption, not a supplied fact: a large input can be divided into bounded partitions or chunks whose outputs can be committed independently. Validate ordering, skew, and cross-partition joins with the data owner before fixing the job contract.",
+      "decision": {
+        "question": "Can the dataset be partitioned so a failed unit can resume without recomputing the entire input?",
+        "chosen": "Proceed with independently addressable partitions as a design assumption, and confirm the partition key and ordering rules before implementation.",
+        "chosenReason": "Partition-level work enables parallel execution and bounded recovery, but the brief does not describe the dataset shape.",
+        "alternatives": [
+          {
+            "option": "Assume one monolithic job over the entire dataset",
+            "tradeoff": "It simplifies the first diagram but increases restart cost and can make the SLA depend on one long-running task."
+          },
+          {
+            "option": "Choose a partition key before learning the data semantics",
+            "tradeoff": "A poor key can create skew or break required ordering and cross-record logic."
+          }
+        ]
+      }
+    },
+    {
+      "id": "batch_04",
+      "stepNumber": 4,
+      "phase": "Frame the workload and separate evidence",
+      "title": "Decide what a retry is allowed to repeat",
+      "type": "decision_point",
+      "content": "Assumption to validate: a partition's effects can be made idempotent, or its committed output can be detected before a retry writes again. Keep the input identity, job-run identity, partition identity, and output commit marker together so an interrupted attempt can resume safely.",
+      "decision": {
+        "question": "What is the smallest safe retry unit after a worker interruption?",
+        "chosen": "Retry an idempotent partition from its last durable checkpoint, with output commits keyed so duplicate attempts do not create duplicate results.",
+        "chosenReason": "This bounds replay while protecting correctness; the actual partition contract must be confirmed with the workload owner.",
+        "alternatives": [
+          {
+            "option": "Restart the full dataset for every failure",
+            "tradeoff": "Easy to reason about initially, but may waste compute and threaten the completion window."
+          },
+          {
+            "option": "Retry a partition without an idempotent output rule",
+            "tradeoff": "A retry after an ambiguous write can duplicate or corrupt results."
+          }
+        ]
+      }
+    },
+    {
+      "id": "batch_05",
+      "stepNumber": 5,
+      "phase": "Frame the workload and separate evidence",
+      "title": "Define the cost comparison before tuning Spot capacity",
+      "type": "decision_point",
+      "content": "The brief states a 70% cost-reduction constraint compared with on-demand. Treat it as a target to demonstrate, not a result to claim from the diagram. Agree on an equivalent on-demand baseline and count compute, retries, storage, data transfer, and unfinished work in the comparison.",
+      "decision": {
+        "question": "What evidence would show whether the cost target is being met?",
+        "chosen": "Compare measured all-in cost per successfully completed workload against the agreed on-demand baseline over representative runs.",
+        "chosenReason": "A Spot discount alone does not account for interruptions, retries, idle capacity, or storage and transfer costs.",
+        "alternatives": [
+          {
+            "option": "Treat the Spot price difference as the total saving",
+            "tradeoff": "It can overstate savings when failed work, idle workers, or non-compute costs are material."
+          },
+          {
+            "option": "Declare the 70% target achieved from configuration alone",
+            "tradeoff": "Configuration is not measured workload evidence."
+          }
+        ]
+      }
+    },
+    {
+      "id": "batch_06",
+      "stepNumber": 6,
+      "phase": "Frame the workload and separate evidence",
+      "title": "Make the SLA measurable before choosing capacity",
+      "type": "decision_point",
+      "content": "The brief requires completion within SLA timeframes but supplies no duration. Ask when the clock starts, whether queueing and retries count, and which workloads have distinct deadlines. Carry the agreed deadline into scheduling, queue-age alarms, and the capacity decision.",
+      "decision": {
+        "question": "How should the team decide whether the scheduled run completed within its SLA?",
+        "chosen": "Record the agreed start event, completion event, and deadline per workload; do not insert a numerical SLA that the brief does not contain.",
+        "chosenReason": "Capacity fallback and cost tradeoffs require a measurable deadline, while the prompt leaves its value open.",
+        "alternatives": [
+          {
+            "option": "Measure only worker runtime",
+            "tradeoff": "This can omit schedule delay, queue wait, dependency wait, and retries."
+          },
+          {
+            "option": "Assume every scheduled job has the same deadline",
+            "tradeoff": "The brief does not establish that all workloads share one SLA."
+          }
+        ]
+      }
+    },
+    {
+      "id": "batch_07",
+      "stepNumber": 7,
+      "phase": "Frame the workload and separate evidence",
+      "title": "Use the SLA as a scale signal, not an invented traffic target",
+      "type": "scale_trigger",
+      "content": "No request rate or dataset-size threshold is supplied. Derive capacity from observed partitions, processing time, queue wait, and the agreed completion deadline.",
+      "scaleTrigger": {
+        "metric": "Projected job completion time compared with the agreed SLA deadline",
+        "action": "When the projected finish threatens the deadline, inspect dependency waits and partition skew, then decide whether additional parallel capacity or a less interruption-prone capacity mix is justified.",
+        "impact": "The scale decision is tied to the stated completion constraint and measured workload rather than an invented request-rate number."
+      }
+    },
+    {
+      "id": "batch_08",
+      "stepNumber": 8,
+      "phase": "Schedule and orchestrate the dependency graph",
+      "title": "Add the schedule trigger using the existing custom catalog node",
+      "type": "add_component",
+      "content": "The catalog has no dedicated EventBridge or CloudWatch Events palette entry, so use its supported Custom Component type and name the service explicitly. The supplied hint says CloudWatch Events; confirm the intended schedule semantics and service naming with the team. Leave the cadence unspecified until it is provided.",
+      "component": {
+        "nodeId": "batch_scheduler",
+        "componentType": "custom-component",
+        "label": "Amazon EventBridge Scheduler",
+        "description": "Starts an agreed batch workflow on its schedule",
+        "position": { "x": 0, "y": 0 },
+        "properties": {
+          "componentName": "Amazon EventBridge Scheduler",
+          "purpose": "Start the batch workflow on the agreed schedule. The schedule cadence, timezone, catch-up behavior, and duplicate-start policy remain questions for the workload owner.",
+          "componentType": "Schedule Trigger",
+          "technology": "Amazon EventBridge Scheduler",
+          "notes": "The supplied hint names CloudWatch Events. Confirm the expected schedule semantics and terminology; no cadence is assumed."
+        },
+        "highlightReason": "The component catalog has no dedicated AWS scheduler entry; this uses the real generic custom-component palette item and its supported fields."
+      },
+      "requirementIds": ["legacy-requirement:4"]
+    },
+    {
+      "id": "batch_09",
+      "stepNumber": 9,
+      "phase": "Schedule and orchestrate the dependency graph",
+      "title": "Add Step Functions as the durable workflow coordinator",
+      "type": "add_component",
+      "content": "Use the custom catalog item because there is no dedicated Step Functions type. The workflow owns run identity, dependency order, task submission, and terminal status. Standard Workflow is an explicit design choice to discuss against execution duration and workflow semantics; it is not a new problem requirement.",
+      "component": {
+        "nodeId": "batch_workflow",
+        "componentType": "custom-component",
+        "label": "AWS Step Functions Standard Workflow",
+        "description": "Coordinates scheduled runs, dependencies, retries, and completion state",
+        "position": { "x": 350, "y": 0 },
+        "properties": {
+          "componentName": "AWS Step Functions Standard Workflow",
+          "purpose": "Create a run, order dependent batch jobs, pass compact manifest references, wait for job outcomes, and record the terminal state for the run.",
+          "componentType": "Workflow Orchestrator",
+          "technology": "AWS Step Functions Standard",
+          "notes": "Confirm Standard versus Express from duration, execution-history, and cost requirements; the brief does not specify these values."
+        },
+        "highlightReason": "The catalog has no dedicated Step Functions palette entry, so this names the AWS service through the supported generic custom component."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "batch_10",
+      "stepNumber": 10,
+      "phase": "Schedule and orchestrate the dependency graph",
+      "title": "Connect the schedule to one workflow execution",
+      "type": "add_connection",
+      "content": "The trigger starts a workflow run, not one worker per input object. The workflow assigns a run identity and applies the agreed duplicate or catch-up policy before submitting work.",
+      "connection": {
+        "edgeId": "schedule_starts_workflow",
+        "sourceNodeId": "batch_scheduler",
+        "targetNodeId": "batch_workflow",
+        "connectionType": "api-call",
+        "label": "Scheduled run trigger",
+        "description": "Start the workflow for the agreed schedule occurrence; cadence and duplicate-start handling remain explicit discovery questions."
+      },
+      "requirementIds": ["legacy-requirement:4"]
+    },
+    {
+      "id": "batch_11",
+      "stepNumber": 11,
+      "phase": "Schedule and orchestrate the dependency graph",
+      "title": "Choose how a late or overlapping schedule is handled",
+      "type": "decision_point",
+      "content": "This policy is not stated in the brief. Ask whether missed occurrences should be skipped, caught up, or coalesced, and whether two runs may overlap. Make the choice visible in the workflow's run identity and schedule configuration rather than allowing accidental duplicate processing.",
+      "decision": {
+        "question": "What should happen if a scheduled run is still active when the next occurrence arrives?",
+        "chosen": "Require the workload owner to select a catch-up and concurrency policy; use a run identity and idempotency check so the selected policy is enforced consistently.",
+        "chosenReason": "No overlap or missed-run behavior is supplied, and silently choosing one could skip or duplicate work.",
+        "alternatives": [
+          {
+            "option": "Always start another full run",
+            "tradeoff": "Can create contention and duplicate work when a prior run is delayed."
+          },
+          {
+            "option": "Always discard a late occurrence",
+            "tradeoff": "Can violate business expectations if each scheduled dataset must be processed."
+          }
+        ]
+      }
+    },
+    {
+      "id": "batch_12",
+      "stepNumber": 12,
+      "phase": "Schedule and orchestrate the dependency graph",
+      "title": "Represent dependencies as a directed job graph",
+      "type": "explanation",
+      "content": "The workflow records which jobs depend on which upstream outputs. Submit only runnable jobs; release a dependent job after its prerequisites have a successful terminal result. Independent partitions can run in parallel, while a failed prerequisite blocks only its dependent branch according to the agreed recovery policy."
+    },
+    {
+      "id": "batch_13",
+      "stepNumber": 13,
+      "phase": "Schedule and orchestrate the dependency graph",
+      "title": "Ask which dependencies are ordering constraints versus data inputs",
+      "type": "decision_point",
+      "content": "A dependency may mean 'wait for this job to succeed' or 'consume this job's output.' Capture both the predecessor identity and the output reference. This avoids serializing independent work merely because it shares a workflow.",
+      "decision": {
+        "question": "Which jobs must wait for earlier jobs, and which can proceed independently?",
+        "chosen": "Model only supplied data or ordering dependencies; allow independent partitions to fan out and join at explicit downstream steps.",
+        "chosenReason": "This satisfies dependency management without sacrificing the parallelism constraint through an unnecessarily serial workflow.",
+        "alternatives": [
+          {
+            "option": "Run every job sequentially",
+            "tradeoff": "Reduces parallelism and can waste the available SLA window."
+          },
+          {
+            "option": "Run every job concurrently",
+            "tradeoff": "Can violate data dependencies and overload downstream storage or compute."
+          }
+        ]
+      }
+    },
+    {
+      "id": "batch_14",
+      "stepNumber": 14,
+      "phase": "Schedule and orchestrate the dependency graph",
+      "title": "Add AWS Batch for queues, job definitions, and compute placement",
+      "type": "add_component",
+      "content": "The catalog has no dedicated AWS Batch entry. Use its generic custom component and name the service, then configure queues, job definitions, and compute environments in the AWS design. Keep retry policy separate from workflow-level retries so one fault does not multiply attempts invisibly.",
+      "component": {
+        "nodeId": "aws_batch",
+        "componentType": "custom-component",
+        "label": "AWS Batch Job Queue + Compute Environment",
+        "description": "Accepts job definitions, schedules runnable work, and places jobs on compute capacity",
+        "position": { "x": 700, "y": 0 },
+        "properties": {
+          "componentName": "AWS Batch Job Queue + Compute Environment",
+          "purpose": "Orchestrate partition jobs through queues and job definitions, place runnable work on the selected capacity mix, and expose per-job attempts and status.",
+          "componentType": "Batch Job Orchestrator",
+          "technology": "AWS Batch",
+          "notes": "Use EC2 Spot capacity as prompted; diversify compatible capacity and decide whether an on-demand fallback is justified by the measured SLA and cost tradeoff. Do not claim the 70% target until measured."
+        },
+        "highlightReason": "No AWS Batch palette entry exists; the semantically named AWS Batch custom node uses only supported custom-component properties."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "batch_15",
+      "stepNumber": 15,
+      "phase": "Schedule and orchestrate the dependency graph",
+      "title": "Submit only dependency-ready jobs to AWS Batch",
+      "type": "add_connection",
+      "content": "The workflow passes the run identity, job definition, dependency information, and compact input references. AWS Batch places runnable work; the workflow remains responsible for the higher-level dependency graph and run outcome.",
+      "connection": {
+        "edgeId": "workflow_submits_batch_jobs",
+        "sourceNodeId": "batch_workflow",
+        "targetNodeId": "aws_batch",
+        "connectionType": "api-call",
+        "label": "Submit dependency-ready jobs",
+        "description": "Step Functions submits jobs after prerequisite checks and passes run, partition, and input references rather than dataset payloads."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "batch_16",
+      "stepNumber": 16,
+      "phase": "Schedule and orchestrate the dependency graph",
+      "title": "Return job outcomes to the workflow",
+      "type": "add_connection",
+      "content": "The workflow needs a terminal result to release dependent work, retry a transient failure, or mark the run failed. Preserve the job and run identifiers in status so operators can trace the result to its input and attempts.",
+      "connection": {
+        "edgeId": "batch_reports_to_workflow",
+        "sourceNodeId": "aws_batch",
+        "targetNodeId": "batch_workflow",
+        "connectionType": "event-stream",
+        "label": "Job status and completion result",
+        "description": "Return success, retryable failure, terminal failure, and job identity to the owning workflow execution."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "batch_17",
+      "stepNumber": 17,
+      "phase": "Schedule and orchestrate the dependency graph",
+      "title": "Scale against queued work and deadline risk",
+      "type": "scale_trigger",
+      "content": "Do not alarm on queue depth alone: queued work may be expected while dependencies run. Pair queue age and runnable backlog with measured processing duration and the remaining SLA budget.",
+      "scaleTrigger": {
+        "metric": "Runnable queue backlog and projected completion compared with remaining SLA time",
+        "action": "If runnable work threatens the deadline, check capacity availability and dependency blockage, then raise parallel capacity only within the job's resource and downstream limits.",
+        "impact": "A measured deadline signal can improve completion time without continuously paying for idle workers."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "batch_18",
+      "stepNumber": 18,
+      "phase": "Move data through elastic batch compute",
+      "title": "Add S3 input storage from the existing object-storage catalog",
+      "type": "add_component",
+      "content": "Use the catalog's Object Storage component and set its supported provider to S3. Keep large payloads in S3; the workflow passes object or manifest references so orchestration state does not become a data-transfer path.",
+      "component": {
+        "nodeId": "input_data_s3",
+        "componentType": "object-storage",
+        "label": "Amazon S3 Input Data + Manifest",
+        "description": "Stores source datasets and compact manifests that identify processable partitions",
+        "position": { "x": 350, "y": 250 },
+        "properties": {
+          "componentName": "Amazon S3 Input Data + Manifest",
+          "purpose": "Store input objects and a manifest of dataset and partition references. Workers stream or read bounded ranges from S3 instead of loading the full dataset into memory.",
+          "provider": "S3",
+          "versioning": true,
+          "checksumValidation": true
+        },
+        "highlightReason": "Object Storage is the catalog's S3-compatible component and exposes the provider, versioning, and checksum properties used here."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6"]
+    },
+    {
+      "id": "batch_19",
+      "stepNumber": 19,
+      "phase": "Move data through elastic batch compute",
+      "title": "Pass a compact manifest reference through the workflow",
+      "type": "add_connection",
+      "content": "The workflow reads or receives manifest metadata and passes S3 references and partition identifiers to each job. Do not copy the large dataset through Step Functions state or embed it in a job-submission payload.",
+      "connection": {
+        "edgeId": "workflow_reads_input_manifest",
+        "sourceNodeId": "batch_workflow",
+        "targetNodeId": "input_data_s3",
+        "connectionType": "data-flow",
+        "label": "Resolve manifest and S3 references",
+        "description": "Use compact manifest metadata to create the dependency-aware partition plan; dataset bytes remain in S3."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6"]
+    },
+    {
+      "id": "batch_20",
+      "stepNumber": 20,
+      "phase": "Move data through elastic batch compute",
+      "title": "Add EC2 Spot processing workers from the worker catalog",
+      "type": "add_component",
+      "content": "Processing Worker is a direct catalog match for the background compute role. Name it as the Spot worker pool and describe AWS Batch placement; do not invent an EC2-specific component type. Choose instance families and per-job resource requests after measuring the workload rather than assigning unsupported capacity numbers here.",
+      "component": {
+        "nodeId": "spot_workers",
+        "componentType": "processing-worker",
+        "label": "EC2 Spot Batch Workers",
+        "description": "Process independent data partitions on AWS Batch-managed Spot capacity",
+        "position": { "x": 1050, "y": 0 },
+        "properties": {
+          "componentName": "EC2 Spot Batch Workers",
+          "purpose": "Run data-processing partitions on EC2 Spot capacity placed by AWS Batch. Handle termination signals, stop at a safe partition boundary, and resume from durable checkpoints; use measured resource requests and compatible capacity diversity.",
+          "tasks": "Data Processing"
+        },
+        "highlightReason": "Processing Worker is the existing catalog type for background job processors and supports the selected data-processing task."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-constraint:2",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "batch_21",
+      "stepNumber": 21,
+      "phase": "Move data through elastic batch compute",
+      "title": "Dispatch runnable partitions to available workers",
+      "type": "add_connection",
+      "content": "AWS Batch owns compute placement and the queue of runnable jobs. Independent partitions may execute in parallel, subject to job resource requests, available Spot capacity, and any downstream limits established by measurement.",
+      "connection": {
+        "edgeId": "batch_dispatches_to_spot_workers",
+        "sourceNodeId": "aws_batch",
+        "targetNodeId": "spot_workers",
+        "connectionType": "message-queue",
+        "label": "Dispatch runnable partition jobs",
+        "description": "Place dependency-ready AWS Batch jobs on Spot-backed worker capacity with measured resource requests."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "batch_22",
+      "stepNumber": 22,
+      "phase": "Move data through elastic batch compute",
+      "title": "Read partition data directly from S3",
+      "type": "add_connection",
+      "content": "Workers fetch only their assigned input ranges or objects. Stream large objects where supported, use bounded local scratch, and avoid turning worker memory or workflow payloads into a second copy of the full dataset.",
+      "connection": {
+        "edgeId": "input_s3_to_workers",
+        "sourceNodeId": "input_data_s3",
+        "targetNodeId": "spot_workers",
+        "connectionType": "data-flow",
+        "label": "Read assigned input partitions",
+        "description": "Workers fetch the manifest-selected S3 objects or ranges for their partition and validate the input before processing."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "batch_23",
+      "stepNumber": 23,
+      "phase": "Move data through elastic batch compute",
+      "title": "Scale partitioning when dataset shape changes",
+      "type": "scale_trigger",
+      "content": "The brief says datasets are large but gives no byte count or object count. Observe bytes and partitions processed, per-partition duration, and skew before changing partition granularity.",
+      "scaleTrigger": {
+        "metric": "Input volume, partition completion time, and observed skew for the current run",
+        "action": "If a small number of oversized or skewed partitions dominate completion time, revise the partition plan and job resource requests, then load-test the change.",
+        "impact": "Balanced work improves useful parallelism without assuming a dataset size or fixed batch size."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "batch_24",
+      "stepNumber": 24,
+      "phase": "Move data through elastic batch compute",
+      "title": "Choose streaming or bounded reads based on the data format",
+      "type": "decision_point",
+      "content": "This is a data-format decision, not a new brief requirement. Ask whether partitions can be read independently and whether the processing library supports streaming. Validate checksums and distinguish a malformed input from a transient S3 or worker failure.",
+      "decision": {
+        "question": "How should a worker consume an input that is too large to fit comfortably in memory?",
+        "chosen": "Prefer streaming or bounded partition reads when the file format supports them; otherwise size the job around a measured bounded partition and document the format constraint.",
+        "chosenReason": "The design must handle large datasets without inventing a dataset size or promising memory behavior the format may not support.",
+        "alternatives": [
+          {
+            "option": "Load each entire dataset into worker memory",
+            "tradeoff": "Can increase instance cost and make large inputs fail from memory pressure."
+          },
+          {
+            "option": "Split data without respecting its format or record boundaries",
+            "tradeoff": "Can produce invalid or incomplete results."
+          }
+        ]
+      }
+    },
+    {
+      "id": "batch_25",
+      "stepNumber": 25,
+      "phase": "Move data through elastic batch compute",
+      "title": "Add S3 for durable checkpoints and completed outputs",
+      "type": "add_component",
+      "content": "Use a separate logical output/checkpoint location so a partially completed run cannot be mistaken for a published result. Versioning and checksums are supported catalog settings; retention and lifecycle policies remain questions because the brief supplies no retention period.",
+      "component": {
+        "nodeId": "checkpoint_output_s3",
+        "componentType": "object-storage",
+        "label": "Amazon S3 Checkpoints + Results",
+        "description": "Stores durable partition checkpoints and committed outputs",
+        "position": { "x": 1400, "y": 0 },
+        "properties": {
+          "componentName": "Amazon S3 Checkpoints + Results",
+          "purpose": "Persist resumable partition progress and committed result objects separately from incomplete output. Keep run and partition identity with each checkpoint so retries can discover the last safe commit.",
+          "provider": "S3",
+          "versioning": true,
+          "checksumValidation": true
+        },
+        "highlightReason": "The catalog's Object Storage type supports S3, versioning, and checksum validation for durable result and checkpoint objects."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "batch_26",
+      "stepNumber": 26,
+      "phase": "Move data through elastic batch compute",
+      "title": "Persist output and checkpoint progress at safe boundaries",
+      "type": "add_connection",
+      "content": "Write completed partition results and a checkpoint marker durably before reporting the partition complete. A restart reads the last committed marker and avoids treating temporary or partial output as final.",
+      "connection": {
+        "edgeId": "workers_commit_to_output_s3",
+        "sourceNodeId": "spot_workers",
+        "targetNodeId": "checkpoint_output_s3",
+        "connectionType": "data-flow",
+        "label": "Commit checkpoint and partition output",
+        "description": "Workers write checksummed, run-scoped checkpoints and completed output objects to S3 before reporting successful completion."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "batch_27",
+      "stepNumber": 27,
+      "phase": "Move data through elastic batch compute",
+      "title": "Enable worker autoscaling without pinning an arbitrary size",
+      "type": "update_component",
+      "content": "Turn on the catalog-supported autoscale property. Set the scaling bounds and resource requests only after measuring partition duration, capacity availability, downstream limits, and the SLA window; this guide does not invent a worker count.",
+      "componentUpdate": {
+        "nodeId": "spot_workers",
+        "properties": { "autoscale": true }
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "batch_28",
+      "stepNumber": 28,
+      "phase": "Move data through elastic batch compute",
+      "title": "Discuss Spot diversity and an SLA-aware fallback",
+      "type": "decision_point",
+      "content": "Use compatible instance alternatives and a Spot allocation strategy chosen for the workload. Whether to permit on-demand fallback is an explicit cost/SLA decision: it can protect deadlines when Spot capacity is unavailable but can weaken the cost target. Do not claim that either target is met without measurement.",
+      "decision": {
+        "question": "When should the system trade some Spot savings for more predictable completion?",
+        "chosen": "Start with diversified compatible Spot capacity; allow an agreed fallback only when measured capacity risk threatens the SLA and the owner accepts the cost impact.",
+        "chosenReason": "The brief simultaneously calls for lower cost, graceful interruption handling, and SLA completion, so the capacity policy must expose rather than hide that tradeoff.",
+        "alternatives": [
+          {
+            "option": "Use only one Spot instance type and never fall back",
+            "tradeoff": "Can reduce capacity availability and increase completion-time risk."
+          },
+          {
+            "option": "Always use on-demand capacity for every job",
+            "tradeoff": "May undermine the stated cost-reduction target."
+          }
+        ]
+      }
+    },
+    {
+      "id": "batch_29",
+      "stepNumber": 29,
+      "phase": "Move data through elastic batch compute",
+      "title": "Treat Spot interruption as expected control flow",
+      "type": "explanation",
+      "content": "A worker should handle termination notification when available, stop taking new partitions, finish or safely abandon its current unit, and persist progress before exit when time permits. Correctness must not depend on receiving enough warning: the next attempt discovers durable checkpoints and safely replays uncommitted work."
+    },
+    {
+      "id": "batch_30",
+      "stepNumber": 30,
+      "phase": "Move data through elastic batch compute",
+      "title": "Return worker exit and interruption status to AWS Batch",
+      "type": "add_connection",
+      "content": "AWS Batch needs the worker's job outcome to apply its retry policy. Preserve exit classification and partition identity so an infrastructure interruption is not confused with invalid input or a deterministic application defect.",
+      "connection": {
+        "edgeId": "workers_report_job_status_to_batch",
+        "sourceNodeId": "spot_workers",
+        "targetNodeId": "aws_batch",
+        "connectionType": "event-stream",
+        "label": "Exit status and interruption outcome",
+        "description": "Return the job exit result and run/partition identity for Batch status tracking and retry classification."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:2"]
+    },
+    {
+      "id": "batch_31",
+      "stepNumber": 31,
+      "phase": "Move data through elastic batch compute",
+      "title": "Tune checkpoint frequency from lost-work evidence",
+      "type": "scale_trigger",
+      "content": "Checkpointing too often adds storage and coordination work; checkpointing too rarely can repeat substantial processing after an interruption. Use observed interruption and replay data to choose safe boundaries, not an unprovided fixed interval.",
+      "scaleTrigger": {
+        "metric": "Reprocessed work after worker restarts and checkpoint write overhead",
+        "action": "If interruptions repeatedly replay completed partitions, move checkpoint commits closer to safe partition boundaries; if checkpoint overhead dominates, measure a coarser boundary while preserving restart safety.",
+        "impact": "The checkpoint policy balances recovery cost and storage/coordination overhead using observed failures."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "batch_32",
+      "stepNumber": 32,
+      "phase": "Make failures recoverable and observable",
+      "title": "Separate retryable infrastructure faults from permanent data faults",
+      "type": "decision_point",
+      "content": "Retry transient capacity loss, interruption, and selected temporary service failures. Fail fast or quarantine deterministic validation and application errors unless the job contract says they are recoverable. Prevent nested workflow and Batch retries from multiplying attempts without a shared run-level budget.",
+      "decision": {
+        "question": "Which failures should an automatic retry handle?",
+        "chosen": "Retry classified transient infrastructure failures from a durable checkpoint; send deterministic input or code failures to a visible terminal state for correction.",
+        "chosenReason": "Automatic retry is required, but retrying every failure can waste cost and repeatedly process invalid data.",
+        "alternatives": [
+          {
+            "option": "Retry every nonzero exit identically",
+            "tradeoff": "Permanent failures consume compute and may delay unrelated dependent jobs."
+          },
+          {
+            "option": "Disable automatic retry and require operators to restart all work",
+            "tradeoff": "Does not meet the brief's automatic-retry requirement and slows recovery."
+          }
+        ]
+      }
+    },
+    {
+      "id": "batch_33",
+      "stepNumber": 33,
+      "phase": "Make failures recoverable and observable",
+      "title": "Configure an explicit, bounded AWS Batch retry strategy",
+      "type": "update_component",
+      "content": "Record that retryable exit classes resume from the last durable checkpoint, while deterministic failures stop for diagnosis. The number of attempts is intentionally left open: set it from observed failure rates and the remaining SLA budget, and coordinate it with workflow retries to prevent retry storms.",
+      "componentUpdate": {
+        "nodeId": "aws_batch",
+        "properties": {
+          "notes": "Configure the AWS Batch job-definition retry strategy for classified transient failures only; resume from the durable S3 checkpoint and make output commits idempotent. Set the attempt count from measured failure behavior and SLA budget; keep it coordinated with workflow-level retries."
+        }
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:2"]
+    },
+    {
+      "id": "batch_34",
+      "stepNumber": 34,
+      "phase": "Make failures recoverable and observable",
+      "title": "Add CloudWatch monitoring using the existing catalog type",
+      "type": "add_component",
+      "content": "Monitoring is a direct catalog match; select the supported CloudWatch stack. Observe the whole run as well as each job so a completed worker does not mask a stuck dependency or a run approaching its SLA deadline.",
+      "component": {
+        "nodeId": "job_monitoring",
+        "componentType": "monitoring",
+        "label": "Amazon CloudWatch Job Monitoring",
+        "description": "Tracks workflow, queue, worker, retry, interruption, and completion signals",
+        "position": { "x": 700, "y": 350 },
+        "properties": {
+          "componentName": "Amazon CloudWatch Job Monitoring",
+          "purpose": "Correlate run and partition status with queue wait, job duration, retries, worker interruptions, input/output progress, and projected completion against the agreed SLA.",
+          "stack": "CloudWatch",
+          "metrics": true,
+          "alerts": true
+        },
+        "highlightReason": "Monitoring is the existing catalog entry and its stack selector explicitly supports CloudWatch."
+      },
+      "requirementIds": ["legacy-requirement:7"]
+    },
+    {
+      "id": "batch_35",
+      "stepNumber": 35,
+      "phase": "Make failures recoverable and observable",
+      "title": "Observe worker throughput and Spot recovery signals",
+      "type": "add_connection",
+      "content": "Emit structured run, job, and partition identifiers with progress, checkpoint, exit, and interruption events. Avoid logging sensitive input payloads; keep metrics useful for both deadline and cost analysis.",
+      "connection": {
+        "edgeId": "workers_to_cloudwatch",
+        "sourceNodeId": "spot_workers",
+        "targetNodeId": "job_monitoring",
+        "connectionType": "event-stream",
+        "label": "Worker progress and interruption metrics",
+        "description": "Publish partition progress, processing duration, checkpoint commits, resource use, and Spot interruption outcomes."
+      },
+      "requirementIds": ["legacy-requirement:7"]
+    },
+    {
+      "id": "batch_36",
+      "stepNumber": 36,
+      "phase": "Make failures recoverable and observable",
+      "title": "Observe queue health, retries, and parallel capacity",
+      "type": "add_connection",
+      "content": "Monitor runnable backlog and queue age alongside job attempts and the number of useful concurrent partitions. Alert on sustained deadline risk or retry growth rather than an arbitrary fixed queue depth.",
+      "connection": {
+        "edgeId": "batch_to_cloudwatch",
+        "sourceNodeId": "aws_batch",
+        "targetNodeId": "job_monitoring",
+        "connectionType": "event-stream",
+        "label": "Queue, job state, retry, and capacity metrics",
+        "description": "Track runnable work, wait time, job outcome, retry classifications, and active parallel work used in the SLA assessment."
+      },
+      "requirementIds": ["legacy-requirement:7"]
+    },
+    {
+      "id": "batch_37",
+      "stepNumber": 37,
+      "phase": "Make failures recoverable and observable",
+      "title": "Monitor the orchestration run and its dependency waits",
+      "type": "add_connection",
+      "content": "Track workflow start, dependency wait, retries, terminal status, and completion time using the same run identity carried by jobs. This identifies whether a deadline problem comes from orchestration, an upstream dependency, queueing, or compute.",
+      "connection": {
+        "edgeId": "workflow_to_cloudwatch",
+        "sourceNodeId": "batch_workflow",
+        "targetNodeId": "job_monitoring",
+        "connectionType": "event-stream",
+        "label": "Workflow execution and dependency state",
+        "description": "Record run lifecycle and waits so the end-to-end SLA clock is not confused with worker runtime alone."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "batch_38",
+      "stepNumber": 38,
+      "phase": "Make failures recoverable and observable",
+      "title": "Add the catalog notification service for SNS job alerts",
+      "type": "add_component",
+      "content": "The catalog's Notification Service is a reasonable match, so use it instead of inventing a component type. Name Amazon SNS in the component and describe topic-based job notifications. Subscriber channels and notification policy are deployment decisions not specified by the brief.",
+      "component": {
+        "nodeId": "job_notifications",
+        "componentType": "notification-service",
+        "label": "Amazon SNS Job Notifications",
+        "description": "Fans out actionable workflow and monitoring alerts to configured subscribers",
+        "position": { "x": 1050, "y": 350 },
+        "properties": {
+          "componentName": "Amazon SNS Job Notifications",
+          "purpose": "Publish actionable job failure, interruption, and completion notifications through configured SNS topics; summarize routine partition success instead of sending one alert per partition.",
+          "fanout": true,
+          "batching": true
+        },
+        "highlightReason": "Notification Service is the existing catalog type with fan-out and batching properties; no unsupported SNS-specific palette ID is introduced."
+      }
+    },
+    {
+      "id": "batch_39",
+      "stepNumber": 39,
+      "phase": "Make failures recoverable and observable",
+      "title": "Route actionable operational alarms to SNS",
+      "type": "add_connection",
+      "content": "Notify on conditions that need attention: terminal job failure, repeated interruptions that threaten completion, or projected SLA breach. Keep message identity actionable with run and job links, and avoid alerting for each expected retry.",
+      "connection": {
+        "edgeId": "cloudwatch_notifies_sns",
+        "sourceNodeId": "job_monitoring",
+        "targetNodeId": "job_notifications",
+        "connectionType": "api-call",
+        "label": "Actionable CloudWatch alarms",
+        "description": "Send summarized operational alarms to SNS subscribers with run identity, failure class, and next action."
+      }
+    },
+    {
+      "id": "batch_40",
+      "stepNumber": 40,
+      "phase": "Make failures recoverable and observable",
+      "title": "Send terminal workflow status to SNS subscribers",
+      "type": "add_connection",
+      "content": "Publish one terminal outcome for the scheduled run, including success or failure and a reference to its results or diagnostics. Subscriber destinations and retention are agreed operational choices; the brief does not specify them.",
+      "connection": {
+        "edgeId": "workflow_notifies_sns",
+        "sourceNodeId": "batch_workflow",
+        "targetNodeId": "job_notifications",
+        "connectionType": "api-call",
+        "label": "Run completion or terminal failure",
+        "description": "Publish the workflow's final run status and durable result/diagnostic references through the configured SNS topic."
+      }
+    },
+    {
+      "id": "batch_41",
+      "stepNumber": 41,
+      "phase": "Make failures recoverable and observable",
+      "title": "Keep retry budgets inside the remaining SLA window",
+      "type": "decision_point",
+      "content": "A retry can improve resilience and still cause an SLA miss if it consumes the remaining deadline budget. Use one correlated run-level policy across Batch and Step Functions, with backoff for transient service/capacity failures and a terminal route for exhausted or permanent failures.",
+      "decision": {
+        "question": "How should automatic retries stop before consuming the entire completion window?",
+        "chosen": "Bound attempts and backoff by measured failure behavior and the run's remaining SLA budget, then surface an explicit terminal state when recovery is no longer viable.",
+        "chosenReason": "The prompt requires automatic retries and SLA completion; unbounded or uncoordinated retries can defeat both cost and deadline goals.",
+        "alternatives": [
+          {
+            "option": "Retry forever with a fixed delay",
+            "tradeoff": "Can accumulate cost and leave dependent jobs waiting indefinitely."
+          },
+          {
+            "option": "Retry once regardless of failure class or remaining time",
+            "tradeoff": "Can waste the available recovery window on permanent faults or stop too early for transient capacity loss."
+          }
+        ]
+      }
+    },
+    {
+      "id": "batch_42",
+      "stepNumber": 42,
+      "phase": "Make failures recoverable and observable",
+      "title": "Scale recovery based on interruption and replay evidence",
+      "type": "update_component",
+      "content": "Update the worker purpose to make recovery decisions evidence-based: consider replayed work, checkpoint recovery, queue state, and projected completion together. Review compatible Spot alternatives and use a less interruption-prone fallback only when the agreed SLA is threatened and that fallback is approved; interruption counts alone do not justify an automatic switch.",
+      "componentUpdate": {
+        "nodeId": "spot_workers",
+        "properties": {
+          "purpose": "Run independent data-processing partitions on EC2 Spot capacity placed by AWS Batch. Handle termination signals, stop at safe partition boundaries, and resume from durable checkpoints. Use compatible capacity diversity and measured resource requests. Evaluate interruptions together with replayed work, checkpoint recovery, queue state, and projected completion; consider an explicitly approved less interruption-prone fallback only when the agreed SLA is threatened."
+        }
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "batch_43",
+      "stepNumber": 43,
+      "phase": "Validate cost, parallelism, and SLA",
+      "title": "Add capacity only when projected completion needs it",
+      "type": "update_component",
+      "content": "Record the capacity policy on AWS Batch: compare runnable work and measured partition duration with the remaining deadline, and add parallel capacity or an approved fallback only when projected completion threatens the SLA and downstream capacity is safe. This avoids paying for early scale-up that does not shorten the critical path; leave all numeric bounds open until workload measurements exist.",
+      "componentUpdate": {
+        "nodeId": "aws_batch",
+        "properties": {
+          "purpose": "Orchestrate dependency-ready partition jobs through queues and job definitions, place work on the selected capacity mix, and expose per-job attempts and status. Prefer measured EC2 Spot capacity; increase parallel capacity or use an explicitly approved less interruption-prone fallback only when projected completion threatens the agreed SLA and downstream capacity is safe. Set queue and compute bounds from workload measurements rather than assumptions."
+        }
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "batch_44",
+      "stepNumber": 44,
+      "phase": "Validate cost, parallelism, and SLA",
+      "title": "Compare Spot-only and fallback runs against the same workload",
+      "type": "scale_trigger",
+      "content": "The cost objective is relative to on-demand. Compare successful equivalent runs and include retry/replay work, idle periods, storage, and transfer; also record whether the SLA was met. A lower compute price is not sufficient evidence by itself.",
+      "scaleTrigger": {
+        "metric": "Measured all-in cost per successfully completed run versus the agreed on-demand baseline",
+        "action": "If the observed reduction misses the stated 70% target, inspect idle capacity, retry waste, partition balance, and storage/transfer before changing the Spot and fallback mix.",
+        "impact": "The target becomes auditable and cost changes are evaluated alongside successful completion and SLA results."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:1"]
+    },
+    {
+      "id": "batch_45",
+      "stepNumber": 45,
+      "phase": "Validate cost, parallelism, and SLA",
+      "title": "Protect independent parallel work without breaking dependencies",
+      "type": "decision_point",
+      "content": "Increase parallelism over independent partitions, not across dependency edges. Confirm job resource requests and S3 access do not create a new bottleneck, then stop adding workers when the critical path or downstream service is the limiter.",
+      "decision": {
+        "question": "How should parallel capacity grow while preserving job dependencies?",
+        "chosen": "Fan out only independent, dependency-ready partitions; join at declared downstream stages and cap capacity using measured resource and storage limits.",
+        "chosenReason": "The brief requires parallel job execution and dependency management at the same time.",
+        "alternatives": [
+          {
+            "option": "Serialize every partition to simplify orchestration",
+            "tradeoff": "Can miss the SLA and ignores available independent work."
+          },
+          {
+            "option": "Remove dependency checks to maximize worker count",
+            "tradeoff": "Can process incomplete inputs or publish invalid downstream results."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "batch_46",
+      "stepNumber": 46,
+      "phase": "Validate cost, parallelism, and SLA",
+      "title": "Validate recovery with interruption and dependency-failure drills",
+      "type": "explanation",
+      "content": "Before calling the design ready, test a Spot worker interruption during a partition, a retry after a checkpoint commit, a duplicate schedule event, a permanent input error, an exhausted retry budget, and a failed prerequisite. Confirm that completed output is not duplicated, dependent work does not run early, the workflow reaches a terminal state, and operators can locate the run from its alert. These are validation scenarios, not additional supplied requirements."
+    },
+    {
+      "id": "batch_47",
+      "stepNumber": 47,
+      "phase": "Validate cost, parallelism, and SLA",
+      "title": "Use measured evidence for the two headline targets",
+      "type": "explanation",
+      "content": "Report the 70% cost-reduction target and SLA outcome separately. Evidence should include the baseline definition, completed-run cost, retry and interruption work, and end-to-end completion time. If either target is unmeasured or missed, say so and identify the capacity or workload question to resolve; do not infer success from using Spot or Step Functions."
+    },
+    {
+      "id": "batch_48",
+      "stepNumber": 48,
+      "phase": "Validate cost, parallelism, and SLA",
+      "title": "Review the resulting data and control paths",
+      "type": "explanation",
+      "content": "The control path is EventBridge Scheduler to Step Functions to dependency-ready AWS Batch jobs and back with job outcomes. The data path is S3 input to Spot workers to durable S3 checkpoints and results. CloudWatch observes the run, queue, and workers; CloudWatch and the workflow send actionable status through SNS. Validate dataset partitioning, retry classes, schedule policy, retention, numeric SLA, and cost baseline with stakeholders before selecting concrete thresholds."
+    }
+  ]
+}

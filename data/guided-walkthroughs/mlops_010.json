@@ -1,0 +1,619 @@
+{
+  "problem_id": "mlops_010",
+  "version": "1.0.0-review-draft",
+  "totalSteps": 37,
+  "phases": [
+    {
+      "name": "Read the frozen brief and isolate unknowns",
+      "stepRange": [1, 6],
+      "description": "Keep the live problem row intact, distinguish its requirements from its hints, and name unresolved serving policy."
+    },
+    {
+      "name": "Place the serving and release components",
+      "stepRange": [7, 14],
+      "description": "Add the endpoint, traffic router, stable and candidate serving pools, model artifacts and metadata, orchestration, and telemetry."
+    },
+    {
+      "name": "Connect request, artifact, and feedback paths",
+      "stepRange": [15, 26],
+      "description": "Wire REST/gRPC requests through canary and A/B routing, load selected model versions, and feed serving observations into autoscaling."
+    },
+    {
+      "name": "Validate batching, scale, readiness, and rollout",
+      "stepRange": [27, 37],
+      "description": "Separate model-quality evidence, canary traffic health, rollback behavior, and serving-capacity validation while keeping unspecified traffic and SLO values explicit."
+    }
+  ],
+  "steps": [
+    {
+      "id": "mlops010_scope_snapshot",
+      "stepNumber": 1,
+      "phase": "Read the frozen brief and isolate unknowns",
+      "title": "Keep the live problem row frozen",
+      "type": "explanation",
+      "content": "FROZEN PROBLEM ROW (verbatim)\nTitle: Design a Model Serving Infrastructure with Canary Deployments\nDescription: Design a model serving infrastructure that deploys ML models as scalable APIs with support for canary deployments, traffic splitting, auto-scaling, and multi-framework model support.\nRequirements:\n- Serve models as REST/gRPC endpoints\n- Support canary deployments with gradual rollout\n- Auto-scale based on request volume and latency\n- Support multiple ML frameworks (PyTorch, TF, ONNX)\n- Implement request batching for throughput\n- Handle model warm-up and pre-loading\n- Provide request logging and latency monitoring\n- Support A/B testing between model versions\nConstraints:\n- P99 inference latency under 100ms\n- Support 50k+ requests per second\n- Zero-downtime deployments\n- Scale to zero for cost optimization\n- Model loading time under 30 seconds\nSupplied hints (references, not additional acceptance criteria):\n- Use KServe, Seldon, or Triton Inference Server\n- Implement Istio or Envoy for traffic management\n- Use Kubernetes HPA with custom metrics\n- Implement model caching with warm standby replicas\n- Use async prediction pipelines for batch optimization\n- Implement health checks and readiness probes",
+      "requirementIds": []
+    },
+    {
+      "id": "mlops010_facts_and_hints",
+      "stepNumber": 2,
+      "phase": "Read the frozen brief and isolate unknowns",
+      "title": "Separate acceptance criteria from implementation hints",
+      "type": "explanation",
+      "content": "The eight requirements and five constraints above define the acceptance scope. KServe, Seldon, Triton, Istio, Envoy, Kubernetes HPA, warm standby, caching, and asynchronous prediction are supplied hints, not required vendors or extra service-level targets. Keep the serving design provider-neutral until a technology choice is made.",
+      "requirementIds": []
+    },
+    {
+      "id": "mlops010_open_questions",
+      "stepNumber": 3,
+      "phase": "Read the frozen brief and isolate unknowns",
+      "title": "Ask for the missing workload and measurement details",
+      "type": "explanation",
+      "content": "The row does not define the request mix, payload sizes, framework/model distribution, burst shape, batching wait budget, or the measurement start and end points for P99 inference latency. It also does not define the traffic split, A/B cohort policy, promotion criteria, autoscaling cooldowns, or what zero replicas means during a cold start. Ask for these details before setting configuration values; the walkthrough adds no numeric targets.",
+      "requirementIds": []
+    },
+    {
+      "id": "mlops010_online_batching",
+      "stepNumber": 4,
+      "phase": "Read the frozen brief and isolate unknowns",
+      "title": "Keep required request batching on the online path",
+      "type": "decision_point",
+      "content": "Request batching is an explicit requirement for the REST/gRPC serving path. The asynchronous prediction pipeline is only a supplied hint and does not replace the online endpoint.",
+      "decision": {
+        "question": "Where should batching happen for the required inference endpoints?",
+        "chosen": "Batch compatible online requests within the serving path while preserving the endpoint contract.",
+        "chosenReason": "This addresses request batching without turning the required online API into an asynchronous job interface.",
+        "alternatives": [
+          {
+            "option": "Queue every prediction and return only after background processing",
+            "tradeoff": "This changes the endpoint interaction and can add queue delay to the stated inference latency objective."
+          },
+          {
+            "option": "Use asynchronous prediction for all requests",
+            "tradeoff": "The hint describes an optional optimization and does not satisfy the explicit online endpoint requirement by itself."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "mlops010_scale_zero_and_warmup",
+      "stepNumber": 5,
+      "phase": "Read the frozen brief and isolate unknowns",
+      "title": "Resolve the cold-start and warm-standby tension",
+      "type": "explanation",
+      "content": "The row asks for model warm-up and pre-loading, scale-to-zero, and model loading under 30 seconds. A continuously running warm-standby replica conflicts with zero replicas during an idle period. Gate traffic on model readiness, measure activation through readiness against the stated loading limit, and clarify whether model caching may persist while serving replicas are at zero. Treat warm standby as an option from the hints, not a simultaneous guarantee.",
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlops010_rollout_unknowns",
+      "stepNumber": 6,
+      "phase": "Read the frozen brief and isolate unknowns",
+      "title": "Keep release policy explicit",
+      "type": "explanation",
+      "content": "Canary rollout and A/B testing both need stable and candidate versions, but the brief provides no split percentages, cohort key, observation window, or promotion threshold. Keep those as deployment policy inputs. Use separate version identity and telemetry so a rollout can be observed and reversed without claiming a policy the problem never specified.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:8"]
+    },
+    {
+      "id": "mlops010_api",
+      "stepNumber": 7,
+      "phase": "Place the serving and release components",
+      "title": "Expose the REST and gRPC inference endpoint",
+      "type": "add_component",
+      "content": "Use the API gateway as the stable public entry for REST and gRPC inference. Keep the contract and protocol support in the component purpose; the palette has no separate REST-versus-gRPC endpoint switch.",
+      "requirementIds": ["legacy-requirement:1"],
+      "component": {
+        "nodeId": "mlops010_api",
+        "componentType": "api-gateway",
+        "label": "REST / gRPC Inference API",
+        "description": "Stable API entry for model inference requests.",
+        "position": {"x": 70, "y": 250},
+        "highlightReason": "Clients need one endpoint contract while model versions change behind the routing boundary.",
+        "properties": {
+          "componentName": "REST / gRPC Inference API",
+          "purpose": "Expose model-serving endpoints over REST and gRPC and forward inference requests to the serving traffic router."
+        }
+      }
+    },
+    {
+      "id": "mlops010_router",
+      "stepNumber": 8,
+      "phase": "Place the serving and release components",
+      "title": "Add the canary and A/B traffic router",
+      "type": "add_component",
+      "content": "Use a load balancer to direct requests to stable and candidate model versions. Its route policy must support gradual canary rollout and the problem's A/B comparison; split weights and cohort rules remain unspecified until agreed.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:8", "legacy-constraint:3"],
+      "component": {
+        "nodeId": "mlops010_router",
+        "componentType": "loadbalancer",
+        "label": "Canary & A/B Traffic Router",
+        "description": "Routes inference requests between stable and candidate model versions.",
+        "position": {"x": 370, "y": 250},
+        "highlightReason": "The router is the controlled boundary for gradual rollout and version comparison.",
+        "properties": {
+          "componentName": "Canary & A/B Traffic Router",
+          "purpose": "Apply an explicitly configured canary or A/B policy to stable and candidate serving pools, and route only to ready pools. Split weights and cohort rules are deployment inputs, not values supplied by the brief."
+        }
+      }
+    },
+    {
+      "id": "mlops010_stable_runtime",
+      "stepNumber": 9,
+      "phase": "Place the serving and release components",
+      "title": "Add the stable multi-framework serving pool",
+      "type": "add_component",
+      "content": "Represent the currently selected model version as a serving pool. Support PyTorch, TF, and ONNX as stated, batch compatible requests on the online path, and coordinate warm-up and pre-loading with readiness. Do not select a framework server or add a batch size or wait threshold from the hints.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "mlops010_stable_runtime",
+        "componentType": "model-serving",
+        "label": "Stable Model Serving Pool",
+        "description": "Current production model version serving REST/gRPC inference requests.",
+        "position": {"x": 700, "y": 390},
+        "highlightReason": "The stable pool maintains the current serving path while a candidate is evaluated.",
+        "properties": {
+          "componentName": "Stable Model Serving Pool",
+          "purpose": "Serve the selected stable model version for PyTorch, TF, and ONNX workloads; batch compatible online requests; support model warm-up and pre-loading; and expose readiness before receiving routed traffic."
+        }
+      }
+    },
+    {
+      "id": "mlops010_candidate_runtime",
+      "stepNumber": 10,
+      "phase": "Place the serving and release components",
+      "title": "Add an isolated candidate serving pool",
+      "type": "add_component",
+      "content": "Keep the candidate version separate from the stable version so the router can apply gradual rollout or A/B comparison. Use the same framework, batching, and readiness contract; a rollout percentage or promotion rule is not supplied.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "mlops010_candidate_runtime",
+        "componentType": "model-serving",
+        "label": "Candidate Model Serving Pool",
+        "description": "Candidate model version isolated for canary rollout and A/B comparison.",
+        "position": {"x": 700, "y": 90},
+        "highlightReason": "An isolated candidate lets the release policy compare versions without replacing the stable pool first.",
+        "properties": {
+          "componentName": "Candidate Model Serving Pool",
+          "purpose": "Serve a candidate model version for PyTorch, TF, and ONNX workloads with the same online batching and readiness contract as the stable pool."
+        }
+      }
+    },
+    {
+      "id": "mlops010_registry",
+      "stepNumber": 11,
+      "phase": "Place the serving and release components",
+      "title": "Track stable and candidate model versions",
+      "type": "add_component",
+      "content": "Use the model registry to identify the stable and candidate versions and their framework-compatible serving artifacts. The brief does not specify a promotion workflow or registry vendor.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:8"],
+      "component": {
+        "nodeId": "mlops010_registry",
+        "componentType": "model-registry",
+        "label": "Model Version Registry",
+        "description": "Version metadata and references for stable and candidate serving artifacts.",
+        "position": {"x": 70, "y": 570},
+        "highlightReason": "Explicit version identity ties traffic and latency observations to the model that produced them.",
+        "properties": {
+          "componentName": "Model Version Registry",
+          "purpose": "Resolve the stable and candidate model version references and their framework-compatible serving artifacts."
+        }
+      }
+    },
+    {
+      "id": "mlops010_artifacts",
+      "stepNumber": 12,
+      "phase": "Place the serving and release components",
+      "title": "Store model packages for loading",
+      "type": "add_component",
+      "content": "Represent durable model-package storage separately from version metadata so a serving pool can fetch the selected artifact when it starts or warms a version. Storage behavior and artifact retention are not specified by the problem.",
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "mlops010_artifacts",
+        "componentType": "object-storage",
+        "label": "Model Package Storage",
+        "description": "Model packages fetched by stable and candidate serving pools.",
+        "position": {"x": 370, "y": 570},
+        "highlightReason": "The loading path must be visible when checking the stated model startup bound.",
+        "properties": {
+          "componentName": "Model Package Storage",
+          "purpose": "Hold serving model packages referenced by the registry and fetched by a serving pool during model loading or pre-loading."
+        }
+      }
+    },
+    {
+      "id": "mlops010_orchestrator",
+      "stepNumber": 13,
+      "phase": "Place the serving and release components",
+      "title": "Coordinate deployment, readiness, and autoscaling",
+      "type": "add_component",
+      "content": "Use Kubernetes orchestration for stable and candidate pool lifecycle, health/readiness gating, and scaling based on request volume and latency. Scale-to-zero and cold-start behavior must be evaluated together; do not imply that a standby replica remains running when capacity is zero.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "mlops010_orchestrator",
+        "componentType": "kubernetes",
+        "label": "Serving Orchestrator & Autoscaler",
+        "description": "Manages serving pool lifecycle, readiness, and request/latency-driven scaling.",
+        "position": {"x": 1010, "y": 50},
+        "highlightReason": "Replica lifecycle and readiness determine whether rollouts remain available and whether scale-to-zero can meet model loading time.",
+        "properties": {
+          "componentName": "Serving Orchestrator & Autoscaler",
+          "purpose": "Manage stable and candidate serving replicas, gate routing on health and readiness, and autoscale using request volume and latency while honoring the stated scale-to-zero and model-loading constraints."
+        }
+      }
+    },
+    {
+      "id": "mlops010_monitoring",
+      "stepNumber": 14,
+      "phase": "Place the serving and release components",
+      "title": "Observe request logs, volume, and per-version latency",
+      "type": "add_component",
+      "content": "Capture request logs and latency observations with stable/candidate identity. Include request volume so the same feedback path can inform autoscaling. The problem sets no monitoring retention period or additional alert threshold.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1"],
+      "component": {
+        "nodeId": "mlops010_monitoring",
+        "componentType": "monitoring",
+        "label": "Inference Logs & Latency Monitoring",
+        "description": "Request logs, request volume, and latency observations by serving version.",
+        "position": {"x": 1010, "y": 320},
+        "highlightReason": "The same observations support the P99 objective, A/B comparison, and request/latency-driven scaling.",
+        "properties": {
+          "componentName": "Inference Logs & Latency Monitoring",
+          "purpose": "Collect request logs, request volume, and latency observations labeled by stable or candidate model version."
+        }
+      }
+    },
+    {
+      "id": "mlops010_api_to_router",
+      "stepNumber": 15,
+      "phase": "Connect request, artifact, and feedback paths",
+      "title": "Forward inference calls to the traffic router",
+      "type": "add_connection",
+      "content": "Keep REST/gRPC endpoint handling in front of the version-specific routing decision.",
+      "requirementIds": ["legacy-requirement:1"],
+      "connection": {
+        "edgeId": "mlops010_api_to_router",
+        "sourceNodeId": "mlops010_api",
+        "targetNodeId": "mlops010_router",
+        "connectionType": "api-call",
+        "label": "REST / gRPC inference",
+        "description": "Forwards online prediction requests from the stable endpoint to canary or A/B routing."
+      }
+    },
+    {
+      "id": "mlops010_router_to_stable",
+      "stepNumber": 16,
+      "phase": "Connect request, artifact, and feedback paths",
+      "title": "Keep the stable version in the routing pool",
+      "type": "add_connection",
+      "content": "Route the stable share to the current model-serving pool. The split is policy, not a fixed percentage from the problem.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:8", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "mlops010_router_to_stable",
+        "sourceNodeId": "mlops010_router",
+        "targetNodeId": "mlops010_stable_runtime",
+        "connectionType": "api-call",
+        "label": "Stable-version traffic",
+        "description": "Carries the configured stable share for production requests and A/B comparison."
+      }
+    },
+    {
+      "id": "mlops010_router_to_candidate",
+      "stepNumber": 17,
+      "phase": "Connect request, artifact, and feedback paths",
+      "title": "Route a controlled share to the candidate",
+      "type": "add_connection",
+      "content": "The candidate route enables gradual rollout and version comparison. Keep its split, cohort assignment, and promotion criteria configurable until the release policy is supplied.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:8", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "mlops010_router_to_candidate",
+        "sourceNodeId": "mlops010_router",
+        "targetNodeId": "mlops010_candidate_runtime",
+        "connectionType": "api-call",
+        "label": "Candidate-version traffic",
+        "description": "Carries the explicitly configured canary or A/B share to the isolated candidate pool."
+      }
+    },
+    {
+      "id": "mlops010_registry_to_stable",
+      "stepNumber": 18,
+      "phase": "Connect request, artifact, and feedback paths",
+      "title": "Resolve the stable model version",
+      "type": "add_connection",
+      "content": "Associate the stable serving pool with its registered version and artifact reference.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6"],
+      "connection": {
+        "edgeId": "mlops010_registry_to_stable",
+        "sourceNodeId": "mlops010_registry",
+        "targetNodeId": "mlops010_stable_runtime",
+        "connectionType": "data-flow",
+        "label": "Stable version reference",
+        "description": "Supplies version identity and the framework-compatible artifact reference to the stable pool."
+      }
+    },
+    {
+      "id": "mlops010_registry_to_candidate",
+      "stepNumber": 19,
+      "phase": "Connect request, artifact, and feedback paths",
+      "title": "Resolve the candidate model version",
+      "type": "add_connection",
+      "content": "Associate the candidate serving pool with a distinct registered version so its requests and observations remain attributable.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:8"],
+      "connection": {
+        "edgeId": "mlops010_registry_to_candidate",
+        "sourceNodeId": "mlops010_registry",
+        "targetNodeId": "mlops010_candidate_runtime",
+        "connectionType": "data-flow",
+        "label": "Candidate version reference",
+        "description": "Supplies the candidate version identity and framework-compatible artifact reference."
+      }
+    },
+    {
+      "id": "mlops010_artifact_to_stable",
+      "stepNumber": 20,
+      "phase": "Connect request, artifact, and feedback paths",
+      "title": "Load the stable model package",
+      "type": "add_connection",
+      "content": "Fetch the selected package when the stable pool starts or pre-loads the model. Measure through readiness against the stated model loading constraint.",
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "mlops010_artifact_to_stable",
+        "sourceNodeId": "mlops010_artifacts",
+        "targetNodeId": "mlops010_stable_runtime",
+        "connectionType": "data-flow",
+        "label": "Stable model package",
+        "description": "Provides the registered stable package for model loading or pre-loading."
+      }
+    },
+    {
+      "id": "mlops010_artifact_to_candidate",
+      "stepNumber": 21,
+      "phase": "Connect request, artifact, and feedback paths",
+      "title": "Load the candidate model package",
+      "type": "add_connection",
+      "content": "Load and warm the candidate before the router sends it traffic; its readiness must not be inferred from package download completion alone.",
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "mlops010_artifact_to_candidate",
+        "sourceNodeId": "mlops010_artifacts",
+        "targetNodeId": "mlops010_candidate_runtime",
+        "connectionType": "data-flow",
+        "label": "Candidate model package",
+        "description": "Provides the registered candidate package for model loading and readiness checks."
+      }
+    },
+    {
+      "id": "mlops010_orchestrator_to_stable",
+      "stepNumber": 22,
+      "phase": "Connect request, artifact, and feedback paths",
+      "title": "Manage stable replicas and readiness",
+      "type": "add_connection",
+      "content": "The orchestrator manages the stable pool lifecycle and prevents routing to replicas that are not ready.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "mlops010_orchestrator_to_stable",
+        "sourceNodeId": "mlops010_orchestrator",
+        "targetNodeId": "mlops010_stable_runtime",
+        "connectionType": "api-call",
+        "label": "Stable pool lifecycle",
+        "description": "Coordinates stable replicas, autoscaling, health, and readiness."
+      }
+    },
+    {
+      "id": "mlops010_orchestrator_to_candidate",
+      "stepNumber": 23,
+      "phase": "Connect request, artifact, and feedback paths",
+      "title": "Manage candidate replicas and readiness",
+      "type": "add_connection",
+      "content": "Prepare candidate capacity and verify readiness before enabling its canary or A/B route.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "mlops010_orchestrator_to_candidate",
+        "sourceNodeId": "mlops010_orchestrator",
+        "targetNodeId": "mlops010_candidate_runtime",
+        "connectionType": "api-call",
+        "label": "Candidate pool lifecycle",
+        "description": "Coordinates candidate replicas, autoscaling, health, and readiness before traffic is enabled."
+      }
+    },
+    {
+      "id": "mlops010_stable_to_monitoring",
+      "stepNumber": 24,
+      "phase": "Connect request, artifact, and feedback paths",
+      "title": "Observe stable-version requests",
+      "type": "add_connection",
+      "content": "Emit request logs, volume, and latency with stable-version identity.",
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1"],
+      "connection": {
+        "edgeId": "mlops010_stable_to_monitoring",
+        "sourceNodeId": "mlops010_stable_runtime",
+        "targetNodeId": "mlops010_monitoring",
+        "connectionType": "event-stream",
+        "label": "Stable request telemetry",
+        "description": "Reports request logs, request volume, and latency for the stable version."
+      }
+    },
+    {
+      "id": "mlops010_candidate_to_monitoring",
+      "stepNumber": 25,
+      "phase": "Connect request, artifact, and feedback paths",
+      "title": "Observe candidate-version requests",
+      "type": "add_connection",
+      "content": "Keep candidate telemetry distinct so A/B and canary observations are comparable by version.",
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1"],
+      "connection": {
+        "edgeId": "mlops010_candidate_to_monitoring",
+        "sourceNodeId": "mlops010_candidate_runtime",
+        "targetNodeId": "mlops010_monitoring",
+        "connectionType": "event-stream",
+        "label": "Candidate request telemetry",
+        "description": "Reports request logs, request volume, and latency for the candidate version."
+      }
+    },
+    {
+      "id": "mlops010_monitoring_to_orchestrator",
+      "stepNumber": 26,
+      "phase": "Connect request, artifact, and feedback paths",
+      "title": "Feed request and latency signals into scaling",
+      "type": "add_connection",
+      "content": "Use observed request volume and latency as autoscaling inputs. Their sampling, aggregation, and reaction policy need workload validation and are not numeric targets from the brief.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7"],
+      "connection": {
+        "edgeId": "mlops010_monitoring_to_orchestrator",
+        "sourceNodeId": "mlops010_monitoring",
+        "targetNodeId": "mlops010_orchestrator",
+        "connectionType": "event-stream",
+        "label": "Request volume & latency signals",
+        "description": "Provides observed load and latency signals for replica scaling decisions."
+      }
+    },
+    {
+      "id": "mlops010_batching_budget",
+      "stepNumber": 27,
+      "phase": "Validate batching, scale, readiness, and rollout",
+      "title": "Bound batching by the latency objective",
+      "type": "decision_point",
+      "content": "Request batching is required, but the row gives no maximum queue wait, batch size, or compatibility key. Measure the batching contribution within the P99 inference path and ask for a workload-based batching policy. Do not invent a wait window or batch size.",
+      "decision": {
+        "question": "What batching configuration should be enabled?",
+        "chosen": "Expose the batching policy as a serving configuration and set its values only after the request mix and latency measurement boundary are agreed.",
+        "chosenReason": "The problem requires batching and a P99 objective but supplies no safe numeric batching parameters.",
+        "alternatives": [
+          {
+            "option": "Use a fixed batch size and wait period now",
+            "tradeoff": "Neither value is specified, and waiting can consume the inference latency budget."
+          },
+          {
+            "option": "Disable batching on the online path",
+            "tradeoff": "That would omit the explicit request-batching requirement."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "mlops010_framework_validation",
+      "stepNumber": 28,
+      "phase": "Validate batching, scale, readiness, and rollout",
+      "title": "Validate the required framework coverage",
+      "type": "explanation",
+      "content": "Exercise the same serving contract with PyTorch, TF, and ONNX models. Record framework compatibility and model readiness for each version; the brief does not require a particular runtime vendor or model conversion path.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6"]
+    },
+    {
+      "id": "mlops010_warmup_validation",
+      "stepNumber": 29,
+      "phase": "Validate batching, scale, readiness, and rollout",
+      "title": "Measure loading through readiness",
+      "type": "explanation",
+      "content": "Measure from the agreed model activation point through artifact fetch, runtime initialization, warm-up, and readiness. Compare the result with the exact under-30-second model-loading constraint. A downloaded file alone is not evidence that the endpoint can safely receive traffic.",
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlops010_scale_trigger",
+      "stepNumber": 30,
+      "phase": "Validate batching, scale, readiness, and rollout",
+      "title": "Scale on the supplied request and latency signals",
+      "type": "scale_trigger",
+      "content": "Evaluate scaling separately for stable and candidate pools where their request and latency behavior differs. Preserve scale-to-zero as an explicit requirement. Validate 50k+ requests per second in the dedicated capacity test; this step covers the scaling signals and idle-to-active policy, not a capacity guarantee. Thresholds, cooldowns, and the expected traffic ramp are unspecified.",
+      "scaleTrigger": {
+        "metric": "Request volume and inference latency",
+        "action": "Adjust serving capacity through the orchestrator, including the required scale-to-zero behavior.",
+        "impact": "Connects the stated autoscaling signals to replica capacity without inventing thresholds or cooldowns."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "mlops010_readiness_and_availability",
+      "stepNumber": 31,
+      "phase": "Validate batching, scale, readiness, and rollout",
+      "title": "Keep unready replicas out of traffic",
+      "type": "explanation",
+      "content": "Use health and readiness checks before enabling a new stable or candidate replica. During replacement, retain a routable ready path so the deployment does not interrupt requests. Test this behavior against the zero-downtime constraint; the brief does not state a separate availability percentage.",
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "mlops010_canary_review",
+      "stepNumber": 32,
+      "phase": "Validate batching, scale, readiness, and rollout",
+      "title": "Measure canary traffic health separately from model quality",
+      "type": "decision_point",
+      "content": "For each serving version, compare request volume, successful responses, errors/timeouts, and inference latency during the gradual rollout. These are traffic-health signals: they show whether the serving path is handling requests, not whether predictions are correct or useful. Keep the stated P99 target attached to an agreed measurement boundary. The brief provides no canary split, cohort key, health-error threshold, or observation window; agree those before using health to promote a version.",
+      "decision": {
+        "question": "What evidence should determine whether candidate traffic is healthy?",
+        "chosen": "Evaluate per-version request outcomes and latency against an explicitly agreed canary-health policy, without treating those signals as model-quality evidence.",
+        "chosenReason": "Canary rollout and request logging/latency monitoring are required, but the brief supplies no error threshold, split, cohort, or observation duration.",
+        "alternatives": [
+          {
+            "option": "Promote based only on low latency and successful responses",
+            "tradeoff": "A healthy serving path does not establish that candidate predictions meet a quality objective."
+          },
+          {
+            "option": "Use an invented fixed error-rate threshold and observation window",
+            "tradeoff": "Neither value is supplied by the frozen brief; the owner must set and approve them."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:1"]
+    },
+    {
+      "id": "mlops010_model_quality_evaluation",
+      "stepNumber": 33,
+      "phase": "Validate batching, scale, readiness, and rollout",
+      "title": "Evaluate model quality independently from traffic health",
+      "type": "decision_point",
+      "content": "Use the required A/B comparison to evaluate candidate predictions with a pre-agreed task-quality metric and an appropriate labeled/reference outcome source, keeping results attributable to model version and cohort. Request success and latency from the canary-health check do not prove prediction quality; quality regression can occur while serving remains healthy. The frozen brief does not name a quality metric, labels, sample size, evaluation window, or quality acceptance threshold. Treat these as product decisions, not supplied SLOs.",
+      "decision": {
+        "question": "What evidence supports an A/B model-quality decision?",
+        "chosen": "Define the outcome metric, evaluation population, label source, and decision threshold with the model owner before interpreting the experiment.",
+        "chosenReason": "A/B testing between versions is required, but the brief does not define how prediction quality is measured.",
+        "alternatives": [
+          {
+            "option": "Treat canary request health as model-quality evidence",
+            "tradeoff": "Availability and latency describe serving behavior, not prediction correctness or utility."
+          },
+          {
+            "option": "Choose an arbitrary accuracy threshold or label source",
+            "tradeoff": "That would invent acceptance criteria and may not fit the model task or delayed outcomes."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "mlops010_rollback_policy",
+      "stepNumber": 34,
+      "phase": "Validate batching, scale, readiness, and rollout",
+      "title": "Keep rollback as a separate release-control action",
+      "type": "explanation",
+      "content": "If an approved canary-health trigger or model-quality guardrail fails, stop increasing candidate exposure and route traffic back to the last known-good stable version; then verify the stable route is serving. This rollback changes version routing. It is distinct from autoscaling, which changes available replica capacity. Preserve a ready stable path to support the zero-downtime deployment constraint. The brief specifies no rollback trigger, automation policy, or recovery-time objective, so define and test those before promising automatic or instantaneous rollback.",
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "mlops010_latency_and_capacity_acceptance",
+      "stepNumber": 35,
+      "phase": "Validate batching, scale, readiness, and rollout",
+      "title": "Validate serving capacity independently from canary health",
+      "type": "explanation",
+      "content": "Load-test stable and candidate serving, including the intended mixed-version route, at the stated 50k+ requests per second while checking the stated P99 inference latency under 100ms. Agree the request/model mix, payload sizes, burst profile, batching policy, and P99 start/end boundary first; none is specified in the brief. This is a capacity and latency acceptance test, not a model-quality test or an automatic canary-health threshold. The brief gives no additional per-model capacity, headroom, availability percentage, or latency budget.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "mlops010_hint_conflict_review",
+      "stepNumber": 36,
+      "phase": "Validate batching, scale, readiness, and rollout",
+      "title": "Review hints that change the serving trade-off",
+      "type": "explanation",
+      "content": "Treat model caching and warm standby as options to evaluate against scale-to-zero and model-loading time. Treat asynchronous prediction as a separate optional path unless the problem owner confirms it is in scope. Evaluate KServe, Seldon, Triton, Istio, Envoy, and Kubernetes HPA as implementation choices; none is forced by the frozen requirements.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlops010_acceptance",
+      "stepNumber": 37,
+      "phase": "Validate batching, scale, readiness, and rollout",
+      "title": "Close against only the frozen acceptance scope",
+      "type": "conclusion",
+      "content": "Review the endpoint protocols, gradual canary routing, request/latency autoscaling, PyTorch/TF/ONNX coverage, online request batching, model warm-up and pre-loading, request logs and latency monitoring, and stable-versus-candidate A/B support. Verify P99 inference latency under 100ms, 50k+ requests per second, zero-downtime deployment, scale-to-zero, and model loading under 30 seconds. Record workload and rollout-policy unknowns for clarification; do not add guessed thresholds.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

@@ -1,0 +1,712 @@
+{
+  "problem_id": "6901ef1b9420d83630aca881",
+  "version": "1.0.0-review-draft",
+  "totalSteps": 40,
+  "requirementRevision": null,
+  "problemSnapshot": {
+    "id": "6901ef1b9420d83630aca881",
+    "title": "Design a System for Sorting Large Data Sets",
+    "description": "Design a system to efficiently sort datasets that are too large to fit in memory.",
+    "requirements": [
+      "Sort datasets larger than available memory",
+      "Support different data types",
+      "Efficient disk I/O operations",
+      "Parallel processing support",
+      "Handle terabytes of data",
+      "Minimize time complexity",
+      "Support custom sorting keys"
+    ],
+    "constraints": [
+      "Limited memory availability",
+      "Large disk space required",
+      "Minimize disk I/O operations",
+      "Handle data that doesn't fit in RAM",
+      "Efficient merge operations"
+    ],
+    "hints": [
+      "External merge sort algorithm",
+      "Divide data into chunks",
+      "Sort chunks in memory",
+      "Merge sorted chunks using k-way merge",
+      "MapReduce for distributed sorting"
+    ],
+    "slug": "design-a-system-for-sorting-large-data-sets",
+    "has_guided_walkthrough": false
+  },
+  "phases": [
+    {
+      "name": "Job Contract and Durable Data",
+      "stepRange": [1, 9],
+      "description": "Define the sort request, control plane, job metadata, and durable dataset boundary without assuming a cloud vendor or sizing target."
+    },
+    {
+      "name": "Run Generation Under Memory Constraints",
+      "stepRange": [10, 20],
+      "description": "Partition input into bounded in-memory sorts and persist immutable sorted runs with parallel, observable work assignment."
+    },
+    {
+      "name": "External Merge and Result Delivery",
+      "stepRange": [21, 31],
+      "description": "Merge sorted runs with bounded fan-in and buffers, checkpoint progress, and expose a complete output only after validation."
+    },
+    {
+      "name": "Correctness and Operations",
+      "stepRange": [32, 40],
+      "description": "Measure resource use and sort correctness, recover safely from retries, and identify the workload facts needed before capacity planning."
+    }
+  ],
+  "steps": [
+    {
+      "id": "sort-large-intro",
+      "stepNumber": 1,
+      "phase": "Job Contract and Durable Data",
+      "title": "Start with external merge sort, not an in-memory sort",
+      "type": "explanation",
+      "content": "The live brief is to sort datasets larger than available memory, including terabytes of data, while supporting different data types and custom sorting keys. The supplied hints point to external merge sort: divide data into chunks, sort chunks in memory, then merge sorted runs with k-way merge. The brief does not define record formats, dataset-size distribution, sort stability, throughput, deadline, or cloud provider; keep those as open decisions instead of inventing targets.",
+      "requirementIds": []
+    },
+    {
+      "id": "sort-client",
+      "stepNumber": 2,
+      "phase": "Job Contract and Durable Data",
+      "title": "Add a client for submitting and tracking sort jobs",
+      "type": "add_component",
+      "content": "The client submits a source dataset reference and a versioned sort specification, then displays job state and the final output reference. Input upload can be direct to object storage; the brief does not prescribe a user interface or authentication model.",
+      "component": {
+        "nodeId": "sort_web_app",
+        "componentType": "web-app",
+        "label": "Sort Job Client",
+        "description": "Submit sort jobs and inspect their status and completed output.",
+        "position": { "x": 80, "y": 180 },
+        "properties": {
+          "componentName": "Sort Job Client",
+          "purpose": "Collects the source dataset reference and sort specification, then presents progress and the completed result without loading the dataset into the client."
+        },
+        "data": { "originalComponentId": "web-app", "semanticRole": "frontend" },
+        "highlightReason": "The job interface exchanges references and status; the large dataset stays in external storage rather than being fetched into a browser." 
+      },
+      "requirementIds": []
+    },
+    {
+      "id": "sort-api",
+      "stepNumber": 3,
+      "phase": "Job Contract and Durable Data",
+      "title": "Create a validated job-submission boundary",
+      "type": "add_component",
+      "content": "Validate the source object, declared record type, custom-key expression, comparator/version, and job idempotency token before work is enqueued. Reject unsupported or ambiguous encodings instead of silently sorting their byte representation.",
+      "component": {
+        "nodeId": "sort_api_gateway",
+        "componentType": "api-gateway",
+        "label": "Sort Job API",
+        "description": "Validated API boundary for job creation, status, and output-reference requests.",
+        "position": { "x": 360, "y": 180 },
+        "properties": {
+          "componentName": "Sort Job API",
+          "purpose": "Validates dataset references and versioned sort specifications, enforces job-level authorization, and returns status or output references without proxying dataset bytes.",
+          "inputValidation": true
+        },
+        "data": { "originalComponentId": "api-gateway", "semanticRole": "api-gateway" },
+        "highlightReason": "A strict request contract prevents malformed types, key definitions, or duplicate submissions from producing misleading sort results."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7"]
+    },
+    {
+      "id": "sort-client-api-edge",
+      "stepNumber": 4,
+      "phase": "Job Contract and Durable Data",
+      "title": "Connect the client to the job API",
+      "type": "add_connection",
+      "content": "Send job specifications and status requests over the API. Keep dataset bytes on the object-storage data path so the API tier does not become a large-file relay.",
+      "connection": {
+        "edgeId": "sort_client_to_api",
+        "sourceNodeId": "sort_web_app",
+        "targetNodeId": "sort_api_gateway",
+        "connectionType": "http",
+        "label": "Job specification and status",
+        "description": "The client sends a typed sort request and receives progress or a completed output reference."
+      },
+      "requirementIds": []
+    },
+    {
+      "id": "sort-coordinator",
+      "stepNumber": 5,
+      "phase": "Job Contract and Durable Data",
+      "title": "Add a coordinator for job and merge-stage state",
+      "type": "add_component",
+      "content": "The coordinator validates the job contract, creates a source manifest, schedules run-generation work, waits for all required runs, constructs bounded merge stages, and marks a result complete only after output validation. Workers remain stateless between tasks; durable state belongs in metadata and object storage.",
+      "component": {
+        "nodeId": "sort_coordinator",
+        "componentType": "backend-server",
+        "label": "Sort Job Coordinator",
+        "description": "Orchestrates durable job state and run/merge stages; it does not sort dataset bytes itself.",
+        "position": { "x": 650, "y": 180 },
+        "properties": {
+          "componentName": "Sort Job Coordinator",
+          "purpose": "Plans chunk-sort and merge tasks from durable manifests, handles idempotent stage transitions, and publishes only a validated completed output reference."
+        },
+        "data": { "originalComponentId": "backend-server", "semanticRole": "backend" },
+        "highlightReason": "Separating coordination from data processing lets long-running sort work resume without keeping a coordinator process in memory."
+      },
+      "requirementIds": ["legacy-requirement:4"]
+    },
+    {
+      "id": "sort-api-coordinator-edge",
+      "stepNumber": 6,
+      "phase": "Job Contract and Durable Data",
+      "title": "Route accepted jobs to the coordinator",
+      "type": "add_connection",
+      "content": "The API passes the validated job specification and an idempotency key to the coordinator. A retry of the same submission must return the existing job rather than start a second full sort.",
+      "connection": {
+        "edgeId": "sort_api_to_coordinator",
+        "sourceNodeId": "sort_api_gateway",
+        "targetNodeId": "sort_coordinator",
+        "connectionType": "api-call",
+        "label": "Create or inspect sort job",
+        "description": "The coordinator receives a validated, idempotent job contract from the API boundary."
+      },
+      "requirementIds": []
+    },
+    {
+      "id": "sort-metadata",
+      "stepNumber": 7,
+      "phase": "Job Contract and Durable Data",
+      "title": "Persist job state and run manifests",
+      "type": "add_component",
+      "content": "Track the job state, source identity, sort-specification version, partition ranges, immutable run locations, checksums, merge-stage dependencies, and final-output pointer. Store metadata rather than duplicating the dataset in the control database.",
+      "component": {
+        "nodeId": "sort_metadata_db",
+        "componentType": "database",
+        "label": "Job Metadata and Run Manifest Store",
+        "description": "Durable control-plane state and references to immutable data objects.",
+        "position": { "x": 930, "y": 60 },
+        "properties": {
+          "componentName": "Job Metadata and Run Manifest Store",
+          "purpose": "Stores idempotent job state, the versioned comparator specification, input ranges, run and merge manifests, checksums, and the committed output reference; large records remain in object storage."
+        },
+        "data": { "originalComponentId": "database", "semanticRole": "database" },
+        "highlightReason": "A durable manifest makes retries and multi-pass merging recoverable without rescanning or guessing which intermediate objects are valid."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "sort-coordinator-metadata-edge",
+      "stepNumber": 8,
+      "phase": "Job Contract and Durable Data",
+      "title": "Connect coordination to durable metadata",
+      "type": "add_connection",
+      "content": "Commit each stage transition and manifest reference before acknowledging it. A worker retry can then be checked against the same job and comparator version.",
+      "connection": {
+        "edgeId": "sort_coordinator_to_metadata",
+        "sourceNodeId": "sort_coordinator",
+        "targetNodeId": "sort_metadata_db",
+        "connectionType": "database-connection",
+        "label": "Job state and manifest metadata",
+        "description": "The coordinator records durable stage state and object references."
+      },
+      "requirementIds": []
+    },
+    {
+      "id": "sort-object-store",
+      "stepNumber": 9,
+      "phase": "Job Contract and Durable Data",
+      "title": "Use object storage for input, sorted runs, and output",
+      "type": "add_component",
+      "content": "Keep the source dataset immutable and place generated sorted runs and final output in separate, manifest-addressed prefixes. Object storage provides the external capacity boundary for terabytes of data and the large disk space required; define quotas, retention, encryption, and cleanup policy from actual workload and compliance needs rather than invented values.",
+      "component": {
+        "nodeId": "sort_object_store",
+        "componentType": "object-storage",
+        "label": "Dataset and Sorted-Run Object Storage",
+        "description": "Vendor-neutral durable source, intermediate-run, manifest-support, and output storage.",
+        "position": { "x": 930, "y": 350 },
+        "properties": {
+          "componentName": "Dataset and Sorted-Run Object Storage",
+          "purpose": "Stores immutable input datasets, sequentially written sorted runs, and completed outputs addressed by durable manifests; capacity and intermediate retention are sized from measured data volume and recovery policy."
+        },
+        "data": { "originalComponentId": "object-storage", "semanticRole": "storage" },
+        "highlightReason": "The dataset and intermediate runs exceed worker memory and may reach terabytes, so their authoritative copies must live outside process memory."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:2"]
+    },
+    {
+      "id": "sort-client-object-edge",
+      "stepNumber": 10,
+      "phase": "Run Generation Under Memory Constraints",
+      "title": "Keep dataset transfer on the storage data path",
+      "type": "add_connection",
+      "content": "The client uploads or selects the source in object storage and later downloads or reads the committed output. Use short-lived scoped access when the product requires direct transfer; the API and coordinator carry references, not the full dataset.",
+      "connection": {
+        "edgeId": "sort_client_to_objects",
+        "sourceNodeId": "sort_web_app",
+        "targetNodeId": "sort_object_store",
+        "connectionType": "http",
+        "label": "Source upload and completed-result access",
+        "description": "Large input and output bytes move between the client and object storage rather than through control-plane services."
+      },
+      "requirementIds": ["legacy-constraint:2"]
+    },
+    {
+      "id": "sort-input-boundary",
+      "stepNumber": 11,
+      "phase": "Run Generation Under Memory Constraints",
+      "title": "Freeze the input and comparator for this job",
+      "type": "explanation",
+      "content": "Record the exact source object version or immutable identity plus the schema, encoding, null policy, collation, key expression, direction, and comparator version. If a custom key or data type is unsupported, fail validation before generating runs. Retries and every merge pass must use the identical specification.",
+      "requirementIds": []
+    },
+    {
+      "id": "sort-run-queue",
+      "stepNumber": 12,
+      "phase": "Run Generation Under Memory Constraints",
+      "title": "Queue bounded run-generation tasks",
+      "type": "add_component",
+      "content": "Represent each task as a source range plus job and comparator version, not as an in-memory copy of records. Durable queueing lets independent partitions be retried and processed in parallel while backpressure limits outstanding work.",
+      "component": {
+        "nodeId": "sort_run_queue",
+        "componentType": "queue",
+        "label": "Run-Generation Task Queue",
+        "description": "Durable work descriptors for independent input ranges.",
+        "position": { "x": 1220, "y": 350 },
+        "properties": {
+          "componentName": "Run-Generation Task Queue",
+          "purpose": "Carries idempotent source-range tasks and comparator versions; bounded consumption applies backpressure when workers or storage are saturated.",
+          "durable": true,
+          "backoff": "exponential"
+        },
+        "data": { "originalComponentId": "queue", "semanticRole": "queue" },
+        "highlightReason": "Parallel processing is expressed as independently retryable tasks rather than unbounded fan-out or a single process holding the entire dataset."
+      },
+      "requirementIds": ["legacy-requirement:4"]
+    },
+    {
+      "id": "sort-coordinator-run-queue-edge",
+      "stepNumber": 13,
+      "phase": "Run Generation Under Memory Constraints",
+      "title": "Dispatch only manifest-backed input ranges",
+      "type": "add_connection",
+      "content": "The coordinator creates deterministic range descriptors and enqueues each once by idempotency key. Queue depth and worker capacity regulate parallel processing support without multiplying memory use without bound.",
+      "connection": {
+        "edgeId": "sort_coordinator_to_run_queue",
+        "sourceNodeId": "sort_coordinator",
+        "targetNodeId": "sort_run_queue",
+        "connectionType": "message-queue",
+        "label": "Input-range sort tasks",
+        "description": "The coordinator dispatches durable, deduplicated work descriptors for source ranges."
+      },
+      "requirementIds": ["legacy-requirement:4"]
+    },
+    {
+      "id": "sort-run-workers",
+      "stepNumber": 14,
+      "phase": "Run Generation Under Memory Constraints",
+      "title": "Sort one bounded chunk per worker task",
+      "type": "add_component",
+      "content": "Use external merge sort: divide data into chunks, read each chunk under a configured memory budget, sort chunks in memory, and spill each completed sorted run before accepting more input. This sorts datasets larger than available memory; for data that doesn't fit in RAM, the complete dataset is never materialized in RAM. Limited memory availability is handled by bounded records, buffers, and task concurrency, with thresholds chosen from worker measurements rather than assumed here. Decode supported different data types consistently and apply the same versioned comparator for custom sorting keys during both run generation and merge. For the Minimize time complexity requirement, run sorting uses comparison-based O(N log N) behavior in aggregate as an upper-level target; benchmark the selected codec and comparator against representative records.",
+      "component": {
+        "nodeId": "sort_run_workers",
+        "componentType": "processing-worker",
+        "label": "Bounded-Memory Run Sort Workers",
+        "description": "Parse typed records, apply a versioned custom-key comparator, and emit sorted external runs.",
+        "position": { "x": 1510, "y": 350 },
+        "properties": {
+          "componentName": "Bounded-Memory Run Sort Workers",
+          "purpose": "Reads bounded source ranges, decodes declared data types, sorts within a measured per-task memory budget using the job's custom-key comparator, and writes immutable sorted runs without loading the full dataset into RAM.",
+          "tasks": "Data Processing"
+        },
+        "data": { "originalComponentId": "processing-worker", "semanticRole": "processing-worker" },
+        "highlightReason": "This worker directly implements chunk sorting while explicitly bounding memory and preserving the same typed-key ordering contract for later merges."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "sort-queue-worker-edge",
+      "stepNumber": 15,
+      "phase": "Run Generation Under Memory Constraints",
+      "title": "Scale run sorting with bounded parallel workers",
+      "type": "add_connection",
+      "content": "Workers claim independent ranges, so run generation supports parallel processing. Set concurrency from measured memory per task, storage throughput, and queue lag; do not raise worker count past the memory or disk-I/O budget.",
+      "connection": {
+        "edgeId": "sort_run_queue_to_workers",
+        "sourceNodeId": "sort_run_queue",
+        "targetNodeId": "sort_run_workers",
+        "connectionType": "message-queue",
+        "label": "Independent bounded sort tasks",
+        "description": "The durable queue distributes independent ranges and applies backpressure to the worker pool."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "sort-workers-store-edge",
+      "stepNumber": 16,
+      "phase": "Run Generation Under Memory Constraints",
+      "title": "Write sorted runs sequentially and publish them by manifest",
+      "type": "add_connection",
+      "content": "Write each run as an immutable, sequential object and record its key range, record count, checksum, comparator version, and source range in the manifest. This supports efficient disk I/O operations and minimizes random writes; never mark a partial object as a complete run.",
+      "connection": {
+        "edgeId": "sort_run_workers_to_objects",
+        "sourceNodeId": "sort_run_workers",
+        "targetNodeId": "sort_object_store",
+        "connectionType": "data-flow",
+        "label": "Sequential sorted-run writes",
+        "description": "Run data is written as immutable external objects, with completion and integrity metadata recorded separately."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:3", "legacy-constraint:2"]
+    },
+    {
+      "id": "sort-workers-metadata-edge",
+      "stepNumber": 17,
+      "phase": "Run Generation Under Memory Constraints",
+      "title": "Checkpoint completed runs, not worker memory",
+      "type": "add_connection",
+      "content": "After an immutable run is finalized and verified, record its manifest entry and task completion. Replaying a task can detect an already committed run by deterministic identity and checksum instead of duplicating it.",
+      "connection": {
+        "edgeId": "sort_run_workers_to_metadata",
+        "sourceNodeId": "sort_run_workers",
+        "targetNodeId": "sort_metadata_db",
+        "connectionType": "database-connection",
+        "label": "Verified run manifest entries",
+        "description": "Workers commit metadata only after a complete run object is durable and checked."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "sort-run-boundaries",
+      "stepNumber": 18,
+      "phase": "Run Generation Under Memory Constraints",
+      "title": "Make run boundaries recoverable and auditable",
+      "type": "explanation",
+      "content": "A run manifest records the input range, key-range bounds when available, sort-specification hash, object version, checksum, and completion marker. This lets the coordinator distinguish a retry from missing or corrupt data and avoids rescanning the entire source after a process restart.",
+      "requirementIds": []
+    },
+    {
+      "id": "sort-run-selection",
+      "stepNumber": 19,
+      "phase": "Run Generation Under Memory Constraints",
+      "title": "Choose chunk and concurrency limits from evidence",
+      "type": "explanation",
+      "content": "Measure record width, parser expansion, comparator memory, sort temporary allocations, object-store throughput, and worker memory under representative data. Then choose chunk bounds and concurrent tasks with headroom; the live brief supplies no memory size, dataset distribution, or throughput target to plug in as a default.",
+      "requirementIds": []
+    },
+    {
+      "id": "sort-runs-ready",
+      "stepNumber": 20,
+      "phase": "Run Generation Under Memory Constraints",
+      "title": "Advance only when all expected runs are verified",
+      "type": "explanation",
+      "content": "Compare the manifest with the planned source ranges, verify each checksum and comparator version, and wait for retryable tasks to reach a terminal outcome. Missing, overlapping, or duplicate ranges must block the merge stage instead of producing a plausible but incomplete sorted file.",
+      "requirementIds": []
+    },
+    {
+      "id": "sort-merge-queue",
+      "stepNumber": 21,
+      "phase": "External Merge and Result Delivery",
+      "title": "Queue explicit merge-stage tasks",
+      "type": "add_component",
+      "content": "Each task names a bounded group of verified input runs and its output manifest identity. A later merge pass is scheduled only when its predecessor runs are committed, so work can resume from the last durable stage.",
+      "component": {
+        "nodeId": "sort_merge_queue",
+        "componentType": "queue",
+        "label": "Merge-Stage Task Queue",
+        "description": "Durable, idempotent tasks for each bounded merge group and pass.",
+        "position": { "x": 1220, "y": 650 },
+        "properties": {
+          "componentName": "Merge-Stage Task Queue",
+          "purpose": "Carries manifest-backed groups of verified runs for each merge pass and controls concurrency against memory and storage capacity.",
+          "durable": true,
+          "backoff": "exponential"
+        },
+        "data": { "originalComponentId": "queue", "semanticRole": "queue" },
+        "highlightReason": "Separate merge work can be retried and paced independently from chunk sorting without losing pass dependencies."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "sort-coordinator-merge-queue-edge",
+      "stepNumber": 22,
+      "phase": "External Merge and Result Delivery",
+      "title": "Schedule merge groups from verified manifests",
+      "type": "add_connection",
+      "content": "The coordinator groups only committed, non-overlapping run manifests and records parent-child lineage for each merge task. Fan-in and concurrent task counts must respect buffer memory and storage limits.",
+      "connection": {
+        "edgeId": "sort_coordinator_to_merge_queue",
+        "sourceNodeId": "sort_coordinator",
+        "targetNodeId": "sort_merge_queue",
+        "connectionType": "message-queue",
+        "label": "Verified run groups by merge pass",
+        "description": "The coordinator schedules deterministic merge groups with explicit lineage and bounded fan-in."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "sort-merge-workers",
+      "stepNumber": 23,
+      "phase": "External Merge and Result Delivery",
+      "title": "Merge runs with bounded k-way buffers",
+      "type": "add_component",
+      "content": "Use merge sorted chunks using k-way merge: keep a bounded input buffer per selected run and a priority structure ordered by the exact same typed comparator and custom sorting keys used to create runs. Emit the next record sequentially and refill only the consumed buffer. This provides efficient merge operations without opening or buffering every run at once. Per pass, comparison work is O(N log k) for fan-in k; multiple passes add I/O, so select fan-in from memory and storage evidence rather than maximizing it blindly.",
+      "component": {
+        "nodeId": "sort_merge_workers",
+        "componentType": "processing-worker",
+        "label": "Bounded K-Way Merge Workers",
+        "description": "Merge sorted runs with bounded buffers, deterministic comparator semantics, and durable pass outputs.",
+        "position": { "x": 1510, "y": 650 },
+        "properties": {
+          "componentName": "Bounded K-Way Merge Workers",
+          "purpose": "Reads a bounded group of sorted runs, applies the run-generation comparator and custom key unchanged, and writes a sequential merged run with lineage and integrity metadata.",
+          "tasks": "Data Processing"
+        },
+        "data": { "originalComponentId": "processing-worker", "semanticRole": "processing-worker" },
+        "highlightReason": "A bounded k-way merge addresses efficient merge operations while controlling per-task memory, open inputs, and comparison complexity."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "sort-merge-queue-worker-edge",
+      "stepNumber": 24,
+      "phase": "External Merge and Result Delivery",
+      "title": "Dispatch bounded merge groups to workers",
+      "type": "add_connection",
+      "content": "A merge worker processes a finite manifest group and returns a durable output-run reference. Retries use the task identity and comparator hash so duplicate delivery cannot silently create a second lineage branch.",
+      "connection": {
+        "edgeId": "sort_merge_queue_to_workers",
+        "sourceNodeId": "sort_merge_queue",
+        "targetNodeId": "sort_merge_workers",
+        "connectionType": "message-queue",
+        "label": "Bounded merge tasks",
+        "description": "The queue distributes idempotent groups of verified sorted runs to the merge worker pool."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "sort-merge-storage-edge",
+      "stepNumber": 25,
+      "phase": "External Merge and Result Delivery",
+      "title": "Stream merge reads and sequential pass writes",
+      "type": "add_connection",
+      "content": "Read run objects with bounded sequential buffers and write each merged pass as a new immutable object. Minimize disk I/O operations by avoiding random record rewrites and unnecessary passes; when fan-in is limited by memory, record the extra pass and its storage cost explicitly.",
+      "connection": {
+        "edgeId": "sort_merge_workers_to_objects",
+        "sourceNodeId": "sort_merge_workers",
+        "targetNodeId": "sort_object_store",
+        "connectionType": "data-flow",
+        "label": "Sequential run reads and merged-run writes",
+        "description": "Workers stream manifest-selected runs and persist each completed merge output without in-place mutation."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "sort-merge-metadata-edge",
+      "stepNumber": 26,
+      "phase": "External Merge and Result Delivery",
+      "title": "Commit merge lineage only after output verification",
+      "type": "add_connection",
+      "content": "Record the parent run IDs, output object version, checksum, key bounds, and pass number. Do not advance the job's active manifest pointer until the merged object is complete and verified.",
+      "connection": {
+        "edgeId": "sort_merge_workers_to_metadata",
+        "sourceNodeId": "sort_merge_workers",
+        "targetNodeId": "sort_metadata_db",
+        "connectionType": "database-connection",
+        "label": "Verified merge lineage and pass state",
+        "description": "The manifest store records recoverable parent-child lineage for every committed merge output."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "sort-merge-passes",
+      "stepNumber": 27,
+      "phase": "External Merge and Result Delivery",
+      "title": "Repeat bounded passes until one ordered result remains",
+      "type": "explanation",
+      "content": "If the number of runs exceeds the safe fan-in, merge groups in additional passes. Keep memory bounded, track every pass in the manifest, and delete an input run only after all dependent outputs are verified and the configured recovery/retention policy permits cleanup. This trades extra sequential I/O for a safe resource envelope.",
+      "requirementIds": []
+    },
+    {
+      "id": "sort-coordinator-api-edge",
+      "stepNumber": 28,
+      "phase": "External Merge and Result Delivery",
+      "title": "Return job state through the API boundary",
+      "type": "add_connection",
+      "content": "The coordinator reports queued, sorting, merging, validating, completed, or failed states. The API exposes the committed result pointer only after final validation succeeds.",
+      "connection": {
+        "edgeId": "sort_coordinator_to_api",
+        "sourceNodeId": "sort_coordinator",
+        "targetNodeId": "sort_api_gateway",
+        "connectionType": "api-call",
+        "label": "Job state and committed result reference",
+        "description": "The API reads coordinator-backed state and never advertises a partial merge output as final."
+      },
+      "requirementIds": []
+    },
+    {
+      "id": "sort-api-client-result-edge",
+      "stepNumber": 29,
+      "phase": "External Merge and Result Delivery",
+      "title": "Expose progress and completion to the client",
+      "type": "add_connection",
+      "content": "The client polls or subscribes to job state and receives the final object reference after the manifest pointer is committed. Expiring access links, if used, are an implementation decision and must follow the product's authorization policy.",
+      "connection": {
+        "edgeId": "sort_api_to_client",
+        "sourceNodeId": "sort_api_gateway",
+        "targetNodeId": "sort_web_app",
+        "connectionType": "http",
+        "label": "Job status and result reference",
+        "description": "The API returns status and a result reference only after the completed output is committed."
+      },
+      "requirementIds": []
+    },
+    {
+      "id": "sort-output-client-edge",
+      "stepNumber": 30,
+      "phase": "External Merge and Result Delivery",
+      "title": "Let consumers read the completed sorted dataset",
+      "type": "add_connection",
+      "content": "Consumers read the final object after its completion marker and checksum are committed. Preserve the input and intermediate runs according to the chosen retention policy; never expose a partial object as the sorted result.",
+      "connection": {
+        "edgeId": "sort_objects_to_client",
+        "sourceNodeId": "sort_object_store",
+        "targetNodeId": "sort_web_app",
+        "connectionType": "http",
+        "label": "Completed sorted output",
+        "description": "The client or downstream consumer reads the committed output directly from durable object storage."
+      },
+      "requirementIds": ["legacy-requirement:5"]
+    },
+    {
+      "id": "sort-output-commit",
+      "stepNumber": 31,
+      "phase": "External Merge and Result Delivery",
+      "title": "Validate ordering before declaring success",
+      "type": "explanation",
+      "content": "Validate run and merge checksums, record counts, comparator hash, range coverage, and monotonic output order. If the comparator cannot be replayed or any input range is missing, fail the job visibly and retain enough manifest data for diagnosis rather than returning a partially sorted file.",
+      "requirementIds": []
+    },
+    {
+      "id": "sort-monitoring",
+      "stepNumber": 32,
+      "phase": "Correctness and Operations",
+      "title": "Monitor the whole external-sort pipeline",
+      "type": "add_component",
+      "content": "Observe queue lag, task retries, records and bytes processed, memory high-water marks, spill/run counts, object-store read/write throughput, merge fan-in, pass count, checksum failures, and end-to-end job duration. Alert on stalled progress and corruption, not just process health.",
+      "component": {
+        "nodeId": "sort_monitoring",
+        "componentType": "monitoring",
+        "label": "Sort Pipeline Monitoring",
+        "description": "Metrics and alerts for correctness, resource pressure, and job progress.",
+        "position": { "x": 1810, "y": 500 },
+        "properties": {
+          "componentName": "Sort Pipeline Monitoring",
+          "purpose": "Tracks job duration, queue lag, retries, memory high-water marks, bytes and disk I/O, run counts, merge passes, checksum failures, and output-order validation.",
+          "stack": "Prometheus + Grafana",
+          "metrics": true,
+          "alerts": true
+        },
+        "data": { "originalComponentId": "monitoring", "semanticRole": "monitoring" },
+        "highlightReason": "A job can be unhealthy while workers are running; progress and data-integrity metrics make that failure observable."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "sort-run-monitor-edge",
+      "stepNumber": 33,
+      "phase": "Correctness and Operations",
+      "title": "Measure run-generation memory and I/O",
+      "type": "add_connection",
+      "content": "Track per-task memory high-water mark, bytes read and written, records sorted, spill count, run size distribution, and source-range completion. Use the measurements to tune bounded chunk size and worker concurrency.",
+      "connection": {
+        "edgeId": "sort_run_workers_to_monitoring",
+        "sourceNodeId": "sort_run_workers",
+        "targetNodeId": "sort_monitoring",
+        "connectionType": "data-flow",
+        "label": "Run worker resource and progress metrics",
+        "description": "Worker telemetry reveals memory pressure, inefficient disk I/O, and incomplete partitions."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "sort-merge-monitor-edge",
+      "stepNumber": 34,
+      "phase": "Correctness and Operations",
+      "title": "Measure merge fan-in, passes, and ordering",
+      "type": "add_connection",
+      "content": "Record active input count, per-run buffer use, comparisons, bytes read/written, pass number, key-bound continuity, and output monotonicity. This makes efficient merge operations measurable instead of assumed.",
+      "connection": {
+        "edgeId": "sort_merge_workers_to_monitoring",
+        "sourceNodeId": "sort_merge_workers",
+        "targetNodeId": "sort_monitoring",
+        "connectionType": "data-flow",
+        "label": "Merge resource, I/O, and correctness metrics",
+        "description": "Merge telemetry exposes fan-in limits, excess passes, and ordering or integrity defects."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "sort-queues-monitor-edge",
+      "stepNumber": 35,
+      "phase": "Correctness and Operations",
+      "title": "Observe queue pressure and retry storms",
+      "type": "add_connection",
+      "content": "Alert on growing age of oldest task, repeated failures, duplicate deliveries, and queue saturation. Tune retries and backoff so temporary storage or worker failures recover without flooding disk or exhausting bounded memory.",
+      "connection": {
+        "edgeId": "sort_queues_to_monitoring",
+        "sourceNodeId": "sort_run_queue",
+        "targetNodeId": "sort_monitoring",
+        "connectionType": "data-flow",
+        "label": "Sort and merge queue health",
+        "description": "Queue metrics show whether parallel stages are progressing or blocked by a downstream limit."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "sort-coordinator-monitor-edge",
+      "stepNumber": 36,
+      "phase": "Correctness and Operations",
+      "title": "Trace job lineage through every stage",
+      "type": "add_connection",
+      "content": "Correlate source object identity, job specification hash, task IDs, run manifests, merge parents, retries, and final output checksum. This makes an incorrect or incomplete result traceable to the exact stage and comparator version.",
+      "connection": {
+        "edgeId": "sort_coordinator_to_monitoring",
+        "sourceNodeId": "sort_coordinator",
+        "targetNodeId": "sort_monitoring",
+        "connectionType": "data-flow",
+        "label": "Job lineage and stage outcomes",
+        "description": "Correlated stage events support job-level diagnosis and auditable result provenance."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "sort-correctness-checks",
+      "stepNumber": 37,
+      "phase": "Correctness and Operations",
+      "title": "Prove the comparator and output invariants",
+      "type": "explanation",
+      "content": "Test that the comparator is transitive and deterministic for each supported data type, custom-key version, null policy, and collation. Compare total input/output counts, verify every source range appears exactly once, and check adjacent output records are ordered under the same comparator. Define whether the sort is stable; if stability is required, include a deterministic original-position tie-breaker.",
+      "requirementIds": []
+    },
+    {
+      "id": "sort-recovery",
+      "stepNumber": 38,
+      "phase": "Correctness and Operations",
+      "title": "Recover from task and storage failures without corrupting output",
+      "type": "explanation",
+      "content": "Make task outputs immutable and idempotently named. On retry, verify the prior object and manifest before reusing it; otherwise regenerate only the affected range or merge group. Garbage-collect orphaned intermediates only after a durable reference scan and the agreed recovery window.",
+      "requirementIds": []
+    },
+    {
+      "id": "sort-capacity-open-questions",
+      "stepNumber": 39,
+      "phase": "Correctness and Operations",
+      "title": "Size only after workload discovery",
+      "type": "explanation",
+      "content": "Confirm file and record formats, maximum and typical terabytes per job, record width and skew, concurrent jobs, completion-time target, available worker memory, storage throughput/cost, retry and retention needs, sort stability, key/collation semantics, and region/security requirements. MapReduce is a possible distributed-sorting execution model when measured scale and operations justify it; it is an alternative implementation, not a capacity guarantee or a new requirement from this brief.",
+      "requirementIds": []
+    },
+    {
+      "id": "sort-close",
+      "stepNumber": 40,
+      "phase": "Correctness and Operations",
+      "title": "Review the design as a verifiable sort pipeline",
+      "type": "explanation",
+      "content": "The core path is: immutable external input -> bounded in-memory chunk sorts -> durable sorted runs -> bounded k-way merge passes -> verified committed output. Before implementation, test representative types and custom keys, measure memory and sequential disk I/O, and demonstrate that a multi-terabyte input completes with correct ordering without loading the full dataset into RAM.",
+      "requirementIds": []
+    }
+  ]
+}

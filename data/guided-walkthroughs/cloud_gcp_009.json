@@ -1,0 +1,973 @@
+{
+  "problem_id": "cloud_gcp_009",
+  "version": "1.0-review",
+  "totalSteps": 61,
+  "requirementRevision": null,
+  "phases": [
+    {
+      "name": "Freeze the brief and establish the entry path",
+      "stepRange": [1, 7],
+      "description": "Separate the supplied targets from sizing assumptions, then place channel ingress, authentication, orchestration, and admission control."
+    },
+    {
+      "name": "Add conversational AI and supporting services",
+      "stepRange": [8, 19],
+      "description": "Use catalog components where their semantics fit and narrowly scoped custom nodes only for missing telephony and Google-managed contact-center APIs."
+    },
+    {
+      "name": "Wire the real-time conversation and agent handoff",
+      "stepRange": [20, 37],
+      "description": "Connect the live audio/text path, model calls, human desktop, presence projection, session state, and the asynchronous event boundary."
+    },
+    {
+      "name": "Move insights off-path and make failures observable",
+      "stepRange": [38, 53],
+      "description": "Archive governed artifacts, build BigQuery insights asynchronously, quarantine/replay failed work, and instrument the end-to-end path."
+    },
+    {
+      "name": "Set evidence gates and operational triggers",
+      "stepRange": [54, 61],
+      "description": "Make latency, privacy, consistency, model quality, agent outcomes, and concurrency explicit acceptance tests rather than architecture promises."
+    }
+  ],
+  "steps": [
+    {
+      "id": "contact_01_contract",
+      "stepNumber": 1,
+      "phase": "Freeze the brief and establish the entry path",
+      "title": "Freeze what the brief says—and what it does not",
+      "type": "explanation",
+      "content": "Brief facts: support virtual agents, call transcription, sentiment, agent assistance, intent detection, intelligent routing, conversation insights, and agent-performance monitoring. The stated constraints are response under 2 seconds, 10,000+ concurrent calls, transcription accuracy above 95%, intent accuracy above 90%, and a 30% handling-time reduction. The hints name Contact Center AI, Dialogflow, Speech-to-Text, Text-to-Speech, Natural Language API, and BigQuery. Provisional design assumptions: Google Cloud is the target provider; the response target means time to first useful response for an agreed interactive workload; live audio is streamed; and the agent desktop is browser-based. The brief does not define geography, languages, peak call arrival rate, the latency percentile, accuracy dataset, data-retention policy, or the baseline and formula for handling time. Treat every target as unverified until measured.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "contact_02_channels",
+      "stepNumber": 2,
+      "phase": "Freeze the brief and establish the entry path",
+      "title": "Represent voice and text channel adapters",
+      "type": "add_component",
+      "content": "Use this custom node only for the missing carrier/channel boundary: the catalog has no PSTN/SIP, WebRTC, or inbound text-channel adapter. Keep carrier failover, tenant identity, consent, and regional media routing behind this boundary; do not treat it as a newly invented generic product component.",
+      "component": {
+        "nodeId": "cc_channels",
+        "componentType": "custom-component",
+        "label": "Voice & Text Channel Adapters",
+        "description": "Provider-facing voice and text ingress adapters",
+        "position": {"x": 60, "y": 260},
+        "properties": {
+          "componentName": "Voice & Text Channel Adapters",
+          "subtitle": "SIP/PSTN · WebRTC · text",
+          "componentType": "External contact-channel adapters (catalog gap)",
+          "technology": "Carrier and messaging-provider adapters",
+          "purpose": "Terminate supported voice and text channels, attach a stable tenant and call identity, enforce consent policy, and route media to the regional contact-center service.",
+          "notes": "Custom is used because the catalog has no telephony or inbound messaging gateway item. Provider, country, emergency-call, and failover choices remain open."
+        },
+        "highlightReason": "Voice and text enter through different provider protocols but need one governed conversation identity."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:2"]
+    },
+    {
+      "id": "contact_03_global_ingress",
+      "stepNumber": 3,
+      "phase": "Freeze the brief and establish the entry path",
+      "title": "Distribute sessions without pinning every call to one host",
+      "type": "add_component",
+      "content": "Use the existing global Layer 7 load balancer for healthy-region selection, TLS policy, draining, and connection-aware routing. Voice media and long-lived signaling need protocol-aware health checks and graceful draining; a generic HTTP-only probe is not evidence that an active media session is healthy.",
+      "component": {
+        "nodeId": "cc_ingress",
+        "componentType": "loadbalancer",
+        "label": "Global Contact-Center Ingress",
+        "description": "Regional traffic distribution and connection draining",
+        "position": {"x": 360, "y": 260},
+        "properties": {
+          "componentName": "Global Contact-Center Ingress",
+          "purpose": "Route channel signaling and supported media ingress to healthy regional services, terminate TLS at the approved boundary, and drain connections safely during deployment or failover.",
+          "type": "Global",
+          "algorithm": "least-connections",
+          "sslTermination": true,
+          "healthCheck": true,
+          "multiAZ": true,
+          "accessLogs": true,
+          "connectionDraining": true,
+          "ddosProtection": true
+        },
+        "highlightReason": "Global distribution and connection draining support the concurrency target without asserting capacity."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "contact_04_api_gateway",
+      "stepNumber": 4,
+      "phase": "Freeze the brief and establish the entry path",
+      "title": "Separate authenticated control requests from media streams",
+      "type": "add_component",
+      "content": "Use the catalog API Gateway for session creation, agent actions, and tenant administration—not as a place to buffer a live audio stream. Validate schemas, authenticate every control request, apply per-tenant quotas, and accept an idempotency key for retried create/assign/close operations.",
+      "component": {
+        "nodeId": "cc_api",
+        "componentType": "api-gateway",
+        "label": "Session & Agent API Gateway",
+        "description": "Authenticated control plane for calls and agent actions",
+        "position": {"x": 660, "y": 260},
+        "properties": {
+          "componentName": "Session & Agent API Gateway",
+          "purpose": "Expose versioned session and agent-control APIs with request validation, tenant-aware authentication, throttling, and deduplication; keep long-lived media off the ordinary request path.",
+          "inputValidation": true,
+          "authentication": "OAuth 2.0",
+          "rateLimiting": true,
+          "tlsTermination": true,
+          "deduplication": true,
+          "throttling": true
+        },
+        "highlightReason": "A distinct control plane makes authorization and duplicate-request handling explicit."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "contact_05_identity",
+      "stepNumber": 5,
+      "phase": "Freeze the brief and establish the entry path",
+      "title": "Authenticate customers and agents with different scopes",
+      "type": "add_component",
+      "content": "Use the catalog Auth Service for identity and session-token validation. Customer access, agent access, supervisor access, and service-to-service identity are separate policies; enforce tenant and role checks in the API and data boundary rather than trusting a browser claim.",
+      "component": {
+        "nodeId": "cc_auth",
+        "componentType": "auth-service",
+        "label": "Tenant Identity & Authorization",
+        "description": "Customer, agent, supervisor, and workload identity checks",
+        "position": {"x": 660, "y": 500},
+        "properties": {
+          "componentName": "Tenant Identity & Authorization",
+          "purpose": "Validate customer and workforce identities, issue short-lived scoped claims, enforce tenant and role policy server-side, and record privileged access for audit.",
+          "oauth": true,
+          "sessions": "redis",
+          "tokenTTL": 15,
+          "mfa": true
+        },
+        "highlightReason": "Call recordings, transcripts, and agent controls require distinct least-privilege identities."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:2"]
+    },
+    {
+      "id": "contact_06_orchestrator",
+      "stepNumber": 6,
+      "phase": "Freeze the brief and establish the entry path",
+      "title": "Keep session orchestration and routing state explicit",
+      "type": "add_component",
+      "content": "The backend owns conversation state transitions, intent-to-queue policy, human handoff, retries, and agent assignment. Use a versioned state machine and conditional writes so two retries or competing workers cannot assign two agents or close a call twice. Keep provider-specific model calls behind the AI gateway.",
+      "component": {
+        "nodeId": "cc_orchestrator",
+        "componentType": "backend-server",
+        "label": "Conversation Orchestrator & Router",
+        "description": "Session lifecycle, intent policy, and human routing",
+        "position": {"x": 960, "y": 260},
+        "properties": {
+          "componentName": "Conversation Orchestrator & Router",
+          "purpose": "Manage idempotent call state, confidence-aware intent routing, agent eligibility, queue fallback, and human handoff while enforcing a measured latency budget.",
+          "architecture": "Microservices",
+          "retry": true,
+          "caching": true
+        },
+        "highlightReason": "A single policy owner makes routing, fallback, and state transitions auditable."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "contact_07_admission_control",
+      "stepNumber": 7,
+      "phase": "Freeze the brief and establish the entry path",
+      "title": "Protect shared inference and API quotas",
+      "type": "add_component",
+      "content": "Use a distributed token bucket for tenant and operation-class admission. Reserve capacity for active calls and agent assist; do not let batch insight jobs consume the same quota as a live turn. Rate limiting is overload protection, not proof that 10,000 simultaneous calls are supported.",
+      "component": {
+        "nodeId": "cc_limiter",
+        "componentType": "rate-limiter",
+        "label": "Tenant & Inference Admission Control",
+        "description": "Distributed quotas for live and background work",
+        "position": {"x": 660, "y": 80},
+        "properties": {
+          "componentName": "Tenant & Inference Admission Control",
+          "purpose": "Apply distributed per-tenant and per-operation quotas, reserve capacity for live sessions, and shed or defer background work before shared provider quotas are exhausted.",
+          "algorithm": "Token Bucket",
+          "distributed": true,
+          "backend": "Redis"
+        },
+        "highlightReason": "Admission control protects interactive latency under burst and provider quota pressure."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "contact_08_ai_gateway",
+      "stepNumber": 8,
+      "phase": "Add conversational AI and supporting services",
+      "title": "Put a provider adapter and policy boundary around AI calls",
+      "type": "add_component",
+      "content": "The catalog has an AI Gateway but its provider select does not include Google Contact Center AI. Select the supported Custom adapter option and identify Google services in the label and purpose. Disable response caching for live, personalized conversations unless privacy and freshness review explicitly approves a narrow cache; redact identifiers before diagnostic logs.",
+      "component": {
+        "nodeId": "cc_ai_gateway",
+        "componentType": "ai-gateway",
+        "label": "Google CCAI Provider & Policy Gateway",
+        "description": "Provider adapter, quotas, redaction, and timeout policy",
+        "position": {"x": 1260, "y": 80},
+        "properties": {
+          "componentName": "Google CCAI Provider & Policy Gateway",
+          "purpose": "Adapt the approved Google Contact Center AI APIs, enforce tenant quotas and timeout budgets, redact sensitive fields from operational logs, and expose provider-neutral request and response contracts.",
+          "platform": "Custom",
+          "caching": false
+        },
+        "highlightReason": "The catalog's AI Gateway is reusable, while its provider enum lacks Google; the supported Custom value avoids inventing an option."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1"]
+    },
+    {
+      "id": "contact_09_circuit_breaker",
+      "stepNumber": 9,
+      "phase": "Add conversational AI and supporting services",
+      "title": "Bound slow or unavailable model calls",
+      "type": "add_component",
+      "content": "Place a circuit breaker around optional upstream AI calls. Open it on measured timeout/error rates, use a bounded fallback, and recover gradually with half-open probes. A failed AI response must not strand a call: continue safe deterministic routing or offer a human queue according to confidence and policy.",
+      "component": {
+        "nodeId": "cc_breaker",
+        "componentType": "circuit-breaker",
+        "label": "AI Dependency Circuit Breaker",
+        "description": "Timeout isolation and safe human fallback",
+        "position": {"x": 1560, "y": 80},
+        "properties": {
+          "componentName": "AI Dependency Circuit Breaker",
+          "purpose": "Bound optional inference calls, open on a measured failure threshold, and return a safe fallback or human handoff without blocking the conversation indefinitely.",
+          "failureThreshold": 50,
+          "timeout": 500,
+          "fallback": true
+        },
+        "highlightReason": "The sub-second dependency timeout leaves budget for orchestration and channel delivery, subject to measurement."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "contact_10_google_contact_ai",
+      "stepNumber": 10,
+      "phase": "Add conversational AI and supporting services",
+      "title": "Represent Google-managed contact-center speech and language APIs",
+      "type": "add_component",
+      "content": "This is the second justified custom node: the catalog has generic AI Agent and ML Model items, but neither models Google Contact Center AI/ Dialogflow CX nor the managed streaming Speech-to-Text, Text-to-Speech, Natural Language sentiment, and Agent Assist APIs; the AI Gateway provider choices also omit Google. Use one custom service-plane node rather than mislabeling these APIs as an unrelated framework. Inside this boundary, stream partial transcripts for fast turns, retain final transcript/confidence metadata, synthesize virtual-agent audio when needed, and keep agent-assist suggestions advisory until accepted by a human.",
+      "component": {
+        "nodeId": "cc_google_ai",
+        "componentType": "custom-component",
+        "label": "Google CCAI, Dialogflow & Speech APIs",
+        "description": "Managed virtual-agent, transcription, language, and agent-assist services",
+        "position": {"x": 1860, "y": 260},
+        "properties": {
+          "componentName": "Google CCAI, Dialogflow & Speech APIs",
+          "subtitle": "Dialogflow CX · Speech-to-Text · Text-to-Speech · Natural Language API · Agent Assist",
+          "componentType": "Google managed contact-center AI service plane (catalog gap)",
+          "technology": "Google Cloud Contact Center AI and managed speech/language APIs",
+          "purpose": "Provide virtual-agent turns and intent detection, streaming call transcription, speech synthesis, sentiment signals, and agent-assist suggestions behind one tenant-aware provider boundary.",
+          "notes": "Custom is used because the existing AI Agent and ML Model entries do not represent these managed Google APIs or their supported configuration. Validate regional availability, language coverage, quotas, privacy terms, and API-specific accuracy before selecting a deployment."
+        },
+        "highlightReason": "One explicitly documented custom service plane keeps the real Google capabilities accurate without adding unsupported catalog types or select values."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "contact_11_agent_desktop",
+      "stepNumber": 11,
+      "phase": "Add conversational AI and supporting services",
+      "title": "Give agents one live, reviewable workspace",
+      "type": "add_component",
+      "content": "The agent desktop should show a synchronized transcript with confidence and timestamps, current intent and queue, customer context allowed by policy, and clearly labeled suggestions. Agents can edit or reject generated text, take over from a virtual agent, and mark disposition; model output never silently sends a message or closes a case.",
+      "component": {
+        "nodeId": "cc_agent_ui",
+        "componentType": "web-app",
+        "label": "Agent Desktop & Supervisor Console",
+        "description": "Human review, takeover, live transcript, and disposition",
+        "position": {"x": 2160, "y": 260},
+        "properties": {
+          "componentName": "Agent Desktop & Supervisor Console",
+          "purpose": "Present live transcript, confidence, intent, queue, and advisory agent-assist suggestions; support human takeover, correction, and audited disposition actions.",
+          "framework": "React",
+          "cdn": true,
+          "ssl": true
+        },
+        "highlightReason": "The agent remains the decision-maker for suggested responses and sensitive actions."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:8"]
+    },
+    {
+      "id": "contact_12_presence_cache",
+      "stepNumber": 12,
+      "phase": "Add conversational AI and supporting services",
+      "title": "Cache agent availability as a short-lived routing hint",
+      "type": "add_component",
+      "content": "Keep hot presence and skill-eligibility projections in Redis with a short TTL. Presence can be stale, so assignment still uses a conditional write against authoritative session/agent state; if the cache is unavailable, use a bounded database-backed fallback or queue the call rather than double-assigning it.",
+      "component": {
+        "nodeId": "cc_presence",
+        "componentType": "cache",
+        "label": "Agent Presence & Skill Cache",
+        "description": "Ephemeral routing projection; not the source of truth",
+        "position": {"x": 1260, "y": 560},
+        "properties": {
+          "componentName": "Agent Presence & Skill Cache",
+          "purpose": "Serve low-latency presence and skill projections for routing while treating expiration and cache misses as normal; authoritative assignment is committed in the session store.",
+          "engine": "redis",
+          "cacheStrategy": "cache-aside",
+          "ttl": 5,
+          "inMemory": true,
+          "replication": true,
+          "clusterMode": true,
+          "encryption": true
+        },
+        "highlightReason": "Short-lived presence data reduces routing lookup latency without weakening assignment correctness."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "contact_13_session_store",
+      "stepNumber": 13,
+      "phase": "Add conversational AI and supporting services",
+      "title": "Persist call state, idempotency, and assignment leases",
+      "type": "add_component",
+      "content": "Use a transactional/strongly consistent store for call state, stable idempotency keys, transcript segment cursors, agent leases, and disposition. Firestore is a provisional GCP choice, not a volume or multi-region proof; validate write contention and the required transaction semantics. If cross-region transactional requirements exceed it, compare a globally consistent datastore before committing to this design.",
+      "component": {
+        "nodeId": "cc_state",
+        "componentType": "database",
+        "label": "Conversation & Assignment State",
+        "description": "Authoritative session state and deduplication records",
+        "position": {"x": 1560, "y": 560},
+        "properties": {
+          "componentName": "Conversation & Assignment State",
+          "purpose": "Store versioned call state, tenant-scoped idempotency keys, transcript cursors, agent assignment leases, and disposition with conditional transitions and recovery history.",
+          "type": "NoSQL",
+          "engine": "Firestore",
+          "workload": "OLTP",
+          "replicationMode": "Sync",
+          "multiAZ": true,
+          "backups": true,
+          "pitr": true,
+          "encryption": true,
+          "rbac": true,
+          "auditLog": true
+        },
+        "highlightReason": "Authoritative state, not an eventually consistent analytics stream, decides who owns a live call."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:2"]
+    },
+    {
+      "id": "contact_14_event_bus",
+      "stepNumber": 14,
+      "phase": "Add conversational AI and supporting services",
+      "title": "Publish versioned conversation events after state transitions",
+      "type": "add_component",
+      "content": "Use Google Cloud Pub/Sub for append-like call lifecycle, transcript-segment, assignment, and completion events. Include tenant/call identifiers, event ID, sequence/version, model version, and a minimal object reference; never put raw audio or unnecessary PII into the event. Consumers must deduplicate because delivery can repeat.",
+      "component": {
+        "nodeId": "cc_events",
+        "componentType": "pubsub",
+        "label": "Conversation Event Stream (Pub/Sub)",
+        "description": "Durable fan-out for insights and operational consumers",
+        "position": {"x": 1260, "y": 840},
+        "properties": {
+          "componentName": "Conversation Event Stream (Pub/Sub)",
+          "purpose": "Fan out minimal versioned call events after authoritative state changes so analytics, audit, and quality consumers can lag or replay independently of a live response.",
+          "topics": "call.started, transcript.segment, agent.assignment, call.completed",
+          "fanout": true,
+          "ordering": true,
+          "durable": true
+        },
+        "highlightReason": "The asynchronous boundary prevents insight computation from blocking the active conversation."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:2"]
+    },
+    {
+      "id": "contact_15_insights_worker",
+      "stepNumber": 15,
+      "phase": "Add conversational AI and supporting services",
+      "title": "Build summaries and insight aggregates asynchronously",
+      "type": "add_component",
+      "content": "Use autoscaled background workers for redaction, conversation summaries, topic and sentiment aggregates, quality cohorts, and agent outcome measures such as talk/hold and after-call-work durations for later handling-time analysis. Partition and checkpoint by tenant/call/event sequence; separate live traffic from backfills, and do not let slow warehouse writes hold a customer response open.",
+      "component": {
+        "nodeId": "cc_worker",
+        "componentType": "processing-worker",
+        "label": "Conversation Insights & Quality Workers",
+        "description": "Replayable, off-path transcript and analytics processing",
+        "position": {"x": 1560, "y": 840},
+        "properties": {
+          "componentName": "Conversation Insights & Quality Workers",
+          "purpose": "Consume ordered conversation references, redact governed fields, compute summaries and quality aggregates, checkpoint progress, and write replay-safe analytics outputs without entering the live response path.",
+          "tasks": "redaction, transcript summarization, topic/sentiment aggregation, agent outcomes including talk/hold and after-call-work durations",
+          "autoscale": true
+        },
+        "highlightReason": "Background insight generation can scale and recover independently from interactive inference."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "contact_16_recording_archive",
+      "stepNumber": 16,
+      "phase": "Add conversational AI and supporting services",
+      "title": "Keep recordings and governed transcript artifacts in object storage",
+      "type": "add_component",
+      "content": "Use GCS for artifacts only when recording consent, retention, regional residency, and access policy allow it. Store immutable object generations and checksums; place references and policy metadata in session state. Encryption, CMEK choice, retention duration, and deletion workflow must be confirmed against law and tenant contracts before production.",
+      "component": {
+        "nodeId": "cc_archive",
+        "componentType": "object-storage",
+        "label": "GCS Audio & Transcript Archive",
+        "description": "Policy-governed recordings and derived artifacts",
+        "position": {"x": 1860, "y": 840},
+        "properties": {
+          "componentName": "GCS Audio & Transcript Archive",
+          "purpose": "Store consented recordings and approved transcript artifacts by tenant and retention class with immutable generation references and checksum validation.",
+          "provider": "GCS",
+          "versioning": true,
+          "checksumValidation": true
+        },
+        "highlightReason": "Object generations and checksums support audit and replay without making raw audio part of the analytics event."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7"]
+    },
+    {
+      "id": "contact_17_warehouse",
+      "stepNumber": 17,
+      "phase": "Add conversational AI and supporting services",
+      "title": "Use BigQuery for cohort insights and agent performance",
+      "type": "add_component",
+      "content": "Use BigQuery for governed, partitioned conversation and agent-outcome aggregates—not call routing or hot session reads. Keep model version, language/cohort, confidence, queue, transfer, resolution, and after-call-work measures so teams can distinguish a real handling-time change from a case-mix shift.",
+      "component": {
+        "nodeId": "cc_warehouse",
+        "componentType": "data-warehouse",
+        "label": "BigQuery Conversation & Agent Insights",
+        "description": "Partitioned analytics for quality and operational outcomes",
+        "position": {"x": 2160, "y": 840},
+        "properties": {
+          "componentName": "BigQuery Conversation & Agent Insights",
+          "purpose": "Analyze redacted conversation outcomes, intent and sentiment cohorts, handoffs, queue waits, resolution, and agent performance using partition-pruned analytical queries.",
+          "platform": "BigQuery",
+          "partitioning": true,
+          "compression": true
+        },
+        "highlightReason": "A warehouse supports delayed conversation insights and agent performance trends without adding latency to calls."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "contact_18_retry_queue",
+      "stepNumber": 18,
+      "phase": "Add conversational AI and supporting services",
+      "title": "Quarantine poison events and make replay explicit",
+      "type": "add_component",
+      "content": "Use a durable retry/quarantine queue for repeatedly failing analytics work. Bound retries with exponential backoff, retain the original event/object generation and error class, alert on age, and require safe replay keys. Never replay a completion event as a second customer-visible response.",
+      "component": {
+        "nodeId": "cc_retry",
+        "componentType": "queue",
+        "label": "Insights Retry & Quarantine Queue",
+        "description": "Bounded retries and operator-controlled replay",
+        "position": {"x": 1860, "y": 1080},
+        "properties": {
+          "componentName": "Insights Retry & Quarantine Queue",
+          "purpose": "Retain poison or transiently failed insight events with bounded retries, exponential backoff, age-based alerting, and an audited replay path.",
+          "visibilityTimeout": 60,
+          "maxRetries": 5,
+          "durable": true,
+          "backoff": "exponential"
+        },
+        "highlightReason": "Explicit quarantine prevents infinite retry loops and gives operators a recoverable failure state."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:2"]
+    },
+    {
+      "id": "contact_19_monitoring",
+      "stepNumber": 19,
+      "phase": "Add conversational AI and supporting services",
+      "title": "Observe service SLOs and model-quality cohorts",
+      "type": "add_component",
+      "content": "Collect traces and metrics across channel, API, orchestration, AI provider, state store, and event consumers. Keep user-facing latency separate from provider duration, and aggregate model-quality evidence by language, channel, noise, and intent cohort. Do not put audio, full transcripts, tokens, or customer identifiers in ordinary logs.",
+      "component": {
+        "nodeId": "cc_monitoring",
+        "componentType": "monitoring",
+        "label": "Contact-Center SLO & Quality Monitoring",
+        "description": "Latency, concurrency, reliability, model, and agent outcome telemetry",
+        "position": {"x": 2460, "y": 500},
+        "properties": {
+          "componentName": "Contact-Center SLO & Quality Monitoring",
+          "purpose": "Measure end-to-end response time, active calls, provider errors, transcript and intent quality cohorts, handoff, queue age, agent outcomes, and recovery signals without logging raw sensitive content.",
+          "stack": "Prometheus + Grafana",
+          "metrics": "first-useful-response latency, concurrent calls, STT/intent quality cohorts, queue age, handoff rate, after-call work",
+          "alerts": true,
+          "retention": 30
+        },
+        "highlightReason": "The stated targets need operational telemetry and offline evaluation, not just an architecture diagram."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "contact_20_channel_ingress_edge",
+      "stepNumber": 20,
+      "phase": "Wire the real-time conversation and agent handoff",
+      "title": "Route provider sessions into healthy regions",
+      "type": "add_connection",
+      "content": "Bind a provider call/message ID to a stable tenant-scoped conversation ID at ingress. Preserve media-session affinity only where the protocol requires it; global failover must not silently create a second active owner for the same call.",
+      "connection": {"edgeId": "contact_edge_01", "sourceNodeId": "cc_channels", "targetNodeId": "cc_ingress", "connectionType": "voice-and-text-ingress", "label": "Signaling, media, and text ingress", "description": "Provider events enter through globally health-checked channel ingress."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:2"]
+    },
+    {
+      "id": "contact_21_control_path",
+      "stepNumber": 21,
+      "phase": "Wire the real-time conversation and agent handoff",
+      "title": "Send control-plane requests through the API gateway",
+      "type": "add_connection",
+      "content": "The gateway validates session and agent-control requests; it does not buffer the long-lived media stream. Apply tenant quotas and connection draining before requests reach orchestration.",
+      "connection": {"edgeId": "contact_edge_02", "sourceNodeId": "cc_ingress", "targetNodeId": "cc_api", "connectionType": "control-request", "label": "Session and agent control APIs", "description": "Validated control traffic is separated from the direct real-time media path."},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "contact_22_identity_validation",
+      "stepNumber": 22,
+      "phase": "Wire the real-time conversation and agent handoff",
+      "title": "Validate the caller and workforce identity",
+      "type": "add_connection",
+      "content": "Authenticate customer tokens separately from workforce sessions, and derive tenant and role from verified claims. Reject an invalid identity before loading transcript or customer context.",
+      "connection": {"edgeId": "contact_edge_03", "sourceNodeId": "cc_api", "targetNodeId": "cc_auth", "connectionType": "identity-validation", "label": "Validate scoped identity", "description": "The API asks the identity boundary to validate caller, tenant, and agent role."},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8"]
+    },
+    {
+      "id": "contact_23_scoped_claims",
+      "stepNumber": 23,
+      "phase": "Wire the real-time conversation and agent handoff",
+      "title": "Return only scoped authorization claims",
+      "type": "add_connection",
+      "content": "Return short-lived verified claims to the API tier. Re-check object and conversation authorization at each protected read/write; a valid login alone does not grant access to a recording or another tenant's call.",
+      "connection": {"edgeId": "contact_edge_04", "sourceNodeId": "cc_auth", "targetNodeId": "cc_api", "connectionType": "scoped-claims", "label": "Tenant and role claims", "description": "Only verified, least-privilege identity claims return to the API boundary."},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:2"]
+    },
+    {
+      "id": "contact_24_orchestration_request",
+      "stepNumber": 24,
+      "phase": "Wire the real-time conversation and agent handoff",
+      "title": "Create or resume a conversation idempotently",
+      "type": "add_connection",
+      "content": "Pass an idempotency key and tenant-scoped call identity to the orchestrator. Retries return the existing session result; they must not create a second virtual-agent turn, assignment, or billable action.",
+      "connection": {"edgeId": "contact_edge_05", "sourceNodeId": "cc_api", "targetNodeId": "cc_orchestrator", "connectionType": "request-response", "label": "Idempotent session command", "description": "Validated session and agent commands enter the stateful conversation owner."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1"]
+    },
+    {
+      "id": "contact_25_live_media",
+      "stepNumber": 25,
+      "phase": "Wire the real-time conversation and agent handoff",
+      "title": "Stream consented media to the managed speech service",
+      "type": "add_connection",
+      "content": "Send encrypted voice frames and text turns over the supported regional provider path, bound to the stable conversation identity and consent status. Text interactions skip speech recognition; do not persist audio unless the applicable policy permits it.",
+      "connection": {"edgeId": "contact_edge_06", "sourceNodeId": "cc_channels", "targetNodeId": "cc_google_ai", "connectionType": "voice-stream", "label": "Consented audio or text turn", "description": "The channel adapter streams media/text to the Google CCAI service plane without routing audio through the ordinary control API."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "contact_26_context_to_ai",
+      "stepNumber": 26,
+      "phase": "Wire the real-time conversation and agent handoff",
+      "title": "Send bounded conversation context for intent and assistance",
+      "type": "add_connection",
+      "content": "The orchestrator supplies only the minimum authorized context, locale, channel, and policy version needed for this turn. Redact direct identifiers unless the task requires them; keep prompt/model version and confidence for evaluation.",
+      "connection": {"edgeId": "contact_edge_07", "sourceNodeId": "cc_orchestrator", "targetNodeId": "cc_ai_gateway", "connectionType": "inference-request", "label": "Bounded, policy-filtered context", "description": "The provider gateway applies quotas, redaction policy, and request deadlines before a managed inference call."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "contact_27_ai_circuit_boundary",
+      "stepNumber": 27,
+      "phase": "Wire the real-time conversation and agent handoff",
+      "title": "Apply a bounded timeout and open-circuit policy",
+      "type": "add_connection",
+      "content": "Carry the request deadline through the gateway and breaker. The breaker covers upstream dependency calls, not the entire caller experience; circuit-open behavior returns a safe prompt, deterministic policy route, or human handoff.",
+      "connection": {"edgeId": "contact_edge_08", "sourceNodeId": "cc_ai_gateway", "targetNodeId": "cc_breaker", "connectionType": "bounded-inference", "label": "Deadline and provider policy", "description": "The gateway passes a bounded request to an isolated dependency breaker."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "contact_28_ai_service_call",
+      "stepNumber": 28,
+      "phase": "Wire the real-time conversation and agent handoff",
+      "title": "Invoke the managed contact-center AI APIs",
+      "type": "add_connection",
+      "content": "The breaker calls Dialogflow CX for virtual-agent dialogue and intent, Speech-to-Text for streaming transcript, Natural Language API/approved CCAI signals for sentiment, Text-to-Speech for synthesized turns, and Agent Assist for agent suggestions. Provider capability and language coverage must be verified for the chosen region and API versions.",
+      "connection": {"edgeId": "contact_edge_09", "sourceNodeId": "cc_breaker", "targetNodeId": "cc_google_ai", "connectionType": "managed-ai-api", "label": "Dialogflow, speech, NLP, and Agent Assist", "description": "One catalog-gap service-plane node represents the specified Google-managed API family behind a bounded call boundary."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "contact_29_partial_results",
+      "stepNumber": 29,
+      "phase": "Wire the real-time conversation and agent handoff",
+      "title": "Return partial and final signals with provenance",
+      "type": "add_connection",
+      "content": "Return partial transcript segments for responsive UI, then a final transcript with timestamps, language, confidence, and model version. Attach intent and sentiment confidence separately; low-confidence or unsupported-language turns route to a human instead of being treated as certain.",
+      "connection": {"edgeId": "contact_edge_10", "sourceNodeId": "cc_google_ai", "targetNodeId": "cc_orchestrator", "connectionType": "inference-result", "label": "Transcript, intent, sentiment, and dialogue state", "description": "Versioned and confidence-bearing model signals return to the session owner for policy decisions."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "contact_30_live_agent_workspace",
+      "stepNumber": 30,
+      "phase": "Wire the real-time conversation and agent handoff",
+      "title": "Push a synchronized live view to the assigned agent",
+      "type": "add_connection",
+      "content": "Deliver transcript deltas, current intent, queue state, sentiment context, and clearly marked advisory suggestions with monotonic sequence numbers. The UI detects gaps and requests a bounded resync instead of silently displaying stale state.",
+      "connection": {"edgeId": "contact_edge_11", "sourceNodeId": "cc_orchestrator", "targetNodeId": "cc_agent_ui", "connectionType": "live-agent-context", "label": "Transcript, routing, and assist context", "description": "The orchestrator sends the canonical live view to the authorized assigned agent."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:8"]
+    },
+    {
+      "id": "contact_31_agent_commands",
+      "stepNumber": 31,
+      "phase": "Wire the real-time conversation and agent handoff",
+      "title": "Route agent actions back through authorization and idempotency",
+      "type": "add_connection",
+      "content": "Accept agent accept/decline, correction, transfer, and disposition through authenticated APIs with actor identity, expected session version, and idempotency key. Reject stale writes and record the human-versus-model decision for later quality analysis.",
+      "connection": {"edgeId": "contact_edge_12", "sourceNodeId": "cc_agent_ui", "targetNodeId": "cc_api", "connectionType": "agent-control", "label": "Authenticated, versioned agent actions", "description": "Human control actions re-enter through the same validated API boundary."},
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:8"]
+    },
+    {
+      "id": "contact_32_presence_lookup",
+      "stepNumber": 32,
+      "phase": "Wire the real-time conversation and agent handoff",
+      "title": "Find eligible agents from a short-lived presence projection",
+      "type": "add_connection",
+      "content": "Filter by required skill, language, tenant, availability, and policy, then rank using the agreed routing objective. If the cache is stale or empty, revalidate against authoritative state before assignment.",
+      "connection": {"edgeId": "contact_edge_13", "sourceNodeId": "cc_orchestrator", "targetNodeId": "cc_presence", "connectionType": "presence-read", "label": "Eligible agent and skill lookup", "description": "The router reads a fast but explicitly non-authoritative presence projection."},
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "contact_33_presence_projection",
+      "stepNumber": 33,
+      "phase": "Wire the real-time conversation and agent handoff",
+      "title": "Return candidate agents without reserving them in cache",
+      "type": "add_connection",
+      "content": "Return candidate IDs and freshness metadata; do not treat a cache hit as a lock. A routing decision must claim an assignment atomically in the durable state store, and stale presence should fall back to a queue or another eligible agent.",
+      "connection": {"edgeId": "contact_edge_14", "sourceNodeId": "cc_presence", "targetNodeId": "cc_orchestrator", "connectionType": "presence-result", "label": "Candidate list with freshness", "description": "The cache response is advisory; durable state owns the assignment claim."},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:2"]
+    },
+    {
+      "id": "contact_34_commit_session",
+      "stepNumber": 34,
+      "phase": "Wire the real-time conversation and agent handoff",
+      "title": "Commit session transitions and assignments conditionally",
+      "type": "add_connection",
+      "content": "Write the call state, idempotency record, assignment lease, and event sequence in a transaction or conditional mutation. Reject an old expected version; retry only with the same operation key so concurrent callers converge on one result.",
+      "connection": {"edgeId": "contact_edge_15", "sourceNodeId": "cc_orchestrator", "targetNodeId": "cc_state", "connectionType": "transactional-write", "label": "Conditional state and assignment write", "description": "The orchestrator commits one versioned owner and idempotent state transition."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:2"]
+    },
+    {
+      "id": "contact_35_session_read",
+      "stepNumber": 35,
+      "phase": "Wire the real-time conversation and agent handoff",
+      "title": "Read the current session version before taking an action",
+      "type": "add_connection",
+      "content": "Read canonical session state and the last accepted transcript/event cursor when resuming after reconnect. If the database is unavailable, preserve the call at the channel boundary or fail over according to a tested policy; never fabricate a successful assignment from cached state.",
+      "connection": {"edgeId": "contact_edge_16", "sourceNodeId": "cc_state", "targetNodeId": "cc_orchestrator", "connectionType": "authoritative-state-read", "label": "Current call and assignment state", "description": "Recovery and duplicate requests consult the durable versioned session record."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:2"]
+    },
+    {
+      "id": "contact_36_publish_events",
+      "stepNumber": 36,
+      "phase": "Wire the real-time conversation and agent handoff",
+      "title": "Publish analytics events only after the state transition commits",
+      "type": "add_connection",
+      "content": "Emit event IDs and committed state versions after the canonical write. If the write and publish cannot be one transaction, use an outbox/reconciliation pattern so a crash between them is repaired without double-counting a call or losing its final disposition.",
+      "connection": {"edgeId": "contact_edge_17", "sourceNodeId": "cc_orchestrator", "targetNodeId": "cc_events", "connectionType": "async-event", "label": "Committed, versioned conversation events", "description": "An outbox or reconciliation worker bridges the durable state change to Pub/Sub."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:2"]
+    },
+    {
+      "id": "contact_37_consume_events",
+      "stepNumber": 37,
+      "phase": "Wire the real-time conversation and agent handoff",
+      "title": "Consume insights events with deduplication and checkpoints",
+      "type": "add_connection",
+      "content": "The worker checkpoints per event key/sequence and handles at-least-once delivery safely. Out-of-order or duplicate segments are reconciled against the transcript cursor; a lagging consumer changes insight freshness, not the active call response.",
+      "connection": {"edgeId": "contact_edge_18", "sourceNodeId": "cc_events", "targetNodeId": "cc_worker", "connectionType": "async-stream", "label": "Replayable call and transcript events", "description": "Background consumers derive quality and insight data outside the user-facing path."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:2"]
+    },
+    {
+      "id": "contact_38_archive_outputs",
+      "stepNumber": 38,
+      "phase": "Move insights off-path and make failures observable",
+      "title": "Write permitted artifacts with immutable generation references",
+      "type": "add_connection",
+      "content": "Store only consented recordings and policy-approved transcript derivatives. The worker records tenant, retention class, event range, checksum, and object generation; access is checked before retrieval and deletion follows the contractual retention workflow.",
+      "connection": {"edgeId": "contact_edge_19", "sourceNodeId": "cc_worker", "targetNodeId": "cc_archive", "connectionType": "governed-object-write", "label": "Redacted, policy-approved artifacts", "description": "Background processing writes versioned GCS artifacts only when retention and consent permit."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7"]
+    },
+    {
+      "id": "contact_39_bigquery_outputs",
+      "stepNumber": 39,
+      "phase": "Move insights off-path and make failures observable",
+      "title": "Publish partitioned insight and agent-outcome rows",
+      "type": "add_connection",
+      "content": "Write redacted, versioned outcomes partitioned by event date and clustered by approved tenant/call dimensions. Track transcript and intent evaluation cohorts, handoffs, queue wait, resolution, and after-call work; enforce retention and query-cost controls.",
+      "connection": {"edgeId": "contact_edge_20", "sourceNodeId": "cc_worker", "targetNodeId": "cc_warehouse", "connectionType": "analytics-write", "label": "Governed BigQuery insight tables", "description": "Async workers publish partition-pruned conversation and workforce aggregates."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "contact_40_quarantine_failures",
+      "stepNumber": 40,
+      "phase": "Move insights off-path and make failures observable",
+      "title": "Quarantine exhausted event processing",
+      "type": "add_connection",
+      "content": "After bounded retries, retain the event key, source version, failure class, and redacted diagnostic in quarantine. Alert on age and volume; an operator reviews the cause before replay.",
+      "connection": {"edgeId": "contact_edge_21", "sourceNodeId": "cc_worker", "targetNodeId": "cc_retry", "connectionType": "dead-letter", "label": "Exhausted analytics event", "description": "Poison events leave the hot consumer loop for bounded operator review."},
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:2"]
+    },
+    {
+      "id": "contact_41_replay_failures",
+      "stepNumber": 41,
+      "phase": "Move insights off-path and make failures observable",
+      "title": "Replay failed insight work without repeating customer actions",
+      "type": "add_connection",
+      "content": "An approved replay reuses the immutable event/object generation and idempotency key, then resumes from the last checkpoint. Replay is restricted to analytics derivation; it never replays an outbound message, virtual-agent response, or agent assignment.",
+      "connection": {"edgeId": "contact_edge_22", "sourceNodeId": "cc_retry", "targetNodeId": "cc_worker", "connectionType": "controlled-replay", "label": "Reviewed idempotent replay", "description": "Operators re-drive only safe background work from its last durable checkpoint."},
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:2"]
+    },
+    {
+      "id": "contact_42_ingress_telemetry",
+      "stepNumber": 42,
+      "phase": "Move insights off-path and make failures observable",
+      "title": "Measure active sessions and channel health at ingress",
+      "type": "add_connection",
+      "content": "Export active media sessions, handshake failures, regional routing, disconnects, connection-drain outcomes, and channel-provider errors. Avoid customer identifiers and raw payloads in metric labels.",
+      "connection": {"edgeId": "contact_edge_23", "sourceNodeId": "cc_ingress", "targetNodeId": "cc_monitoring", "connectionType": "telemetry", "label": "Regional ingress and active-call metrics", "description": "Ingress health and active-session load become observable for SLOs and capacity tests."},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "contact_43_gateway_telemetry",
+      "stepNumber": 43,
+      "phase": "Move insights off-path and make failures observable",
+      "title": "Measure control-plane latency and authorization failures",
+      "type": "add_connection",
+      "content": "Trace request ID, tenant-safe dimensions, validation/auth outcomes, throttles, deduplicated retries, and gateway latency. Record histogram buckets instead of raw sensitive request bodies.",
+      "connection": {"edgeId": "contact_edge_24", "sourceNodeId": "cc_api", "targetNodeId": "cc_monitoring", "connectionType": "telemetry", "label": "API latency, auth, and throttle metrics", "description": "Control-plane requests are monitored separately from the media and inference paths."},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1"]
+    },
+    {
+      "id": "contact_44_session_telemetry",
+      "stepNumber": 44,
+      "phase": "Move insights off-path and make failures observable",
+      "title": "Trace the complete live turn against its deadline",
+      "type": "add_connection",
+      "content": "Correlate channel capture, transcript partial/final, intent, routing, assist suggestion, agent delivery, and first useful response with one trace ID. Report p50/p95/p99 and timeout/error rates by channel and locale; do not claim the under-2-second target until the measurement point is agreed and load-tested.",
+      "connection": {"edgeId": "contact_edge_25", "sourceNodeId": "cc_orchestrator", "targetNodeId": "cc_monitoring", "connectionType": "distributed-trace", "label": "End-to-end turn and routing trace", "description": "The trace separates provider time, queue wait, orchestration, and delivery latency."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "contact_45_ai_quality_telemetry",
+      "stepNumber": 45,
+      "phase": "Move insights off-path and make failures observable",
+      "title": "Evaluate speech and intent quality by representative cohort",
+      "type": "add_connection",
+      "content": "Track model/API version, locale, channel, confidence, correction, fallback, and consent-safe evaluation references. Use adjudicated representative audio/text samples to compute a predeclared transcription metric and intent accuracy/confusion matrix; investigate accents, noise, code-switching, rare intents, and drift separately.",
+      "connection": {"edgeId": "contact_edge_26", "sourceNodeId": "cc_google_ai", "targetNodeId": "cc_monitoring", "connectionType": "quality-telemetry", "label": "Model latency, confidence, and cohort quality", "description": "Operational metrics and offline labeled-set evaluation measure different properties and are not conflated."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "contact_46_state_telemetry",
+      "stepNumber": 46,
+      "phase": "Move insights off-path and make failures observable",
+      "title": "Alert on state-store contention and assignment conflicts",
+      "type": "add_connection",
+      "content": "Observe transaction retries, write conflicts, stale lease claims, idempotency hits, recovery lag, backup status, and authorization denials. Alert on rising contention before it causes duplicate assignments or missed response deadlines.",
+      "connection": {"edgeId": "contact_edge_27", "sourceNodeId": "cc_state", "targetNodeId": "cc_monitoring", "connectionType": "store-telemetry", "label": "State, contention, and recovery metrics", "description": "The authoritative state boundary reports correctness and durability signals."},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "contact_47_event_telemetry",
+      "stepNumber": 47,
+      "phase": "Move insights off-path and make failures observable",
+      "title": "Monitor event freshness and replay backlog",
+      "type": "add_connection",
+      "content": "Measure Pub/Sub oldest-message age, duplicate/out-of-order events, consumer lag, quarantine count, and replay completion. The freshness SLO for insights is separate from the interactive response SLO.",
+      "connection": {"edgeId": "contact_edge_28", "sourceNodeId": "cc_events", "targetNodeId": "cc_monitoring", "connectionType": "queue-telemetry", "label": "Event age, delivery, and consumer lag", "description": "Asynchronous backlog is visible without making analytics a synchronous dependency."},
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "contact_48_worker_telemetry",
+      "stepNumber": 48,
+      "phase": "Move insights off-path and make failures observable",
+      "title": "Measure insight processing cost and correctness",
+      "type": "add_connection",
+      "content": "Track checkpoint age, processing duration, dropped/duplicate records, redaction failures, output reconciliation, warehouse write errors, and per-tenant cost. Pause a bad model or data transformation and preserve the source event for corrected replay.",
+      "connection": {"edgeId": "contact_edge_29", "sourceNodeId": "cc_worker", "targetNodeId": "cc_monitoring", "connectionType": "worker-telemetry", "label": "Worker progress, data quality, and cost", "description": "Background work is monitored for freshness, safe replay, quality, and spend."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "contact_49_agent_outcome_telemetry",
+      "stepNumber": 49,
+      "phase": "Move insights off-path and make failures observable",
+      "title": "Observe agent outcomes without ranking agents by raw volume",
+      "type": "add_connection",
+      "content": "Record queue wait, transfer, resolution, correction rate, suggestion acceptance, and after-call work with case complexity and shift context. Restrict supervisor views; use cohorts and review for coaching, not an unadjusted individual leaderboard.",
+      "connection": {"edgeId": "contact_edge_30", "sourceNodeId": "cc_agent_ui", "targetNodeId": "cc_monitoring", "connectionType": "agent-outcome-telemetry", "label": "Human-reviewed agent outcomes", "description": "The agent workflow emits governed operational outcomes for later cohort analysis."},
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "contact_50_provider_telemetry",
+      "stepNumber": 50,
+      "phase": "Move insights off-path and make failures observable",
+      "title": "Alert on provider quota, errors, and circuit state",
+      "type": "add_connection",
+      "content": "Export AI gateway throttles, provider quota exhaustion, timeout and circuit-open rates, model version, and safe fallback counts. Use provider error budgets to decide when to reduce optional assist features or route directly to a human.",
+      "connection": {"edgeId": "contact_edge_31", "sourceNodeId": "cc_ai_gateway", "targetNodeId": "cc_monitoring", "connectionType": "provider-telemetry", "label": "AI quotas, timeouts, and fallback signals", "description": "Provider health is visible to operations without recording prompt or transcript contents."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "contact_51_presence_telemetry",
+      "stepNumber": 51,
+      "phase": "Move insights off-path and make failures observable",
+      "title": "Watch stale presence and cache recovery",
+      "type": "add_connection",
+      "content": "Measure cache hit/miss, age, failover, and stale-candidate rejection. Alert on a sudden rise in stale agent state; route conservatively until presence is rebuilt from the authoritative workforce/session source.",
+      "connection": {"edgeId": "contact_edge_32", "sourceNodeId": "cc_presence", "targetNodeId": "cc_monitoring", "connectionType": "cache-telemetry", "label": "Presence freshness and cache health", "description": "Routing hints are monitored for staleness and failover rather than treated as authoritative."},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "contact_52_api_admission",
+      "stepNumber": 52,
+      "phase": "Move insights off-path and make failures observable",
+      "title": "Apply admission control before orchestration",
+      "type": "add_connection",
+      "content": "Apply tenant-aware quotas to session creation and agent actions before expensive work begins. Keep separate reservations for interactive call traffic and background jobs; return a clear retry-after or safe queue response when a tenant exceeds its policy.",
+      "connection": {"edgeId": "contact_edge_33", "sourceNodeId": "cc_api", "targetNodeId": "cc_limiter", "connectionType": "admission-control", "label": "Tenant quota check", "description": "The API gateway applies distributed admission control before session orchestration."},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "contact_53_limiter_result",
+      "stepNumber": 53,
+      "phase": "Move insights off-path and make failures observable",
+      "title": "Forward admitted requests to the conversation owner",
+      "type": "add_connection",
+      "content": "Only admitted requests reach the stateful orchestrator. A quota denial must not partially create a call, assignment, or billable model turn; retries retain the same idempotency key.",
+      "connection": {"edgeId": "contact_edge_34", "sourceNodeId": "cc_limiter", "targetNodeId": "cc_orchestrator", "connectionType": "admitted-request", "label": "Admitted session command", "description": "Requests that pass distributed tenant and operation quotas continue to orchestration."},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "contact_52_latency_budget",
+      "stepNumber": 54,
+      "phase": "Set evidence gates and operational triggers",
+      "title": "Turn the under-2-second target into a measured budget",
+      "type": "decision_point",
+      "content": "The brief says response under 2 seconds but does not define percentile, start/end events, channel, or whether this is first audio/text response versus final transcript. Propose p95 time-to-first-useful-response for named interactive cohorts, then budget capture/network, partial recognition, intent/policy, optional assist, and delivery to fit below 2 seconds with headroom. Final transcription and async summaries have separate freshness targets. A 500 ms breaker timeout is only an initial per-dependency assumption and must be tuned from traces.",
+      "decision": {
+        "question": "What happens when an optional AI dependency consumes its allocated live-turn budget?",
+        "chosen": "Bound each dependency call and fall back to safe deterministic routing or a human queue before the end-to-end deadline.",
+        "chosenReason": "The caller experience must remain bounded even when transcription, intent, or assist providers are slow; optional intelligence must not hold a live call indefinitely.",
+        "alternatives": [
+          {"option": "Wait for every model to finish before responding", "tradeoff": "May improve completeness but makes the under-2-second target vulnerable to the slowest provider."},
+          {"option": "Return an immediate generic response with no human fallback", "tradeoff": "Protects latency but can strand a caller when intent confidence is low or the model is unavailable."}
+        ]
+      },
+      "componentUpdate": {"nodeId": "cc_breaker", "properties": {"timeout": 500}},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "contact_53_model_quality_gate",
+      "stepNumber": 55,
+      "phase": "Set evidence gates and operational triggers",
+      "title": "Define how transcription and intent targets are evaluated",
+      "type": "decision_point",
+      "content": "The supplied thresholds are acceptance targets, not measured results. Pre-register a representative, consented and adjudicated test set; define transcription accuracy (for example, word error rate and critical-entity accuracy) separately from intent-recognition accuracy against a frozen label taxonomy. Treat them as independent gates: transcription accuracy must exceed 95%, and intent-recognition accuracy must exceed 90% on their agreed cohorts; a pass on one cannot compensate for a miss on the other. Define confidence handling, language/channel cohorts, and minimum sample sizes; otherwise keep human confirmation or fallback routing. Re-evaluate after provider/model changes and monitor drift.",
+      "decision": {
+        "question": "How should a call proceed when transcript or intent confidence is below the validated threshold?",
+        "chosen": "Ask for clarification or route to a qualified human; never silently treat low-confidence output as ground truth.",
+        "chosenReason": "The accuracy constraints affect caller outcomes and routing decisions, so failures need a visible safe path and a measurable quality gate.",
+        "alternatives": [
+          {"option": "Always accept the top-ranked intent", "tradeoff": "Keeps automation high but converts uncertainty into misroutes and biased quality measurements."},
+          {"option": "Disable all AI after any quality regression", "tradeoff": "Is safe but may unnecessarily remove unaffected languages, channels, and functions; cohort isolation permits a narrower response."}
+        ]
+      },
+      "componentUpdate": {"nodeId": "cc_google_ai", "properties": {"notes": "Acceptance targets: transcription >95% and intent >90% on predeclared, representative labeled cohorts; define metric, sample size, language/channel scope, and human fallback before enablement. These are targets, not achieved results."}},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "contact_54_consistency_boundary",
+      "stepNumber": 56,
+      "phase": "Set evidence gates and operational triggers",
+      "title": "Choose strong consistency for call ownership and eventual consistency for insights",
+      "type": "decision_point",
+      "content": "Use a conditional, strongly consistent transition for assignment, active-call ownership, and idempotency. Allow Pub/Sub, transcript enrichment, and BigQuery aggregates to converge asynchronously; display freshness and reconcile event versions. If a publish is lost after a database commit, an outbox/reconciler republishes it. This split avoids a distributed transaction on the live path while keeping duplicate assignments preventable.",
+      "decision": {
+        "question": "Which data needs an immediate authoritative decision and which can converge later?",
+        "chosen": "Strongly validate session ownership and deduplication; make analytics/event projections replayable and eventually consistent.",
+        "chosenReason": "A duplicated agent assignment is a live correctness failure, while delayed aggregate insights can tolerate bounded lag if freshness is observed.",
+        "alternatives": [
+          {"option": "Use one eventual store for both routing and analytics", "tradeoff": "Simplifies topology but risks conflicting assignments or stale call ownership."},
+          {"option": "Synchronously write every insight before replying", "tradeoff": "Makes analytics failures part of the caller critical path and amplifies latency."}
+        ]
+      },
+      "componentUpdate": {"nodeId": "cc_state", "properties": {"replicationMode": "Sync", "pitr": true, "encryption": true, "auditLog": true}},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "contact_55_privacy_boundary",
+      "stepNumber": 57,
+      "phase": "Set evidence gates and operational triggers",
+      "title": "Minimize and govern audio, transcript, and model context",
+      "type": "decision_point",
+      "content": "Obtain and persist the required recording/transcription consent before storing media. Encrypt in transit and at rest, use workload identity and tenant-scoped least privilege, redact direct identifiers from prompts/logs/analytics where possible, apply contractual retention and deletion, and audit privileged access. The appropriate regions, retention duration, legal basis, and customer opt-out behavior are open questions—not defaults to infer from the architecture.",
+      "decision": {
+        "question": "Should the service retain raw audio and complete transcripts by default?",
+        "chosen": "No; retain only what a documented purpose, consent, tenant contract, and retention policy require.",
+        "chosenReason": "Voice and transcripts are sensitive; data minimization reduces exposure and keeps retention decisions reviewable.",
+        "alternatives": [
+          {"option": "Retain all audio indefinitely for future model training", "tradeoff": "Enables broad reuse but creates substantial privacy, residency, consent, and breach impact."},
+          {"option": "Never retain any artifact", "tradeoff": "Minimizes stored data but may prevent consented quality audits, dispute review, or required compliance evidence."}
+        ]
+      },
+      "componentUpdate": {"nodeId": "cc_archive", "properties": {"versioning": true, "checksumValidation": true}},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:7"]
+    },
+    {
+      "id": "contact_56_handling_time_measurement",
+      "stepNumber": 58,
+      "phase": "Set evidence gates and operational triggers",
+      "title": "Measure the 30% handling-time goal without gaming the metric",
+      "type": "decision_point",
+      "content": "First establish a baseline that includes talk/hold time and after-call work, stratified by case type, language, channel, and shift. Compare a controlled pilot with a comparable control group, include repeat-contact and transfer rates, and measure agent suggestion acceptance/correction. The 30% reduction is not attributable to AI merely because average handle time falls; guard against premature call closure or lower-quality resolution.",
+      "decision": {
+        "question": "What evidence would justify claiming the target handling-time reduction?",
+        "chosen": "A case-mix-aware controlled comparison with stable resolution, repeat-contact, and customer-quality guardrails.",
+        "chosenReason": "The brief gives a reduction goal but no baseline, population, or formula; a measurable experiment prevents misleading attribution.",
+        "alternatives": [
+          {"option": "Compare this week's raw average with last week's", "tradeoff": "Fast but confounded by case mix, staffing, seasonality, and channel volume."},
+          {"option": "Optimize only suggestion acceptance rate", "tradeoff": "Can reward persuasive or frequent suggestions without proving faster successful resolution."}
+        ]
+      },
+      "componentUpdate": {"nodeId": "cc_monitoring", "properties": {"metrics": "AHT incl. talk/hold/after-call work; case mix; repeat contact; transfer; resolution; suggestion acceptance/correction; queue wait"}},
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "contact_57_call_capacity_trigger",
+      "stepNumber": 59,
+      "phase": "Set evidence gates and operational triggers",
+      "title": "Treat 10,000 concurrent calls as a load-test gate",
+      "type": "scale_trigger",
+      "content": "Load-test at least 10,000 concurrent calls with a realistic distribution of audio, text, languages, agent handoffs, reconnects, and model requests. Measure channel-provider limits, active streams per region, state-store contention, AI quotas, p95/p99 first-response latency, and failover behavior. A provisional three-instance backend seed is only a diagram default; scale on active sessions and measured per-instance saturation, and publish capacity only after the full dependency chain passes the test.",
+      "scaleTrigger": {
+        "metric": "Concurrent calls by region, live-turn latency, provider quota, CPU/memory, and session-store conflict rate",
+        "action": "Scale orchestration and channel-serving capacity horizontally before saturation; reserve AI quota for live calls and shed/defer noncritical work.",
+        "impact": "Supports the 10,000+ concurrency target while protecting interactive latency; the achievable limit remains unverified until load and failover tests pass."
+      },
+      "componentUpdate": {"nodeId": "cc_orchestrator", "properties": {"instances": 3}},
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:2"]
+    },
+    {
+      "id": "contact_58_backlog_trigger",
+      "stepNumber": 60,
+      "phase": "Set evidence gates and operational triggers",
+      "title": "Scale background insights by age and protect the live pool",
+      "type": "scale_trigger",
+      "content": "Scale insight workers when oldest-event age or partition backlog exceeds an agreed freshness SLO, subject to a spend cap and healthy input quality. Keep backfills on separate quotas; stop or quarantine a poison-message loop rather than autoscaling it indefinitely.",
+      "scaleTrigger": {
+        "metric": "Oldest Pub/Sub event age, consumer lag, retry/quarantine rate, and worker saturation",
+        "action": "Increase independent worker concurrency for healthy partitions; pause repeated failures and route them to quarantine.",
+        "impact": "Keeps conversation insights and agent metrics fresh without consuming the capacity reserved for live turns."
+      },
+      "componentUpdate": {"nodeId": "cc_worker", "properties": {"autoscale": true}},
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "contact_59_acceptance_review",
+      "stepNumber": 61,
+      "phase": "Set evidence gates and operational triggers",
+      "title": "Review the design against evidence, not the diagram alone",
+      "type": "explanation",
+      "content": "Before calling this design ready, demonstrate: agreed end-to-end response measurement under 2 seconds for the named workload; a 10,000+ concurrent-call load and regional/provider-failure test; transcription above 95% and intent above 90% on representative labeled cohorts with confidence-based human fallback; and a controlled, case-mix-aware pilot showing whether handling time improves toward 30% without harming resolution or repeat-contact rates. Also rehearse duplicate requests, lost event publication, out-of-order transcript segments, stale presence, provider timeout, cache/database outage, quarantine replay, consent withdrawal, and tenant-isolation checks. This file is a review draft only: no browser replay, AI assessment gate, publication, or measured performance result is claimed.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

@@ -1,0 +1,682 @@
+{
+  "problem_id": "cloud_aws_007",
+  "version": "1.0-local-draft",
+  "totalSteps": 35,
+  "phases": [
+    {
+      "name": "Frame the live brief and workload unknowns",
+      "stepRange": [1, 5],
+      "description": "Preserve the source requirements and targets, then identify which workload facts must be measured before selecting cache behavior or origin capacity."
+    },
+    {
+      "name": "Route viewers to the CloudFront distribution",
+      "stepRange": [6, 13],
+      "description": "Represent the viewer, DNS answer, HTTPS request path, and the separation between cacheable and dynamic content."
+    },
+    {
+      "name": "Connect content origins and location-aware edge logic",
+      "stepRange": [14, 20],
+      "description": "Serve static objects and dynamic responses through CloudFront and apply location-aware customization at the edge."
+    },
+    {
+      "name": "Add protection, invalidation, monitoring, and validation",
+      "stepRange": [21, 35],
+      "description": "Attach the viewer certificate and DDoS protection, make invalidation explicit, observe cache behavior, and validate the supplied targets without inventing a workload."
+    }
+  ],
+  "steps": [
+    {
+      "id": "aws007_preserve_brief",
+      "stepNumber": 1,
+      "phase": "Frame the live brief and workload unknowns",
+      "title": "Preserve the live problem brief verbatim",
+      "type": "explanation",
+      "content": "Live problem brief (strongly consistent DynamoDB GetItem in ap-south-1; has_guided_walkthrough=false): id cloud_aws_007; title: Design a Global Content Delivery Network; slug: design-a-global-content-delivery-network; description: Design a global CDN architecture that serves static and dynamic content with low latency, customizes content based on location, and protects against DDoS attacks.; difficulty: Medium; category: AWS - CDN; domain: infra; estimated_time: 30-45 minutes. Requirements: Serve static and dynamic content globally; Minimize latency for users worldwide; Cache content at edge locations; Customize content based on location; Handle HTTPS requests; Protect against DDoS attacks; Invalidate cached content; Monitor cache performance. Constraints: Cache hit ratio above 80%; Latency under 100ms globally; Support 10M+ requests per day; Handle traffic spikes gracefully; Minimize origin server load. Hints: CloudFront for CDN; S3 as origin for static content; Lambda@Edge for edge computing; Route 53 for DNS routing; AWS Shield for DDoS protection; CloudWatch for monitoring. Tags: aws, cloudfront, cdn, s3, lambda-edge, route53. Companies: Amazon, Netflix, Disney+. This is an unpublished local draft; the source availability flag remains false. These are supplied requirements and targets, not evidence that a design already meets them. No geographic demand mix, object sizes, dynamic-content ratio, freshness tolerance, or origin capacity is supplied.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "aws007_content_classes",
+      "stepNumber": 2,
+      "phase": "Frame the live brief and workload unknowns",
+      "title": "Separate static and dynamic cache behavior",
+      "type": "decision_point",
+      "content": "Static objects and dynamic responses have different freshness and personalization risks. Decide which paths may be shared-cacheable, which must reach the application origin, and which request attributes belong in a cache key. The brief does not specify content freshness or personalization rules, so keep those as design inputs to confirm.",
+      "decision": {
+        "question": "How should CloudFront treat static and dynamic content?",
+        "chosen": "Define distinct cache behaviors and keys from the content and authorization contract; cache only responses safe to share.",
+        "chosenReason": "One blanket policy can either reduce cache effectiveness or serve a personalized response to the wrong viewer. The prompt requires both static and dynamic delivery but does not define their freshness or privacy rules.",
+        "alternatives": [
+          {
+            "option": "Use one shared cache policy for every path",
+            "tradeoff": "It can cache content that should be viewer-specific or bypass caching for reusable static objects."
+          },
+          {
+            "option": "Forward every dynamic request directly to the origin",
+            "tradeoff": "It avoids shared-cache mistakes but can increase origin work; measure the effect against the supplied origin-load objective."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3"]
+    },
+    {
+      "id": "aws007_hit_ratio_target",
+      "stepNumber": 3,
+      "phase": "Frame the live brief and workload unknowns",
+      "title": "Treat the cache-hit target as an acceptance measure",
+      "type": "scale_trigger",
+      "content": "The brief sets a cache hit ratio above 80%. Treat it as a target to measure by relevant cache behavior and geography; do not claim it is achieved from the architecture alone.",
+      "scaleTrigger": {
+        "metric": "CloudFront cache hit ratio compared with the supplied above-80% target",
+        "action": "Inspect cacheable paths, cache keys, origin headers, and invalidation patterns; adjust behavior only after confirming freshness and viewer-isolation requirements.",
+        "impact": "A measured improvement can reduce origin requests while preserving correct content."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:1"]
+    },
+    {
+      "id": "aws007_latency_target",
+      "stepNumber": 4,
+      "phase": "Frame the live brief and workload unknowns",
+      "title": "Measure the global latency target end to end",
+      "type": "scale_trigger",
+      "content": "The brief says latency under 100ms globally. Measure viewer-facing latency from representative geographies for cache hits and misses separately; the target is not guaranteed by using a CDN.",
+      "scaleTrigger": {
+        "metric": "Viewer-facing latency compared with the supplied under-100ms-global target",
+        "action": "Measure the complete viewer path by geography and cache outcome, then investigate DNS, edge processing, origin distance, and origin response time where the target is missed.",
+        "impact": "Separating hit and miss paths shows whether edge delivery or origin behavior is driving the observed latency."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:2"]
+    },
+    {
+      "id": "aws007_capacity_unknowns",
+      "stepNumber": 5,
+      "phase": "Frame the live brief and workload unknowns",
+      "title": "Do not turn daily volume into an invented peak rate",
+      "type": "decision_point",
+      "content": "The brief requires support for 10M+ requests per day and graceful handling of traffic spikes. It does not provide a peak-to-average ratio, geographic mix, object sizes, cache-miss share, or dynamic request share. Keep daily volume as the supplied target and obtain representative arrival and payload measurements before sizing origins.",
+      "decision": {
+        "question": "What evidence should guide capacity choices?",
+        "chosen": "Use measured peak arrival patterns, cache-miss behavior, payloads, and origin response characteristics while retaining 10M+ requests per day as the supplied daily target.",
+        "chosenReason": "Daily volume alone does not determine the peak request rate or origin capacity, and the brief supplies no conversion inputs.",
+        "alternatives": [
+          {
+            "option": "Convert the daily request target into a presumed steady rate",
+            "tradeoff": "A steady-rate assumption hides bursts and would add an unsupported sizing input."
+          },
+          {
+            "option": "Size only from total viewer requests",
+            "tradeoff": "Cache misses and dynamic requests, rather than total requests alone, drive origin work."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "aws007_viewers",
+      "stepNumber": 6,
+      "phase": "Route viewers to the CloudFront distribution",
+      "title": "Represent global viewers",
+      "type": "add_component",
+      "content": "Start with browser clients making HTTPS content requests. Keep the viewer-facing protocol visible in the graph so it is distinct from the CDN's origin connections.",
+      "component": {
+        "nodeId": "aws007_viewers",
+        "componentType": "web-app",
+        "label": "Global viewers",
+        "description": "Browser clients requesting static and dynamic content over HTTPS.",
+        "position": {"x": 40, "y": 300},
+        "properties": {
+          "componentName": "Global viewers",
+          "purpose": "Represent worldwide browser clients requesting static and dynamic content over HTTPS.",
+          "ssl": true
+        },
+        "highlightReason": "Makes the global HTTPS viewer path explicit without assuming a client framework or client fleet size."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5"]
+    },
+    {
+      "id": "aws007_route53",
+      "stepNumber": 7,
+      "phase": "Route viewers to the CloudFront distribution",
+      "title": "Resolve the public delivery hostname",
+      "type": "add_component",
+      "content": "Use the catalog's authoritative-name-server component to represent the Route 53 DNS role. The record and routing policy are deployment choices; no Route 53 policy or geography is specified by the brief.",
+      "component": {
+        "nodeId": "aws007_route53",
+        "componentType": "authoritative-nameserver",
+        "label": "Route 53 DNS",
+        "description": "Resolves the delivery hostname to the CloudFront distribution.",
+        "position": {"x": 300, "y": 150},
+        "properties": {
+          "componentName": "Amazon Route 53",
+          "purpose": "Authoritative DNS for the delivery hostname, with an alias/record targeting the CloudFront distribution. Choose the DNS routing policy from the actual domain and routing needs."
+        },
+        "highlightReason": "Uses the supported authoritative DNS catalog component for the Route 53 function named in the brief."
+      },
+      "requirementIds": ["legacy-requirement:2"]
+    },
+    {
+      "id": "aws007_dns_query",
+      "stepNumber": 8,
+      "phase": "Route viewers to the CloudFront distribution",
+      "title": "Connect viewers to DNS resolution",
+      "type": "add_connection",
+      "content": "Viewers resolve the delivery hostname before opening the HTTPS connection.",
+      "connection": {
+        "edgeId": "aws007_dns_query",
+        "sourceNodeId": "aws007_viewers",
+        "targetNodeId": "aws007_route53",
+        "connectionType": "data-flow",
+        "label": "Resolve delivery hostname",
+        "description": "The viewer performs DNS resolution for the content-delivery hostname."
+      },
+      "requirementIds": ["legacy-requirement:2"]
+    },
+    {
+      "id": "aws007_cloudfront",
+      "stepNumber": 9,
+      "phase": "Route viewers to the CloudFront distribution",
+      "title": "Place CloudFront on the request path",
+      "type": "add_component",
+      "content": "CloudFront is the global delivery and edge-cache layer. Define cache behaviors for static and dynamic paths from the confirmed content contract, and keep the supplied cache-hit and global-latency targets as measurements rather than promises.",
+      "component": {
+        "nodeId": "aws007_cloudfront",
+        "componentType": "cdn",
+        "label": "Amazon CloudFront",
+        "description": "Delivers content from edge locations and routes cache misses to the appropriate origin.",
+        "position": {"x": 610, "y": 300},
+        "properties": {
+          "componentName": "Amazon CloudFront",
+          "purpose": "Global distribution for static and dynamic content. Use separate cache behaviors and safe cache keys; validate cache hit ratio, viewer latency, invalidation, and origin request volume against the brief.",
+          "provider": "AWS CloudFront"
+        },
+        "highlightReason": "Uses the catalog CDN component and its supported AWS CloudFront provider option for global edge delivery."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "aws007_dns_answer",
+      "stepNumber": 10,
+      "phase": "Route viewers to the CloudFront distribution",
+      "title": "Point DNS at the distribution",
+      "type": "add_connection",
+      "content": "The DNS record resolves the configured hostname to the CloudFront distribution; confirm the exact record form and routing policy during deployment.",
+      "connection": {
+        "edgeId": "aws007_dns_answer",
+        "sourceNodeId": "aws007_route53",
+        "targetNodeId": "aws007_cloudfront",
+        "connectionType": "data-flow",
+        "label": "DNS answer targets distribution",
+        "description": "Route 53 returns the configured DNS answer for the CloudFront distribution."
+      },
+      "requirementIds": ["legacy-requirement:2"]
+    },
+    {
+      "id": "aws007_viewer_request",
+      "stepNumber": 11,
+      "phase": "Route viewers to the CloudFront distribution",
+      "title": "Send HTTPS content requests to CloudFront",
+      "type": "add_connection",
+      "content": "After DNS resolution, the viewer sends its HTTPS request to CloudFront. Configure and validate the viewer certificate and TLS policy as part of distribution setup.",
+      "connection": {
+        "edgeId": "aws007_viewer_request",
+        "sourceNodeId": "aws007_viewers",
+        "targetNodeId": "aws007_cloudfront",
+        "connectionType": "http",
+        "label": "HTTPS content request",
+        "description": "Viewer requests for static and dynamic content enter through the CloudFront distribution over HTTPS."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5"]
+    },
+    {
+      "id": "aws007_cache_behaviors",
+      "stepNumber": 12,
+      "phase": "Route viewers to the CloudFront distribution",
+      "title": "Choose cache keys from content semantics",
+      "type": "decision_point",
+      "content": "Cache behavior must reflect the response contract. Avoid including irrelevant headers, cookies, or query parameters in a shared cache key, but do not omit attributes needed to keep viewer-specific or location-customized responses correct.",
+      "decision": {
+        "question": "Which request attributes should affect cache selection?",
+        "chosen": "Include only attributes required by the confirmed content and personalization contract, and keep private or user-specific responses out of a shared cache unless explicitly made safe.",
+        "chosenReason": "A larger cache key fragments reusable content; an incomplete key can mix responses that should differ.",
+        "alternatives": [
+          {
+            "option": "Forward every request attribute into the cache key",
+            "tradeoff": "Unneeded variation can lower reuse and increase origin requests."
+          },
+          {
+            "option": "Ignore all request variation",
+            "tradeoff": "Responses that depend on viewer or location context may be served incorrectly."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "aws007_cache_separation",
+      "stepNumber": 13,
+      "phase": "Route viewers to the CloudFront distribution",
+      "title": "Keep origin and cache rules explicit",
+      "type": "explanation",
+      "content": "Define which paths use the static S3 origin and which use the dynamic application origin. Confirm origin response cache directives and freshness expectations with the content owner; the live brief does not provide TTLs or a staleness allowance."
+    },
+    {
+      "id": "aws007_s3_origin",
+      "stepNumber": 14,
+      "phase": "Connect content origins and location-aware edge logic",
+      "title": "Add S3 for static content",
+      "type": "add_component",
+      "content": "Use S3 as the static-content origin, as suggested by the live brief. Keep the bucket as an origin behind CloudFront and decide its access and origin configuration from the deployment security requirements.",
+      "component": {
+        "nodeId": "aws007_s3_origin",
+        "componentType": "object-storage",
+        "label": "S3 static origin",
+        "description": "Stores static objects served through CloudFront.",
+        "position": {"x": 1030, "y": 150},
+        "properties": {
+          "componentName": "Amazon S3 static origin",
+          "purpose": "Origin for static content delivered through CloudFront; viewer delivery remains through the CDN. Do not expose origin access as a substitute for the intended delivery path.",
+          "provider": "S3"
+        },
+        "highlightReason": "Reuses the catalog object-storage component with its supported S3 provider option."
+      },
+      "requirementIds": ["legacy-requirement:1"]
+    },
+    {
+      "id": "aws007_static_origin_request",
+      "stepNumber": 15,
+      "phase": "Connect content origins and location-aware edge logic",
+      "title": "Fetch static objects on cache misses",
+      "type": "add_connection",
+      "content": "CloudFront requests a static object from S3 when the applicable cached object is unavailable or must be refreshed.",
+      "connection": {
+        "edgeId": "aws007_static_origin_request",
+        "sourceNodeId": "aws007_cloudfront",
+        "targetNodeId": "aws007_s3_origin",
+        "connectionType": "http",
+        "label": "Static origin request",
+        "description": "CloudFront fetches the requested static object from S3 on the origin path."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "aws007_dynamic_origin",
+      "stepNumber": 16,
+      "phase": "Connect content origins and location-aware edge logic",
+      "title": "Represent the dynamic application origin",
+      "type": "add_component",
+      "content": "The prompt requires dynamic content but does not specify its application stack. Represent its origin generically and leave its runtime, deployment topology, and capacity open for discovery.",
+      "component": {
+        "nodeId": "aws007_dynamic_origin",
+        "componentType": "backend-server",
+        "label": "Dynamic application origin",
+        "description": "Application origin for dynamic content that CloudFront does not safely serve from a shared cache.",
+        "position": {"x": 1030, "y": 430},
+        "properties": {
+          "componentName": "Dynamic application origin",
+          "purpose": "Serves dynamic responses through CloudFront. Establish safe cacheability, authorization, freshness, and origin capacity from the actual application contract and measured workload."
+        },
+        "highlightReason": "Uses a supported generic backend component without assuming a specific application or instance count."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "aws007_dynamic_origin_request",
+      "stepNumber": 17,
+      "phase": "Connect content origins and location-aware edge logic",
+      "title": "Route dynamic cache misses to the application",
+      "type": "add_connection",
+      "content": "CloudFront forwards requests for dynamic behavior to the application origin and returns the resulting response to the viewer. Cache a dynamic response only when its content and authorization semantics make sharing safe.",
+      "connection": {
+        "edgeId": "aws007_dynamic_origin_request",
+        "sourceNodeId": "aws007_cloudfront",
+        "targetNodeId": "aws007_dynamic_origin",
+        "connectionType": "http",
+        "label": "Dynamic origin request",
+        "description": "CloudFront forwards eligible dynamic requests to the application origin."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "aws007_lambda_edge",
+      "stepNumber": 18,
+      "phase": "Connect content origins and location-aware edge logic",
+      "title": "Add location-aware edge processing",
+      "type": "add_component",
+      "content": "Use the hinted Lambda@Edge role for lightweight request or response customization based on location context. Keep the business rules and the exact location data to be consumed as explicit follow-up decisions.",
+      "component": {
+        "nodeId": "aws007_lambda_edge",
+        "componentType": "serverless-function",
+        "label": "Lambda@Edge location logic",
+        "description": "Applies the confirmed location-aware customization in the CloudFront request path.",
+        "position": {"x": 610, "y": 620},
+        "properties": {
+          "componentName": "AWS Lambda@Edge",
+          "purpose": "Perform only the location-aware request or response customization defined by the product contract; avoid embedding unconfirmed geography rules or user-specific data into shared cache behavior."
+        },
+        "highlightReason": "The catalog has a generic serverless-function component; the component name and purpose identify the hinted Lambda@Edge role without inventing runtime or capacity values."
+      },
+      "requirementIds": ["legacy-requirement:4"]
+    },
+    {
+      "id": "aws007_edge_invocation",
+      "stepNumber": 19,
+      "phase": "Connect content origins and location-aware edge logic",
+      "title": "Invoke edge logic in the distribution path",
+      "type": "add_connection",
+      "content": "Attach the Lambda@Edge behavior to the appropriate CloudFront event after deciding whether customization belongs on viewer or origin processing.",
+      "connection": {
+        "edgeId": "aws007_edge_invocation",
+        "sourceNodeId": "aws007_cloudfront",
+        "targetNodeId": "aws007_lambda_edge",
+        "connectionType": "api-call",
+        "label": "Invoke location-aware edge logic",
+        "description": "CloudFront invokes the configured Lambda@Edge behavior in the request or response path."
+      },
+      "requirementIds": ["legacy-requirement:4"]
+    },
+    {
+      "id": "aws007_geo_rules",
+      "stepNumber": 20,
+      "phase": "Connect content origins and location-aware edge logic",
+      "title": "Keep geographic behavior and cache variation consistent",
+      "type": "decision_point",
+      "content": "Define which location signal is trusted, what content changes by location, and whether that variation must affect cache selection. The brief asks for location-based customization but supplies no regions, locales, or content rules.",
+      "decision": {
+        "question": "How should location customization interact with caching?",
+        "chosen": "Apply only confirmed location rules and ensure any response variation is reflected in the cache behavior or is not shared across viewers.",
+        "chosenReason": "Edge customization and cache selection must agree or the CDN can reuse a response for a different location than intended.",
+        "alternatives": [
+          {
+            "option": "Customize the response while keeping one location-independent cache key",
+            "tradeoff": "A cached response may be reused outside the context for which it was generated."
+          },
+          {
+            "option": "Bypass caching for every location-customized response",
+            "tradeoff": "This is simpler for correctness but may increase origin work; measure the effect before adopting it."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "aws007_acm",
+      "stepNumber": 21,
+      "phase": "Add protection, invalidation, monitoring, and validation",
+      "title": "Represent viewer certificate management",
+      "type": "add_component",
+      "content": "HTTPS is a viewer requirement. The current catalog has no certificate-management component or TLS setting on its CDN component, so represent AWS Certificate Manager with a generic custom component and attach its viewer certificate to CloudFront during deployment.",
+      "component": {
+        "nodeId": "aws007_acm",
+        "componentType": "custom-component",
+        "label": "ACM viewer certificate",
+        "description": "Certificate-management dependency for HTTPS on the CloudFront viewer endpoint.",
+        "position": {"x": 300, "y": 620},
+        "properties": {
+          "componentName": "AWS Certificate Manager viewer certificate",
+          "subtitle": "HTTPS certificate for CloudFront",
+          "purpose": "Manage the certificate used by the CloudFront viewer endpoint; validate hostname coverage, certificate lifecycle, and the selected TLS policy during deployment.",
+          "componentType": "TLS certificate management",
+          "technology": "AWS Certificate Manager (ACM)",
+          "notes": "Generic custom component used because the current catalog has no certificate-management component or CDN TLS configuration field."
+        },
+        "highlightReason": "ACM is a genuine catalog gap needed to make the HTTPS endpoint dependency explicit."
+      },
+      "requirementIds": ["legacy-requirement:5"]
+    },
+    {
+      "id": "aws007_acm_attachment",
+      "stepNumber": 22,
+      "phase": "Add protection, invalidation, monitoring, and validation",
+      "title": "Attach the viewer certificate to CloudFront",
+      "type": "add_connection",
+      "content": "The certificate is configured on the CloudFront viewer endpoint; validate HTTPS from the viewer through certificate and hostname checks.",
+      "connection": {
+        "edgeId": "aws007_acm_attachment",
+        "sourceNodeId": "aws007_acm",
+        "targetNodeId": "aws007_cloudfront",
+        "connectionType": "data-flow",
+        "label": "Viewer certificate configuration",
+        "description": "CloudFront uses the managed certificate for viewer HTTPS."
+      },
+      "requirementIds": ["legacy-requirement:5"]
+    },
+    {
+      "id": "aws007_shield",
+      "stepNumber": 23,
+      "phase": "Add protection, invalidation, monitoring, and validation",
+      "title": "Represent AWS Shield protection",
+      "type": "add_component",
+      "content": "The brief requires DDoS protection and names AWS Shield. The catalog has no dedicated DDoS-protection component; its firewall entry represents firewall/WAF filtering, which is not the same control, so use a generic custom component for Shield.",
+      "component": {
+        "nodeId": "aws007_shield",
+        "componentType": "custom-component",
+        "label": "AWS Shield DDoS protection",
+        "description": "DDoS-protection service associated with the public delivery endpoint.",
+        "position": {"x": 930, "y": 620},
+        "properties": {
+          "componentName": "AWS Shield",
+          "subtitle": "DDoS protection",
+          "purpose": "Protect the public CloudFront delivery endpoint against DDoS attacks; confirm the required protection tier and operational response process separately.",
+          "componentType": "DDoS protection",
+          "technology": "AWS Shield",
+          "notes": "Generic custom component used because the current catalog has no dedicated DDoS-protection component."
+        },
+        "highlightReason": "AWS Shield is named by the brief, but the current catalog has no semantically equivalent component."
+      },
+      "requirementIds": ["legacy-requirement:6"]
+    },
+    {
+      "id": "aws007_shield_association",
+      "stepNumber": 24,
+      "phase": "Add protection, invalidation, monitoring, and validation",
+      "title": "Associate protection with the public delivery path",
+      "type": "add_connection",
+      "content": "Show the Shield protection association on the CloudFront delivery endpoint. Confirm the account's selected protection and response settings during implementation.",
+      "connection": {
+        "edgeId": "aws007_shield_association",
+        "sourceNodeId": "aws007_shield",
+        "targetNodeId": "aws007_cloudfront",
+        "connectionType": "data-flow",
+        "label": "DDoS protection association",
+        "description": "AWS Shield protects the public CloudFront delivery path."
+      },
+      "requirementIds": ["legacy-requirement:6"]
+    },
+    {
+      "id": "aws007_security_boundary",
+      "stepNumber": 25,
+      "phase": "Add protection, invalidation, monitoring, and validation",
+      "title": "Validate the origin access boundary",
+      "type": "explanation",
+      "content": "Keep viewer traffic on the CloudFront path and verify that origin access follows the deployment's intended policy. The prompt requires DDoS protection; it does not specify an application-layer WAF policy, origin network topology, or access mechanism, so do not claim those controls are already designed."
+    },
+    {
+      "id": "aws007_enable_invalidation",
+      "stepNumber": 26,
+      "phase": "Add protection, invalidation, monitoring, and validation",
+      "title": "Make cache invalidation an explicit design action",
+      "type": "update_component",
+      "content": "Enable the CDN catalog's supported manual-invalidation setting on the CloudFront node. Decide which paths to invalidate when content changes and verify the behavior against the confirmed freshness contract.",
+      "componentUpdate": {
+        "nodeId": "aws007_cloudfront",
+        "properties": {
+          "cacheInvalidation": true
+        }
+      },
+      "requirementIds": ["legacy-requirement:7"]
+    },
+    {
+      "id": "aws007_invalidation_policy",
+      "stepNumber": 27,
+      "phase": "Add protection, invalidation, monitoring, and validation",
+      "title": "Choose invalidation or versioned object delivery",
+      "type": "decision_point",
+      "content": "Invalidation is the explicit mechanism requested in the brief. For static releases, versioned object names can reduce reliance on broad purges; for content that must be replaced at a stable path, issue targeted invalidations and observe completion. Select the approach from the publishing workflow and freshness requirement.",
+      "decision": {
+        "question": "How should changed content become visible through CloudFront?",
+        "chosen": "Use targeted invalidation where stable paths must be refreshed, and consider versioned object names where the publishing process can change URLs safely.",
+        "chosenReason": "The brief requires invalidation but does not define the content release process or freshness window, so the specific policy must follow those inputs.",
+        "alternatives": [
+          {
+            "option": "Invalidate the entire distribution for every content change",
+            "tradeoff": "A broad purge can discard useful cached objects and increase origin requests."
+          },
+          {
+            "option": "Rely only on natural cache expiry",
+            "tradeoff": "Content at a stable path may remain stale beyond the required freshness window."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "aws007_cloudwatch",
+      "stepNumber": 28,
+      "phase": "Add protection, invalidation, monitoring, and validation",
+      "title": "Add CloudWatch monitoring",
+      "type": "add_component",
+      "content": "Use the hinted CloudWatch role to observe cache performance and the origin path. Select log fields and retention from operational and privacy requirements, which the brief does not specify.",
+      "component": {
+        "nodeId": "aws007_cloudwatch",
+        "componentType": "monitoring",
+        "label": "CloudWatch",
+        "description": "Collects delivery and edge metrics used to evaluate cache and latency behavior.",
+        "position": {"x": 1320, "y": 390},
+        "properties": {
+          "componentName": "Amazon CloudWatch",
+          "purpose": "Observe CloudFront cache performance, viewer-facing latency, origin requests, and Lambda@Edge behavior against the supplied targets and operational needs.",
+          "stack": "CloudWatch",
+          "metrics": true
+        },
+        "highlightReason": "Uses the supported monitoring component with the catalog's CloudWatch stack option."
+      },
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "aws007_cdn_metrics",
+      "stepNumber": 29,
+      "phase": "Add protection, invalidation, monitoring, and validation",
+      "title": "Observe distribution cache and delivery metrics",
+      "type": "add_connection",
+      "content": "Send the selected CloudFront metrics and delivery telemetry to CloudWatch so cache-hit, request, latency, and origin behavior can be evaluated.",
+      "connection": {
+        "edgeId": "aws007_cdn_metrics",
+        "sourceNodeId": "aws007_cloudfront",
+        "targetNodeId": "aws007_cloudwatch",
+        "connectionType": "event-stream",
+        "label": "Distribution telemetry",
+        "description": "CloudFront delivery and cache metrics feed CloudWatch monitoring."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "aws007_edge_metrics",
+      "stepNumber": 30,
+      "phase": "Add protection, invalidation, monitoring, and validation",
+      "title": "Observe edge-function behavior",
+      "type": "add_connection",
+      "content": "Include Lambda@Edge operational signals in the monitoring view so location customization can be investigated alongside distribution behavior.",
+      "connection": {
+        "edgeId": "aws007_edge_metrics",
+        "sourceNodeId": "aws007_lambda_edge",
+        "targetNodeId": "aws007_cloudwatch",
+        "connectionType": "event-stream",
+        "label": "Edge-function telemetry",
+        "description": "Lambda@Edge operational metrics and selected logs are available for CloudWatch review."
+      },
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "aws007_validate_hit_ratio",
+      "stepNumber": 31,
+      "phase": "Add protection, invalidation, monitoring, and validation",
+      "title": "Tune from observed cache-hit results",
+      "type": "scale_trigger",
+      "content": "Compare observed cache hit ratio with the supplied above-80% target, segmented by the cache behaviors that matter. Investigate misses before changing policy so freshness and viewer isolation remain correct.",
+      "scaleTrigger": {
+        "metric": "CloudFront cache hit ratio versus the supplied above-80% target",
+        "action": "Review path behavior, origin cache directives, cache-key variation, and invalidation history; change only the policy responsible for measured misses.",
+        "impact": "Improves edge reuse when content is safe to cache and helps reduce origin load."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "aws007_validate_daily_volume",
+      "stepNumber": 32,
+      "phase": "Add protection, invalidation, monitoring, and validation",
+      "title": "Validate the stated daily request target",
+      "type": "scale_trigger",
+      "content": "Validate support for 10M+ requests per day using representative request distribution and payloads. Do not treat this daily target as a peak rate or assert capacity without measurement.",
+      "scaleTrigger": {
+        "metric": "Daily viewer requests compared with the supplied 10M+ requests-per-day target",
+        "action": "Load-test representative cache-hit and cache-miss paths using measured arrival patterns, geographic mix, and request payloads; record origin demand separately from viewer demand.",
+        "impact": "Confirms the stated daily-volume target while exposing workload facts still needed for capacity decisions."
+      },
+      "requirementIds": ["legacy-constraint:3"]
+    },
+    {
+      "id": "aws007_validate_spikes",
+      "stepNumber": 33,
+      "phase": "Add protection, invalidation, monitoring, and validation",
+      "title": "Exercise traffic-spike behavior",
+      "type": "scale_trigger",
+      "content": "Evaluate graceful handling of traffic spikes using a measured burst profile. Observe whether cached delivery remains effective and whether origin misses or dynamic requests create pressure; the prompt supplies no spike magnitude.",
+      "scaleTrigger": {
+        "metric": "Viewer arrival bursts, cache-miss volume, and origin response behavior under a representative spike profile",
+        "action": "Run load tests with an observed or agreed burst profile, then adjust cache behavior and origin capacity based on measured bottlenecks.",
+        "impact": "Shows whether edge delivery absorbs repeatable content demand and whether the origin path needs further work."
+      },
+      "requirementIds": ["legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "aws007_validate_origin_load",
+      "stepNumber": 34,
+      "phase": "Add protection, invalidation, monitoring, and validation",
+      "title": "Check that edge delivery reduces origin work",
+      "type": "scale_trigger",
+      "content": "Compare origin requests and resource pressure with viewer demand across cache hits, misses, invalidations, and dynamic paths. Minimize origin load without caching responses that are stale, private, or location-inconsistent.",
+      "scaleTrigger": {
+        "metric": "Origin request volume and origin response/resource behavior by content path",
+        "action": "Identify avoidable misses and unnecessary cache-key variation, then tune only where the content contract allows; retain a direct origin path for responses that cannot be safely shared.",
+        "impact": "Reduces avoidable origin work while preserving correct dynamic and location-aware responses."
+      },
+      "requirementIds": ["legacy-constraint:4", "legacy-constraint:5", "legacy-requirement:1", "legacy-requirement:4"]
+    },
+    {
+      "id": "aws007_end_to_end_review",
+      "stepNumber": 35,
+      "phase": "Add protection, invalidation, monitoring, and validation",
+      "title": "Review the request and operational paths",
+      "type": "explanation",
+      "content": "The intended path is viewer DNS resolution, HTTPS to CloudFront, edge customization where required, and a cache response or request to the static S3 or dynamic application origin. ACM supplies the viewer certificate dependency, AWS Shield represents DDoS protection, invalidation refreshes changed content, and CloudWatch supports cache-performance review. Treat every numeric constraint as an acceptance target to validate with the actual workload; the walkthrough does not establish that any target is already met.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    }
+  ]
+}

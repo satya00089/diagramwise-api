@@ -1,0 +1,1053 @@
+{
+  "problem_id": "ml_007",
+  "version": "1.0-review-draft",
+  "totalSteps": 58,
+  "phases": [
+    {
+      "name": "Freeze the line contract and target definitions",
+      "stepRange": [1, 3],
+      "description": "Separate the supplied performance and quality targets from provisional plant assumptions, then define the item-level decision contract and measurement boundary."
+    },
+    {
+      "name": "Capture and infer within the edge budget",
+      "stepRange": [4, 19],
+      "description": "Build the camera-to-edge inference path, address lighting and pose variation, and make accuracy, false rejection, throughput, and latency measurable rather than promised."
+    },
+    {
+      "name": "Deliver safe PLC decisions and preserve evidence",
+      "stepRange": [20, 31],
+      "description": "Separate the bounded synchronous control decision from replayable inspection events and optional image retention; define acknowledgment and line-safe failure behavior."
+    },
+    {
+      "name": "Persist quality outcomes and operate access safely",
+      "stepRange": [32, 46],
+      "description": "Deduplicate results, persist item-level evidence and aggregates, expose quality statistics to authorized operators, and instrument the operational path."
+    },
+    {
+      "name": "Release model updates without stopping production",
+      "stepRange": [47, 58],
+      "description": "Train from reviewed data, validate and register immutable model versions, warm and switch candidates safely, and define the production acceptance and rollback gates."
+    }
+  ],
+  "steps": [
+    {
+      "id": "cv_01",
+      "stepNumber": 1,
+      "phase": "Freeze the line contract and target definitions",
+      "title": "Separate brief facts from design assumptions",
+      "type": "explanation",
+      "content": "Problem: Design a Computer Vision Quality Inspection System. Assigned brief: Design a computer vision system for automated quality inspection in manufacturing that detects defects on production lines, classifies defect types, and integrates with factory automation systems. Supplied brief facts: inspect production-line images for scratches, dents, and cracks; classify defect type and severity; handle lighting and position variation; produce quality statistics; integrate with PLC/factory automation; and update models without stopping the line. The stated targets are >99.5% detection accuracy, <200ms/item, <0.1% false rejection, edge hardware, and 100+ items/minute. These are acceptance requirements, not achieved results. Provisional design assumptions for this walkthrough: use a representative line-side image-capture-to-local-edge-inference path without assuming a number of production lines, cameras, lanes, or inspection cells; the line can hold or divert an item under an agreed plant safety policy; and image-ready to PLC decision is only a provisional latency boundary. The brief does not define the latency statistic or whether that boundary includes camera exposure, PLC acknowledgment, or physical actuation. Confirm the in-scope line/camera/lane count, image dimensions and smallest defect, exposure and trigger cadence, throughput scope and observation window, actuator deadline, availability, retention, defect prevalence, and PLC protocol before sizing or claiming compliance.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "cv_02",
+      "stepNumber": 2,
+      "phase": "Freeze the line contract and target definitions",
+      "title": "Define what one item result must contain",
+      "type": "explanation",
+      "content": "Use a stable line_id, station_id, item_sequence, capture timestamp, image/crop reference, model version, class, severity, confidence, defect boxes, final disposition, and PLC acknowledgment. A repeated item_sequence must not create a second logical inspection or a second reject actuation. The brief does not define whether <200ms/item includes camera exposure, PLC round-trip, or physical actuator movement; report each segment and agree the end-to-end boundary with controls engineers. Detection accuracy must be reported with per-class recall, missed-defect rate, and false-reject rate because a high share of good items can make aggregate accuracy misleading.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "cv_03",
+      "stepNumber": 3,
+      "phase": "Freeze the line contract and target definitions",
+      "title": "Keep rate, latency, and accuracy as separate gates",
+      "type": "explanation",
+      "content": "100+ items/minute is the supplied throughput target; at the 100-items/minute threshold it is approximately 1.67 items/second. The brief does not say whether that rate is per line/lane or system-wide, whether it is sustained or peak, or what observation window applies. <200ms/item is a distinct per-item processing-time target, not a throughput guarantee; the brief leaves its start/end boundary and required percentile or summary statistic unspecified. Benchmark measured workload on representative high-resolution images and selected edge hardware; report p50/p95/p99 as diagnostics, and agree which statistic (if any) is the acceptance gate. Evaluate per-class quality on a production-like holdout. Do not trade away the >99.5% detection target or <0.1% false-rejection target to make a latency chart look better.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "cv_04",
+      "stepNumber": 4,
+      "phase": "Capture and infer within the edge budget",
+      "title": "Add the production-line image source",
+      "type": "add_component",
+      "content": "Represent the existing high-resolution area-scan or line-scan camera and its trigger/lighting interface. The component catalog has no camera or machine-vision sensor item, so this is a justified use of its generic custom-component type, not a new palette type. The brief specifies no camera or line count, pixel dimensions, bit depth, field of view, or smallest physical defect. Measure image width/height, bit depth, region of interest and payload size, smallest-defect pixel footprint, exposure/blur, and trigger cadence on representative product, lighting, and pose samples; select resolution, shutter, lens, illumination, and trigger mode from that evidence rather than an invented sensor specification.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "cv_camera",
+        "componentType": "custom-component",
+        "label": "Production-Line Vision Camera",
+        "description": "Existing high-resolution camera and controlled capture trigger; custom type is used because the catalog has no industrial camera component.",
+        "position": {"x": 0, "y": 220},
+        "properties": {
+          "componentName": "Production-Line Vision Camera",
+          "subtitle": "High-resolution image capture",
+          "purpose": "Capture triggered, high-resolution images at a repeatable station pose and timestamp each item; camera, lens, shutter, illumination, and exposure are site-specific and must resolve the smallest target defect at line speed.",
+          "componentType": "Industrial machine-vision camera",
+          "technology": "Existing area-scan or line-scan camera; exact model is a plant assumption"
+        },
+        "highlightReason": "Image quality, timing, and repeatable pose set the upper bound on downstream detection quality."
+      }
+    },
+    {
+      "id": "cv_05",
+      "stepNumber": 5,
+      "phase": "Capture and infer within the edge budget",
+      "title": "Place preprocessing and inference close to the line",
+      "type": "add_component",
+      "content": "Use the catalog's existing Edge Server as the local gateway for camera triggering, bounded preprocessing, health checks, and inference routing. Local execution addresses the edge-hardware constraint and avoids making a cloud round trip part of the item decision. Hardware redundancy, GPU/accelerator choice, and offline operating duration are provisional until the plant's power, thermal, network, and availability needs are known.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "cv_edge",
+        "componentType": "edge-server",
+        "label": "Line-Side Edge Gateway",
+        "description": "Local capture coordination, preprocessing, and bounded inference routing",
+        "position": {"x": 300, "y": 220},
+        "properties": {
+          "componentName": "Line-Side Edge Gateway",
+          "purpose": "Coordinate triggered image capture, validate image dimensions and quality, perform bounded resize/normalization, route to the local inference runtime, buffer non-blocking evidence uploads, and continue the agreed safe mode during WAN loss.",
+          "scope": "Local",
+          "streaming": true
+        },
+        "highlightReason": "Keeping the item path local is necessary to meet the edge-hardware constraint and avoid WAN latency."
+      }
+    },
+    {
+      "id": "cv_06",
+      "stepNumber": 6,
+      "phase": "Capture and infer within the edge budget",
+      "title": "Connect triggered images to the edge gateway",
+      "type": "add_connection",
+      "content": "Carry item sequence, capture timestamp, station identity, and image-quality metadata with each frame. Apply bounded buffering with backpressure; a late or malformed frame must be marked as an inspection failure rather than silently associated with the next item.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "cv_camera_edge",
+        "sourceNodeId": "cv_camera",
+        "targetNodeId": "cv_edge",
+        "connectionType": "data-flow",
+        "label": "Triggered high-resolution frame + item ID",
+        "description": "Timestamped image frames with station, item-sequence, and capture-quality metadata."
+      }
+    },
+    {
+      "id": "cv_07",
+      "stepNumber": 7,
+      "phase": "Capture and infer within the edge budget",
+      "title": "Control lighting and pose before compensating in software",
+      "type": "decision_point",
+      "content": "Prefer repeatable camera geometry, guarded focus, stable exposure, and controlled illumination; then validate augmentations across the remaining expected lighting and position envelope. Detect blur, glare, occlusion, and out-of-envelope pose and route those items to a defined reinspection or safe hold path. Do not imply that augmentation handles arbitrary physical variation.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:3"],
+      "decision": {
+        "question": "How should the design handle lighting and item-position variation without hiding bad captures?",
+        "chosen": "Stabilize capture physically, validate an explicit image envelope, and flag out-of-envelope frames for safe reinspection",
+        "chosenReason": "Mechanical and optical controls reduce avoidable variance; software normalization and training augmentation handle only measured residual variation, while quality checks expose unusable images.",
+        "alternatives": [
+          {"option": "Rely on training augmentation alone", "tradeoff": "May not cover glare, blur, occlusion, or a camera shift outside the training distribution."},
+          {"option": "Accept every frame and always classify", "tradeoff": "Can turn capture faults into confident but unsafe pass decisions."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "cv_edge",
+        "properties": {"purpose": "Coordinate triggered capture; check blur, glare, dimensions, and pose against a calibrated envelope; apply bounded normalization; route out-of-envelope frames to the plant-approved reinspection/hold path; buffer non-blocking evidence uploads."}
+      }
+    },
+    {
+      "id": "cv_08",
+      "stepNumber": 8,
+      "phase": "Capture and infer within the edge budget",
+      "title": "Size for line rate and measured burst headroom",
+      "type": "scale_trigger",
+      "content": "The supplied 100+ items/minute is a throughput target; the brief does not define its observation window, whether it applies per line/lane or system-wide, or its peak/burst profile. Replay the actual trigger cadence, image sizes, and lane count on target edge hardware; account for overlapping items and PLC deadlines before choosing batching or replica counts.",
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"],
+      "scaleTrigger": {
+        "metric": "Capture or inference queue age rises under the measured workload at the declared 100+ items/minute scope, or image-ready-to-PLC-decision latency approaches the agreed <200ms/item acceptance measure",
+        "action": "Profile image decode and accelerator utilization; increase local accelerator capacity or parallel stations, bound batches, and shed only optional image retention or analytics work",
+        "impact": "Protects the PLC decision deadline without claiming target throughput until the full line-rate test passes."
+      }
+    },
+    {
+      "id": "cv_09",
+      "stepNumber": 9,
+      "phase": "Capture and infer within the edge budget",
+      "title": "Represent the defect and anomaly models",
+      "type": "add_component",
+      "content": "Use an existing ML Model catalog item for a versioned computer-vision artifact. Candidate detectors such as YOLO or Faster R-CNN are options to benchmark, not fixed choices. Model the required defect classes and severity labels explicitly, and add an anomaly signal for novel appearances rather than pretending it has known-class accuracy.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:3"],
+      "component": {
+        "nodeId": "cv_model",
+        "componentType": "ml-model",
+        "label": "Defect Detection + Novelty Model",
+        "description": "Versioned supervised defect detector with a separate novelty signal",
+        "position": {"x": 620, "y": 80},
+        "properties": {
+          "componentName": "Defect Detection + Novelty Model",
+          "purpose": "Detect and localize scratches, dents, and cracks; classify defect class and severity; expose calibrated confidence and a separate unknown-defect/anomaly score. Track per-class recall and false-reject behavior on representative lighting, position, product, and defect-prevalence slices.",
+          "modelType": "Computer Vision"
+        },
+        "highlightReason": "Separate known-defect detection from novelty detection so unknown defects are not mislabeled as a known safe class."
+      }
+    },
+    {
+      "id": "cv_10",
+      "stepNumber": 10,
+      "phase": "Capture and infer within the edge budget",
+      "title": "Serve inference on the line-side accelerator",
+      "type": "add_component",
+      "content": "Use the existing Model Serving item to represent the local inference runtime. Export and benchmark an ONNX or TensorRT-compatible build on the actual edge device, including preprocessing, postprocessing, warm-up, and concurrent station load. Accelerator support and quantization effects must be measured against the quality gates.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "cv_serving",
+        "componentType": "model-serving",
+        "label": "Edge CV Inference Runtime",
+        "description": "Warm local model runtime with bounded inference deadlines",
+        "position": {"x": 900, "y": 220},
+        "properties": {
+          "componentName": "Edge CV Inference Runtime",
+          "purpose": "Serve pinned, warmed computer-vision model versions locally using an ONNX Runtime or TensorRT build selected for the edge hardware; enforce an item deadline and return class, severity, boxes, confidence, model version, and an explicit unavailable/uncertain result.",
+          "platform": "Custom API"
+        },
+        "highlightReason": "The line calls a bounded local serving path; cloud inference is not on the synchronous item decision path."
+      }
+    },
+    {
+      "id": "cv_11",
+      "stepNumber": 11,
+      "phase": "Capture and infer within the edge budget",
+      "title": "Load the immutable model artifact into serving",
+      "type": "add_connection",
+      "content": "Bind each served runtime to an immutable model digest and preprocessing contract. Reject artifacts with incompatible input shape, missing calibration metadata, invalid signature, or an unapproved version.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "cv_model_serving",
+        "sourceNodeId": "cv_model",
+        "targetNodeId": "cv_serving",
+        "connectionType": "data-flow",
+        "label": "Signed model artifact + preprocessing contract",
+        "description": "Immutable model version, class map, calibration, and input/output schema used by the runtime."
+      }
+    },
+    {
+      "id": "cv_12",
+      "stepNumber": 12,
+      "phase": "Capture and infer within the edge budget",
+      "title": "Keep inference on the synchronous local path",
+      "type": "add_connection",
+      "content": "Send the item image or bounded crop from the local gateway to the warm edge runtime and return the result before the agreed PLC deadline. Do not wait for object storage, statistics aggregation, model registry, or remote services to finish.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "cv_edge_serving",
+        "sourceNodeId": "cv_edge",
+        "targetNodeId": "cv_serving",
+        "connectionType": "grpc",
+        "label": "Image tensor + item context",
+        "description": "Deadline-bound local inference request with a stable item sequence and capture-quality flags."
+      }
+    },
+    {
+      "id": "cv_13",
+      "stepNumber": 13,
+      "phase": "Capture and infer within the edge budget",
+      "title": "Use a known-class detector and explicit novelty handling",
+      "type": "decision_point",
+      "content": "Train supervised localization/classification for labeled scratches, dents, and cracks, and evaluate an anomaly detector for novel defects on a separate unknown-class set. Unknown or low-confidence outputs should become an explicit review/hold result, not a fabricated class or automatic pass. Validate class and severity confusion matrices by product and operating condition.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:3"],
+      "decision": {
+        "question": "How should the system behave when a defect differs from the labeled training classes?",
+        "chosen": "Combine a supervised detector with a separately calibrated anomaly/novelty signal and route uncertain items to review",
+        "chosenReason": "Known classes need measurable localization and severity performance; novelty needs a visible uncertainty path instead of an unsupported label.",
+        "alternatives": [
+          {"option": "Force every image into scratch, dent, crack, or pass", "tradeoff": "Can conceal an unseen defect as a confident known class or safe pass."},
+          {"option": "Use anomaly detection as the only classifier", "tradeoff": "Signals unusual appearance but does not by itself provide the required defect type and severity."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "cv_model",
+        "properties": {"purpose": "Detect and localize labeled scratches, dents, and cracks and classify severity; emit calibrated known-class confidence plus a separately evaluated novelty score. Unknown or low-confidence items go to review/hold, never an invented known label or automatic pass."}
+      }
+    },
+    {
+      "id": "cv_14",
+      "stepNumber": 14,
+      "phase": "Capture and infer within the edge budget",
+      "title": "Tune decision thresholds against both quality targets",
+      "type": "decision_point",
+      "content": "Choose class/severity thresholds from held-out, plant-labeled images/items. Report the detection-accuracy measure (its definition and denominator need confirmation), per-class missed-defect rate, and false-rejection rate on good items separately. The brief does not define the accuracy metric, sampling unit, defect prevalence, confidence level, or sample size. Its >99.5% detection-accuracy and <0.1% false-rejection values are distinct acceptance targets; selecting a threshold does not establish either. Require enough evidence and confidence intervals for rare classes, and audit disagreement with human inspectors.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:3"],
+      "decision": {
+        "question": "How should pass, reject, and uncertain outcomes be calibrated?",
+        "chosen": "Use per-class held-out calibration, a measured reject threshold, and an explicit uncertain/manual-review band",
+        "chosenReason": "This makes false accepts and false rejects visible and avoids optimizing aggregate accuracy on a class-imbalanced line.",
+        "alternatives": [
+          {"option": "One global confidence threshold tuned on average accuracy", "tradeoff": "Can hide weak rare-defect recall and exceed the false-rejection target for a product slice."},
+          {"option": "Treat all uncertain predictions as pass", "tradeoff": "Reduces apparent false rejects but can allow defects through without evidence."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "cv_serving",
+        "properties": {"purpose": "Return calibrated per-class confidence and severity with a distinct uncertain result; thresholds are selected only from held-out plant data and must be shown against >99.5% detection accuracy and <0.1% false rejection targets, not treated as proof those targets are met."}
+      }
+    },
+    {
+      "id": "cv_15",
+      "stepNumber": 15,
+      "phase": "Capture and infer within the edge budget",
+      "title": "Add line-path observability",
+      "type": "add_component",
+      "content": "Collect stage timings and health from capture, preprocessing, accelerator inference, and result delivery. Keep image payloads and sensitive production data out of high-cardinality metric labels; link restricted traces to item IDs only under the plant's retention and access policy.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "cv_monitor",
+        "componentType": "monitoring",
+        "label": "Inspection SLO & Quality Monitoring",
+        "description": "Stage latency, line health, PLC acknowledgments, and measured quality",
+        "position": {"x": 900, "y": 470},
+        "properties": {
+          "componentName": "Inspection SLO & Quality Monitoring",
+          "purpose": "Track capture failures, image-quality rejects, p50/p95/p99 image-ready-to-decision latency, throughput, accelerator saturation, PLC acknowledgment timeouts, queue age, model version, drift indicators, and audited per-class miss/false-reject metrics.",
+          "stack": "Prometheus + Grafana",
+          "metrics": true,
+          "alerts": true
+        },
+        "highlightReason": "Production targets require evidence from the full line path, not only an offline model benchmark."
+      }
+    },
+    {
+      "id": "cv_16",
+      "stepNumber": 16,
+      "phase": "Capture and infer within the edge budget",
+      "title": "Export edge gateway health and timing",
+      "type": "add_connection",
+      "content": "Emit capture, preprocessing, queue, and network-state metrics with station and model-version dimensions. Alert on stale item IDs, poor image quality, and a growing capture queue before the line deadline is missed.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "cv_edge_monitor",
+        "sourceNodeId": "cv_edge",
+        "targetNodeId": "cv_monitor",
+        "connectionType": "data-flow",
+        "label": "Capture health + stage timings",
+        "description": "Privacy-conscious local capture and preprocessing telemetry."
+      }
+    },
+    {
+      "id": "cv_17",
+      "stepNumber": 17,
+      "phase": "Capture and infer within the edge budget",
+      "title": "Measure accelerator and model behavior",
+      "type": "add_connection",
+      "content": "Report per-stage latency, accelerator utilization, version, confidence distribution, and inference failures. Compare the deployed edge build with its validated artifact so quantization, driver, or runtime changes cannot silently invalidate model quality evidence.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "cv_serving_monitor",
+        "sourceNodeId": "cv_serving",
+        "targetNodeId": "cv_monitor",
+        "connectionType": "data-flow",
+        "label": "Inference latency + version + health",
+        "description": "Runtime metrics and versioned, non-image quality signals."
+      }
+    },
+    {
+      "id": "cv_18",
+      "stepNumber": 18,
+      "phase": "Capture and infer within the edge budget",
+      "title": "Page on the decision budget, not a slow average",
+      "type": "scale_trigger",
+      "content": "Measure p50/p95/p99 latency and missed-deadline counts; a healthy average can conceal a slow tail. The brief does not identify which statistic must meet <200ms/item, so do not silently treat p99 as the acceptance definition. Test the supported image dimensions, warm and cold start, thermal throttling, accelerator contention, and concurrent lanes.",
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"],
+      "scaleTrigger": {
+        "metric": "The plant-agreed image-ready-to-PLC-decision statistic trends toward the <200ms/item target, or missed item deadlines rise under the declared 100+ items/minute workload scope",
+        "action": "Profile each stage on production edge hardware; pin accelerator resources, reduce only validated preprocessing cost, and add a local inference replica or station capacity after concurrency tests",
+        "impact": "Provides actionable headroom while retaining the quality gate; any optimization must be rerun against accuracy and false-rejection targets."
+      }
+    },
+    {
+      "id": "cv_19",
+      "stepNumber": 19,
+      "phase": "Capture and infer within the edge budget",
+      "title": "Do not make remote connectivity a decision dependency",
+      "type": "explanation",
+      "content": "The line-side capture and inference path should continue through WAN loss using the locally approved model and a bounded local buffer. Remote monitoring, registry access, and evidence upload may become delayed; show freshness and backlog explicitly. Define how long offline operation is permitted and what happens when local storage, accelerator, or the approved model is unavailable with the plant safety owner.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "cv_20",
+      "stepNumber": 20,
+      "phase": "Deliver safe PLC decisions and preserve evidence",
+      "title": "Represent the existing PLC integration boundary",
+      "type": "add_component",
+      "content": "The palette has no PLC, industrial protocol, or factory-controller item. Use the existing generic custom-component type for the already-present plant PLC/adapter boundary; the protocol (for example OPC UA or Modbus TCP), safety interlocks, and vendor behavior are site-specific and must be reviewed with controls engineering.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:2"],
+      "component": {
+        "nodeId": "cv_plc",
+        "componentType": "custom-component",
+        "label": "PLC & Factory Control Adapter",
+        "description": "Existing PLC/control integration boundary; custom type is used because no industrial controller or PLC adapter exists in the catalog.",
+        "position": {"x": 1200, "y": 80},
+        "properties": {
+          "componentName": "PLC & Factory Control Adapter",
+          "subtitle": "Existing plant control system",
+          "purpose": "Translate an authenticated, deadline-bound item verdict into the plant-approved PLC tag/command contract; correlate item sequence and command ID with PLC acknowledgment and expose safe fallback state without owning safety interlocks.",
+          "componentType": "Existing PLC / industrial automation adapter",
+          "technology": "Site-selected industrial protocol and vendor driver; confirm with controls engineering"
+        },
+        "highlightReason": "Factory integration is a live requirement, but the current palette lacks a truthful PLC-specific component."
+      }
+    },
+    {
+      "id": "cv_21",
+      "stepNumber": 21,
+      "phase": "Deliver safe PLC decisions and preserve evidence",
+      "title": "Send the bounded verdict to factory automation",
+      "type": "add_connection",
+      "content": "Send item sequence, pass/reject/uncertain disposition, defect class/severity, confidence, model version, and a unique command ID. Require a PLC acknowledgment before recording the decision as delivered; the command deadline and actuator semantics must be agreed with the line owner.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:2"],
+      "connection": {
+        "edgeId": "cv_serving_plc",
+        "sourceNodeId": "cv_serving",
+        "targetNodeId": "cv_plc",
+        "connectionType": "api-call",
+        "label": "Deadline-bound item verdict + command ID",
+        "description": "Local PLC decision request and acknowledgment correlated to one item sequence."
+      }
+    },
+    {
+      "id": "cv_22",
+      "stepNumber": 22,
+      "phase": "Deliver safe PLC decisions and preserve evidence",
+      "title": "Make PLC retries idempotent and observable",
+      "type": "decision_point",
+      "content": "Use a unique line/station/item-sequence command key and retain the acknowledgment state. Retry only when the PLC contract makes the command idempotent; after an ambiguous timeout, read back state or apply the plant-approved hold/reinspection behavior instead of blindly issuing a second reject pulse.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:2"],
+      "decision": {
+        "question": "What should happen if the PLC acknowledgment is lost after a verdict was sent?",
+        "chosen": "Correlate an idempotent command with item sequence, reconcile ambiguous outcomes, and use the approved safe state on unresolved timeout",
+        "chosenReason": "Retries must not cause duplicate physical actuation, and an unconfirmed command must not be reported as delivered.",
+        "alternatives": [
+          {"option": "Blindly resend every timed-out command", "tradeoff": "May create duplicate reject or divert actions if the first command took effect."},
+          {"option": "Treat send success as PLC acknowledgment", "tradeoff": "Hides network, controller, or actuator failures and corrupts quality statistics."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "cv_plc",
+        "properties": {"purpose": "Translate verdicts using a unique line/station/item-sequence command ID, retain PLC acknowledgment state, retry only if the site protocol guarantees idempotency, and reconcile ambiguous timeouts through readback or a plant-approved hold/reinspection policy; never claim delivery from a successful socket write alone."}
+      }
+    },
+    {
+      "id": "cv_23",
+      "stepNumber": 23,
+      "phase": "Deliver safe PLC decisions and preserve evidence",
+      "title": "Fail closed to the agreed plant safety policy",
+      "type": "explanation",
+      "content": "If the frame is invalid, the model is unavailable, or the decision deadline expires, do not convert failure into pass. Return an explicit inspection-unavailable outcome and invoke the controls-approved hold, divert, or manual inspection behavior. The exact fail-safe action is not specified in the brief and cannot be chosen by the software design alone; validate it with plant safety and controls owners.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "cv_24",
+      "stepNumber": 24,
+      "phase": "Deliver safe PLC decisions and preserve evidence",
+      "title": "Add a durable asynchronous inspection-event path",
+      "type": "add_component",
+      "content": "Buffer item outcomes, PLC acknowledgments, and quality events separately from the synchronous control command. A durable broker permits replay after downstream outages; it must not be on the critical path to the PLC verdict.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "cv_events",
+        "componentType": "message-broker",
+        "label": "Inspection Event Bus",
+        "description": "Replayable asynchronous result, acknowledgment, and quality-event stream",
+        "position": {"x": 1500, "y": 400},
+        "properties": {
+          "componentName": "Inspection Event Bus",
+          "purpose": "Durably buffer versioned inspection results, PLC acknowledgments, and state changes using stable event IDs and line/item keys for partition ordering; support bounded retention, replay, and downstream backpressure without blocking PLC decisions.",
+          "durable": true
+        },
+        "highlightReason": "Durable asynchronous delivery preserves history through analytics outages without delaying the line decision."
+      }
+    },
+    {
+      "id": "cv_25",
+      "stepNumber": 25,
+      "phase": "Deliver safe PLC decisions and preserve evidence",
+      "title": "Publish results after the local decision",
+      "type": "add_connection",
+      "content": "Publish a versioned event containing the item key, model version, verdict, class/severity, confidence, timing, and later PLC acknowledgment. Assign stable event IDs so consumer retries can be deduplicated.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "cv_serving_events",
+        "sourceNodeId": "cv_serving",
+        "targetNodeId": "cv_events",
+        "connectionType": "event-stream",
+        "label": "Versioned inspection result events",
+        "description": "Asynchronous result publication after the PLC-path verdict has been formed."
+      }
+    },
+    {
+      "id": "cv_26",
+      "stepNumber": 26,
+      "phase": "Deliver safe PLC decisions and preserve evidence",
+      "title": "Add controlled image and evidence storage",
+      "type": "add_component",
+      "content": "Use the existing Object Storage component for retained inspection images, crops, labels, and model-validation evidence. The retention and residency policy are absent from the brief; start with a local/private S3-compatible store only as a replaceable example and confirm whether all, sampled, rejected, or disputed images must be retained.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "cv_images",
+        "componentType": "object-storage",
+        "label": "Inspection Image & Dataset Store",
+        "description": "Access-controlled, checksum-verified image and dataset artifacts",
+        "position": {"x": 600, "y": 560},
+        "properties": {
+          "componentName": "Inspection Image & Dataset Store",
+          "purpose": "Store policy-approved original images/crops, labels, and immutable dataset/model evidence with checksums, encryption, access logging, lifecycle retention, and deletion controls; uploads are asynchronous and cannot delay PLC disposition.",
+          "provider": "MinIO",
+          "versioning": true,
+          "checksumValidation": true
+        },
+        "highlightReason": "Image evidence supports audits and reviewed model improvement, while asynchronous writes protect line latency."
+      }
+    },
+    {
+      "id": "cv_27",
+      "stepNumber": 27,
+      "phase": "Deliver safe PLC decisions and preserve evidence",
+      "title": "Upload evidence off the item-decision path",
+      "type": "add_connection",
+      "content": "Enqueue an item-keyed image reference and checksum after local capture; the edge agent retries resumable uploads with bounded storage. When disconnected or full, preserve the inspection outcome and apply the approved evidence-retention fallback rather than delaying the line or silently claiming an image was archived.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "cv_edge_images",
+        "sourceNodeId": "cv_edge",
+        "targetNodeId": "cv_images",
+        "connectionType": "data-flow",
+        "label": "Asynchronous image + checksum",
+        "description": "Policy-approved image evidence transfer, decoupled from the synchronous inspection decision."
+      }
+    },
+    {
+      "id": "cv_28",
+      "stepNumber": 28,
+      "phase": "Deliver safe PLC decisions and preserve evidence",
+      "title": "Bound image retention and verify integrity",
+      "type": "decision_point",
+      "content": "Retain only the image population required by quality, safety, privacy, and model-learning policy; a high-resolution stream can dominate storage and network cost. Verify checksums and access logs, version approved labels, and test deletion/retention behavior. Decide the local buffer capacity and behavior on a prolonged outage with the plant owner.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:4"],
+      "decision": {
+        "question": "Should the line upload every full-resolution image to centralized storage synchronously?",
+        "chosen": "Keep the item decision local; retain policy-selected evidence asynchronously with checksums and bounded local buffering",
+        "chosenReason": "This protects latency and disconnected operation while preserving the evidence needed by an explicit retention policy.",
+        "alternatives": [
+          {"option": "Synchronously upload every full frame before a verdict", "tradeoff": "Makes storage/network latency and outage availability part of the <200ms/item path."},
+          {"option": "Retain no images or checksums", "tradeoff": "Makes false-reject investigation, audit, and reviewed learning difficult or impossible."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "cv_images",
+        "properties": {"purpose": "Store only the image population approved by quality/privacy policy; verify checksums, encrypt and audit access, version reviewed labels, apply explicit retention/deletion, and use bounded asynchronous uploads so evidence storage is not required for PLC disposition."}
+      }
+    },
+    {
+      "id": "cv_29",
+      "stepNumber": 29,
+      "phase": "Deliver safe PLC decisions and preserve evidence",
+      "title": "Expose evidence loss instead of hiding it",
+      "type": "explanation",
+      "content": "Track local evidence queue age, free space, failed uploads, checksum mismatches, and retention deletions. When evidence cannot be stored, emit a durable operational event and apply the approved sampling/hold policy. Do not let a successful inference imply successful archive or audit retention.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "cv_30",
+      "stepNumber": 30,
+      "phase": "Deliver safe PLC decisions and preserve evidence",
+      "title": "Alert on asynchronous backlog before replay expires",
+      "type": "scale_trigger",
+      "content": "Measure oldest event age, broker disk use, consumer lag, local image-buffer use, and the maximum acceptable recovery window. Retention duration and capacity are design choices to confirm, not facts in the brief.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:5"],
+      "scaleTrigger": {
+        "metric": "Broker consumer lag or edge image-buffer occupancy approaches the configured replay/retention limit while the line is at target rate",
+        "action": "Add consumer capacity, reduce only policy-optional evidence volume, restore connectivity, and replay by stable item/event key with deduplication",
+        "impact": "Protects quality-history completeness without allowing analytics backlog to stall synchronous factory control."
+      }
+    },
+    {
+      "id": "cv_31",
+      "stepNumber": 31,
+      "phase": "Deliver safe PLC decisions and preserve evidence",
+      "title": "Monitor factory acknowledgment health",
+      "type": "add_connection",
+      "content": "Export PLC round-trip, acknowledgment timeout, readback reconciliation, safe-hold activation, and command deduplication metrics. Alert on the plant-approved operational threshold and keep verdict delivery distinct from inference success.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:2"],
+      "connection": {
+        "edgeId": "cv_plc_monitor",
+        "sourceNodeId": "cv_plc",
+        "targetNodeId": "cv_monitor",
+        "connectionType": "data-flow",
+        "label": "PLC acknowledgment + safe-state metrics",
+        "description": "Command delivery, acknowledgment, and failure-state telemetry."
+      }
+    },
+    {
+      "id": "cv_32",
+      "stepNumber": 32,
+      "phase": "Persist quality outcomes and operate access safely",
+      "title": "Process inspection events idempotently",
+      "type": "add_component",
+      "content": "Use the existing Stream Processor to validate event schemas, deduplicate by stable event and item keys, preserve event time, and derive ordered quality aggregates. At-least-once delivery plus idempotent consumers is the recovery model; do not claim exactly-once effects across the broker, database, and PLC.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "cv_processor",
+        "componentType": "stream-processor",
+        "label": "Inspection Result Processor",
+        "description": "Schema validation, deduplication, and event-time quality rollups",
+        "position": {"x": 1800, "y": 400},
+        "properties": {
+          "componentName": "Inspection Result Processor",
+          "purpose": "Validate versioned inspection and PLC-ack events; deduplicate event_id and line/station/item_sequence; preserve event time and model version; compute replay-safe item, defect, severity, false-reject-review, and yield aggregates with checkpointed offsets.",
+          "engine": "Apache Flink",
+          "windowing": true,
+          "stateful": true
+        },
+        "highlightReason": "A replayable stream consumer can recover quality statistics without duplicating item outcomes."
+      }
+    },
+    {
+      "id": "cv_33",
+      "stepNumber": 33,
+      "phase": "Persist quality outcomes and operate access safely",
+      "title": "Consume events with checkpoints and backpressure",
+      "type": "add_connection",
+      "content": "Consume event partitions with durable offsets and bounded state. Preserve original item timestamps during replay, quarantine malformed schemas, and alert on lag; do not drop high-severity defect or PLC acknowledgment events to keep aggregate dashboards fresh.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "cv_events_processor",
+        "sourceNodeId": "cv_events",
+        "targetNodeId": "cv_processor",
+        "connectionType": "event-stream",
+        "label": "Replayable item outcomes + PLC acknowledgments",
+        "description": "Checkpointed, event-time consumption with bounded replay and schema validation."
+      }
+    },
+    {
+      "id": "cv_34",
+      "stepNumber": 34,
+      "phase": "Persist quality outcomes and operate access safely",
+      "title": "Add the inspection system of record",
+      "type": "add_component",
+      "content": "Persist item outcomes, model version, defect location/class/severity, review disposition, PLC acknowledgment, and aggregate refresh watermark. Separate mutable operational status from immutable audit events and define indexes around line, station, item, time, and defect queries.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "cv_db",
+        "componentType": "database",
+        "label": "Inspection Results & Quality Store",
+        "description": "Durable item-level outcomes, audit history, and queryable aggregates",
+        "position": {"x": 2100, "y": 400},
+        "properties": {
+          "componentName": "Inspection Results & Quality Store",
+          "purpose": "Persist idempotent item outcomes, defect class/severity, model digest, PLC acknowledgment, human review, and aggregate watermarks; encrypt data, restrict roles, audit reads/changes, and verify backup/restore against the required retention and recovery objectives.",
+          "type": "RDBMS",
+          "engine": "postgresql",
+          "workload": "OLTP",
+          "encryption": true,
+          "rbac": true,
+          "auditLog": true,
+          "backups": true
+        },
+        "highlightReason": "Statistics and defect investigations need durable, queryable item evidence rather than dashboard-only state."
+      }
+    },
+    {
+      "id": "cv_35",
+      "stepNumber": 35,
+      "phase": "Persist quality outcomes and operate access safely",
+      "title": "Commit outcomes and review state idempotently",
+      "type": "add_connection",
+      "content": "Write by a unique line/station/item key and stable event ID; use a transaction or inbox/outbox pattern so a retry cannot duplicate counts or lose an audit transition. Preserve the original decision and append a later human review instead of rewriting what the model originally returned.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7"],
+      "connection": {
+        "edgeId": "cv_processor_db",
+        "sourceNodeId": "cv_processor",
+        "targetNodeId": "cv_db",
+        "connectionType": "database-connection",
+        "label": "Idempotent item result + audit event",
+        "description": "Transactional or inbox/outbox-backed persistence of item outcomes and replay-safe aggregates."
+      }
+    },
+    {
+      "id": "cv_36",
+      "stepNumber": 36,
+      "phase": "Persist quality outcomes and operate access safely",
+      "title": "Recover stream state without double-counting",
+      "type": "decision_point",
+      "content": "Assume broker delivery can repeat after a crash. Persist consumer progress with checkpoints and make the item-key upsert and aggregate contribution idempotent; reconcile broker offsets against stored watermarks after restore. Keep the original inference decision immutable and record corrected labels or dispositions as separate review events.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7"],
+      "decision": {
+        "question": "How can quality totals remain correct after a processor crash and replay?",
+        "chosen": "Use at-least-once replay, stable item/event keys, idempotent upserts, checkpointed offsets, and reconciliation watermarks",
+        "chosenReason": "This makes recovery explicit without overpromising exactly-once behavior across independent systems.",
+        "alternatives": [
+          {"option": "Assume each event is delivered exactly once", "tradeoff": "A crash between database commit and offset checkpoint can double-count on replay."},
+          {"option": "Drop events that appear duplicated by timestamp", "tradeoff": "Can suppress distinct items and corrupt line-level quality evidence."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "cv_processor",
+        "properties": {"purpose": "Validate events and process at least once; deduplicate only by stable event_id and line/station/item_sequence, checkpoint offsets, use idempotent result upserts and aggregate watermarks, and preserve replay timestamps so crashes do not double-count quality statistics."}
+      }
+    },
+    {
+      "id": "cv_37",
+      "stepNumber": 37,
+      "phase": "Persist quality outcomes and operate access safely",
+      "title": "Compute quality statistics from acknowledged outcomes",
+      "type": "add_component",
+      "content": "Use the existing Analytics catalog item for derived quality statistics. Separate model predictions from confirmed outcomes and reviewed labels; initial false-reject estimates should come from audited samples or adjudication, not from prediction counts alone.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3"],
+      "component": {
+        "nodeId": "cv_analytics",
+        "componentType": "analytics",
+        "label": "Production Quality Statistics",
+        "description": "Per-line yield, defect, severity, and audited quality metrics",
+        "position": {"x": 2100, "y": 140},
+        "properties": {
+          "componentName": "Production Quality Statistics",
+          "purpose": "Calculate item counts, yield, defect type/severity rates, line/station trends, model-version comparisons, inspection-unavailable counts, and audited per-class detection and false-reject measures; label unreviewed prediction-based metrics as provisional."
+        },
+        "highlightReason": "The brief requires quality statistics, and the data must distinguish predictions from confirmed ground truth."
+      }
+    },
+    {
+      "id": "cv_38",
+      "stepNumber": 38,
+      "phase": "Persist quality outcomes and operate access safely",
+      "title": "Build aggregates from the replayable stream",
+      "type": "add_connection",
+      "content": "Compute time-windowed counts and trends from deduplicated item outcomes, keeping event time and processing time distinct. Recompute a bounded interval after replay and publish a watermark so operators can see whether a report is complete or delayed.",
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "cv_processor_analytics",
+        "sourceNodeId": "cv_processor",
+        "targetNodeId": "cv_analytics",
+        "connectionType": "event-stream",
+        "label": "Deduplicated outcomes + quality watermarks",
+        "description": "Replay-safe event-time input for quality rollups and model-version metrics."
+      }
+    },
+    {
+      "id": "cv_39",
+      "stepNumber": 39,
+      "phase": "Persist quality outcomes and operate access safely",
+      "title": "Persist rollups with freshness metadata",
+      "type": "add_connection",
+      "content": "Store aggregates with line/station, window boundaries, model version, sample counts, label provenance, and completeness watermark. Keep audited defect quality and provisional prediction-derived measures distinguishable in every query and export.",
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "cv_analytics_db",
+        "sourceNodeId": "cv_analytics",
+        "targetNodeId": "cv_db",
+        "connectionType": "database-connection",
+        "label": "Versioned quality rollups + freshness watermark",
+        "description": "Queryable aggregates with sample count, provenance, and completeness state."
+      }
+    },
+    {
+      "id": "cv_40",
+      "stepNumber": 40,
+      "phase": "Persist quality outcomes and operate access safely",
+      "title": "Give operators a quality review surface",
+      "type": "add_component",
+      "content": "Use the catalog's Admin Console for line, station, shift, defect class/severity, confidence, model-version, and review trends. Show freshness and sample sizes, provide drill-through only to authorized evidence, and distinguish reported statistics from proven target attainment.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3"],
+      "component": {
+        "nodeId": "cv_console",
+        "componentType": "admin-console",
+        "label": "Quality Operations Console",
+        "description": "Authorized review of production quality and inspection evidence",
+        "position": {"x": 2400, "y": 140},
+        "properties": {
+          "componentName": "Quality Operations Console",
+          "purpose": "Show quality rollups, freshness, sample size, per-class trends, model version, and review queues; let authorized quality staff inspect permitted evidence and annotate adjudicated outcomes without changing the immutable original result.",
+          "accessControl": "RBAC",
+          "auditLogging": true
+        },
+        "highlightReason": "Quality teams need transparent statistics and a controlled path to adjudicate uncertain or false-reject cases."
+      }
+    },
+    {
+      "id": "cv_41",
+      "stepNumber": 41,
+      "phase": "Persist quality outcomes and operate access safely",
+      "title": "Serve quality views from durable records",
+      "type": "add_connection",
+      "content": "Query aggregates and authorized item details with pagination and freshness watermarks. Never expose full-resolution images or cross-line data simply because an operator can see a dashboard summary.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7"],
+      "connection": {
+        "edgeId": "cv_db_console",
+        "sourceNodeId": "cv_db",
+        "targetNodeId": "cv_console",
+        "connectionType": "database-connection",
+        "label": "Authorized quality queries + item evidence references",
+        "description": "Paginated quality reporting with explicit freshness and access filtering."
+      }
+    },
+    {
+      "id": "cv_42",
+      "stepNumber": 42,
+      "phase": "Persist quality outcomes and operate access safely",
+      "title": "Add operator and service identity controls",
+      "type": "add_component",
+      "content": "Use the existing Auth Service for operator authentication and scoped authorization to the quality console, evidence, and model-promotion workflow. Device identity and PLC network controls remain separate plant/OT responsibilities and need a mutually authenticated site-specific design.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8"],
+      "component": {
+        "nodeId": "cv_auth",
+        "componentType": "auth-service",
+        "label": "Operator & Service Authorization",
+        "description": "Role-scoped access and auditable identity for quality and model operations",
+        "position": {"x": 2400, "y": 400},
+        "properties": {
+          "componentName": "Operator & Service Authorization",
+          "purpose": "Authenticate operators and services; apply least-privilege roles for dashboard reads, restricted image access, label adjudication, and model promotion; log authorization changes and rotate service credentials.",
+          "oauth": true,
+          "mfa": true
+        },
+        "highlightReason": "Image evidence and model promotion have different risk levels and must not share unrestricted operator access."
+      }
+    },
+    {
+      "id": "cv_43",
+      "stepNumber": 43,
+      "phase": "Persist quality outcomes and operate access safely",
+      "title": "Authorize quality console actions",
+      "type": "add_connection",
+      "content": "Require role checks for dashboard access, evidence drill-through, label adjudication, and promotion approval; use MFA for privileged actions and record actor, scope, time, and before/after state.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8"],
+      "connection": {
+        "edgeId": "cv_console_auth",
+        "sourceNodeId": "cv_console",
+        "targetNodeId": "cv_auth",
+        "connectionType": "api-call",
+        "label": "Authenticated role and policy checks",
+        "description": "Scoped identity and auditable authorization for quality operations."
+      }
+    },
+    {
+      "id": "cv_44",
+      "stepNumber": 44,
+      "phase": "Persist quality outcomes and operate access safely",
+      "title": "Instrument replay lag and data-store health",
+      "type": "add_connection",
+      "content": "Measure consumer lag, duplicate suppression, checkpoint age, database commit failures, aggregate freshness, and dead-letter volume. Alert before the configured replay window or reporting freshness objective is breached.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "cv_events_monitor",
+        "sourceNodeId": "cv_events",
+        "targetNodeId": "cv_monitor",
+        "connectionType": "data-flow",
+        "label": "Broker lag + durable-delivery health",
+        "description": "Asynchronous pipeline health metrics and replay indicators."
+      }
+    },
+    {
+      "id": "cv_45",
+      "stepNumber": 45,
+      "phase": "Persist quality outcomes and operate access safely",
+      "title": "Make data freshness and outages visible",
+      "type": "add_connection",
+      "content": "Export database write/restore health, quality-rollup freshness, and evidence-storage queue/checksum status. Keep identifiers low-cardinality in metrics and restrict item-level traces and images under the same access and retention policy as source records.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "cv_images_monitor",
+        "sourceNodeId": "cv_images",
+        "targetNodeId": "cv_monitor",
+        "connectionType": "data-flow",
+        "label": "Evidence integrity + storage health",
+        "description": "Checksum, upload, capacity, retention, and restore telemetry without image payloads."
+      }
+    },
+    {
+      "id": "cv_46",
+      "stepNumber": 46,
+      "phase": "Persist quality outcomes and operate access safely",
+      "title": "Isolate OT traffic and privilege boundaries",
+      "type": "explanation",
+      "content": "Keep camera, edge, and PLC traffic on an allow-listed OT network segment; expose only required flows to IT services. Authenticate devices where supported, protect credentials in a managed secret store, encrypt retained evidence, log privileged changes, patch in a plant-tested maintenance window, and document offline recovery. The brief does not specify regulatory, privacy, or retention obligations, so resolve them with the factory security and quality teams.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:4"]
+    },
+    {
+      "id": "cv_47",
+      "stepNumber": 47,
+      "phase": "Release model updates without stopping production",
+      "title": "Add a reviewed model-training pipeline",
+      "type": "add_component",
+      "content": "Use the existing Model Training component for offline training and validation, not for line-time inference. Build versioned datasets from authorized, human-reviewed evidence; split by production time, lot, camera, or product to reduce near-duplicate leakage.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3"],
+      "component": {
+        "nodeId": "cv_training",
+        "componentType": "model-training",
+        "label": "Reviewed Defect Model Training",
+        "description": "Offline training, augmentation, and held-out evaluation",
+        "position": {"x": 900, "y": 760},
+        "properties": {
+          "componentName": "Reviewed Defect Model Training",
+          "purpose": "Train and evaluate only on access-approved, versioned, human-reviewed images and labels; track dataset provenance, class balance, camera/product splits, augmentation recipe, reproducibility, and separate unknown-defect holdout.",
+          "computeType": "GPU"
+        },
+        "highlightReason": "Reviewable offline training creates candidate versions without consuming the line's inference budget."
+      }
+    },
+    {
+      "id": "cv_48",
+      "stepNumber": 48,
+      "phase": "Release model updates without stopping production",
+      "title": "Version models and promotion evidence",
+      "type": "add_component",
+      "content": "Use the existing Model Registry for immutable candidate and approved model versions. Store the artifact digest, source dataset revision, class map, calibration, runtime/export version, evaluation report, approver, and rollback target with each promotion.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "cv_registry",
+        "componentType": "model-registry",
+        "label": "Inspection Model Registry",
+        "description": "Immutable candidates, approvals, deployment metadata, and rollback references",
+        "position": {"x": 1500, "y": 760},
+        "properties": {
+          "componentName": "Inspection Model Registry",
+          "purpose": "Register immutable model digests with dataset and label provenance, class map, preprocessing and calibration contract, target-edge export, validation results, approval identity, rollout state, and last-known-good rollback version.",
+          "platform": "MLflow"
+        },
+        "highlightReason": "Traceability from a line result to its exact model and training evidence is required for safe updates."
+      }
+    },
+    {
+      "id": "cv_49",
+      "stepNumber": 49,
+      "phase": "Release model updates without stopping production",
+      "title": "Train only from approved image evidence",
+      "type": "add_connection",
+      "content": "Read checksummed images, labels, and review events by immutable dataset revision. Enforce purpose-specific access and keep customer/factory data out of unapproved external training services.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:8", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "cv_images_training",
+        "sourceNodeId": "cv_images",
+        "targetNodeId": "cv_training",
+        "connectionType": "data-flow",
+        "label": "Reviewed, checksummed dataset revision",
+        "description": "Authorized training input with immutable provenance and approved retention."
+      }
+    },
+    {
+      "id": "cv_50",
+      "stepNumber": 50,
+      "phase": "Release model updates without stopping production",
+      "title": "Register evaluated candidate artifacts",
+      "type": "add_connection",
+      "content": "Publish candidate artifact, evaluation report, per-class metrics, false-reject estimate and confidence interval, edge-runtime benchmark, and rollback metadata. A registry write alone is not approval to deploy.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "cv_training_registry",
+        "sourceNodeId": "cv_training",
+        "targetNodeId": "cv_registry",
+        "connectionType": "api-call",
+        "label": "Candidate artifact + validation evidence",
+        "description": "Versioned training output submitted for independent policy and quality approval."
+      }
+    },
+    {
+      "id": "cv_51",
+      "stepNumber": 51,
+      "phase": "Release model updates without stopping production",
+      "title": "Deliver approved versions to line-side serving",
+      "type": "add_connection",
+      "content": "The edge periodically fetches only an approved signed artifact and its runtime manifest. Registry/network outage leaves the current approved version active; no candidate is downloaded or promoted as an implicit fallback.",
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "cv_registry_serving",
+        "sourceNodeId": "cv_registry",
+        "targetNodeId": "cv_serving",
+        "connectionType": "data-flow",
+        "label": "Approved signed model + rollout manifest",
+        "description": "Versioned edge deployment control path; it does not carry per-item inference traffic."
+      }
+    },
+    {
+      "id": "cv_52",
+      "stepNumber": 52,
+      "phase": "Release model updates without stopping production",
+      "title": "Warm and switch model versions without stopping the line",
+      "type": "decision_point",
+      "content": "Download and verify a candidate beside the current model, load and warm it, run health and shadow checks, then route a bounded canary only if the plant supports safe comparison. Promote with an atomic routing switch after approval; retain the previous model in memory or on disk for immediate rollback. Never unload the serving version before the replacement is ready.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4"],
+      "decision": {
+        "question": "How can a model update avoid stopping production or leaving no usable inference model?",
+        "chosen": "Verify and warm the approved candidate in parallel, canary/shadow it, atomically switch routing, and retain the last-known-good version for rollback",
+        "chosenReason": "The active model remains available throughout transfer, validation, and promotion; failed candidates do not interrupt line operation.",
+        "alternatives": [
+          {"option": "Stop the line, replace the only model, then validate", "tradeoff": "Creates the exact service interruption excluded by the requirement and may expose an unusable candidate."},
+          {"option": "Automatically switch when download completes", "tradeoff": "Completeness does not prove runtime compatibility, quality, or deadline compliance."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "cv_serving",
+        "properties": {"purpose": "Keep the current approved model serving while a signed candidate is verified, loaded, warmed, and shadow/canary checked; atomically switch only after approval and retain the last-known-good version for immediate rollback. Registry outage or candidate failure leaves the current version active."}
+      }
+    },
+    {
+      "id": "cv_53",
+      "stepNumber": 53,
+      "phase": "Release model updates without stopping production",
+      "title": "Handle rare defects without evaluation leakage",
+      "type": "explanation",
+      "content": "Use realistic augmentation for rare classes only after confirming it preserves defect morphology; synthetic defect images can expand candidate training data but are not independent validation evidence. Keep lots, source images, and near-duplicate crops separated across train and holdout sets, and require a human-reviewed sample before synthetic examples influence a promoted model.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "cv_54",
+      "stepNumber": 54,
+      "phase": "Release model updates without stopping production",
+      "title": "Close the learning loop with reviewed labels",
+      "type": "decision_point",
+      "content": "Prioritize low-confidence, novel, and operator-disputed items for active-learning review. Require adjudicated labels, class/lot-aware holdouts, and a promotion approver independent of automatic training; keep every prior prediction and review correction auditable.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3"],
+      "decision": {
+        "question": "Which production results are safe to feed into future training?",
+        "chosen": "Use human-adjudicated uncertain and disputed cases with immutable provenance and held-out evaluation",
+        "chosenReason": "Model predictions are not ground truth; review prevents self-reinforcing mislabels and gives rare classes targeted attention.",
+        "alternatives": [
+          {"option": "Automatically train on every model prediction", "tradeoff": "Can turn false predictions into training labels and amplify drift."},
+          {"option": "Ignore production review signals", "tradeoff": "Misses rare or newly emerging defects and operator evidence."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "cv_training",
+        "properties": {"purpose": "Prioritize low-confidence, novel, and disputed cases for human adjudication; train from approved versioned labels with class/lot/camera-separated holdouts, auditable augmentation, and no automatic use of unreviewed predictions as ground truth."}
+      }
+    },
+    {
+      "id": "cv_55",
+      "stepNumber": 55,
+      "phase": "Release model updates without stopping production",
+      "title": "Preserve service and evidence through release failures",
+      "type": "explanation",
+      "content": "If artifact verification, warm-up, health checks, canary, or registry communication fails, stop the rollout and keep the active approved version. If rollback also fails, invoke the plant-approved safe inspection mode; never silently pass items. Reconcile deployed digest and registry state after restart before accepting traffic.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "cv_56",
+      "stepNumber": 56,
+      "phase": "Release model updates without stopping production",
+      "title": "Gate deployment on quality and operational regressions",
+      "type": "scale_trigger",
+      "content": "A candidate must satisfy the plant's pre-agreed statistical acceptance protocol across representative product, shift, camera, lighting, image-size, and defect slices. The brief's numerical goals do not specify the accuracy definition, confidence level, minimum sample size, latency statistic/boundary, or tolerated downtime during rollback; these remain explicit release questions.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"],
+      "scaleTrigger": {
+        "metric": "Any candidate degrades a per-class detection measure, exceeds the <0.1% false-rejection target, misses the agreed <200ms/item processing-time measure at its declared boundary/statistic, or increases edge resource saturation",
+        "action": "Halt rollout, route traffic to the last-known-good digest, preserve candidate evidence, and require new held-out evaluation before retry",
+        "impact": "Prevents a model update from trading line continuity or quality for a lower average latency."
+      }
+    },
+    {
+      "id": "cv_57",
+      "stepNumber": 57,
+      "phase": "Release model updates without stopping production",
+      "title": "Ask the plant questions that change the architecture",
+      "type": "explanation",
+      "content": "Before committing hardware or retention, confirm: the number and arrangement of lines, cameras, and lanes; whether 100+ items/minute is per lane or aggregate; sustained/peak cadence and observation window; image dimensions, bit depth, region of interest, payload size, and smallest defect; product/lot mix; defect prevalence and cost of false accept versus false reject; the accuracy definition and latency boundary/statistic; PLC protocol, acknowledgment and safety state; offline duration and availability objective; image/label retention and residency; acceptable model-release canary; and maintenance windows. These answers may change camera choice/count, edge redundancy, broker retention, storage tier, and rollback design.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "cv_58",
+      "stepNumber": 58,
+      "phase": "Release model updates without stopping production",
+      "title": "Review the connected design against the brief",
+      "type": "explanation",
+      "content": "The complete graph keeps camera capture, local edge inference, and PLC disposition on the synchronous path; event processing, quality statistics, and image retention are asynchronous; and reviewed training reaches serving through an approved, rollback-capable model registry. Before production acceptance, test every requirement against labeled production-like evidence: image dimensions and smallest-defect visibility; scratches/dents/cracks and severity; lighting/pose envelope; 100+ items/minute at the declared workload scope; <200ms/item at the agreed timing boundary and statistic; >99.5% detection accuracy and <0.1% false rejection as separate measures under a documented statistical protocol; PLC acknowledgment and safe failure behavior; quality-statistic reconciliation; and a model update/rollback exercise with no line stop. The brief does not provide camera/line counts or the image/latency measurement details needed to claim those targets are met. This file is a review draft only: no browser apply/save/reload, live AI assessment, score, or publication gate is claimed complete.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

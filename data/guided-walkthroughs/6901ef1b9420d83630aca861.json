@@ -1,0 +1,581 @@
+{
+  "problem_id": "6901ef1b9420d83630aca861",
+  "version": "1.0.0-review-draft",
+  "requirementRevision": null,
+  "totalSteps": 29,
+  "phases": [
+    {
+      "name": "1. Define the stream contract and core services",
+      "stepRange": [1, 9],
+      "description": "Translate the frozen Kafka-like brief into producer, broker, coordination, processing, consumer, sink, and operational responsibilities."
+    },
+    {
+      "name": "2. Connect publishers, processors, and subscribers",
+      "stepRange": [10, 18],
+      "description": "Wire every data and control path after its endpoint components exist so the walkthrough replays into one connected architecture."
+    },
+    {
+      "name": "3. Choose ordering, durability, and delivery semantics",
+      "stepRange": [19, 25],
+      "description": "Make partition ordering, replicated commit, partition-failure, replay, delivery, and large-record tradeoffs explicit."
+    },
+    {
+      "name": "4. Scale from observed behavior and validate",
+      "stepRange": [26, 29],
+      "description": "Scale from measured workload and lag, exercise recovery paths, and keep unspecified capacity and latency targets open."
+    }
+  ],
+  "steps": [
+    {
+      "id": "6901ef1b9420d83630aca861_step_01",
+      "stepNumber": 1,
+      "phase": "1. Define the stream contract and core services",
+      "title": "Frame the frozen streaming brief",
+      "type": "explanation",
+      "content": "Design a distributed stream platform for publishing and subscribing to records, durable real-time processing, replay, graceful failure, and horizontal growth. The brief calls for millions of messages per second, order within a partition, low delivery latency, no data loss, records up to 1 MB, network-partition handling, and either exactly-once or at-least-once delivery. Its hints point to partitioning, replication, an append-only commit log, consumer groups, and ZooKeeper-like coordination. Treat the throughput phrase as a capability requirement, not a measured capacity target."
+    },
+    {
+      "id": "6901ef1b9420d83630aca861_step_02",
+      "stepNumber": 2,
+      "phase": "1. Define the stream contract and core services",
+      "title": "Add producer applications",
+      "type": "add_component",
+      "content": "Publishers assign a stable key to records whose order matters and a stable event ID for retry deduplication. They validate the brief's 1 MB maximum before sending and use broker acknowledgements to know when a record is committed.",
+      "component": {
+        "nodeId": "stream_producers",
+        "componentType": "backend-server",
+        "label": "Producer Applications",
+        "description": "Applications that publish keyed records to named streams",
+        "position": { "x": 80, "y": 200 },
+        "properties": {
+          "componentName": "Producer Applications",
+          "purpose": "Publish records directly to the partition leader selected by the broker metadata. Include a stable event ID for safe retries, choose a stable partition key for records that require ordering, and reject payloads above the brief's 1 MB limit before transmission."
+        },
+        "highlightReason": "The producer establishes the identity, size, and ordering key that downstream retries and partition routing depend on."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca861_step_03",
+      "stepNumber": 3,
+      "phase": "1. Define the stream contract and core services",
+      "title": "Add the partitioned broker and commit log",
+      "type": "add_component",
+      "content": "The broker is the durable system of record for stream data. It appends records to ordered partition logs, replicates them across broker failure domains, tracks offsets, and serves independent consumer groups. Keep the partition count, replica placement, and replay retention policy tied to the workload and failure model; the brief does not set those values.",
+      "component": {
+        "nodeId": "stream_broker",
+        "componentType": "message-broker",
+        "label": "Partitioned Stream Broker",
+        "description": "Replicated append-only log for named record streams",
+        "position": { "x": 440, "y": 200 },
+        "properties": {
+          "componentName": "Partitioned Stream Broker",
+          "purpose": "Serve publish-subscribe streams from a partitioned append-only commit log. Preserve append order and offsets within each partition, replicate committed records across broker failure domains, store consumer-group offsets, and retain records for the replay window selected from product needs.",
+          "durable": true
+        },
+        "highlightReason": "Durable partition logs and replicated commits provide the platform's storage, replay, and ordering boundary."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca861_step_04",
+      "stepNumber": 4,
+      "phase": "1. Define the stream contract and core services",
+      "title": "Add cluster coordination",
+      "type": "add_component",
+      "content": "Use a ZooKeeper-compatible coordination service for broker membership, controller election, partition-leader metadata, and fencing stale leaders. It belongs on the control plane; record payloads stay on the broker data plane. A consensus-backed metadata quorum is the alternative if operating an external coordinator is undesirable.",
+      "component": {
+        "nodeId": "stream_coordination",
+        "componentType": "distributed-lock",
+        "label": "Cluster Coordination Service",
+        "description": "Membership, controller election, and fenced partition leadership",
+        "position": { "x": 440, "y": 40 },
+        "properties": {
+          "componentName": "Cluster Coordination Service",
+          "purpose": "Coordinate broker membership and controller election, publish partition-leader metadata, and fence stale leaders after a network partition. The ZooKeeper backend represents the brief's coordination hint; this control plane never carries stream records.",
+          "backend": "Zookeeper"
+        },
+        "highlightReason": "A single current leader per partition prevents split-brain writes while the coordination quorum is healthy."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca861_step_05",
+      "stepNumber": 5,
+      "phase": "1. Define the stream contract and core services",
+      "title": "Add real-time stream processing",
+      "type": "add_component",
+      "content": "Processors consume partition records continuously, preserve each partition's order, checkpoint progress with state, and publish derived records when needed. Processing throughput is bounded by partition parallelism and the slowest stateful operation, so measure skew as well as aggregate rate.",
+      "component": {
+        "nodeId": "stream_processor",
+        "componentType": "stream-processor",
+        "label": "Real-Time Processing Engine",
+        "description": "Stateful and stateless operators over ordered stream partitions",
+        "position": { "x": 800, "y": 200 },
+        "properties": {
+          "componentName": "Real-Time Processing Engine",
+          "purpose": "Continuously consume broker partitions for real-time filtering, transformation, joins, and stateful aggregation. Checkpoint operator state with committed input offsets, keep per-partition order, and publish derived streams through the broker.",
+          "stateful": true
+        },
+        "highlightReason": "This processing tier turns the durable log into real-time pipelines without making publishers wait for downstream work."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca861_step_06",
+      "stepNumber": 6,
+      "phase": "1. Define the stream contract and core services",
+      "title": "Add consumer-group workers",
+      "type": "add_component",
+      "content": "Each consumer group has its own offsets and can scale members across partitions. A group processes a partition in order; adding members beyond the group's assigned partition parallelism does not increase that group's useful concurrency.",
+      "component": {
+        "nodeId": "stream_consumers",
+        "componentType": "processing-worker",
+        "label": "Consumer Group Workers",
+        "description": "Independent subscriber groups with partition assignments and offsets",
+        "position": { "x": 800, "y": 440 },
+        "properties": {
+          "componentName": "Consumer Group Workers",
+          "purpose": "Run independent consumer groups that subscribe to named streams, divide assigned partitions among group members, and track a committed offset per partition. Reprocessing starts from an earlier retained offset; independent groups do not advance one another's cursors."
+        },
+        "highlightReason": "Consumer groups provide subscriber isolation, load balancing, and an explicit replay cursor."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca861_step_07",
+      "stepNumber": 7,
+      "phase": "1. Define the stream contract and core services",
+      "title": "Add an example durable consumer sink",
+      "type": "add_component",
+      "content": "The sink is an example downstream system, not a second source of truth for the stream. Make writes idempotent by event ID or use a transaction that commits output and input progress together when the sink supports it.",
+      "component": {
+        "nodeId": "stream_sink",
+        "componentType": "database",
+        "label": "Consumer Output Store",
+        "description": "Example durable destination for consumer results",
+        "position": { "x": 1160, "y": 440 },
+        "properties": {
+          "componentName": "Consumer Output Store",
+          "purpose": "Persist application results written by a consumer group. Apply each stable event ID idempotently, or transact the result and consumer checkpoint together when supported; the broker log remains the replay source."
+        },
+        "highlightReason": "The sink boundary makes duplicate delivery and replay effects visible rather than assuming network-level exactly-once behavior."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca861_step_08",
+      "stepNumber": 8,
+      "phase": "1. Define the stream contract and core services",
+      "title": "Add stream health monitoring",
+      "type": "add_component",
+      "content": "Observe broker append latency, throughput, partition skew, under-replicated partitions, controller changes, consumer lag, retry volume, and processor checkpoint age. Alert on user-impacting symptoms using service objectives established from the actual workload.",
+      "component": {
+        "nodeId": "stream_monitoring",
+        "componentType": "monitoring",
+        "label": "Stream Health Monitoring",
+        "description": "Metrics and alerts for data-plane and control-plane health",
+        "position": { "x": 1160, "y": 40 },
+        "properties": {
+          "componentName": "Stream Health Monitoring",
+          "purpose": "Collect broker append and delivery latency, throughput, partition skew, replication health, coordinator elections, consumer lag, retry and dead-letter counts, and processor checkpoint age. Set alert thresholds from measured workload and agreed service objectives.",
+          "metrics": true,
+          "alerts": true
+        },
+        "highlightReason": "Lag, replication health, and partition skew reveal delivery and recovery problems before an aggregate throughput number does."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca861_step_09",
+      "stepNumber": 9,
+      "phase": "1. Define the stream contract and core services",
+      "title": "Keep the control and data planes separate",
+      "type": "explanation",
+      "content": "Publishers, processors, and consumer groups exchange records through the broker. Coordination changes membership and leadership metadata only. This boundary keeps record throughput from competing with controller operations and gives the commit log one clear durability authority."
+    },
+    {
+      "id": "6901ef1b9420d83630aca861_step_10",
+      "stepNumber": 10,
+      "phase": "2. Connect publishers, processors, and subscribers",
+      "title": "Connect publishers to the broker",
+      "type": "add_connection",
+      "content": "Producer clients discover the current partition leader and publish records directly to it. The broker returns the configured commit acknowledgement; request size validation enforces the 1 MB record limit before append.",
+      "connection": {
+        "edgeId": "stream_producers_to_broker",
+        "sourceNodeId": "stream_producers",
+        "targetNodeId": "stream_broker",
+        "connectionType": "message-queue",
+        "label": "Publish keyed records",
+        "description": "Send records to the selected partition leader, validate the 1 MB maximum, and return a commit acknowledgement under the chosen replication policy."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca861_step_11",
+      "stepNumber": 11,
+      "phase": "2. Connect publishers, processors, and subscribers",
+      "title": "Connect coordination to broker leadership",
+      "type": "add_connection",
+      "content": "Broker controllers read membership and partition assignments from the coordinator. Leadership epochs fence a former leader after a partition so it cannot continue accepting writes with stale metadata.",
+      "connection": {
+        "edgeId": "stream_coordination_to_broker",
+        "sourceNodeId": "stream_coordination",
+        "targetNodeId": "stream_broker",
+        "connectionType": "data-flow",
+        "label": "Membership and leader metadata",
+        "description": "Provide controller election, partition assignments, and fencing epochs on the control plane; record traffic remains on broker links."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca861_step_12",
+      "stepNumber": 12,
+      "phase": "2. Connect publishers, processors, and subscribers",
+      "title": "Feed the real-time processing engine",
+      "type": "add_connection",
+      "content": "The processor consumes committed records by partition and checkpoints its state with input offsets. A slow operator creates lag in its assigned partitions, not a global ordering barrier.",
+      "connection": {
+        "edgeId": "stream_broker_to_processor",
+        "sourceNodeId": "stream_broker",
+        "targetNodeId": "stream_processor",
+        "connectionType": "event-stream",
+        "label": "Consume committed partitions",
+        "description": "Stream ordered records and offsets to stateful or stateless operators for real-time processing."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:7"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca861_step_13",
+      "stepNumber": 13,
+      "phase": "2. Connect publishers, processors, and subscribers",
+      "title": "Connect independent consumer groups",
+      "type": "add_connection",
+      "content": "Each subscription group receives partition assignments and advances only its own committed offsets. Group membership distributes partitions for parallel work while preserving order within each assigned partition.",
+      "connection": {
+        "edgeId": "stream_broker_to_consumers",
+        "sourceNodeId": "stream_broker",
+        "targetNodeId": "stream_consumers",
+        "connectionType": "event-stream",
+        "label": "Subscribe by consumer group",
+        "description": "Deliver ordered partition records with independent group offsets for load balancing and replay."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca861_step_14",
+      "stepNumber": 14,
+      "phase": "2. Connect publishers, processors, and subscribers",
+      "title": "Publish derived streams",
+      "type": "add_connection",
+      "content": "Derived events return to the broker as a new stream or topic. Use a stable output event ID and keep the processor's input checkpoint coordinated with its output commit where the runtime supports a transaction.",
+      "connection": {
+        "edgeId": "stream_processor_to_broker",
+        "sourceNodeId": "stream_processor",
+        "targetNodeId": "stream_broker",
+        "connectionType": "message-queue",
+        "label": "Publish derived records",
+        "description": "Append transformed or aggregated events to a derived stream without bypassing broker durability and replay."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca861_step_15",
+      "stepNumber": 15,
+      "phase": "2. Connect publishers, processors, and subscribers",
+      "title": "Persist consumer results",
+      "type": "add_connection",
+      "content": "Write the result before advancing the group's offset, or atomically commit the result and offset. If a crash occurs after the write but before the offset commit, replay may repeat the record, so the sink must deduplicate or make the operation idempotent.",
+      "connection": {
+        "edgeId": "stream_consumers_to_sink",
+        "sourceNodeId": "stream_consumers",
+        "targetNodeId": "stream_sink",
+        "connectionType": "database-connection",
+        "label": "Apply idempotent consumer effects",
+        "description": "Persist each event safely before committing progress; replay after a partial failure must not duplicate the business effect."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca861_step_16",
+      "stepNumber": 16,
+      "phase": "2. Connect publishers, processors, and subscribers",
+      "title": "Export broker health signals",
+      "type": "add_connection",
+      "content": "Expose per-partition append latency, leader and replica state, log utilization, produce errors, and coordinator changes to monitoring. Per-partition signals make hot partitions and replica loss visible even when cluster averages appear healthy.",
+      "connection": {
+        "edgeId": "stream_broker_to_monitoring",
+        "sourceNodeId": "stream_broker",
+        "targetNodeId": "stream_monitoring",
+        "connectionType": "data-flow",
+        "label": "Broker and replica metrics",
+        "description": "Report append latency, throughput, partition skew, replication health, and controller transitions."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca861_step_17",
+      "stepNumber": 17,
+      "phase": "2. Connect publishers, processors, and subscribers",
+      "title": "Export processing and lag signals",
+      "type": "add_connection",
+      "content": "Report consumer lag and processor checkpoint age by group and partition. These signals distinguish a broker delivery problem from a slow operator or sink.",
+      "connection": {
+        "edgeId": "stream_processor_to_monitoring",
+        "sourceNodeId": "stream_processor",
+        "targetNodeId": "stream_monitoring",
+        "connectionType": "data-flow",
+        "label": "Consumer lag and checkpoint metrics",
+        "description": "Expose per-group lag, processing rate, retries, and checkpoint progress for scaling and recovery decisions."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca861_step_18",
+      "stepNumber": 18,
+      "phase": "2. Connect publishers, processors, and subscribers",
+      "title": "Trace a record and its replay cursor",
+      "type": "explanation",
+      "content": "A record is keyed and appended to one partition, replicated under the broker's commit policy, then read by each subscribed group at its own offset. A consumer can replay by moving that group's cursor to an earlier offset still present in the log; other groups continue unaffected."
+    },
+    {
+      "id": "6901ef1b9420d83630aca861_step_19",
+      "stepNumber": 19,
+      "phase": "3. Choose ordering, durability, and delivery semantics",
+      "title": "Choose per-key ordering over a global sequence",
+      "type": "decision_point",
+      "content": "Hash a stable entity key to a partition and preserve append order there. This meets the brief's per-partition ordering guarantee while allowing separate partitions to progress in parallel.",
+      "decision": {
+        "question": "What ordering boundary should the stream guarantee?",
+        "chosen": "Stable-key order within a partition; no global total order across partitions",
+        "chosenReason": "The brief requires ordering within a partition. A stable key keeps related records together while partition-level parallelism supports horizontal scale.",
+        "alternatives": [
+          {
+            "option": "One global ordered log",
+            "tradeoff": "Simpler total-order reasoning, but a single serialization point limits parallel throughput and availability."
+          },
+          {
+            "option": "Round-robin records across partitions",
+            "tradeoff": "Can spread load, but related records may land in different partitions and lose their required order."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "stream_broker",
+        "properties": {
+          "purpose": "Serve publish-subscribe streams from a partitioned append-only commit log. Route a stable entity key to one partition, preserve append order and offsets within that partition, replicate committed records across broker failure domains, store consumer-group offsets, and retain records for the replay window selected from product needs."
+        }
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:1"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca861_step_20",
+      "stepNumber": 20,
+      "phase": "3. Choose ordering, durability, and delivery semantics",
+      "title": "Acknowledge replicated commits",
+      "type": "decision_point",
+      "content": "Append at the partition leader and acknowledge only after the selected in-sync replica policy confirms the commit. This favors durability over the lowest possible acknowledgement latency; the exact replica count and acknowledgement policy depend on the deployment's failure domains and recovery objective.",
+      "decision": {
+        "question": "When should a producer receive a successful durable-write acknowledgement?",
+        "chosen": "After the configured in-sync replica commit policy is satisfied",
+        "chosenReason": "An acknowledgement before replication can report success for a record that disappears with its only copy. The policy must be chosen against the actual failure model.",
+        "alternatives": [
+          {
+            "option": "Acknowledge immediately after the leader append",
+            "tradeoff": "Reduces producer wait, but a leader failure before replication can lose an acknowledged record."
+          },
+          {
+            "option": "Wait for every configured replica",
+            "tradeoff": "Can strengthen copy completion, but one unavailable replica can stall writes and increase latency."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "stream_broker",
+        "properties": {
+          "durable": true,
+          "purpose": "Serve publish-subscribe streams from a partitioned append-only commit log. Route a stable entity key to one partition and preserve order there. Replicate records across broker failure domains and acknowledge only after the selected in-sync replica commit policy is met. Store consumer-group offsets and retain records for the replay window selected from product needs."
+        }
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca861_step_21",
+      "stepNumber": 21,
+      "phase": "3. Choose ordering, durability, and delivery semantics",
+      "title": "Fence writes during a network partition",
+      "type": "decision_point",
+      "content": "Only the side with authoritative coordination quorum may elect leaders and advance metadata. Fence former leaders with epochs; replicas that cannot confirm the commit policy must stop acknowledging writes. This can reduce write availability on a minority side, which is the explicit tradeoff for avoiding split-brain commits and data loss.",
+      "decision": {
+        "question": "How should brokers behave when a network partition prevents agreement on leadership?",
+        "chosen": "Fence stale leaders and accept writes only through the authoritative leader under the commit policy",
+        "chosenReason": "Serving conflicting leaders risks divergent logs and acknowledged data loss. Fail closed for writes where leadership or the required replicas cannot be established, then reconcile from the committed log after quorum returns.",
+        "alternatives": [
+          {
+            "option": "Accept writes independently on both sides",
+            "tradeoff": "Preserves local write availability but creates conflicting histories that cannot preserve one partition order without conflict resolution."
+          },
+          {
+            "option": "Keep the old leader active without fencing",
+            "tradeoff": "Can appear available during coordinator loss, but a recovered former leader may append after a newer leader has taken over."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "stream_coordination",
+        "properties": {
+          "purpose": "Coordinate broker membership and controller election, publish partition-leader metadata, and issue monotonically advancing fencing epochs. During a network partition, only the authoritative coordination quorum may elect a leader; a former leader must be rejected after failover. This control plane never carries stream records."
+        }
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca861_step_22",
+      "stepNumber": 22,
+      "phase": "3. Choose ordering, durability, and delivery semantics",
+      "title": "Use at-least-once delivery with idempotent effects",
+      "type": "decision_point",
+      "content": "Choose at-least-once delivery as the default across broker, processor, and sink boundaries. Stable event IDs and idempotent writes absorb retries. Claim exactly-once only inside a transaction boundary that atomically includes the relevant input offset, processor state, and output; an arbitrary external sink is not covered automatically.",
+      "decision": {
+        "question": "Which delivery guarantee should the default consumer path implement?",
+        "chosen": "At-least-once delivery with stable IDs, idempotent processing, and checkpoint-after-effect",
+        "chosenReason": "Retries and replay remain available after failures, while deduplication prevents repeated business effects. Exactly-once depends on a transaction spanning every state boundary involved.",
+        "alternatives": [
+          {
+            "option": "At-most-once with offset committed before processing",
+            "tradeoff": "Avoids duplicate processing but can permanently skip a record if the worker fails after advancing its offset."
+          },
+          {
+            "option": "Exactly-once across broker and an arbitrary external sink",
+            "tradeoff": "The claim is invalid unless the sink participates in the same transaction or exposes an equivalent idempotent commit protocol."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "stream_processor",
+        "properties": {
+          "purpose": "Continuously consume broker partitions for real-time filtering, transformation, joins, and stateful aggregation. Checkpoint operator state with input offsets, preserve partition order, and publish derived records through the broker. Use stable event IDs and idempotent effects for at-least-once retries; claim exactly-once only when input, state, and output share a supported transaction."
+        }
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca861_step_23",
+      "stepNumber": 23,
+      "phase": "3. Choose ordering, durability, and delivery semantics",
+      "title": "Replay from a group's committed offset",
+      "type": "decision_point",
+      "content": "Commit a consumer group's offset only after its effects are durable, or atomically with the effects when supported. Reset that group's cursor to an earlier retained offset to replay; keep other groups independent. Choose log retention from the required recovery and replay window because longer retention consumes more storage.",
+      "decision": {
+        "question": "How should replay progress be represented?",
+        "chosen": "A durable committed offset per consumer group and partition, advanced after effects",
+        "chosenReason": "Independent cursors allow a failed or new subscriber to reprocess retained records without moving another group's progress.",
+        "alternatives": [
+          {
+            "option": "One shared offset for all subscribers",
+            "tradeoff": "Uses less checkpoint metadata, but one group's progress can cause another group to skip records."
+          },
+          {
+            "option": "Commit progress before the sink effect",
+            "tradeoff": "Simplifies retry behavior, but a crash between the offset commit and effect can lose the business result."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "stream_broker",
+        "properties": {
+          "purpose": "Serve publish-subscribe streams from a partitioned append-only commit log. Route stable entity keys to partitions and preserve append order there. Replicate records across broker failure domains and acknowledge only after the selected in-sync replica commit policy is met. Store a durable offset per consumer group and partition; allow replay from earlier retained offsets, with retention chosen from product recovery needs."
+        }
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca861_step_24",
+      "stepNumber": 24,
+      "phase": "3. Choose ordering, durability, and delivery semantics",
+      "title": "Honor the 1 MB record limit without hiding latency cost",
+      "type": "decision_point",
+      "content": "Accept records up to the stated 1 MB limit and enforce the same maximum at clients and brokers. Batch only within a latency budget established from the real service objective; compression trades network and disk use for CPU. Do not silently convert large records into object references because that changes the record contract and replay dependency.",
+      "decision": {
+        "question": "How should the platform handle records up to 1 MB while keeping delivery latency low?",
+        "chosen": "Support the full 1 MB record in the stream path, validate size at both ends, and tune batching and compression from measured latency and workload",
+        "chosenReason": "The brief explicitly requires large records up to 1 MB and low-latency delivery. Measuring the workload exposes the network, storage, and CPU tradeoff without inventing a payload or latency target.",
+        "alternatives": [
+          {
+            "option": "Reject records below the stated maximum",
+            "tradeoff": "Can reduce resource use, but violates the explicit 1 MB support requirement."
+          },
+          {
+            "option": "Store payloads externally and put references in the log",
+            "tradeoff": "Can reduce broker bytes, but adds a second durability, authorization, cleanup, and replay dependency not required by this brief."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "stream_producers",
+        "properties": {
+          "purpose": "Publish records directly to the partition leader selected by broker metadata. Include a stable event ID for safe retries, choose a stable partition key where ordering matters, and support payloads up to the brief's 1 MB maximum with matching client and broker validation. Tune batching and compression against measured delivery latency and resource use."
+        }
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca861_step_25",
+      "stepNumber": 25,
+      "phase": "3. Choose ordering, durability, and delivery semantics",
+      "title": "Make workload assumptions explicit",
+      "type": "explanation",
+      "content": "Assume each ordered record family has a stable partition key and each retried record has a stable event ID; if publishers cannot supply one, assign it at ingress. The brief does not specify traffic shape, partition count, replica count, failure-domain layout, latency objective, or replay-retention duration. Measure those inputs before selecting numeric settings."
+    },
+    {
+      "id": "6901ef1b9420d83630aca861_step_26",
+      "stepNumber": 26,
+      "phase": "4. Scale from observed behavior and validate",
+      "title": "Scale broker partitions from measured load",
+      "type": "scale_trigger",
+      "content": "Use measured ingress rate, append latency, disk growth, and per-partition skew to decide whether more broker capacity or partitions are needed. A hot key remains serial within its partition; adding unrelated partitions does not remove that bottleneck.",
+      "scaleTrigger": {
+        "metric": "Measured publish rate, broker append latency, disk growth, and per-partition key skew",
+        "action": "Benchmark the expected workload, then add broker capacity and partitions where observed parallelism or storage demand requires it; plan any key-remapping change explicitly.",
+        "impact": "Increases horizontal capacity while retaining the per-partition ordering contract; an overloaded hot key may need a domain-level key redesign."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:1"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca861_step_27",
+      "stepNumber": 27,
+      "phase": "4. Scale from observed behavior and validate",
+      "title": "Scale consumers from lag and partition parallelism",
+      "type": "scale_trigger",
+      "content": "Use lag age and growth, processing rate, checkpoint duration, and sink latency to locate the constrained stage. Add consumer members only up to useful partition parallelism, then scale the processor or sink that limits progress.",
+      "scaleTrigger": {
+        "metric": "Consumer lag by group and partition, processing throughput, checkpoint age, and sink latency",
+        "action": "Add consumer capacity for independent assigned partitions and remove the measured bottleneck in the processor or sink; retain group offsets during reassignment.",
+        "impact": "Improves catch-up and real-time processing without changing record order inside a partition or sharing offsets across groups."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca861_step_28",
+      "stepNumber": 28,
+      "phase": "4. Scale from observed behavior and validate",
+      "title": "Exercise replica, coordinator, and consumer recovery",
+      "type": "scale_trigger",
+      "content": "Run failure exercises for broker loss, replica lag, coordinator quorum loss, processor restart, and sink timeout. Verify that only committed records survive, stale leaders are fenced, consumers resume from committed offsets, and duplicate delivery does not repeat sink effects.",
+      "scaleTrigger": {
+        "metric": "Under-replicated partitions, leader changes, coordinator quorum health, consumer lag, retries, and duplicate-effect checks",
+        "action": "Inject each failure in a representative environment, verify the configured commit and fencing behavior, and tune replica placement or retry policy from observed recovery evidence.",
+        "impact": "Demonstrates graceful recovery and exposes the availability cost of the selected durability and partition policy."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca861_step_29",
+      "stepNumber": 29,
+      "phase": "4. Scale from observed behavior and validate",
+      "title": "Review the design against the brief",
+      "type": "explanation",
+      "content": "The graph now has a publish path, replicated partition log, control-plane coordination, real-time processing, independent consumer groups, replayable offsets, an idempotent sink example, and operational signals. Validate the 1 MB path, ordering, acknowledged-write recovery, group replay, network-partition fencing, and measured throughput. No fixed partition count, replication factor, throughput threshold, latency target, or replay-retention duration is inferred from the brief."
+    }
+  ]
+}

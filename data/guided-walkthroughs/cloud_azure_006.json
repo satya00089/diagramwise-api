@@ -1,0 +1,756 @@
+{
+  "problem_id": "cloud_azure_006",
+  "version": "1.0.0-review-draft",
+  "totalSteps": 38,
+  "phases": [
+    {
+      "name": "Frame the workload and choose a scheduling model",
+      "stepRange": [1, 7],
+      "description": "Keep the live brief intact, turn the latency and core constraints into measurable questions, and distinguish Azure Batch from CycleCloud before drawing one control plane."
+    },
+    {
+      "name": "Submit and describe scientific jobs",
+      "stepRange": [8, 12],
+      "description": "Represent the unspecified workload-submission channel and route scientific jobs through one selected scheduling service without inventing job traffic or priority rules."
+    },
+    {
+      "name": "Allocate parallel compute over the MPI fabric",
+      "stepRange": [13, 19],
+      "description": "Use the hinted H-series VM pool, queue-driven capacity changes, and an InfiniBand path whose MPI latency is measured on the deployed placement."
+    },
+    {
+      "name": "Route shared file access through an HPC cache",
+      "stepRange": [20, 26],
+      "description": "Connect the shared file system and HPC cache to the compute path, then validate caching and storage against the scientific workload's real I/O pattern."
+    },
+    {
+      "name": "Measure queueing, capacity, I/O, and cost",
+      "stepRange": [27, 38],
+      "description": "Observe the job, compute, network, cache, and storage paths and evaluate only the supplied requirements and constraints."
+    }
+  ],
+  "steps": [
+    {
+      "id": "hpc_azure_001",
+      "stepNumber": 1,
+      "phase": "Frame the workload and choose a scheduling model",
+      "title": "Preserve the supplied problem brief",
+      "type": "explanation",
+      "content": "Problem brief copied verbatim from the current DynamoDB row:\nTitle: Design a High-Performance Computing Cluster\nDescription: Design an HPC cluster that deploys large-scale compute nodes, runs parallel scientific workloads, optimizes job scheduling, and provides low-latency networking.\nRequirements:\n- Deploy large-scale compute clusters\n- Run parallel workloads efficiently\n- Manage job scheduling and queuing\n- Optimize network for MPI workloads\n- Cache shared file systems\n- Auto-scale based on job queue\n- Monitor resource utilization\n- Support scientific simulations\nConstraints:\n- Network latency under 2 microseconds\n- Support 10,000+ cores\n- Minimize job wait time\n- Cost-effective compute resources\n- High throughput for I/O operations\nHints:\n- Azure CycleCloud for cluster management\n- Azure Batch for job scheduling\n- HPC Cache for file system caching\n- InfiniBand for low-latency networking\n- H-series VMs for HPC workloads\n- Azure NetApp Files for shared storage\n\nTreat these as the complete supplied requirements and constraints. No submission rate, storage capacity, cluster node count, availability target, or additional service-level objective is specified.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "hpc_azure_002",
+      "stepNumber": 2,
+      "phase": "Frame the workload and choose a scheduling model",
+      "title": "Define how the network-latency constraint is measured",
+      "type": "decision_point",
+      "content": "The bound applies to the network path used by tightly coupled MPI work, not to queue wait or total simulation duration. Agree on the MPI operation, message shape, measurement points, and whether the reported value is one-way or round-trip before calling a run compliant. A VM family label or an InfiniBand connection in a diagram is not a measurement.",
+      "decision": {
+        "question": "What evidence determines whether the supplied network-latency constraint is met?",
+        "chosen": "Measure MPI communication between participating compute nodes on the selected InfiniBand-capable placement, using a workload-relevant benchmark and a measurement boundary agreed with the workload owner.",
+        "chosenReason": "This keeps the stated constraint attached to the parallel communication path and avoids claiming that a service name guarantees application performance.",
+        "alternatives": [
+          {
+            "option": "Measure only job-submission or queue response time",
+            "tradeoff": "Those timings do not establish the latency of MPI traffic between compute nodes."
+          },
+          {
+            "option": "Treat the presence of an InfiniBand-capable VM as proof of compliance",
+            "tradeoff": "A capability does not show the result for the selected SKU, placement, MPI runtime, or scientific workload."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "hpc_azure_003",
+      "stepNumber": 3,
+      "phase": "Frame the workload and choose a scheduling model",
+      "title": "Turn the core requirement into a capacity question",
+      "type": "decision_point",
+      "content": "The brief gives a core-count requirement but not the H-series SKU, cores per node, simultaneous-job mix, or whether the figure means provisioned or concurrently usable capacity. Confirm those semantics first. Derive a node count only after the selected VM size and workload placement are known.",
+      "decision": {
+        "question": "What capacity must the cluster demonstrate for the supplied core requirement?",
+        "chosen": "Have the workload owner define whether the target is available pool capacity or capacity usable by concurrent jobs, then verify the resulting core count from the selected VM sizes.",
+        "chosenReason": "This preserves the supplied scale requirement without fabricating a node count or assuming every core can participate in one MPI job.",
+        "alternatives": [
+          {
+            "option": "Choose a VM count before choosing the VM size",
+            "tradeoff": "The resulting core capacity would be arbitrary and could misrepresent the requirement."
+          },
+          {
+            "option": "Assume the entire cluster runs one simulation at a time",
+            "tradeoff": "The brief does not define job concurrency or how cores are divided among simulations."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:8", "legacy-constraint:2"]
+    },
+    {
+      "id": "hpc_azure_004",
+      "stepNumber": 4,
+      "phase": "Frame the workload and choose a scheduling model",
+      "title": "Balance job wait against compute spend",
+      "type": "decision_point",
+      "content": "Queue-aware scaling is required, and the brief also asks for cost-effective compute. Define how quickly capacity may grow and shrink from actual job demand, how much idle capacity is acceptable, and how those choices affect waiting jobs. Do not add queue priorities, a scale threshold, or a warm-pool size without workload-owner input.",
+      "decision": {
+        "question": "How should scaling balance job wait time and compute cost?",
+        "chosen": "Use queued resource requests and observed pool readiness as the inputs to a policy whose thresholds and idle-capacity behavior are agreed with the workload owner.",
+        "chosenReason": "The brief requires both queue-driven scaling and cost awareness but supplies no demand curve or acceptable waiting-time target.",
+        "alternatives": [
+          {
+            "option": "Keep a fixed pool sized for a presumed peak",
+            "tradeoff": "A guessed peak can leave costly idle capacity or still fail to meet demand."
+          },
+          {
+            "option": "Scale only from current CPU utilization",
+            "tradeoff": "It can miss queued jobs that need capacity before existing nodes become busy."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "hpc_azure_005",
+      "stepNumber": 5,
+      "phase": "Frame the workload and choose a scheduling model",
+      "title": "Choose Azure Batch or CycleCloud as the scheduler boundary",
+      "type": "decision_point",
+      "content": "The hints name both Azure Batch and Azure CycleCloud, but they describe distinct operating models. Batch provides a managed job-scheduling service and compute pools. CycleCloud is a platform for deploying and autoscaling a scheduler that the team operates. Select one primary job-management path; do not assume both products co-manage the same pool.",
+      "decision": {
+        "question": "Which job-management control plane should this review draft use?",
+        "chosen": "Use Azure Batch as the draft scheduler because the brief requires scheduling and queuing but names no existing scheduler or scheduler-specific policy that the team must operate. Keep CycleCloud as the alternative if those requirements emerge.",
+        "chosenReason": "The choice follows the supplied Azure Batch hint while keeping CycleCloud's separate scheduler-management role visible for review.",
+        "alternatives": [
+          {
+            "option": "Use CycleCloud with a supported scheduler",
+            "tradeoff": "This fits a need for scheduler-specific control or existing scheduler workflows, but those needs are not stated in the brief."
+          },
+          {
+            "option": "Place Batch and CycleCloud over one pool without defining ownership",
+            "tradeoff": "Two control planes could disagree about job placement, pool lifecycle, and queue-driven scaling."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "hpc_azure_006",
+      "stepNumber": 6,
+      "phase": "Frame the workload and choose a scheduling model",
+      "title": "Verify the selected Batch pool for MPI",
+      "type": "decision_point",
+      "content": "Azure Batch can run tightly coupled MPI workloads, but the exact VM size and pool configuration still matter. Confirm that the selected H-series size is InfiniBand-capable, that the Batch pool supports the required multi-node MPI launch, and that the job's ranks receive the intended network placement. Keep the CycleCloud path available if the required scheduler or topology cannot be expressed by the chosen Batch configuration.",
+      "decision": {
+        "question": "What must be true before the Batch-based MPI path is accepted?",
+        "chosen": "Validate the exact VM SKU, MPI runtime, Batch pool configuration, and inter-node placement with a representative scientific job before treating the path as meeting the brief.",
+        "chosenReason": "The problem supplies the VM family and MPI direction, while the exact SKU, runtime, and deployment configuration remain unspecified.",
+        "alternatives": [
+          {
+            "option": "Assume every H-series size and Batch pool configuration provides the same MPI network behavior",
+            "tradeoff": "The selected SKU and pool settings determine whether the required inter-node path is available."
+          },
+          {
+            "option": "Switch to CycleCloud without confirming scheduler needs",
+            "tradeoff": "It adds scheduler operations that the brief does not require and still needs workload-level validation."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "hpc_azure_007",
+      "stepNumber": 7,
+      "phase": "Frame the workload and choose a scheduling model",
+      "title": "Keep job control separate from parallel execution",
+      "type": "explanation",
+      "content": "The selected Batch service accepts and schedules scientific jobs, manages its compute pool, and reports job state. The pool runs the simulation and its MPI ranks. Keep queue and scheduling decisions in the control plane; keep MPI communication and shared-file access on the execution path. CycleCloud remains a product choice for a different scheduler operating model, not a second layer silently added to this design.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6"]
+    },
+    {
+      "id": "hpc_azure_008",
+      "stepNumber": 8,
+      "phase": "Submit and describe scientific jobs",
+      "title": "Represent the scientific workload submitters",
+      "type": "add_component",
+      "content": "Add the people or systems that submit simulations and inspect job progress. The brief does not say whether submission comes from a portal, command line, notebook, or another client, so keep that interface open and do not place a particular client product in the architecture.",
+      "component": {
+        "nodeId": "workload_submitters",
+        "componentType": "custom-component",
+        "label": "Scientific Workload Submitters",
+        "description": "Unspecified clients that submit simulation jobs and inspect their state",
+        "position": {"x": 40, "y": 360},
+        "properties": {
+          "componentName": "Scientific Workload Submitters",
+          "subtitle": "Submission channel to be confirmed",
+          "componentType": "HPC workload clients",
+          "technology": "Client and interface TBD",
+          "purpose": "Submit scientific simulation jobs to Azure Batch and retrieve job state through the approved workload interface. The problem does not identify a portal, command line, notebook, or client application.",
+          "notes": "Keep client choice and job-submission contract as open design questions."
+        },
+        "highlightReason": "The catalog has generic application nodes but no scientific workload actor; a custom node avoids inventing a client channel."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:8"]
+    },
+    {
+      "id": "hpc_azure_009",
+      "stepNumber": 9,
+      "phase": "Submit and describe scientific jobs",
+      "title": "Add the Azure Batch scheduling and queue boundary",
+      "type": "add_component",
+      "content": "Use the catalog Queue component for the job queue and scheduling role named in the Azure Batch hint. The component purpose identifies Batch as the managed job service; it does not claim a queue implementation or retry policy beyond the brief. The scheduler choice remains the review-draft decision above.",
+      "component": {
+        "nodeId": "batch_scheduler",
+        "componentType": "queue",
+        "label": "Azure Batch Job Scheduling and Queue",
+        "description": "Managed job scheduling and queue boundary for scientific workloads",
+        "position": {"x": 440, "y": 360},
+        "properties": {
+          "componentName": "Azure Batch Job Scheduling and Queue",
+          "purpose": "Accept scientific jobs, maintain their scheduling state, allocate work to the associated Batch compute pool, and expose job progress. Confirm the selected MPI mode and queue policy with representative workloads."
+        },
+        "highlightReason": "The existing Queue catalog type models job queuing; Azure Batch is named in the brief as the scheduler hint."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "hpc_azure_010",
+      "stepNumber": 10,
+      "phase": "Submit and describe scientific jobs",
+      "title": "Submit jobs to the selected scheduler",
+      "type": "add_connection",
+      "content": "Route job submission and status queries through Azure Batch. Keep the actual client protocol and authentication contract open until the workload owner supplies them.",
+      "connection": {
+        "edgeId": "submitters_to_batch",
+        "sourceNodeId": "workload_submitters",
+        "targetNodeId": "batch_scheduler",
+        "connectionType": "job-submission",
+        "label": "Submit scientific jobs and read job state",
+        "description": "The unspecified workload client submits a simulation and checks its scheduler-reported progress."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "hpc_azure_011",
+      "stepNumber": 11,
+      "phase": "Submit and describe scientific jobs",
+      "title": "Make MPI resource needs explicit per job",
+      "type": "explanation",
+      "content": "Before sizing a pool, capture the job's parallel execution shape, MPI launch needs, memory and compute requirements, and shared-file inputs and outputs from real simulation examples. These are workload descriptors to collect, not values supplied by this problem. Avoid treating all scientific simulations as the same job shape.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:8"]
+    },
+    {
+      "id": "hpc_azure_012",
+      "stepNumber": 12,
+      "phase": "Submit and describe scientific jobs",
+      "title": "Leave queue policy to the workload owner",
+      "type": "decision_point",
+      "content": "The brief asks to minimize job wait but gives no priority classes, fairness policy, deadlines, or starvation rule. Define those with the scientific users and scheduler owner before encoding queue behavior. Measure waiting separately from execution time so a fast simulation does not conceal a long queue delay.",
+      "decision": {
+        "question": "How should Batch order jobs when several simulations are waiting?",
+        "chosen": "Keep the queue policy configurable and agree on fairness, priority, and deadline behavior with workload owners before setting policy values.",
+        "chosenReason": "A scheduling policy changes who waits and how capacity is consumed; none is specified by the problem.",
+        "alternatives": [
+          {
+            "option": "Give every job the same fixed priority",
+            "tradeoff": "Uniform priority may not match the workload owner's fairness or urgency needs."
+          },
+          {
+            "option": "Assume a priority order from job size",
+            "tradeoff": "The brief does not say that large or small simulations should run first."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:3"]
+    },
+    {
+      "id": "hpc_azure_013",
+      "stepNumber": 13,
+      "phase": "Allocate parallel compute over the MPI fabric",
+      "title": "Add the H-series compute pool",
+      "type": "add_component",
+      "content": "Represent the Batch-managed pool with the H-series VM family named in the hints. Select an InfiniBand-capable SKU only after checking each simulation's core, memory, and MPI needs. Do not enter a node count or pool maximum until the core-capacity question has been resolved.",
+      "component": {
+        "nodeId": "hpc_compute_pool",
+        "componentType": "custom-component",
+        "label": "H-series VM Compute Pool",
+        "description": "Batch-managed HPC nodes for parallel scientific simulations",
+        "position": {"x": 880, "y": 360},
+        "properties": {
+          "componentName": "H-series VM Compute Pool",
+          "subtitle": "SKU and pool capacity to be validated",
+          "componentType": "HPC compute pool",
+          "technology": "Azure H-series VMs",
+          "purpose": "Run parallel scientific simulations on the selected H-series virtual machines through the Azure Batch pool. Choose an InfiniBand-capable SKU from actual job needs and validate its available core capacity without assuming a node count.",
+          "notes": "The catalog GPU Cluster is for GPU workloads and does not represent this H-series HPC pool."
+        },
+        "highlightReason": "The catalog has a GPU-specific cluster but no general H-series HPC compute-pool type, so a custom node preserves the hinted VM family without GPU defaults."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "hpc_azure_014",
+      "stepNumber": 14,
+      "phase": "Allocate parallel compute over the MPI fabric",
+      "title": "Schedule jobs onto the compute pool",
+      "type": "add_connection",
+      "content": "Connect the scheduler to the Batch-managed pool. A job should receive the resources and placement needed by its MPI execution shape; confirm the Batch pool's job model and node allocation behavior with the selected workload.",
+      "connection": {
+        "edgeId": "batch_to_compute_pool",
+        "sourceNodeId": "batch_scheduler",
+        "targetNodeId": "hpc_compute_pool",
+        "connectionType": "batch-allocation",
+        "label": "Schedule jobs and allocate pool capacity",
+        "description": "Azure Batch schedules scientific jobs onto its associated H-series compute pool."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "hpc_azure_015",
+      "stepNumber": 15,
+      "phase": "Allocate parallel compute over the MPI fabric",
+      "title": "Scale the pool from queued job demand",
+      "type": "scale_trigger",
+      "content": "Use queued resource requests and current pool readiness to drive capacity changes. Define scale thresholds and scale-down behavior with the workload owner; the brief supplies no queue-age target, reserve size, or maximum pool size.",
+      "scaleTrigger": {
+        "metric": "Queued job resource requests, queue wait, and pool readiness",
+        "action": "Adjust Azure Batch pool capacity from queued demand and measured capacity after the workload owner defines policy thresholds.",
+        "impact": "Queue-aware capacity changes can reduce avoidable job wait while controlling compute spend; validate the resulting pool against the supplied core requirement."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "hpc_azure_016",
+      "stepNumber": 16,
+      "phase": "Allocate parallel compute over the MPI fabric",
+      "title": "Scale for cores without hard-coding a node count",
+      "type": "explanation",
+      "content": "Translate the supplied core requirement using the selected VM SKU and the scheduler's actual pool capacity. Check both capacity available to the cluster and capacity allocatable to the job shapes in scope. Keep queue-driven scale-up and cost-aware scale-down in the same review, because either policy can affect waiting simulations.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "hpc_azure_017",
+      "stepNumber": 17,
+      "phase": "Allocate parallel compute over the MPI fabric",
+      "title": "Add the InfiniBand MPI fabric",
+      "type": "add_component",
+      "content": "Use a custom component for the InfiniBand data path because the catalog has no RDMA or HPC fabric type. The selected H-series SKU and pool placement must expose the network capability to every node participating in a tightly coupled MPI job.",
+      "component": {
+        "nodeId": "infiniband_fabric",
+        "componentType": "custom-component",
+        "label": "InfiniBand MPI Fabric",
+        "description": "Low-latency inter-node communication path for MPI workloads",
+        "position": {"x": 1320, "y": 80},
+        "properties": {
+          "componentName": "InfiniBand MPI Fabric",
+          "subtitle": "RDMA capability depends on selected VM and placement",
+          "componentType": "HPC interconnect",
+          "technology": "Azure InfiniBand",
+          "purpose": "Carry MPI rank-to-rank communication between participating H-series compute nodes. Validate the selected SKU, network placement, and application-level latency against the supplied constraint.",
+          "notes": "A catalog VPC boundary would not express the InfiniBand MPI data path."
+        },
+        "highlightReason": "The component catalog has no InfiniBand, RDMA, or HPC fabric type, so a custom node is required to show this constraint-driving path."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "hpc_azure_018",
+      "stepNumber": 18,
+      "phase": "Allocate parallel compute over the MPI fabric",
+      "title": "Route MPI traffic over the low-latency network",
+      "type": "add_connection",
+      "content": "Show the MPI communication path from the compute pool to the InfiniBand fabric. Confirm that all ranks for a tightly coupled job are placed where the selected Batch and VM configuration provide the intended inter-node network.",
+      "connection": {
+        "edgeId": "compute_to_infiniband",
+        "sourceNodeId": "hpc_compute_pool",
+        "targetNodeId": "infiniband_fabric",
+        "connectionType": "mpi-interconnect",
+        "label": "MPI rank traffic over InfiniBand",
+        "description": "Participating H-series nodes use the low-latency interconnect for parallel workload communication."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "hpc_azure_019",
+      "stepNumber": 19,
+      "phase": "Allocate parallel compute over the MPI fabric",
+      "title": "Validate network placement with a representative MPI job",
+      "type": "decision_point",
+      "content": "Test the selected VM SKU, MPI runtime, Batch pool, and placement together. Measure the communication path under a representative scientific simulation and inspect whether rank placement or the network path changes the result. Do not infer application compliance from a VM capability alone.",
+      "decision": {
+        "question": "What is the acceptance evidence for the MPI network path?",
+        "chosen": "Record workload-relevant MPI measurements from the intended Batch placement and compare them with the owner's interpretation of the supplied latency constraint.",
+        "chosenReason": "A combined test exercises the same compute, scheduler, runtime, and network choices that the architecture proposes.",
+        "alternatives": [
+          {
+            "option": "Use an isolated network benchmark as the only acceptance evidence",
+            "tradeoff": "It may not represent the MPI runtime, rank placement, or communication pattern of the scientific job."
+          },
+          {
+            "option": "Treat a successful job completion as proof of the latency target",
+            "tradeoff": "Completion alone does not report the network latency required by the brief."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "hpc_azure_020",
+      "stepNumber": 20,
+      "phase": "Route shared file access through an HPC cache",
+      "title": "Add the hinted shared file system",
+      "type": "add_component",
+      "content": "Use the existing File Storage catalog type to represent the shared filesystem and label the service from the hint. The catalog's provider choice does not name Azure NetApp Files, so leave that selector unset and validate the selected service's file-access and throughput behavior with the actual simulations.",
+      "component": {
+        "nodeId": "shared_filesystem",
+        "componentType": "file-storage",
+        "label": "Azure NetApp Files Shared File System",
+        "description": "Shared file storage for simulation inputs and outputs",
+        "position": {"x": 1320, "y": 640},
+        "properties": {
+          "componentName": "Azure NetApp Files Shared File System",
+          "purpose": "Provide the shared file data used by scientific simulations and the backing storage target for the HPC cache. Measure parallel I/O against the workload; capacity and throughput values are not supplied by the brief."
+        },
+        "highlightReason": "The File Storage catalog type models a shared filesystem, while its provider options do not identify Azure NetApp Files specifically."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "hpc_azure_021",
+      "stepNumber": 21,
+      "phase": "Route shared file access through an HPC cache",
+      "title": "Add the HPC file-system cache",
+      "type": "add_component",
+      "content": "Represent Azure HPC Cache as a distinct file-system caching layer. The catalog Cache component represents general application caching and exposes unrelated cache settings, so it is not a faithful substitute for this shared-file workload.",
+      "component": {
+        "nodeId": "hpc_cache",
+        "componentType": "custom-component",
+        "label": "Azure HPC Cache",
+        "description": "HPC file-system cache between compute clients and shared storage",
+        "position": {"x": 1760, "y": 640},
+        "properties": {
+          "componentName": "Azure HPC Cache",
+          "subtitle": "Validate cache behavior against workload I/O",
+          "componentType": "HPC file-system cache",
+          "technology": "Azure HPC Cache",
+          "purpose": "Expose a shared file namespace to the compute pool and use Azure NetApp Files as the hinted backing storage target. Validate cache behavior, consistency expectations, and the read/write profile against actual scientific workloads.",
+          "notes": "Do not infer a cache hit rate, write policy, or throughput target from the problem statement."
+        },
+        "highlightReason": "The catalog Cache type is not an HPC shared-file cache; a custom component preserves the distinct storage role without Redis or Memcached assumptions."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "hpc_azure_022",
+      "stepNumber": 22,
+      "phase": "Route shared file access through an HPC cache",
+      "title": "Mount the shared cache path from compute nodes",
+      "type": "add_connection",
+      "content": "Route simulation file access from the H-series pool through the HPC cache. Confirm that the application's file-access pattern and the cache's supported behavior preserve the semantics expected by the simulation.",
+      "connection": {
+        "edgeId": "compute_to_hpc_cache",
+        "sourceNodeId": "hpc_compute_pool",
+        "targetNodeId": "hpc_cache",
+        "connectionType": "shared-file-access",
+        "label": "Compute clients use the HPC cache path",
+        "description": "Scientific jobs access shared files through the HPC-aware cache layer."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "hpc_azure_023",
+      "stepNumber": 23,
+      "phase": "Route shared file access through an HPC cache",
+      "title": "Connect Azure NetApp Files as a cache storage target",
+      "type": "add_connection",
+      "content": "Connect the shared filesystem to the cache as its storage target. In the runtime data path, compute clients read and write through the cache namespace; the backing service remains the shared file store. Validate the configured target and file-access behavior before relying on the path.",
+      "connection": {
+        "edgeId": "shared_filesystem_to_hpc_cache",
+        "sourceNodeId": "shared_filesystem",
+        "targetNodeId": "hpc_cache",
+        "connectionType": "cache-storage-target",
+        "label": "Shared file storage target",
+        "description": "Azure NetApp Files supplies the shared file data exposed through the Azure HPC Cache namespace."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "hpc_azure_024",
+      "stepNumber": 24,
+      "phase": "Route shared file access through an HPC cache",
+      "title": "Check that caching fits the simulation I/O pattern",
+      "type": "decision_point",
+      "content": "The brief requires caching shared files and high I/O throughput, but does not describe file sizes, reuse, read/write mix, or consistency needs. Azure HPC Cache is intended for HPC file access; verify its benefit and behavior against the actual workload rather than assume every simulation will benefit equally.",
+      "decision": {
+        "question": "What evidence supports placing HPC Cache on the shared-file path?",
+        "chosen": "Compare the workload's direct shared-file behavior with the cache path using representative access patterns, and document the consistency and data-authority expectations before adoption.",
+        "chosenReason": "Cache effectiveness depends on the workload's file access, and the brief does not provide a reuse profile or cache acceptance target.",
+        "alternatives": [
+          {
+            "option": "Assume the cache improves every read and write",
+            "tradeoff": "Cold data, write-heavy access, or incompatible file behavior may not benefit as expected."
+          },
+          {
+            "option": "Remove the cache without measuring the I/O path",
+            "tradeoff": "That would discard a supplied design hint without checking whether it addresses the workload."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "hpc_azure_025",
+      "stepNumber": 25,
+      "phase": "Route shared file access through an HPC cache",
+      "title": "Measure parallel file I/O end to end",
+      "type": "explanation",
+      "content": "Measure the simulation's file operations through the complete compute, cache, and shared-storage path. Include the access patterns the workload actually uses and distinguish cache behavior from backing-store throughput. The brief supplies a high-throughput requirement but no storage capacity, I/O rate, or benchmark dataset.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "hpc_azure_026",
+      "stepNumber": 26,
+      "phase": "Route shared file access through an HPC cache",
+      "title": "Validate the hinted storage service at the required scale",
+      "type": "decision_point",
+      "content": "Azure NetApp Files is the shared-storage hint, not a guarantee that every parallel I/O pattern or pool size will meet the throughput constraint. Validate the selected service configuration with the actual file workload and the agreed compute capacity. If it misses the measured need, revisit the storage choice rather than adding an unsupported target value.",
+      "decision": {
+        "question": "When is the Azure NetApp Files choice ready to keep in the design?",
+        "chosen": "Keep it when measured shared-file behavior satisfies the workload's agreed I/O needs at the planned pool capacity; otherwise compare storage options using the same workload evidence.",
+        "chosenReason": "The brief names the service and requires high-throughput I/O but does not state data volume, file shape, or a throughput figure.",
+        "alternatives": [
+          {
+            "option": "Treat the hint as proof of throughput at any cluster size",
+            "tradeoff": "A product name does not prove performance for the chosen data and MPI access pattern."
+          },
+          {
+            "option": "Choose storage from capacity alone",
+            "tradeoff": "Capacity does not establish the I/O performance required by the simulations."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "hpc_azure_027",
+      "stepNumber": 27,
+      "phase": "Measure queueing, capacity, I/O, and cost",
+      "title": "Add resource and job monitoring",
+      "type": "add_component",
+      "content": "Use the catalog Monitoring component for the required utilization view. Keep the monitoring technology choice open because the brief does not name an observability product and the catalog's stack options do not include an Azure-specific choice.",
+      "component": {
+        "nodeId": "resource_monitoring",
+        "componentType": "monitoring",
+        "label": "HPC Resource and Job Monitoring",
+        "description": "Observe scheduler, compute, MPI, cache, and storage behavior",
+        "position": {"x": 2200, "y": 360},
+        "properties": {
+          "componentName": "HPC Resource and Job Monitoring",
+          "purpose": "Collect resource utilization and job, queue, MPI network, cache, and shared-storage measurements needed to evaluate the supplied wait, core, latency, cost, and I/O constraints. Select the monitoring stack with the platform owner."
+        },
+        "highlightReason": "The generic Monitoring catalog type covers the stated utilization requirement; no product-specific telemetry stack is named in the brief."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "hpc_azure_028",
+      "stepNumber": 28,
+      "phase": "Measure queueing, capacity, I/O, and cost",
+      "title": "Observe queue and job progress",
+      "type": "add_connection",
+      "content": "Send scheduler and job-state measurements to the monitoring component. Keep queue waiting time distinct from pool startup and simulation execution so the job-wait requirement can be evaluated directly.",
+      "connection": {
+        "edgeId": "batch_to_monitoring",
+        "sourceNodeId": "batch_scheduler",
+        "targetNodeId": "resource_monitoring",
+        "connectionType": "job-observability",
+        "label": "Queue and job-state measurements",
+        "description": "Observe queued demand, scheduling progress, and completed job state."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "hpc_azure_029",
+      "stepNumber": 29,
+      "phase": "Measure queueing, capacity, I/O, and cost",
+      "title": "Observe compute capacity and utilization",
+      "type": "add_connection",
+      "content": "Collect pool readiness, allocated capacity, and resource utilization from the compute layer. Compare observed core capacity with the agreed interpretation of the problem's core requirement.",
+      "connection": {
+        "edgeId": "compute_to_monitoring",
+        "sourceNodeId": "hpc_compute_pool",
+        "targetNodeId": "resource_monitoring",
+        "connectionType": "compute-observability",
+        "label": "Pool capacity and utilization",
+        "description": "Track H-series pool readiness, allocated capacity, and workload utilization."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "hpc_azure_030",
+      "stepNumber": 30,
+      "phase": "Measure queueing, capacity, I/O, and cost",
+      "title": "Observe MPI network measurements",
+      "type": "add_connection",
+      "content": "Record the network evidence used to assess MPI communication and the supplied latency constraint. Keep the benchmark context with the result so measurements from unlike jobs are not treated as interchangeable.",
+      "connection": {
+        "edgeId": "infiniband_to_monitoring",
+        "sourceNodeId": "infiniband_fabric",
+        "targetNodeId": "resource_monitoring",
+        "connectionType": "network-observability",
+        "label": "MPI network measurements",
+        "description": "Capture the communication evidence for the selected InfiniBand placement."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1"]
+    },
+    {
+      "id": "hpc_azure_031",
+      "stepNumber": 31,
+      "phase": "Measure queueing, capacity, I/O, and cost",
+      "title": "Observe cache behavior on real jobs",
+      "type": "add_connection",
+      "content": "Collect cache and file-access evidence for the actual scientific workload. Use it to distinguish cache benefit from backing-storage performance and to explain any remaining I/O wait.",
+      "connection": {
+        "edgeId": "hpc_cache_to_monitoring",
+        "sourceNodeId": "hpc_cache",
+        "targetNodeId": "resource_monitoring",
+        "connectionType": "cache-observability",
+        "label": "Cache and shared-file measurements",
+        "description": "Observe cache behavior and file access along the HPC data path."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "hpc_azure_032",
+      "stepNumber": 32,
+      "phase": "Measure queueing, capacity, I/O, and cost",
+      "title": "Observe shared-storage throughput",
+      "type": "add_connection",
+      "content": "Collect file-system measurements from the shared storage side and correlate them with cache and job evidence. Report the workload and measurement boundary alongside throughput results.",
+      "connection": {
+        "edgeId": "shared_filesystem_to_monitoring",
+        "sourceNodeId": "shared_filesystem",
+        "targetNodeId": "resource_monitoring",
+        "connectionType": "storage-observability",
+        "label": "Shared-storage I/O measurements",
+        "description": "Measure the backing file system in the context of parallel scientific workloads."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "hpc_azure_033",
+      "stepNumber": 33,
+      "phase": "Measure queueing, capacity, I/O, and cost",
+      "title": "Evaluate job wait separately from execution",
+      "type": "decision_point",
+      "content": "Measure the time a job waits before resources are assigned, pool readiness after assignment, and simulation runtime as distinct intervals. Use the supplied minimization goal to compare scheduler and scaling changes; do not declare an invented wait-time SLO.",
+      "decision": {
+        "question": "What evidence shows whether job waiting is improving?",
+        "chosen": "Track queue wait and pool readiness by representative job shape and compare changes under the same workload mix.",
+        "chosenReason": "This exposes scheduling and capacity delay without conflating it with MPI or storage execution time.",
+        "alternatives": [
+          {
+            "option": "Track only total job duration",
+            "tradeoff": "It cannot show whether a change affected queue wait, pool startup, or simulation execution."
+          },
+          {
+            "option": "Set a wait-time threshold without owner input",
+            "tradeoff": "The problem asks to minimize wait but provides no numeric acceptance target."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "hpc_azure_034",
+      "stepNumber": 34,
+      "phase": "Measure queueing, capacity, I/O, and cost",
+      "title": "Verify usable core capacity across job shapes",
+      "type": "decision_point",
+      "content": "Compare allocated cores, runnable job demand, and utilization on the selected pool. Establish whether the core requirement is met by total provisioned capacity or by capacity usable for the workloads in scope, and retain that interpretation with the measurements.",
+      "decision": {
+        "question": "How should the design demonstrate support for the supplied core requirement?",
+        "chosen": "Show the selected VM sizes and measured Batch pool capacity, then test that the in-scope parallel simulations can use the capacity under the agreed interpretation.",
+        "chosenReason": "A raw VM count does not establish usable cores or prove that the job's MPI layout can consume them.",
+        "alternatives": [
+          {
+            "option": "Report only the theoretical sum of VM cores",
+            "tradeoff": "It can overstate capacity if quota, placement, or job allocation prevents those cores from being used."
+          },
+          {
+            "option": "Treat observed average utilization as the capacity limit",
+            "tradeoff": "Low utilization can reflect queue or workload shape rather than insufficient provisioned capacity."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "hpc_azure_035",
+      "stepNumber": 35,
+      "phase": "Measure queueing, capacity, I/O, and cost",
+      "title": "Review compute cost with queue and utilization evidence",
+      "type": "decision_point",
+      "content": "Review compute spend alongside queued demand, pool readiness, job wait, and utilization. Tune scale-up and scale-down behavior from observed jobs and owner-approved cost priorities. Do not introduce a budget, utilization target, or scale threshold absent from the brief.",
+      "decision": {
+        "question": "What evidence supports the cost-effective compute policy?",
+        "chosen": "Compare cost and waiting behavior across representative job periods, then adjust the queue-driven pool policy with workload-owner agreement.",
+        "chosenReason": "Cost and job wait are both supplied constraints, but the brief gives no budget or acceptable tradeoff value.",
+        "alternatives": [
+          {
+            "option": "Optimize only for the lowest compute spend",
+            "tradeoff": "A smaller pool can increase queue wait and conflict with the workload goal."
+          },
+          {
+            "option": "Keep capacity permanently available to avoid pool startup",
+            "tradeoff": "It may incur idle compute cost without evidence that the wait benefit is worth it."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "hpc_azure_036",
+      "stepNumber": 36,
+      "phase": "Measure queueing, capacity, I/O, and cost",
+      "title": "Validate the complete simulation path",
+      "type": "explanation",
+      "content": "Run representative scientific simulations through submission, Batch scheduling, H-series pool allocation, MPI communication, and the shared-file cache path. Record job wait, pool capacity, network measurements, resource use, and file I/O with each result. A successful run alone does not prove every supplied constraint.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "hpc_azure_037",
+      "stepNumber": 37,
+      "phase": "Measure queueing, capacity, I/O, and cost",
+      "title": "Attribute bottlenecks before changing the design",
+      "type": "decision_point",
+      "content": "Use the separate monitoring paths to determine whether a slow result comes from waiting for a pool, MPI communication, cache behavior, or backing storage. Change one limiting boundary at a time and repeat the same representative workload so cost or performance improvements can be attributed.",
+      "decision": {
+        "question": "How should a workload that misses one of the supplied constraints be investigated?",
+        "chosen": "Locate the delay or capacity limit from queue, compute, MPI, cache, and storage measurements, then test a targeted change against the same job shape.",
+        "chosenReason": "The architecture has distinct control, communication, and I/O paths, and each can affect a different supplied requirement.",
+        "alternatives": [
+          {
+            "option": "Increase compute capacity for every performance issue",
+            "tradeoff": "More cores may not help if the limit is scheduling, networking, or shared-file I/O."
+          },
+          {
+            "option": "Change scheduler, network, and storage settings together",
+            "tradeoff": "Several simultaneous changes make the cause of an improvement or regression unclear."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "hpc_azure_038",
+      "stepNumber": 38,
+      "phase": "Measure queueing, capacity, I/O, and cost",
+      "title": "Review the high-performance computing design",
+      "type": "conclusion",
+      "content": "Scientific clients submit jobs to Azure Batch, which schedules work onto an H-series compute pool. MPI communication uses the selected InfiniBand-capable placement; compute clients reach shared files through Azure HPC Cache backed by Azure NetApp Files. Monitoring correlates queue wait, usable core capacity, network latency, utilization, cost, and parallel I/O. Azure CycleCloud remains an alternative when scheduler-specific control is required. The review draft leaves exact VM sizing, queue policy, cache behavior, storage performance, and measurement boundaries open for workload evidence and does not claim the supplied constraints are already met.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

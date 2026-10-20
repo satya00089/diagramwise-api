@@ -1,0 +1,702 @@
+{
+  "problem_id": "cloud_aws_011",
+  "version": "1.0-review",
+  "requirementRevision": null,
+  "totalSteps": 51,
+  "phases": [
+    {
+      "name": "Frame the leaderboard contract",
+      "stepRange": [1, 6],
+      "description": "Separate supplied facts from workload and product assumptions; define score, read, rank, friend, consistency, and latency contracts before choosing data structures."
+    },
+    {
+      "name": "Authenticate and accept score events",
+      "stepRange": [7, 18],
+      "description": "Use the existing client and security components to validate server-authoritative score events, control abuse, and acknowledge only after durable stream acceptance."
+    },
+    {
+      "name": "Persist scores and serve ranked reads",
+      "stepRange": [19, 33],
+      "description": "Project replayable events into DynamoDB and Redis sorted sets, support top-K and rank queries, and make partial failure recovery explicit."
+    },
+    {
+      "name": "Support friend boards, seasons, and operations",
+      "stepRange": [34, 51],
+      "description": "Handle bounded friend rankings and low-cost season rotation, then measure hot-key, backlog, latency, and recovery behavior against the stated targets."
+    }
+  ],
+  "steps": [
+    {
+      "id": "leaderboard_01",
+      "stepNumber": 1,
+      "phase": "Frame the leaderboard contract",
+      "title": "Separate prompt facts from design assumptions",
+      "type": "explanation",
+      "content": "Exact supplied description: Design a low-latency gaming leaderboard system that updates scores in real time, handles millions of concurrent players, and provides global and friend-based rankings. Stated requirements: real-time score updates; instant top-player reads; millions of concurrent players; multiple leaderboard types; persist data; anti-cheat; periodic resets; player rank lookup. Stated constraints: reads <10ms; writes <50ms; 1M+ concurrent users; 100k updates/s; consistency. The consistency requirement is named but not defined. Assumptions for this draft, not prompt facts: a score event is submitted by a trusted game server; the write acknowledgement means the event is durably accepted for processing, not yet visible in every leaderboard; Redis is a rebuildable ranking projection and DynamoDB retains score events/snapshots; friend membership and tie-breaking policy need product decisions. Do not claim a target is met without load and failure testing.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_02",
+      "stepNumber": 2,
+      "phase": "Frame the leaderboard contract",
+      "title": "Define what each latency and concurrency target measures",
+      "type": "decision_point",
+      "content": "The brief does not name a percentile, region boundary, or whether reads <10ms and writes <50ms are backend-only or end-to-end. Treat them as provisional service targets and instrument both API end-to-end latency and the Redis/DynamoDB stages separately. For this design, the write response is sent after the score event is durably accepted by the stream; Redis projection freshness is a separate observable measure. Confirm that acknowledgement contract with product owners before implementation. The brief separately states 1M+ concurrent users and 100k updates/s; concurrent users are not a request rate, so load-test active sessions, update rate, reconnect bursts, and dependency quotas independently.",
+      "decision": {
+        "question": "What exactly counts as a successful score write under the <50ms target?",
+        "chosen": "Acknowledge only after durable event-stream acceptance; expose projection freshness separately and validate the end-to-end target under load.",
+        "chosenReason": "It gives the client a precise durable-acceptance contract without pretending that every asynchronous ranking view has already converged.",
+        "alternatives": [
+          {"option": "Acknowledge as soon as the request reaches the API", "tradeoff": "A process or network failure could lose an event the client believes was accepted."},
+          {"option": "Wait for every leaderboard and historical store to update", "tradeoff": "Multiple projections enter the synchronous latency path and a partial outage can make writes unavailable."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "leaderboard_03",
+      "stepNumber": 3,
+      "phase": "Frame the leaderboard contract",
+      "title": "Choose and disclose the consistency model",
+      "type": "decision_point",
+      "content": "The prompt only says consistency; it does not state whether accepted points must appear immediately, whether duplicate submissions are allowed, or how rank ties and season-boundary events behave. The draft assumes durable, idempotent score-event acceptance followed by an eventually consistent Redis projection with a visible version/freshness watermark. The score ledger is the recovery source; Redis is not the only copy. Require the product owner to approve this model or specify a stronger read-after-write guarantee, which may conflict with the latency and availability goals.",
+      "decision": {
+        "question": "Can a score write be acknowledged before top-player and rank reads reflect it?",
+        "chosen": "Yes for this draft: acknowledge durable acceptance and expose the projected-through version; do not imply leaderboard visibility until the projection advances.",
+        "chosenReason": "It makes the latency/failure boundary testable and permits projection repair from durable events.",
+        "alternatives": [
+          {"option": "Require read-your-write consistency for every board", "tradeoff": "Needs synchronous coordination across event persistence and all affected board projections, adding latency and reducing failure isolation."},
+          {"option": "Hide projection lag from clients", "tradeoff": "Users can observe stale scores without a way to distinguish delay from a lost event."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_04",
+      "stepNumber": 4,
+      "phase": "Frame the leaderboard contract",
+      "title": "Identify the records and partitioning questions",
+      "type": "explanation",
+      "content": "Model a score event with event_id, player_id, game/match_id, board scope, season_id, authoritative server sequence, score delta or resulting score, and accepted timestamp. Keep an append-only event record plus a current per-player/per-board score snapshot and friend-edge records. Partition event data so one global board key is not also the write partition; a candidate key is game_id plus player_id, with per-player ordering. Confirm game count, hot-player skew, event retention, friend-list size, and historical lookup needs before fixing table keys or capacity.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_05",
+      "stepNumber": 5,
+      "phase": "Frame the leaderboard contract",
+      "title": "Define the score and ranking interfaces",
+      "type": "explanation",
+      "content": "Use an authenticated game-server write such as POST /v1/matches/{matchId}/score-events with a stable event_id, player_id, server sequence, season_id, and validated score result. Player reads use GET /v1/leaderboards/{boardId}/top?limit=k and GET /v1/players/{playerId}/rank?boardId=...; friend reads use the caller's authorized friend scope rather than a client-selected arbitrary player list. Return score, rank, board/season version, and as-of metadata. Define integer score range, tie order, pagination, rank semantics, and whether a missing/lagging projection is reported as stale; those are product decisions, not hidden implementation defaults.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_06",
+      "stepNumber": 6,
+      "phase": "Frame the leaderboard contract",
+      "title": "Select separate strategies for global and friend boards",
+      "type": "decision_point",
+      "content": "Redis sorted sets fit global top-K and rank queries: ZREVRANGE (or its current equivalent) reads the highest scores and ZREVRANK looks up a player's position. A single sorted-set key still lives on one Redis shard; cluster mode does not make that one key horizontally write-scalable. For this draft, scope keys by game, season, and board type, then benchmark the busiest global board. If it saturates, shard that board and merge each shard's top K; exact rank then requires a separate cross-shard counting contract and freshness semantics. Friend ranking uses the authenticated caller's friend IDs and cached scores as a bounded read-time merge; if friend lists are not bounded, choose and test a materialized/fan-out design instead of promising <10ms.",
+      "decision": {
+        "question": "How should one global sorted set and personalized friend rankings scale?",
+        "chosen": "Start with Redis sorted sets per logical game/season/board; benchmark global hot-key capacity and use bounded friend-score fan-in only if product defines a practical friend-set bound.",
+        "chosenReason": "This uses the hinted data structure without claiming that Redis Cluster splits a single key or that an unbounded friend list is a constant-time query.",
+        "alternatives": [
+          {"option": "Write every score into a separate sorted set for every friend", "tradeoff": "Read becomes simpler but one score can create high, degree-dependent write amplification."},
+          {"option": "Hash one global sorted set across Redis shards", "tradeoff": "A sorted-set key is placed on one shard; cluster mode alone does not distribute its members."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_07",
+      "stepNumber": 7,
+      "phase": "Authenticate and accept score events",
+      "title": "Add the player client",
+      "type": "add_component",
+      "content": "Players request global, season, and authorized friend rankings from browser/mobile clients. The client may display pending or stale status, but it never submits an authoritative score value directly.",
+      "component": {
+        "nodeId": "lb_players",
+        "componentType": "web-app",
+        "label": "Player Clients",
+        "description": "Browser and mobile leaderboard reads",
+        "position": {"x": 0, "y": 280},
+        "properties": {"componentName": "Player Clients", "purpose": "Read top-player, rank, and authorized friend-board views; never authoritatively set scores."},
+        "highlightReason": "The existing Web App palette entry represents the player-facing client without adding a new component type."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:8"]
+    },
+    {
+      "id": "leaderboard_08",
+      "stepNumber": 8,
+      "phase": "Authenticate and accept score events",
+      "title": "Represent trusted game servers separately",
+      "type": "add_component",
+      "content": "Score events originate from trusted game/session servers after match validation. Keep this server-to-server credential and network policy separate from a player's read token; a player must not be able to fabricate a completed match or arbitrary score delta.",
+      "component": {
+        "nodeId": "lb_game_servers",
+        "componentType": "backend-server",
+        "label": "Trusted Game Servers",
+        "description": "Authoritative match result producers",
+        "position": {"x": 0, "y": 600},
+        "properties": {"componentName": "Trusted Game Servers", "purpose": "Submit authenticated, sequenced match score events after server-side validation; do not accept client-authored score totals."},
+        "highlightReason": "The existing Backend Server component models the trusted producer boundary."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "leaderboard_09",
+      "stepNumber": 9,
+      "phase": "Authenticate and accept score events",
+      "title": "Add an edge abuse filter",
+      "type": "add_component",
+      "content": "Place a WAF at the public edge for managed attack signatures, malformed-request filtering, and carefully tuned volumetric rules. It is not a substitute for identity checks, game-result validation, or per-player/game quotas. Avoid logging score payloads or bearer credentials in full.",
+      "component": {
+        "nodeId": "lb_waf",
+        "componentType": "firewall",
+        "label": "AWS WAF",
+        "description": "Public API filtering and request logging controls",
+        "position": {"x": 280, "y": 420},
+        "properties": {"componentName": "AWS WAF", "purpose": "Filter public API abuse and malformed traffic; keep application authentication and anti-cheat checks in their own layers.", "type": "WAF", "logging": true},
+        "highlightReason": "The existing Firewall palette component supports the WAF role and its type property."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "leaderboard_10",
+      "stepNumber": 10,
+      "phase": "Authenticate and accept score events",
+      "title": "Add the API entry point",
+      "type": "add_component",
+      "content": "Expose separate player read routes and the trusted score-event route through API Gateway. Validate body size, board/game identifiers, player identifiers, sequence, and request shape at the boundary; TLS and throttling reduce exposure but do not validate whether a game result is plausible.",
+      "component": {
+        "nodeId": "lb_api_gateway",
+        "componentType": "api-gateway",
+        "label": "Leaderboard API Gateway",
+        "description": "Authenticated HTTPS score and read routes",
+        "position": {"x": 560, "y": 420},
+        "properties": {"componentName": "Leaderboard API Gateway", "purpose": "Route score-event writes and top/rank reads; validate request shape, enforce JWT/service authentication, TLS, throttling, and request quotas.", "inputValidation": true, "authentication": "JWT", "rateLimiting": true, "tlsTermination": true, "throttling": true},
+        "highlightReason": "API Gateway is an existing catalog component with supported JWT, validation, and throttling properties."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "leaderboard_11",
+      "stepNumber": 11,
+      "phase": "Authenticate and accept score events",
+      "title": "Authorize players and game services",
+      "type": "add_component",
+      "content": "Verify player identity for read routes and service identity plus match/game scope for writes. Derive the player ID from the authenticated principal where applicable; authorize friend-board access from stored relationships, not request-supplied IDs. Use least-privilege service roles, rotate credentials, and redact tokens and personal data from logs.",
+      "component": {
+        "nodeId": "lb_auth",
+        "componentType": "auth-service",
+        "label": "Identity & Game Authorization",
+        "description": "Player JWT and trusted game-service permissions",
+        "position": {"x": 840, "y": 180},
+        "properties": {"componentName": "Identity & Game Authorization", "purpose": "Authenticate player reads and service-to-service writes; enforce game, match, player, and friend-scope authorization with least-privilege roles."},
+        "highlightReason": "Auth Service already models identity and authorization; no new node type is needed."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_12",
+      "stepNumber": 12,
+      "phase": "Authenticate and accept score events",
+      "title": "Add distributed abuse and hot-player limits",
+      "type": "add_component",
+      "content": "Apply token-bucket quotas by game service, player, match, and IP where appropriate. Use this to bound replay floods and accidental client loops; do not treat a rate limit as an anti-cheat verdict. Tune limits from legitimate game telemetry and provide a controlled exception path for trusted tournament traffic.",
+      "component": {
+        "nodeId": "lb_rate_limiter",
+        "componentType": "rate-limiter",
+        "label": "Score Ingress Rate Limits",
+        "description": "Distributed quotas for score writes and reads",
+        "position": {"x": 840, "y": 660},
+        "properties": {"componentName": "Score Ingress Rate Limits", "purpose": "Bound requests by service, player, match, and source; keep abuse control distinct from game-result validation.", "algorithm": "Token Bucket", "distributed": true, "backend": "Redis"},
+        "highlightReason": "The catalog Rate Limiter exposes supported distributed token-bucket settings."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "leaderboard_13",
+      "stepNumber": 13,
+      "phase": "Authenticate and accept score events",
+      "title": "Validate and accept score events",
+      "type": "add_component",
+      "content": "The intake Lambda checks service identity, match state, player membership, season, server sequence, score range, event ID, and idempotency before publishing. Reject impossible or duplicate events with a traceable reason; suspicious but syntactically valid results can be flagged for review rather than silently rewriting history. The validation rules must be game-mode-specific and cannot promise detection of every cheat.",
+      "component": {
+        "nodeId": "lb_score_intake",
+        "componentType": "serverless-function",
+        "label": "Score Validation + Intake Lambda",
+        "description": "Authorize, validate, deduplicate, and publish trusted events",
+        "position": {"x": 1120, "y": 420},
+        "properties": {"componentName": "Score Validation + Intake Lambda", "purpose": "Validate authenticated match results, membership, season, monotonic sequence, allowed score changes, and idempotency before durable publication; quarantine suspicious events for review.", "runtime": "Python", "coldStart": true},
+        "highlightReason": "Serverless Function is the existing Lambda-compatible catalog component."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_14",
+      "stepNumber": 14,
+      "phase": "Authenticate and accept score events",
+      "title": "Connect both client paths through the protected API",
+      "type": "add_connection",
+      "content": "Players use the read routes; trusted game servers use the score-event route. Both pass through WAF and API Gateway, but authorization distinguishes player JWTs from game-service credentials. The API invokes identity checks, quotas, and the intake function; clients cannot choose another player's friend scope or submit an authoritative total.",
+      "connection": {"edgeId": "lb_players_waf", "sourceNodeId": "lb_players", "targetNodeId": "lb_waf", "connectionType": "http", "label": "Player HTTPS reads", "description": "Authenticated player requests for top, rank, and friend views"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "leaderboard_15",
+      "stepNumber": 15,
+      "phase": "Authenticate and accept score events",
+      "title": "Complete the protected score-ingress path",
+      "type": "add_connection",
+      "content": "Connect trusted game servers to WAF, WAF to API Gateway, and the gateway to authorization, rate limiting, and score intake. These are logical request dependencies; the gateway must not acknowledge a score just because the Lambda started. Score validation and the durable event write define acceptance.",
+      "connection": {"edgeId": "lb_games_waf", "sourceNodeId": "lb_game_servers", "targetNodeId": "lb_waf", "connectionType": "http", "label": "Service-authenticated score writes", "description": "Trusted match servers submit signed/authorized results over TLS"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "leaderboard_16",
+      "stepNumber": 16,
+      "phase": "Authenticate and accept score events",
+      "title": "Keep anti-cheat checks authoritative and auditable",
+      "type": "decision_point",
+      "content": "Validate results against server-observed match state, allowed game rules, per-player event sequence, and replay-safe event IDs. Preserve accepted and rejected event metadata with reason codes, but minimize retained identifiers and protect access to review data. Detection signals can prioritize investigation; they do not prove a player cheated, and an operator override should be audited. Define appeals and retention with the game team rather than auto-penalizing from a single anomaly score.",
+      "decision": {
+        "question": "Should the client or an anomaly score determine the official leaderboard score?",
+        "chosen": "Only validated server-authoritative events update the score; anomaly signals are auditable review inputs, not an automatic proof of cheating.",
+        "chosenReason": "This keeps the client outside the trust boundary and makes disputed/replayed events explainable.",
+        "alternatives": [
+          {"option": "Accept the player's submitted total", "tradeoff": "Clients can fabricate scores, replay requests, or overwrite other players."},
+          {"option": "Automatically ban any player above an anomaly threshold", "tradeoff": "False positives can unfairly penalize legitimate play and are difficult to appeal."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_17",
+      "stepNumber": 17,
+      "phase": "Authenticate and accept score events",
+      "title": "Add the durable event stream",
+      "type": "add_component",
+      "content": "Use a durable partitioned stream such as Amazon Kinesis Data Streams for validated score events. Partition by game and player (or a reviewed equivalent) to preserve per-player sequence while spreading load; do not partition every score by one global-board key. Set retention from outage and replay objectives, then verify partition throughput and quotas at the required event rate.",
+      "component": {
+        "nodeId": "lb_score_stream",
+        "componentType": "message-broker",
+        "label": "Score Event Stream (Kinesis)",
+        "description": "Durable ordered event log for score projections",
+        "position": {"x": 1400, "y": 420},
+        "properties": {"componentName": "Score Event Stream (Kinesis)", "purpose": "Retain validated score events for ordered, replayable downstream projections; partition on a reviewed game/player key and size shards from measured traffic.", "durable": true},
+        "highlightReason": "The existing Message Broker component represents the durable stream without adding a catalog node."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_18",
+      "stepNumber": 18,
+      "phase": "Authenticate and accept score events",
+      "title": "Acknowledge only after durable stream acceptance",
+      "type": "add_connection",
+      "content": "The intake function publishes the validated event with a stable event ID and receives the stream's durable-acceptance result before returning success. A timeout is ambiguous: retry with the same event ID so a duplicate is a no-op downstream. This is the proposed interpretation of writes <50ms; benchmark it end to end at target traffic, and do not promise that the Redis ranking is already visible when this response returns.",
+      "connection": {"edgeId": "lb_intake_stream", "sourceNodeId": "lb_score_intake", "targetNodeId": "lb_score_stream", "connectionType": "event-stream", "label": "Validated idempotent score events", "description": "Durable event publication before accepted response"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_19",
+      "stepNumber": 19,
+      "phase": "Persist scores and serve ranked reads",
+      "title": "Add an idempotent score projector",
+      "type": "add_component",
+      "content": "Consume ordered stream records and update durable score history/current snapshots plus the Redis ranking projection. Use event IDs and monotonically increasing per-player versions so retry or replay cannot add the same delta twice or overwrite a newer result. Keep the persistent write and Redis update independently retryable; expose the last projected stream/version so operators and clients can see lag.",
+      "component": {
+        "nodeId": "lb_score_projector",
+        "componentType": "serverless-function",
+        "label": "Score Projection Lambda",
+        "description": "Idempotent event-to-ledger and leaderboard projection",
+        "position": {"x": 1680, "y": 420},
+        "properties": {"componentName": "Score Projection Lambda", "purpose": "Consume score events in player order; conditionally persist event/snapshot versions and update Redis idempotently; checkpoint only after recoverable writes and publish projection lag signals.", "runtime": "Python", "coldStart": true},
+        "highlightReason": "The existing Serverless Function component supports Lambda-based stream projection."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_20",
+      "stepNumber": 20,
+      "phase": "Persist scores and serve ranked reads",
+      "title": "Persist score events and snapshots in DynamoDB",
+      "type": "add_component",
+      "content": "Keep an append-only event record keyed for idempotent lookup and a current per-player/game/season score snapshot with a conditional version update. Store friend edges and active/historical season metadata in access-pattern-appropriate tables; do not assume one table/key design fits every query. Use encryption, least-privilege access, point-in-time recovery, and an explicit retention policy. DynamoDB is the durable application history; the stream is the short-horizon replay buffer and Redis is rebuildable.",
+      "component": {
+        "nodeId": "lb_dynamodb",
+        "componentType": "database",
+        "label": "Score Ledger + Player Data (DynamoDB)",
+        "description": "Idempotent event history, score snapshots, friend edges, and seasons",
+        "position": {"x": 1960, "y": 160},
+        "properties": {"componentName": "Score Ledger + Player Data (DynamoDB)", "purpose": "Persist idempotent score events, conditional per-player/game/season snapshots, authorized friend edges, and season metadata using access-pattern-specific keys and retention.", "type": "NoSQL", "engine": "dynamodb", "workload": "OLTP", "encryption": true, "pitr": true, "backups": true, "rbac": true, "auditLog": true},
+        "highlightReason": "Database is an existing catalog component with DynamoDB and supported durability/security properties."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_21",
+      "stepNumber": 21,
+      "phase": "Persist scores and serve ranked reads",
+      "title": "Add the Redis sorted-set projection",
+      "type": "add_component",
+      "content": "Store player IDs as members and ranking scores in Redis sorted sets scoped by game, board type, and season. Redis is optimized for top-K and rank operations, not the only durable record. Replication and cluster mode help with availability and distribution across distinct keys, but a single hot global sorted set remains a single-key bottleneck; size memory, eviction policy, and failover behavior from benchmark results.",
+      "component": {
+        "nodeId": "lb_redis",
+        "componentType": "cache",
+        "label": "Redis Leaderboard Sorted Sets",
+        "description": "Fast top-K and rank projections, rebuildable from persisted data",
+        "position": {"x": 2240, "y": 420},
+        "properties": {"componentName": "Redis Leaderboard Sorted Sets", "purpose": "Serve ZREVRANGE/ZREVRANK-style reads from versioned game/board/season sorted sets; rebuild projections from DynamoDB/events and monitor single-key hot spots.", "engine": "redis", "inMemory": true, "replication": true, "clusterMode": true, "persistence": true, "encryption": true},
+        "highlightReason": "The existing Cache palette component explicitly supports Redis, replication, cluster mode, persistence, and encryption."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_22",
+      "stepNumber": 22,
+      "phase": "Persist scores and serve ranked reads",
+      "title": "Connect the stream to its replayable projector",
+      "type": "add_connection",
+      "content": "The consumer processes each player's events in stream order and records enough version/checkpoint state to resume after a timeout. Bound batch size and concurrency to downstream DynamoDB and Redis capacity; do not increase Lambda concurrency blindly when either sink is throttling.",
+      "connection": {"edgeId": "lb_stream_projector", "sourceNodeId": "lb_score_stream", "targetNodeId": "lb_score_projector", "connectionType": "event-stream", "label": "Ordered score events", "description": "Replayable stream trigger with per-player sequence and bounded consumption"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_23",
+      "stepNumber": 23,
+      "phase": "Persist scores and serve ranked reads",
+      "title": "Commit durable event and score versions",
+      "type": "add_connection",
+      "content": "Write the event idempotently and conditionally advance the player/game/season snapshot only when the incoming sequence/version is newer. If a duplicate arrives, recover the current snapshot and continue the Redis projection safely; if a newer version is already present, ignore the stale replay. This prevents duplicate delta application while preserving an auditable event trail.",
+      "connection": {"edgeId": "lb_projector_dynamodb", "sourceNodeId": "lb_score_projector", "targetNodeId": "lb_dynamodb", "connectionType": "database-connection", "label": "Conditional event + score snapshot", "description": "Idempotent durable history and monotonic per-player version updates"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_24",
+      "stepNumber": 24,
+      "phase": "Persist scores and serve ranked reads",
+      "title": "Project current scores into Redis",
+      "type": "add_connection",
+      "content": "Apply a version-aware, replay-safe score update to each affected sorted set. Prefer setting the resulting cumulative score with an accepted version over blindly incrementing a delta on every retry. Keep the score event and current snapshot in DynamoDB so a Redis eviction, failover, or rebuild can be repaired without inventing points.",
+      "connection": {"edgeId": "lb_projector_redis", "sourceNodeId": "lb_score_projector", "targetNodeId": "lb_redis", "connectionType": "data-flow", "label": "Versioned sorted-set updates", "description": "Idempotent score projection for global and season board keys"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_25",
+      "stepNumber": 25,
+      "phase": "Persist scores and serve ranked reads",
+      "title": "Expose projection freshness and consistency boundaries",
+      "type": "explanation",
+      "content": "A successful score response means the stream accepted the event; it does not prove DynamoDB materialization or Redis visibility. Expose accepted event/version and projected-through version, measure their lag, and define what clients see while they differ. Reads may return a recent but stale rank under the draft's eventual model. If game rules require strict serializable order or immediate rank changes, revisit this architecture and quantify the added coordination cost rather than relabeling eventual data as consistent.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_26",
+      "stepNumber": 26,
+      "phase": "Persist scores and serve ranked reads",
+      "title": "Add a bounded leaderboard query service",
+      "type": "add_component",
+      "content": "The read Lambda authorizes board scope, applies a bounded top-K limit, reads the selected season/version, and returns score, rank, and freshness metadata. For a player-rank lookup, use the sorted-set rank operation; do not fetch or sort the entire global leaderboard. Validate requested board IDs and prevent enumeration of private friend scopes.",
+      "component": {
+        "nodeId": "lb_read_service",
+        "componentType": "serverless-function",
+        "label": "Leaderboard Read Lambda",
+        "description": "Authorized top-K, player rank, and friend ranking reads",
+        "position": {"x": 1680, "y": 780},
+        "properties": {"componentName": "Leaderboard Read Lambda", "purpose": "Authorize board scope, execute bounded top-K/rank reads, combine a caller's allowed friend scores when the friend set is bounded, and return as-of/version metadata.", "runtime": "Python", "coldStart": true},
+        "highlightReason": "The existing Serverless Function is reusable for a distinct query path."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_27",
+      "stepNumber": 27,
+      "phase": "Persist scores and serve ranked reads",
+      "title": "Route player read requests to the query service",
+      "type": "add_connection",
+      "content": "Route top, rank, and friend-board API requests to the read Lambda. Keep score-write acceptance independent from a slow leaderboard query so read saturation does not cause a durable write to be acknowledged incorrectly.",
+      "connection": {"edgeId": "lb_api_read", "sourceNodeId": "lb_api_gateway", "targetNodeId": "lb_read_service", "connectionType": "http", "label": "Top, rank, and friend read routes", "description": "Bounded, authorized read requests separated from score acceptance"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "leaderboard_28",
+      "stepNumber": 28,
+      "phase": "Persist scores and serve ranked reads",
+      "title": "Serve top players and global rank from Redis",
+      "type": "add_connection",
+      "content": "Read the highest K members for a top-player page and use rank-by-member for a player's current global/season position. Set a maximum page size, use a stable cursor/version where pagination is supported, and define an explicit tie policy. The <10ms target must be measured at the boundary product intends; Redis command time alone does not establish end-to-end API latency.",
+      "connection": {"edgeId": "lb_read_redis", "sourceNodeId": "lb_read_service", "targetNodeId": "lb_redis", "connectionType": "database-connection", "label": "Top-K and rank queries", "description": "Sorted-set reads with board, season, and projected-version metadata"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_29",
+      "stepNumber": 29,
+      "phase": "Persist scores and serve ranked reads",
+      "title": "Load friend membership from authorized records",
+      "type": "add_connection",
+      "content": "The read service loads only the authenticated player's friend edges from DynamoDB, batch-reads those members' scores from the selected Redis board, then applies the approved tie rule. Do not trust a client-supplied friend list. This read-time method is practical only for a bounded friend set; if the product allows unbounded sets or the measured latency misses target, choose a materialized friend-board/fan-out model and account for its write amplification.",
+      "connection": {"edgeId": "lb_read_dynamodb", "sourceNodeId": "lb_read_service", "targetNodeId": "lb_dynamodb", "connectionType": "database-connection", "label": "Authorized friend edges + durable fallback", "description": "Read the caller's friend scope and retrieve persistent score/history when required"},
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_30",
+      "stepNumber": 30,
+      "phase": "Persist scores and serve ranked reads",
+      "title": "Define rank, friend, and tie semantics",
+      "type": "decision_point",
+      "content": "Rank lookup should return a rank computed from one named board and season version, plus the score and as-of watermark. Friend ranking compares only currently authorized friends. Define whether ranks are zero- or one-based, whether ties share a rank or receive deterministic secondary ordering, and how a friend removed during a request is handled. If a Redis shard is stale or unavailable, either return an explicitly stale result from a bounded durable fallback or fail clearly; never silently invent a rank.",
+      "decision": {
+        "question": "What does a player's rank mean while projections or friend membership change?",
+        "chosen": "Return a rank scoped to a board/season and projection version, with explicit tie semantics and current friend authorization.",
+        "chosenReason": "A rank without its data version or membership scope is not reproducible and can look incorrect to the player.",
+        "alternatives": [
+          {"option": "Return only a numeric rank", "tradeoff": "The client cannot tell which board, season, friend set, or projection version produced it."},
+          {"option": "Serve stale cached rank as current", "tradeoff": "A cache failover or lag can mislead players and support staff."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_31",
+      "stepNumber": 31,
+      "phase": "Persist scores and serve ranked reads",
+      "title": "Recover Redis and DynamoDB projection failures",
+      "type": "explanation",
+      "content": "If Redis loses data, rebuild the affected board from durable score snapshots/event history and mark it warming until its version catches up; do not expose an empty board as a valid zero-score result. If DynamoDB throttles, pause or reduce consumers and retain stream records for replay. If a projection write succeeds but checkpointing fails, replay with event/version idempotency. Bound retries, alert on the oldest unprocessed event, and test a full rebuild at realistic board size before selecting retention or recovery objectives.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_32",
+      "stepNumber": 32,
+      "phase": "Persist scores and serve ranked reads",
+      "title": "Add a failed-event quarantine queue",
+      "type": "add_component",
+      "content": "Route exhausted projection retries to a durable dead-letter/quarantine queue with event ID, partition/sequence, failure class, and redacted diagnostic context. Alert and inspect before redrive; do not discard poison records or replay them as new score events.",
+      "component": {
+        "nodeId": "lb_projection_dlq",
+        "componentType": "queue",
+        "label": "Projection DLQ (SQS)",
+        "description": "Quarantine and controlled redrive for failed score projections",
+        "position": {"x": 1960, "y": 760},
+        "properties": {"componentName": "Projection DLQ (SQS)", "purpose": "Retain exhausted projection failures for alerting, inspection, repair, and idempotent redrive without losing source event identity."},
+        "highlightReason": "The existing Queue catalog component represents a dead-letter queue."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_33",
+      "stepNumber": 33,
+      "phase": "Persist scores and serve ranked reads",
+      "title": "Quarantine and replay poison events safely",
+      "type": "add_connection",
+      "content": "Send only exhausted/poisoned projection records to the DLQ. An operator diagnoses the cause, repairs schema or capacity, and redrives the original event ID through the idempotent projector. Keep stream and DLQ age, retries, redrive count, and unresolved records visible; an unreviewed replay must not double a score.",
+      "connection": {"edgeId": "lb_projector_dlq", "sourceNodeId": "lb_score_projector", "targetNodeId": "lb_projection_dlq", "connectionType": "message-queue", "label": "Exhausted projection failures", "description": "Quarantine original event identity for reviewed idempotent redrive"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_34",
+      "stepNumber": 34,
+      "phase": "Support friend boards, seasons, and operations",
+      "title": "Bound friend ranking before claiming its latency",
+      "type": "decision_point",
+      "content": "Friend edges are privacy-sensitive data: reads are scoped to the authenticated player and friend relationship, and revocations must stop future results. A read-time batch merge avoids per-score fan-out but costs work proportional to the friend set; the prompt gives no friend-count bound. Keep that bound as an explicit product/load-test decision. If it cannot be bounded, prototype a materialized strategy with update amplification, write lag, membership invalidation, and repair behavior measured before selecting it.",
+      "decision": {
+        "question": "Should friend scores be read-time merged or precomputed?",
+        "chosen": "Use read-time score batches only while the friend-set bound meets the measured latency target; otherwise evaluate a materialized alternative with explicit fan-out cost.",
+        "chosenReason": "The prompt requires friend rankings but omits the cardinality needed to make either strategy a defensible unconditional choice.",
+        "alternatives": [
+          {"option": "Precompute a separate friends sorted set for every player", "tradeoff": "Reads are direct but each score update can fan out to many player boards and membership changes need reconciliation."},
+          {"option": "Fetch and sort an unbounded friend list on every read", "tradeoff": "Read CPU and latency grow with the graph and cannot support a credible fixed <10ms claim."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_35",
+      "stepNumber": 35,
+      "phase": "Support friend boards, seasons, and operations",
+      "title": "Rotate seasons without deleting the active board in place",
+      "type": "add_component",
+      "content": "Use a scheduled coordinator (for example, EventBridge invoking Lambda) to create the next monotonically increasing season epoch, persist the effective boundary and policy, and switch the active-board pointer. Use that epoch as a fence: a delayed result from an older season must not mutate the new board. New Redis keys are namespaced by season; historical scores remain queryable under retention policy. Do not synchronously delete millions of members at reset time. Decide how late match results are assigned to a season and make the authoritative server provide/validate that season identity.",
+      "component": {
+        "nodeId": "lb_season_coordinator",
+        "componentType": "serverless-function",
+        "label": "Season Rotation Coordinator",
+        "description": "Scheduled season metadata and active-board pointer change",
+        "position": {"x": 2520, "y": 160},
+        "properties": {"componentName": "Season Rotation Coordinator", "purpose": "Run on an approved schedule, persist the new season/effective boundary, switch the active board namespace, retain historical data by policy, and make retries idempotent.", "runtime": "Python", "coldStart": true},
+        "highlightReason": "The existing Serverless Function can represent the scheduled reset handler; the schedule is an external trigger, not a new palette node."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_36",
+      "stepNumber": 36,
+      "phase": "Support friend boards, seasons, and operations",
+      "title": "Persist season boundaries and history",
+      "type": "add_connection",
+      "content": "Store season ID, effective time, active status, and policy version durably. A repeated schedule invocation must resolve to the same season transition; partial updates are retried from recorded state. Keep previous score snapshots/events under the approved retention rule rather than erasing history as part of the live reset.",
+      "connection": {"edgeId": "lb_season_dynamodb", "sourceNodeId": "lb_season_coordinator", "targetNodeId": "lb_dynamodb", "connectionType": "database-connection", "label": "Idempotent season metadata", "description": "Durable effective boundary, policy version, and historical season lookup"},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_37",
+      "stepNumber": 37,
+      "phase": "Support friend boards, seasons, and operations",
+      "title": "Switch readers and writers to the new season namespace",
+      "type": "add_connection",
+      "content": "Publish the new active season/version to the leaderboard projection and read path. Avoid a global delete/rebuild before the new board can serve; initialize it as empty/current, keep the previous namespace available for history, and define how in-flight old-season events are routed. Read responses include the season version so clients can refresh intentionally.",
+      "connection": {"edgeId": "lb_season_redis", "sourceNodeId": "lb_season_coordinator", "targetNodeId": "lb_redis", "connectionType": "data-flow", "label": "Versioned active-season pointer", "description": "Switch board namespace without synchronous mass deletion"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_38",
+      "stepNumber": 38,
+      "phase": "Support friend boards, seasons, and operations",
+      "title": "Observe service and player-visible correctness",
+      "type": "add_component",
+      "content": "Use CloudWatch metrics, structured redacted logs, and traces with event/request IDs. Observe accepted writes, validation rejections, dedupe hits, API latency distributions (p50/p95/p99 are telemetry examples only, not brief-defined SLO percentiles), stream lag/iterator age, DynamoDB throttles, Redis latency/memory/evictions/hot keys, projection versions, friend fan-in cost, reset completion, DLQ depth, and rebuild progress. Alert on score loss/duplication signals and stale boards as well as infrastructure errors.",
+      "component": {
+        "nodeId": "lb_monitoring",
+        "componentType": "monitoring",
+        "label": "Leaderboard Operations (CloudWatch)",
+        "description": "Latency, correctness, saturation, lag, and recovery signals",
+        "position": {"x": 2800, "y": 520},
+        "properties": {"componentName": "Leaderboard Operations (CloudWatch)", "purpose": "Correlate score event IDs across API, stream, DynamoDB, Redis, resets, and DLQ; alert on target breaches, projection lag, hot keys, score correctness, and recovery progress with redacted telemetry.", "stack": "CloudWatch", "metrics": true, "alerts": true},
+        "highlightReason": "The existing Monitoring component supports CloudWatch and alerting properties."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_39",
+      "stepNumber": 39,
+      "phase": "Support friend boards, seasons, and operations",
+      "title": "Measure the public request path",
+      "type": "add_connection",
+      "content": "Record separate read and write latency, status, throttling, auth failures, and correlation IDs at the API boundary. Exclude bearer tokens, raw secrets, and unnecessary player data from logs. Compare the intended end-to-end read/write measurements with the clarified SLO boundary.",
+      "connection": {"edgeId": "lb_api_monitor", "sourceNodeId": "lb_api_gateway", "targetNodeId": "lb_monitoring", "connectionType": "data-flow", "label": "API latency + authorization signals", "description": "End-to-end route metrics and redacted request correlation"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "leaderboard_40",
+      "stepNumber": 40,
+      "phase": "Support friend boards, seasons, and operations",
+      "title": "Measure event throughput and consumer lag",
+      "type": "add_connection",
+      "content": "Measure accepted events/s, per-key/partition skew, throttles, consumer age/lag, retry rate, and time to drain after a burst. This shows whether the 100k updates/s target is limited by stream partitions, Lambda concurrency, DynamoDB writes, Redis key pressure, or a downstream quota.",
+      "connection": {"edgeId": "lb_stream_monitor", "sourceNodeId": "lb_score_stream", "targetNodeId": "lb_monitoring", "connectionType": "data-flow", "label": "Throughput + lag + partition skew", "description": "Measure the ingest stream and projection backlog under burst load"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_41",
+      "stepNumber": 41,
+      "phase": "Support friend boards, seasons, and operations",
+      "title": "Measure durable storage and projection correctness",
+      "type": "add_connection",
+      "content": "Track DynamoDB conditional conflicts/throttles and Redis latency, memory, evictions, replication/failover, and projected-version lag. Validate that event IDs are applied once and that a recovery rebuild converges to the durable snapshot/event version. A green infrastructure health check is not proof that score totals or ranks are correct.",
+      "connection": {"edgeId": "lb_db_monitor", "sourceNodeId": "lb_dynamodb", "targetNodeId": "lb_monitoring", "connectionType": "data-flow", "label": "Durable writes + version correctness", "description": "Observe throttles, duplicates, persistence, and recovery checks"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_42",
+      "stepNumber": 42,
+      "phase": "Support friend boards, seasons, and operations",
+      "title": "Observe ranking latency, hot keys, and failed events",
+      "type": "add_connection",
+      "content": "Record top-K/rank and friend query latency by board scope, Redis hot-key pressure, season pointer changes, DLQ depth/age, redrives, and board rebuild state. Alert before projection lag exhausts stream retention; test that an unavailable board is reported as unavailable/stale rather than returning a plausible but incorrect rank.",
+      "connection": {"edgeId": "lb_redis_monitor", "sourceNodeId": "lb_redis", "targetNodeId": "lb_monitoring", "connectionType": "data-flow", "label": "Rank latency + hot key + freshness", "description": "Observe read target, cache health, reset state, and projection recovery"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_43",
+      "stepNumber": 43,
+      "phase": "Support friend boards, seasons, and operations",
+      "title": "Scale from measured event rate and hot-key evidence",
+      "type": "scale_trigger",
+      "content": "At the stated 100k updates/s target, first load-test the full score path with realistic game/player skew and the 1M+ concurrent-user connection/request profile. Scale stream partitions, Lambda concurrency, and DynamoDB capacity only within downstream headroom. If one global Redis key saturates or read latency breaches the agreed <10ms boundary, split by a product-valid scope or benchmark sharded top-K fan-in. Exact global rank across shards needs cross-shard counts and an agreed consistency/tie model; do not claim that top-K merge alone solves rank lookup.",
+      "scaleTrigger": {"metric": "Observed event rate approaching 100000 updates/s; API write latency approaching 50ms; read latency approaching the agreed 10ms boundary; single-board Redis hot-key saturation", "action": "Load-test with measured burst/skew; scale partitions and consumers within DynamoDB/Redis quotas; if a global key saturates, evaluate scope sharding and top-K fan-in; separately design and test exact cross-shard rank", "impact": "Identifies the true bottleneck without equating connected users with request rate or treating Redis cluster mode as a single-key scaling guarantee."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_44",
+      "stepNumber": 44,
+      "phase": "Support friend boards, seasons, and operations",
+      "title": "Recover from backlog before replay capacity expires",
+      "type": "scale_trigger",
+      "content": "When stream age, consumer lag, or DLQ depth rises, alert and identify whether the sink is DynamoDB, Redis, or a poison record. Add consumer capacity only if the sink can absorb it; otherwise apply backpressure and preserve the durable backlog. Repair and redrive from the original event ID, verify version convergence, and keep old season namespaces available while recovery runs.",
+      "scaleTrigger": {"metric": "Oldest unprocessed event age rising, projection watermark stalled, repeated throttles, or DLQ depth increasing", "action": "Alert; isolate the constrained sink; bound or pause consumers; preserve source records; repair capacity/schema; inspect DLQ records; redrive idempotently and verify projection versions", "impact": "Prevents silent score loss/duplication and keeps backlog recoverable within the configured stream-retention window."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_45",
+      "stepNumber": 45,
+      "phase": "Support friend boards, seasons, and operations",
+      "title": "Prove the design with correctness and failure tests",
+      "type": "explanation",
+      "content": "Before claiming readiness, load-test 1M+ concurrent users and 100k updates/s with realistic hot players, board scopes, friend-set sizes, and reconnect/request patterns. Measure the agreed read <10ms and write <50ms boundaries and percentile; verify top-K/rank against a reference model, tie behavior, idempotent duplicate/reordered events, server-auth rejection, DynamoDB and Redis throttling/failover, stream replay, poison-event DLQ/redrive, cache rebuild, friend revocation, and scheduled season rollover with in-flight/late results. Confirm score history retention and privacy controls. The brief does not specify availability, region count, tie policy, friend cardinality, event retention, latency percentile/boundary, or strong-consistency semantics; obtain those decisions and report measured results rather than inventing guarantees.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_46",
+      "stepNumber": 46,
+      "phase": "Support friend boards, seasons, and operations",
+      "title": "Route filtered traffic from the WAF to the API",
+      "type": "add_connection",
+      "content": "Forward only traffic accepted by the edge filter to the public API gateway; the gateway still performs authentication, authorization, and request validation.",
+      "connection": {"edgeId": "lb_waf_gateway", "sourceNodeId": "lb_waf", "targetNodeId": "lb_api_gateway", "connectionType": "http", "label": "WAF-validated HTTPS requests", "description": "Public player reads and trusted game-server score writes"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:8"]
+    },
+    {
+      "id": "leaderboard_47",
+      "stepNumber": 47,
+      "phase": "Support friend boards, seasons, and operations",
+      "title": "Authenticate callers before protected operations",
+      "type": "add_connection",
+      "content": "Resolve a verified player or game-server principal and the requested board scope before dispatching reads or accepting a score event.",
+      "connection": {"edgeId": "lb_gateway_auth", "sourceNodeId": "lb_api_gateway", "targetNodeId": "lb_auth", "connectionType": "api-call", "label": "Identity and board-scope check", "description": "Authenticate the caller and authorize game, season, player, and friend scope"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_48",
+      "stepNumber": 48,
+      "phase": "Support friend boards, seasons, and operations",
+      "title": "Apply distributed ingress limits",
+      "type": "add_connection",
+      "content": "Apply policy and per-principal quotas before expensive score validation; keep the rate-limit decision distinct from an anti-cheat verdict.",
+      "connection": {"edgeId": "lb_gateway_rate_limit", "sourceNodeId": "lb_api_gateway", "targetNodeId": "lb_rate_limiter", "connectionType": "api-call", "label": "Scoped rate-limit decision", "description": "Tier, player, game-server, and IP quotas for bounded ingress"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "leaderboard_49",
+      "stepNumber": 49,
+      "phase": "Support friend boards, seasons, and operations",
+      "title": "Pass verified identity to score validation",
+      "type": "add_connection",
+      "content": "The intake handler receives the verified game-server principal and authorization result; it does not trust a player or score identity copied from an untrusted request body.",
+      "connection": {"edgeId": "lb_auth_intake", "sourceNodeId": "lb_auth", "targetNodeId": "lb_score_intake", "connectionType": "api-call", "label": "Verified principal and match scope", "description": "Authorized server identity and board/season decision for score validation"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "leaderboard_50",
+      "stepNumber": 50,
+      "phase": "Support friend boards, seasons, and operations",
+      "title": "Enforce ingress quota before publishing",
+      "type": "add_connection",
+      "content": "Reject or defer over-limit requests before they consume stream capacity; return the documented retry signal and rate-limit headers to the caller.",
+      "connection": {"edgeId": "lb_rate_limit_intake", "sourceNodeId": "lb_rate_limiter", "targetNodeId": "lb_score_intake", "connectionType": "api-call", "label": "Allowed score-ingress request", "description": "Only requests within the applicable tier and abuse limits proceed"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "leaderboard_51",
+      "stepNumber": 51,
+      "phase": "Support friend boards, seasons, and operations",
+      "title": "Scope ranking reads to the authorized principal",
+      "type": "add_connection",
+      "content": "Pass the authenticated principal and permitted friend scope to the read service so a client cannot query another player's private friend board by changing request parameters.",
+      "connection": {"edgeId": "lb_auth_read", "sourceNodeId": "lb_auth", "targetNodeId": "lb_read_service", "connectionType": "api-call", "label": "Authorized ranking query", "description": "Verified caller identity and permitted global, season, or friend-board scope"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"]
+    }
+  ]
+}

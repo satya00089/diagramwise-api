@@ -1,0 +1,802 @@
+{
+  "problem_id": "ai_009",
+  "version": "1.0.0-review-draft",
+  "totalSteps": 42,
+  "requirementRevision": null,
+  "phases": [
+    {
+      "name": "Establish the clinical and safety contract",
+      "stepRange": [1, 6],
+      "description": "Preserve the supplied scope, make clinical decision ownership explicit, and expose the unknowns that must be resolved before an implementation or regulatory claim."
+    },
+    {
+      "name": "Secure image intake and retrieve clinical context",
+      "stepRange": [7, 23],
+      "description": "Build the clinician entry point, consent and authorization checks, a protected DICOM path, bounded analysis jobs, and standards-based EHR context retrieval."
+    },
+    {
+      "name": "Produce versioned, explainable decision support",
+      "stepRange": [24, 33],
+      "description": "Keep imaging inference separate from clinician-facing differential suggestions, bind results to evaluated model versions, and return uncertainty and review context."
+    },
+    {
+      "name": "Audit every recommendation and operate safely",
+      "stepRange": [34, 42],
+      "description": "Make audit durability part of the response contract, monitor clinical and technical outcomes, and leave unprovided validation and governance choices open."
+    }
+  ],
+  "steps": [
+    {
+      "id": "med_01_scope",
+      "stepNumber": 1,
+      "phase": "Establish the clinical and safety contract",
+      "title": "Read the frozen problem brief before drawing components",
+      "type": "explanation",
+      "content": "Problem: Design an AI-Powered Medical Diagnosis Assistant. Description: Design an AI system that assists clinicians with medical image analysis, symptom assessment, and diagnostic suggestions, with explainable AI and compliance with healthcare regulations.\n\nRequirements (verbatim):\n- Analyze medical images (X-rays, MRIs, CT scans)\n- Assess patient symptoms and history\n- Provide differential diagnosis suggestions\n- Explain AI reasoning to clinicians\n- Integrate with Electronic Health Records (EHR)\n- Support clinical decision support workflows\n- Track and audit all AI recommendations\n- Handle patient data privacy and consent\n\nConstraints (verbatim):\n- Diagnostic accuracy above 95% for supported conditions\n- Image analysis latency under 5 seconds\n- HIPAA and GDPR compliant\n- FDA/CE regulatory requirements\n- Zero tolerance for critical missed diagnoses\n\nHints (verbatim):\n- Use specialized vision models for medical imaging\n- Implement DICOM-compatible image processing pipelines\n- Use FHIR standards for EHR integration\n- Implement Grad-CAM or attention maps for explainability\n- Deploy with on-premises option for data sovereignty\n- Use federated learning for multi-hospital training\n\nCompanies listed: Google Health, IBM Watson Health, Tempus, PathAI. These are context only, not a mandated vendor or evidence of product approval. This is clinician-assistive decision support, not autonomous diagnosis. The numerical and regulatory statements are requirements to validate, not achieved results or compliance claims.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "med_02_safety_contract",
+      "stepNumber": 2,
+      "phase": "Establish the clinical and safety contract",
+      "title": "Keep clinical responsibility with the clinician",
+      "type": "decision_point",
+      "content": "The product returns image findings and a supported-condition differential for clinician review. It must not autonomously diagnose, prescribe, close a case, or silently turn uncertainty into a negative result. A clinician remains responsible for the clinical decision. Treat zero tolerance for critical missed diagnoses as a safety requirement demanding hazard analysis, fail-safe escalation, independent clinical evaluation, and transparent limitations; software alone cannot establish a guarantee of zero misses. The intended use, supported conditions, validation population, acceptance criteria, and escalation owner are not specified and must be decided by clinical and regulatory stakeholders.",
+      "decision": {
+        "question": "Who owns the final diagnosis and what may this system do?",
+        "chosen": "The system provides bounded, evidence-linked decision support; an authorized clinician makes and records the clinical decision",
+        "chosenReason": "This matches the clinician-assistive brief and prevents a model score or generated explanation from being mistaken for an autonomous diagnosis.",
+        "alternatives": [
+          {"option": "Allow the model to finalize a diagnosis", "tradeoff": "Changes the intended use and safety/regulatory case and is not authorized by this brief."},
+          {"option": "Hide uncertainty and always return a ranked answer", "tradeoff": "Can make unsupported or out-of-scope cases appear clinically certain."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "med_03_clinician_client",
+      "stepNumber": 3,
+      "phase": "Establish the clinical and safety contract",
+      "title": "Add the clinician review workspace",
+      "type": "add_component",
+      "component": {
+        "nodeId": "med_clinician_client",
+        "componentType": "web-app",
+        "label": "Clinician Review Workspace",
+        "description": "Authorized image review, patient context, evidence, and clinician-owned disposition",
+        "position": {"x": 0, "y": 260},
+        "properties": {
+          "componentName": "Clinician Review Workspace",
+          "purpose": "Let an authenticated clinician submit or select an authorized study, inspect image findings and their limitations, review symptom/history context and a differential, and record a human disposition. Never present a model suggestion as a final diagnosis or permit an unattended clinical action."
+        },
+        "highlightReason": "The named user is a clinician and the brief asks for clinical decision support, so review and decision ownership belong in the visible workflow."
+      },
+      "content": "Show the study and patient identity context needed for safe review, the model/version, image findings, explanation overlay, uncertainty or out-of-scope status, and the clinician's own disposition as distinct fields. Do not use a heatmap as proof that a prediction is correct.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "med_04_api_boundary",
+      "stepNumber": 4,
+      "phase": "Establish the clinical and safety contract",
+      "title": "Add the clinical API boundary",
+      "type": "add_component",
+      "component": {
+        "nodeId": "med_api_gateway",
+        "componentType": "api-gateway",
+        "label": "Clinical API & FHIR Boundary",
+        "description": "Authenticated request validation, patient-context routing, and bounded deadlines",
+        "position": {"x": 340, "y": 260},
+        "properties": {
+          "componentName": "Clinical API & FHIR Boundary",
+          "purpose": "Validate study and patient references, authenticate the caller, enforce purpose-of-use and request-size policy, propagate a bounded analysis deadline, and route the application and FHIR integration calls. This boundary is a design control, not a declaration of HIPAA/GDPR compliance."
+        },
+        "highlightReason": "Patient and image access need an explicit trust boundary before any model or storage component sees protected information."
+      },
+      "content": "Keep authorization and consent checks server-side. Reject malformed or oversized studies safely, preserve a correlation identifier without placing patient identifiers in general-purpose logs, and establish the image-analysis timing boundary with stakeholders before claiming the under-5-second target.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "med_05_client_gateway",
+      "stepNumber": 5,
+      "phase": "Establish the clinical and safety contract",
+      "title": "Send a clinician request through the protected API",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "med_client_gateway",
+        "sourceNodeId": "med_clinician_client",
+        "targetNodeId": "med_api_gateway",
+        "connectionType": "https",
+        "label": "Study reference, patient context & review request",
+        "description": "Submit an authenticated clinical decision-support request with a study reference and request correlation ID; return explicit processing, uncertainty, and review states."
+      },
+      "content": "The client sends identifiers and the clinician's requested workflow action, not a trusted assertion of consent. The server resolves the current patient, clinician, purpose, and permitted study before retrieval.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "med_06_authorization",
+      "stepNumber": 6,
+      "phase": "Establish the clinical and safety contract",
+      "title": "Add consent, identity, and access policy",
+      "type": "add_component",
+      "component": {
+        "nodeId": "med_access_policy",
+        "componentType": "auth-service",
+        "label": "Clinician Identity & Patient Consent Policy",
+        "description": "Role, relationship, purpose-of-use, and consent decisions",
+        "position": {"x": 680, "y": 20},
+        "properties": {
+          "componentName": "Clinician Identity & Patient Consent Policy",
+          "purpose": "Verify clinician identity and role, patient-care relationship, allowed purpose, and current consent or other approved legal basis before each protected read or write. Apply minimum-necessary access, record policy decisions, and deny or return a reviewable unavailable state when authoritative policy data cannot be checked. Do not infer a legal basis or claim compliance from this component alone."
+        },
+        "highlightReason": "The brief explicitly requires patient privacy and consent; authorization must be enforced before data is fetched or submitted to inference."
+      },
+      "content": "Define consent capture, withdrawal propagation, emergency-access policy, retention/deletion, patient rights, and regional residency with privacy and clinical owners. Those behaviors are not specified by the prompt; an unavailable or revoked permission must not silently fall back to broader access.",
+      "requirementIds": ["legacy-requirement:8", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "med_07_scope_question",
+      "stepNumber": 7,
+      "phase": "Secure image intake and retrieve clinical context",
+      "title": "Enforce consent and role checks at the API boundary",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "med_gateway_access_policy",
+        "sourceNodeId": "med_api_gateway",
+        "targetNodeId": "med_access_policy",
+        "connectionType": "api-call",
+        "label": "Clinician identity + patient purpose + consent state",
+        "description": "Resolve the clinician, patient relationship, purpose, current consent/legal basis, and policy version before image or EHR data access."
+      },
+      "content": "Re-evaluate the applicable policy for protected reads and writes, propagate the policy decision/version, and fail closed when authorization cannot be verified. Do not treat login alone as permission to access a patient's study.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "med_08_orchestrator",
+      "stepNumber": 8,
+      "phase": "Secure image intake and retrieve clinical context",
+      "title": "Add a bounded clinical workflow coordinator",
+      "type": "add_component",
+      "component": {
+        "nodeId": "med_workflow",
+        "componentType": "ai-orchestrator",
+        "label": "Clinical Decision-Support Workflow",
+        "description": "Explicit workflow state machine; not an autonomous diagnostic agent",
+        "position": {"x": 700, "y": 260},
+        "properties": {
+          "componentName": "Clinical Decision-Support Workflow",
+          "purpose": "Coordinate consent-authorized context retrieval, a deadline-bound image-analysis job, supported-condition checks, differential assembly, uncertainty handling, durable audit acceptance, and clinician review. Use explicit states and approved model versions; never autonomously finalize a diagnosis or take treatment action."
+        },
+        "highlightReason": "Several modalities and policy checks must be coordinated consistently, while the clinical workflow remains explicit and reviewable."
+      },
+      "content": "This is a controlled application workflow, not an open-ended agent. Make transitions and failure states visible: authorized, accepted, analyzing, result available for review, out of scope, needs more information, and unavailable. Only return a clinical suggestion when every required input and policy check is satisfied.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "med_09_gateway_workflow",
+      "stepNumber": 9,
+      "phase": "Secure image intake and retrieve clinical context",
+      "title": "Route the authorized request into the workflow",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "med_gateway_workflow",
+        "sourceNodeId": "med_api_gateway",
+        "targetNodeId": "med_workflow",
+        "connectionType": "api-call",
+        "label": "Authorized request + analysis deadline",
+        "description": "Forward the verified clinician, patient/study references, purpose and remaining end-to-end budget without trusting client-supplied consent claims."
+      },
+      "content": "Propagate one deadline through context lookup, image processing, inference, explanation generation, and audit acceptance. Define whether the under-5-second target is measured from accepted image receipt or another boundary, and whether it is a percentile or a hard maximum; the brief does not say.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "med_10_dicom_store",
+      "stepNumber": 10,
+      "phase": "Secure image intake and retrieve clinical context",
+      "title": "Store source studies in a protected DICOM vault",
+      "type": "add_component",
+      "component": {
+        "nodeId": "med_image_store",
+        "componentType": "object-storage",
+        "label": "Protected DICOM Study Store",
+        "description": "Encrypted source objects, immutable study references, and lifecycle controls",
+        "position": {"x": 1030, "y": 500},
+        "properties": {
+          "componentName": "Protected DICOM Study Store",
+          "purpose": "Keep original DICOM studies and derived artifacts under approved encryption, tenant/site boundaries, access logging, integrity checks, retention, deletion, backup, and residency policy. Store opaque study references in application records; never make object URLs public."
+        },
+        "highlightReason": "X-rays, MRIs, and CT studies are large sensitive objects and need a protected, integrity-checkable storage boundary separate from workflow metadata."
+      },
+      "content": "The DICOM hint requires preserving study/series/instance relationships and relevant metadata while controlling de-identification or minimization for each use. No retention period, encryption key model, or residency region is supplied, so keep these as policy decisions.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "med_11_gateway_upload_grant",
+      "stepNumber": 11,
+      "phase": "Secure image intake and retrieve clinical context",
+      "title": "Issue a scoped, short-lived upload authorization",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "med_gateway_image_store",
+        "sourceNodeId": "med_api_gateway",
+        "targetNodeId": "med_image_store",
+        "connectionType": "api-call",
+        "label": "Consent-checked study upload grant",
+        "description": "Create a site-scoped, single-study upload target after authorization; enforce expiry, expected object shape, integrity verification, and no public access."
+      },
+      "content": "The upload grant is not a substitute for consent or access checks. Bind it to the authorized study and intended operation, prevent object-key substitution, and verify the received object's checksum and DICOM structure before analysis.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "med_12_client_image_upload",
+      "stepNumber": 12,
+      "phase": "Secure image intake and retrieve clinical context",
+      "title": "Upload the image without routing bulk bytes through the UI API",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "med_client_image_store",
+        "sourceNodeId": "med_clinician_client",
+        "targetNodeId": "med_image_store",
+        "connectionType": "data-flow",
+        "label": "Authorized DICOM objects + integrity metadata",
+        "description": "Transfer study bytes over the scoped protected path and return an opaque object reference for server-side verification."
+      },
+      "content": "Do not place PHI in filenames, URLs, browser telemetry, or generic error reports. A completed upload is not yet a valid study: the backend verifies object integrity, modality, required DICOM relationships, and the association with the authorized patient/study before queuing work.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:2"]
+    },
+    {
+      "id": "med_13_analysis_queue",
+      "stepNumber": 13,
+      "phase": "Secure image intake and retrieve clinical context",
+      "title": "Add bounded, deadline-aware image work admission",
+      "type": "add_component",
+      "component": {
+        "nodeId": "med_analysis_queue",
+        "componentType": "queue",
+        "label": "Priority DICOM Analysis Queue",
+        "description": "Bounded admission with study reference, deadline, and idempotency key",
+        "position": {"x": 1030, "y": 260},
+        "properties": {
+          "componentName": "Priority DICOM Analysis Queue",
+          "purpose": "Durably admit authorized study-analysis jobs with opaque references, priority, an end-to-end deadline, and idempotency. Bound backlog and age; reject or expose delayed work rather than silently returning an expired or partial result. Do not put raw image content or unnecessary patient identifiers in queue messages."
+        },
+        "highlightReason": "A durable queue can absorb controlled bursts, but its wait time must remain inside the actual image-analysis objective and never hide an overdue result."
+      },
+      "content": "Queueing is not proof of meeting under 5 seconds. Measure admission delay and queue age as part of the agreed end-to-end boundary; reserve capacity or reject safely when the deadline cannot be honored. Retry only idempotent processing and prevent stale jobs from producing a current-looking recommendation.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "med_14_workflow_analysis_queue",
+      "stepNumber": 14,
+      "phase": "Secure image intake and retrieve clinical context",
+      "title": "Admit analysis only after checks and deadline validation",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "med_workflow_analysis_queue",
+        "sourceNodeId": "med_workflow",
+        "targetNodeId": "med_analysis_queue",
+        "connectionType": "message-queue",
+        "label": "Verified study reference + deadline",
+        "description": "Submit one authorized, integrity-checked analysis job with an idempotency key and enough remaining time for processing and result review."
+      },
+      "content": "Do not enqueue if consent, study association, supported modality, object integrity, or deadline preconditions fail. Return a specific reviewable error or pending state; never fabricate an image result from missing input.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "med_15_dicom_worker",
+      "stepNumber": 15,
+      "phase": "Secure image intake and retrieve clinical context",
+      "title": "Add DICOM validation and preprocessing workers",
+      "type": "add_component",
+      "component": {
+        "nodeId": "med_dicom_worker",
+        "componentType": "processing-worker",
+        "label": "DICOM Validation & Preprocessing",
+        "description": "Modality-aware integrity checks and bounded image preparation",
+        "position": {"x": 1370, "y": 260},
+        "properties": {
+          "componentName": "DICOM Validation & Preprocessing",
+          "purpose": "Validate DICOM study structure and supported modality, preserve study and series identity, apply the approved pixel pipeline, emit preprocessing provenance, and stop with an explicit unsupported/invalid status when inputs are incomplete. Keep processing bounded by the propagated deadline and approved deployment profile."
+        },
+        "highlightReason": "DICOM-compatible processing is an explicit hint, and modality errors or altered pixel handling can invalidate downstream model results."
+      },
+      "content": "Version the parser, pixel transformations, and modality-specific preprocessing together with the inference result. Do not assume X-ray, MRI, and CT share one preprocessing contract; the supported protocol and modality matrix must be specified and validated by clinical imaging owners.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "med_16_queue_worker",
+      "stepNumber": 16,
+      "phase": "Secure image intake and retrieve clinical context",
+      "title": "Deliver only live, authorized jobs to preprocessing",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "med_analysis_queue_worker",
+        "sourceNodeId": "med_analysis_queue",
+        "targetNodeId": "med_dicom_worker",
+        "connectionType": "message-queue",
+        "label": "Opaque study job + remaining deadline",
+        "description": "Lease an idempotent job to an approved worker profile; expired, duplicate, or revoked jobs are stopped and made visible for review."
+      },
+      "content": "Worker concurrency and hardware are deployment choices to validate. Keep queue age, retries, duplicate processing, and worker exhaustion observable, and ensure a stale retry cannot overwrite a newer study version or review state.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "med_17_worker_store_read",
+      "stepNumber": 17,
+      "phase": "Secure image intake and retrieve clinical context",
+      "title": "Fetch and verify the exact source study",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "med_dicom_worker_image_store",
+        "sourceNodeId": "med_dicom_worker",
+        "targetNodeId": "med_image_store",
+        "connectionType": "data-flow",
+        "label": "Authorized source DICOM + checksum",
+        "description": "Retrieve the immutable object version for the job and verify its checksum and study association before pixel processing."
+      },
+      "content": "Use object-version identity, not a mutable path alone, so a queued request cannot analyze bytes uploaded later under the same key. Minimize worker-local copies and honor the selected on-premises or hosted data boundary.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "med_18_fhir_adapter",
+      "stepNumber": 18,
+      "phase": "Secure image intake and retrieve clinical context",
+      "title": "Add a FHIR-aware EHR integration adapter",
+      "type": "add_component",
+      "component": {
+        "nodeId": "med_fhir_adapter",
+        "componentType": "backend-server",
+        "label": "FHIR EHR Integration Adapter",
+        "description": "Versioned FHIR mapping, authorization checks, and provenance",
+        "position": {"x": 1030, "y": -80},
+        "properties": {
+          "componentName": "FHIR EHR Integration Adapter",
+          "purpose": "Translate only approved FHIR resource reads and writes for the clinical workflow, validate profiles and identifiers, re-check purpose and patient authorization, preserve source/version provenance, and return explicit missing or stale context states. Do not assume a FHIR version, profile, resource set, or write permission not supplied by the brief."
+        },
+        "highlightReason": "The brief explicitly calls for EHR integration using FHIR, but the EHR's version, profile, resource coverage, and permitted operations remain unknown."
+      },
+      "content": "Use a standard FHIR boundary while asking each EHR/site owner which version, profiles, terminology bindings, patient matching rules, scopes, quotas, and availability contract apply. Avoid putting unnecessary PHI in traces and ensure a failed context lookup does not become an invented history.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "med_19_external_ehr",
+      "stepNumber": 19,
+      "phase": "Secure image intake and retrieve clinical context",
+      "title": "Represent the hospital EHR as an external system",
+      "type": "add_component",
+      "component": {
+        "nodeId": "med_external_ehr",
+        "componentType": "custom-component",
+        "label": "Hospital EHR (FHIR endpoint)",
+        "description": "External system; no dedicated EHR catalog type exists in the current palette",
+        "position": {"x": 1370, "y": -80},
+        "properties": {
+          "componentName": "Hospital EHR (FHIR endpoint)",
+          "purpose": "External source of permitted patient symptoms and history through the hospital's approved FHIR endpoint. This custom node represents a system boundary, not a newly added catalog component or a selected EHR vendor."
+        },
+        "highlightReason": "The external EHR must be visible as a separate trust and availability boundary; the current catalog has no dedicated EHR component type."
+      },
+      "content": "The custom node is only a diagram representation of the external endpoint; no catalog component was added. Confirm supported FHIR resources, authentication, patient matching, update semantics, and downtime behavior with the owning institution.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "med_20_workflow_fhir",
+      "stepNumber": 20,
+      "phase": "Secure image intake and retrieve clinical context",
+      "title": "Request only consent-authorized clinical context",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "med_workflow_fhir_adapter",
+        "sourceNodeId": "med_workflow",
+        "targetNodeId": "med_fhir_adapter",
+        "connectionType": "api-call",
+        "label": "Patient reference + minimum-necessary context query",
+        "description": "Request only the approved symptom/history fields needed by the current workflow, with patient authorization, purpose, and source provenance."
+      },
+      "content": "Use explicit resource allowlists and time bounds chosen by clinical stakeholders. If the EHR response is stale, incomplete, unauthorized, or unavailable, surface that fact and request clinician input rather than silently treating absent data as negative history.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "med_21_fhir_ehr_request",
+      "stepNumber": 21,
+      "phase": "Secure image intake and retrieve clinical context",
+      "title": "Read approved context using the site's FHIR contract",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "med_fhir_ehr_request",
+        "sourceNodeId": "med_fhir_adapter",
+        "targetNodeId": "med_external_ehr",
+        "connectionType": "https",
+        "label": "Authorized FHIR query",
+        "description": "Fetch allowed symptom, history, and study-link resources under the site's agreed FHIR version/profile and access scope."
+      },
+      "content": "FHIR defines interoperability patterns but does not itself grant access or ensure two EHRs share identical semantics. Validate profile and terminology compatibility and carry source timestamps into the clinician-visible context.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "med_22_ehr_fhir_response",
+      "stepNumber": 22,
+      "phase": "Secure image intake and retrieve clinical context",
+      "title": "Return source context with provenance",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "med_ehr_fhir_response",
+        "sourceNodeId": "med_external_ehr",
+        "targetNodeId": "med_fhir_adapter",
+        "connectionType": "https",
+        "label": "FHIR resources + source versions",
+        "description": "Return only authorized resources together with the source timestamps, identifiers, and validation status needed for a traceable clinical context."
+      },
+      "content": "Do not erase distinctions between absent, unknown, stale, and explicitly negative data. Keep raw resource payloads within the protected clinical boundary and minimize copies in transient processing.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "med_23_fhir_workflow_response",
+      "stepNumber": 23,
+      "phase": "Secure image intake and retrieve clinical context",
+      "title": "Return validated symptoms and history to the workflow",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "med_fhir_adapter_workflow",
+        "sourceNodeId": "med_fhir_adapter",
+        "targetNodeId": "med_workflow",
+        "connectionType": "api-call",
+        "label": "Validated context + provenance or explicit gap",
+        "description": "Return normalized permitted facts with source metadata, or a typed stale, missing, denied, or unavailable outcome."
+      },
+      "content": "The workflow combines patient symptoms/history with imaging only when the required context is available and correctly associated. Show provenance and ask the clinician to confirm or correct relevant context; never let a malformed patient match enter inference.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "med_24_vision_model",
+      "stepNumber": 24,
+      "phase": "Produce versioned, explainable decision support",
+      "title": "Define the evaluated supported-condition model scope",
+      "type": "add_component",
+      "component": {
+        "nodeId": "med_vision_model",
+        "componentType": "ml-model",
+        "label": "Versioned Medical Imaging Vision Model",
+        "description": "Specialized model artifact for explicitly supported modalities and conditions",
+        "position": {"x": 1710, "y": 260},
+        "properties": {
+          "componentName": "Versioned Medical Imaging Vision Model",
+          "purpose": "Analyze only the modalities, acquisition protocols, and supported conditions explicitly included in an approved intended-use and evaluation scope. Emit image findings, calibrated or otherwise qualified uncertainty, model version, and explanation inputs; abstain or return unsupported when outside scope. The greater-than-95% target is not evidence of achieved accuracy or clinical validation."
+        },
+        "highlightReason": "A specialized vision model is a supplied hint, while the supported condition set and performance evidence must be defined rather than assumed."
+      },
+      "content": "Do not collapse all conditions or modalities into one headline accuracy. Clinical owners must define supported-condition boundaries, reference standard, validation data and sites, subgroup reporting, confidence intervals, calibration, and acceptance criteria. No validation cohort or measured score is supplied here.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "med_25_model_serving",
+      "stepNumber": 25,
+      "phase": "Produce versioned, explainable decision support",
+      "title": "Add a deadline-aware medical inference endpoint",
+      "type": "add_component",
+      "component": {
+        "nodeId": "med_model_serving",
+        "componentType": "model-serving",
+        "label": "Medical Image Inference & Explanation API",
+        "description": "Pinned model execution, bounded inference, and explanation artifact generation",
+        "position": {"x": 2050, "y": 260},
+        "properties": {
+          "componentName": "Medical Image Inference & Explanation API",
+          "purpose": "Run the approved immutable model and preprocessing version under the request deadline; return supported image findings, uncertainty, model provenance, and a modality-appropriate explanation artifact such as a reviewed Grad-CAM or attention map. Return an explicit timeout, unsupported, or unavailable result rather than an unqualified suggestion."
+        },
+        "highlightReason": "The under-5-second image-analysis objective and explainability requirement need one observable inference boundary tied to an exact model version."
+      },
+      "content": "Measure queue wait, preprocessing, model execution, explanation generation, and response serialization separately as well as at the agreed end-to-end boundary. A heatmap is an aid for clinician inspection, not a causal proof, diagnostic confirmation, or regulatory validation.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "med_26_model_registry",
+      "stepNumber": 26,
+      "phase": "Produce versioned, explainable decision support",
+      "title": "Register immutable model and evaluation evidence",
+      "type": "add_component",
+      "component": {
+        "nodeId": "med_model_registry",
+        "componentType": "model-registry",
+        "label": "Model Version & Clinical Evidence Registry",
+        "description": "Approved artifact identity, intended use, and linked evaluation records",
+        "position": {"x": 1710, "y": -80},
+        "properties": {
+          "componentName": "Model Version & Clinical Evidence Registry",
+          "purpose": "Resolve immutable model and preprocessing artifacts to their intended use, supported modalities/conditions, evaluation evidence, release status, and rollback history. Serving may use only a version released through the organization’s clinical, quality, security, and regulatory approval process; this registry is not itself FDA/CE authorization."
+        },
+        "highlightReason": "A recommendation must be attributable to the exact model and processing versions that produced it, with evidence available for review."
+      },
+      "content": "Keep model weights, preprocessing, explanation method, evaluation report, and release approvals linked by immutable version and digest. Define who can approve or revoke a release and how a newly discovered safety signal suspends use; these governance roles are open questions.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "med_27_registry_serving",
+      "stepNumber": 27,
+      "phase": "Produce versioned, explainable decision support",
+      "title": "Serve only an explicitly released model version",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "med_registry_serving",
+        "sourceNodeId": "med_model_registry",
+        "targetNodeId": "med_model_serving",
+        "connectionType": "api-call",
+        "label": "Released artifact + scope + evidence reference",
+        "description": "Resolve an immutable approved artifact and its allowed modality/condition scope; reject a missing, revoked, or mismatched release."
+      },
+      "content": "Pin each request to one registry version and include that version in every output and audit event. Do not automatically promote a model merely because a benchmark crosses 95%; the intended-use and regulatory approval process is separate.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "med_28_worker_model_request",
+      "stepNumber": 28,
+      "phase": "Produce versioned, explainable decision support",
+      "title": "Send normalized imaging under the original deadline",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "med_worker_model_serving",
+        "sourceNodeId": "med_dicom_worker",
+        "targetNodeId": "med_model_serving",
+        "connectionType": "api-call",
+        "label": "Validated pixels + modality + remaining budget",
+        "description": "Submit the versioned preprocessing result, study correlation reference, supported modality, and remaining deadline without unnecessary patient-identifying fields."
+      },
+      "content": "Preserve a traceable link to the exact source object and preprocessing version while limiting identifying content sent to inference. If required image quality or protocol checks fail, return a qualified failure state and route the case to clinician review.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "med_29_model_worker_result",
+      "stepNumber": 29,
+      "phase": "Produce versioned, explainable decision support",
+      "title": "Return findings, uncertainty, and explanation provenance",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "med_model_serving_worker",
+        "sourceNodeId": "med_model_serving",
+        "targetNodeId": "med_dicom_worker",
+        "connectionType": "api-call",
+        "label": "Versioned findings + uncertainty + explanation artifact",
+        "description": "Return only findings in the released scope, with model and preprocessing versions, uncertainty/abstention status, and an explanation artifact reference."
+      },
+      "content": "The response is image evidence, not a diagnosis. Enforce response schema and study identity; do not convert timeout, unsupported modality, low-quality input, or out-of-scope output into a normal finding. Include map-generation method/version and explicit limitations.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "med_30_cds_service",
+      "stepNumber": 30,
+      "phase": "Produce versioned, explainable decision support",
+      "title": "Add a constrained differential-suggestion service",
+      "type": "add_component",
+      "component": {
+        "nodeId": "med_differential_service",
+        "componentType": "backend-server",
+        "label": "Evidence-Bound Differential & CDS Service",
+        "description": "Combine permitted context and image evidence into a clinician-review packet",
+        "position": {"x": 2390, "y": 260},
+        "properties": {
+          "componentName": "Evidence-Bound Differential & CDS Service",
+          "purpose": "Combine current clinician-provided symptoms/history and versioned image findings into a bounded differential suggestion with supporting evidence, missing-context warnings, scope status, and uncertainty. Keep each suggestion traceable to inputs and model versions; do not autonomously finalize a diagnosis or invent a clinical threshold."
+        },
+        "highlightReason": "Differential suggestions require explicit combination of image evidence and symptoms/history, with limits and evidence visible to the clinician."
+      },
+      "content": "Define how image findings and context may be combined, how conflicts are shown, which conditions are supported, what triggers abstention, and what the clinician must review. These clinical rules and thresholds are not present in the brief and must not be filled in by the walkthrough author.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "med_31_workflow_cds",
+      "stepNumber": 31,
+      "phase": "Produce versioned, explainable decision support",
+      "title": "Build the differential from linked evidence, not fluent text alone",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "med_workflow_cds",
+        "sourceNodeId": "med_workflow",
+        "targetNodeId": "med_differential_service",
+        "connectionType": "api-call",
+        "label": "Image findings + current symptoms/history + provenance",
+        "description": "Submit the versioned image result and consent-authorized context with their sources, timestamps, and explicit missing/uncertain states."
+      },
+      "content": "Do not combine data across patient or study boundaries. The service should receive structured findings and evidence references, not only a free-form model narrative; keep the full prompt/context payload inside the protected processing boundary.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "med_32_cds_workflow",
+      "stepNumber": 32,
+      "phase": "Produce versioned, explainable decision support",
+      "title": "Return a qualified clinician-review packet",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "med_cds_workflow",
+        "sourceNodeId": "med_differential_service",
+        "targetNodeId": "med_workflow",
+        "connectionType": "api-call",
+        "label": "Differential + evidence + limitations + status",
+        "description": "Return candidate suggestions and their linked evidence, explanation references, model versions, uncertainty, missing context, and explicit abstention/out-of-scope status."
+      },
+      "content": "Present an ordered differential only if the clinical owners have approved how ordering is interpreted. Show the inputs and evidence supporting each suggestion and distinguish model-derived image findings from clinician-entered facts and EHR-sourced history.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "med_33_uncertainty_gate",
+      "stepNumber": 33,
+      "phase": "Produce versioned, explainable decision support",
+      "title": "Invoke the registered vision model behind the serving boundary",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "med_serving_vision_model",
+        "sourceNodeId": "med_model_serving",
+        "targetNodeId": "med_vision_model",
+        "connectionType": "api-call",
+        "label": "Pinned modality-specific inference",
+        "description": "Run the immutable released vision artifact only for supported inputs, returning findings, uncertainty, model identity, and explanation inputs."
+      },
+      "content": "If a study is unsupported, required history is unavailable, the result misses the deadline, the model version is revoked, or safety policy cannot be evaluated, show an explicit unavailable/needs-review state. Do not label a case low risk, normal, or complete merely because the model returned no positive finding. The numeric confidence and escalation thresholds remain interview questions.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "med_34_audit_queue",
+      "stepNumber": 34,
+      "phase": "Audit every recommendation and operate safely",
+      "title": "Add a durable recommendation-audit event boundary",
+      "type": "add_component",
+      "component": {
+        "nodeId": "med_audit_queue",
+        "componentType": "queue",
+        "label": "Durable Clinical Recommendation Audit Queue",
+        "description": "Append-only event acceptance before a suggestion is shown",
+        "position": {"x": 2390, "y": 540},
+        "properties": {
+          "componentName": "Durable Clinical Recommendation Audit Queue",
+          "purpose": "Accept an idempotent, tamper-evident audit event for every generated suggestion, abstention, or relevant failure before the workflow marks a recommendation ready for clinician display. Carry protected references and provenance, not unnecessary raw image/PHI copies. If durable acceptance fails, do not silently show an unaudited recommendation."
+        },
+        "highlightReason": "The brief requires tracking and auditing every recommendation; durable event acceptance is a clear boundary before the result is considered ready."
+      },
+      "content": "Agree the audit event schema, integrity protection, access controls, retention, legal holds, correction process, and deletion obligations with privacy, security, quality, and regulatory owners. A queue does not by itself prove records are immutable or compliant.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "med_35_workflow_audit_queue",
+      "stepNumber": 35,
+      "phase": "Audit every recommendation and operate safely",
+      "title": "Persist recommendation provenance before releasing it to the UI",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "med_workflow_audit_queue",
+        "sourceNodeId": "med_workflow",
+        "targetNodeId": "med_audit_queue",
+        "connectionType": "message-queue",
+        "label": "Recommendation, evidence refs, versions & reviewer context",
+        "description": "Require durable idempotent acceptance of the recommendation/abstention event and provenance before marking the review packet ready."
+      },
+      "content": "Record who initiated the workflow, authorized purpose, study and patient references, model/preprocessing versions, input-source versions, generated suggestion and explanation references, status, and eventual human disposition according to approved policy. Keep latency impact visible and do not block indefinitely; timeout becomes an explicit unavailable state.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "med_36_audit_store",
+      "stepNumber": 36,
+      "phase": "Audit every recommendation and operate safely",
+      "title": "Store searchable, retention-controlled audit records",
+      "type": "add_component",
+      "component": {
+        "nodeId": "med_audit_store",
+        "componentType": "database",
+        "label": "Clinical Recommendation & Review Audit Store",
+        "description": "Access-controlled index of recommendation provenance and clinician disposition",
+        "position": {"x": 2730, "y": 540},
+        "properties": {
+          "componentName": "Clinical Recommendation & Review Audit Store",
+          "purpose": "Persist idempotently the protected audit events, references to exact image/model/context versions, access decisions, recommendation status, explanation references, and clinician review/disposition. Enforce role-limited reads, integrity checks, approved retention/deletion, and backup/recovery policy without copying unnecessary clinical payloads."
+        },
+        "highlightReason": "A recommendation needs durable, queryable provenance for clinical review, incident investigation, and whatever regulatory evidence process is applicable."
+      },
+      "content": "Define tenant/site partitioning and query access around authorized clinical and audit roles. Retention duration and immutable-storage requirements are not given; select them only with the responsible owners and applicable legal/regulatory review.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "med_37_queue_audit_store",
+      "stepNumber": 37,
+      "phase": "Audit every recommendation and operate safely",
+      "title": "Consume audit events idempotently and reconcile delivery",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "med_audit_queue_store",
+        "sourceNodeId": "med_audit_queue",
+        "targetNodeId": "med_audit_store",
+        "connectionType": "message-queue",
+        "label": "Idempotent protected audit event",
+        "description": "Persist accepted events with deduplication, integrity validation, retry visibility, and reconciliation for events not yet indexed."
+      },
+      "content": "Separate durable event acceptance from downstream indexing so an audit-store outage can be detected and recovered without losing accepted events. Monitor consumer lag and reconciliation; alert on gaps in a way that does not expose PHI.",
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "med_38_workflow_gateway_result",
+      "stepNumber": 38,
+      "phase": "Audit every recommendation and operate safely",
+      "title": "Return a ready-for-review packet only after audit acceptance",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "med_workflow_gateway_result",
+        "sourceNodeId": "med_workflow",
+        "targetNodeId": "med_api_gateway",
+        "connectionType": "api-call",
+        "label": "Audited suggestion or explicit non-result",
+        "description": "Return the review packet only after durable audit acceptance; otherwise return a typed unavailable state with no recommendation presented as complete."
+      },
+      "content": "Include source evidence, supported-condition scope, explanation and its limitations, model/preprocessing versions, missing context, and whether the clinician must take a follow-up action. Do not claim accuracy above 95%, regulatory clearance, or compliance in the response unless separately established through approved evidence.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "med_39_gateway_client_result",
+      "stepNumber": 39,
+      "phase": "Audit every recommendation and operate safely",
+      "title": "Present suggestions as clinician-facing evidence, not diagnosis",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "med_gateway_client_result",
+        "sourceNodeId": "med_api_gateway",
+        "targetNodeId": "med_clinician_client",
+        "connectionType": "https",
+        "label": "Differential, evidence, uncertainty & review actions",
+        "description": "Render the audited, versioned recommendation packet and capture an authorized clinician's review or explicit non-acceptance."
+      },
+      "content": "Use plain-language labels such as AI-generated suggestion and clinician review required. Keep overlay controls and the underlying source image available; visually distinguish clinician-entered findings, EHR facts, model output, and final human disposition.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "med_40_monitoring",
+      "stepNumber": 40,
+      "phase": "Audit every recommendation and operate safely",
+      "title": "Monitor latency, quality, safety signals, and privacy controls",
+      "type": "add_component",
+      "component": {
+        "nodeId": "med_monitoring",
+        "componentType": "monitoring",
+        "label": "Clinical AI Operations & Safety Monitoring",
+        "description": "Protected operational telemetry, evaluation signals, and escalation visibility",
+        "position": {"x": 2050, "y": 800},
+        "properties": {
+          "componentName": "Clinical AI Operations & Safety Monitoring",
+          "purpose": "Measure agreed end-to-end image-analysis latency and stage budgets, queue age, unsupported/abstention rates, model and modality versions, audit delivery/reconciliation, availability, and approved clinical safety/quality signals. Keep PHI out of general telemetry and route safety events to the designated clinical governance process."
+        },
+        "highlightReason": "The latency and accuracy goals cannot be trusted without version-aware measurement, operational failure visibility, and a governed response to safety signals."
+      },
+      "content": "Define each metric, denominator, reporting window, subgroup, reference standard, alert owner, and permissible use before using dashboard values as evidence. The brief supplies no validation cohort, latency percentile, or critical-miss escalation threshold; do not invent them. Clinical performance monitoring requires an approved privacy and governance design.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "med_41_monitoring_workflow",
+      "stepNumber": 41,
+      "phase": "Audit every recommendation and operate safely",
+      "title": "Feed privacy-safe operational signals to monitoring",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "med_workflow_monitoring",
+        "sourceNodeId": "med_workflow",
+        "targetNodeId": "med_monitoring",
+        "connectionType": "data-flow",
+        "label": "De-identified workflow status + timing spans",
+        "description": "Publish minimized operational events and versioned metrics without raw images, free-text symptoms, or direct patient identifiers."
+      },
+      "content": "Use correlation tokens whose lookup is separately access-controlled. Audit clinician access and operational telemetry access independently, and ensure dashboards cannot be used to reconstruct patient records outside the approved clinical workflow.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "med_42_open_governance",
+      "stepNumber": 42,
+      "phase": "Audit every recommendation and operate safely",
+      "title": "Leave clinical validation and regulatory decisions with their owners",
+      "type": "decision_point",
+      "content": "Before implementation, ask: Which conditions, modalities, sites, and intended-use population are in scope? What reference standard and validation cohort will support the greater-than-95% target, and how are subgroup results and critical misses reviewed? What exact start/end events and percentile or maximum define under-5-second image analysis? Which FHIR version/profiles/resources and EHRs are required? What consent, withdrawal, residency, retention, emergency-access, and deletion policies apply? Who approves clinical rules, model releases, human escalation, monitoring alerts, and incident response? What is the applicable FDA/CE pathway and evidence set, as determined by qualified regulatory stakeholders? Is federated learning approved, and what privacy, site-participation, and model-update governance would it require?\n\nDo not state that this architecture is HIPAA/GDPR compliant, FDA cleared, CE marked, clinically validated, above 95% accurate, or guaranteed to have zero critical misses. Those are not established by a diagram or this draft. The federated-learning hint and on-premises option are design topics to evaluate, not selected or verified capabilities.",
+      "decision": {
+        "question": "What evidence is required before a model or deployment may be used in clinical practice?",
+        "chosen": "Require owner-approved clinical validation, safety case, security/privacy controls, and regulatory release evidence for each intended use and deployment profile",
+        "chosenReason": "The problem names strict accuracy, privacy, safety, and regulatory goals but provides none of the definitions or evidence needed to claim they are met.",
+        "alternatives": [
+          {"option": "Treat the stated thresholds and regulations as already satisfied", "tradeoff": "Confuses design requirements with measured evidence or legal authorization."},
+          {"option": "Use federated learning by default", "tradeoff": "Adds multi-site governance, privacy, and evaluation choices not approved or specified in the brief."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

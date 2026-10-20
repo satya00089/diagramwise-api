@@ -1,0 +1,414 @@
+{
+  "problem_id": "6901ef1b9420d83630aca88b",
+  "version": "1.0-review",
+  "requirementRevision": null,
+  "totalSteps": 68,
+  "phases": [
+    {"name": "Establish scope and a safe control plane", "stepRange": [1, 13], "description": "Separate migration control from bulk data movement, record the unknowns, and establish identity, state, and source-consistent snapshot semantics."},
+    {"name": "Inventory sources and move a resumable baseline", "stepRange": [14, 40], "description": "Discover database and file sources, create durable partition manifests, and copy bounded, checksummed work units through a private transfer path."},
+    {"name": "Catch up changes, validate, and cut over", "stepRange": [41, 54], "description": "Apply database deltas through a known watermark, compare source and target, then move the application endpoint only through an approved blue-green gate."},
+    {"name": "Recover safely and prove operational readiness", "stepRange": [55, 68], "description": "Make lag, failures, cost, and safety observable; resume idempotently; and distinguish a safe rollback from pointing users at stale data."}
+  ],
+  "steps": [
+    {
+      "id": "gcm_01", "stepNumber": 1, "phase": "Establish scope and a safe control plane", "title": "Read the migration brief as written", "type": "explanation",
+      "content": "The brief names Google Cloud as the destination and requires petabyte-scale transfer, minimal downtime, integrity checks, incremental migration, database and file sources, progress visibility, rollback, and cost/time optimization. It also requires consistency, a limited downtime window, operation within bandwidth limits, secure transfer, and graceful failure handling. It does not specify source engines, source snapshot/CDC capabilities, data shape, transformation rules, available bandwidth, a downtime duration, RPO/RTO, or a budget. Do not turn any of those unknowns into a numeric service promise.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_02", "stepNumber": 2, "phase": "Establish scope and a safe control plane", "title": "Make discovery an explicit design activity", "type": "explanation",
+      "content": "Assume a source inventory can identify database tables or equivalent partitions, file paths or object keys, sizes, versions, and access controls. Confirm whether each database can provide a transactionally consistent snapshot and a change log with a durable position. Confirm file mutation semantics and whether source applications can expose a write fence. Destination engine compatibility, schema conversion, metadata/ACL preservation, encryption-key ownership, and the approved downtime window require stakeholder decisions. If a source lacks the needed snapshot or change feed, use a source-specific reconciliation plan rather than claiming the generic path guarantees consistency.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_03", "stepNumber": 3, "phase": "Establish scope and a safe control plane", "title": "Add the migration operator console", "type": "add_component",
+      "content": "Show each migration's source/target, inventory revision, planned and completed work by bytes and logical records, verification state, CDC watermark, current phase, errors, and estimated remaining work with its assumptions. Require an authorized operator for pause, resume, retry, approval, cutover, and rollback actions; a queued task count alone is not a trustworthy completion percentage.",
+      "component": {"nodeId": "gcm_console", "componentType": "web-app", "label": "Migration Operations Console", "description": "Job progress, verification evidence, and gated operator actions", "position": {"x": 0, "y": 240}, "properties": {"componentName": "Migration Operations Console", "purpose": "Present job inventory revisions, bytes and records copied/verified, CDC watermarks, lag, failures, estimated completion with assumptions, and role-authorized pause, resume, approval, cutover, and rollback controls."}, "highlightReason": "The existing Web App component provides the operator experience without inventing a migration-specific node type."},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_04", "stepNumber": 4, "phase": "Establish scope and a safe control plane", "title": "Add an authenticated API boundary", "type": "add_component",
+      "content": "Validate job definitions and source/target references, authenticate operators and service identities, enforce per-tenant authorization and request limits, and keep credentials out of job payloads and logs.",
+      "component": {"nodeId": "gcm_gateway", "componentType": "api-gateway", "label": "Migration API Gateway", "description": "Authenticated control requests and validation", "position": {"x": 300, "y": 240}, "properties": {"componentName": "Migration API Gateway", "purpose": "Authenticate operator and service requests, validate job definitions and source/target references, enforce tenant scope and request limits, require TLS, and redact credentials from logs.", "inputValidation": true, "authentication": "JWT", "rateLimiting": true, "tlsTermination": true}, "highlightReason": "The catalog API Gateway has the input-validation, identity, TLS, and throttling properties this control plane needs."},
+      "requirementIds": ["legacy-constraint:4"]
+    },
+    {
+      "id": "gcm_05", "stepNumber": 5, "phase": "Establish scope and a safe control plane", "title": "Route operator commands over TLS", "type": "add_connection",
+      "content": "Submit job creation, progress reads, and explicit state-changing actions through the gateway. Return a durable job ID and current state; a timed-out submit must be safely retried with a caller-supplied idempotency key.",
+      "connection": {"edgeId": "gcm_console_gateway", "sourceNodeId": "gcm_console", "targetNodeId": "gcm_gateway", "connectionType": "http", "label": "TLS control API", "description": "Authenticated job creation, progress reads, and idempotent operator commands."},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "gcm_06", "stepNumber": 6, "phase": "Establish scope and a safe control plane", "title": "Add the migration coordinator", "type": "add_component",
+      "content": "Orchestrate a versioned job state machine: discover, plan, baseline copy, delta catch-up, validate, cutover, and complete or recover. Keep the coordinator stateless where practical; leases and durable checkpoints, not one process's memory, decide which work is safe to resume.",
+      "component": {"nodeId": "gcm_coordinator", "componentType": "backend-server", "label": "Migration Coordinator", "description": "Durable job orchestration and gated phase transitions", "position": {"x": 600, "y": 240}, "properties": {"componentName": "Migration Coordinator", "purpose": "Validate a versioned migration plan, coordinate inventory and bounded work, persist phase transitions and watermarks, pause on safety violations, and require explicit validation approval before cutover."}, "highlightReason": "The existing Backend Server represents orchestration logic; durable progress is stored separately."},
+      "requirementIds": ["legacy-requirement:2","legacy-requirement:4","legacy-requirement:6","legacy-constraint:1","legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_07", "stepNumber": 7, "phase": "Establish scope and a safe control plane", "title": "Send validated commands to orchestration", "type": "add_connection",
+      "content": "The coordinator rechecks the authenticated principal's permissions and the job's current version before accepting any transition. A repeated command with the same key returns the existing job result rather than starting duplicate migrations.",
+      "connection": {"edgeId": "gcm_gateway_coordinator", "sourceNodeId": "gcm_gateway", "targetNodeId": "gcm_coordinator", "connectionType": "http", "label": "Validated job commands", "description": "Versioned, tenant-scoped control requests with idempotent command identity."},
+      "requirementIds": ["legacy-constraint:4"]
+    },
+    {
+      "id": "gcm_08", "stepNumber": 8, "phase": "Establish scope and a safe control plane", "title": "Persist job, manifest, and checkpoint metadata", "type": "add_component",
+      "content": "Use a transactional metadata store for job state, source snapshot identity, immutable manifest revisions, work-unit leases, retry state, checksums, destination acknowledgements, CDC positions, approval records, and cutover epochs. This is control metadata, not a copy of the petabyte data set. The relational-store choice is a replaceable design assumption; confirm its recovery, encryption, and transaction behavior against the operating requirements.",
+      "component": {"nodeId": "gcm_metadata", "componentType": "database", "label": "Migration Metadata Store", "description": "Transactional manifests, idempotency keys, progress, and watermarks", "position": {"x": 900, "y": 240}, "properties": {"componentName": "Migration Metadata Store", "purpose": "Persist versioned jobs, immutable source manifests, work leases, idempotency identities, per-unit checksum and destination acknowledgements, CDC positions, approvals, and cutover epochs; keep bulk payloads in object storage.", "type": "RDBMS", "engine": "postgresql", "workload": "OLTP", "encryption": true, "backups": true, "pitr": true, "auditLog": true}, "highlightReason": "The existing Database supports atomic metadata updates and explicit recovery controls; its engine is illustrative, not a source or target requirement."},
+      "requirementIds": ["legacy-requirement:3","legacy-requirement:4","legacy-requirement:6","legacy-constraint:1","legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_09", "stepNumber": 9, "phase": "Establish scope and a safe control plane", "title": "Make checkpoint commits durable", "type": "add_connection",
+      "content": "Commit a work-unit checkpoint only after the destination write is acknowledged and its validation evidence is durable. Since a queue acknowledgement and destination commit may not share a transaction, workers must tolerate redelivery and reconcile the target by stable migration, source-version, and partition identity.",
+      "connection": {"edgeId": "gcm_coordinator_metadata", "sourceNodeId": "gcm_coordinator", "targetNodeId": "gcm_metadata", "connectionType": "database-connection", "label": "Job state and durable checkpoints", "description": "Transactional phase, manifest, lease, idempotency, and source/target watermark records."},
+      "requirementIds": ["legacy-requirement:3","legacy-requirement:4","legacy-requirement:6","legacy-constraint:1","legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_10", "stepNumber": 10, "phase": "Establish scope and a safe control plane", "title": "Add a credential and key integration", "type": "add_component",
+      "content": "Resolve narrowly scoped source and destination credentials at runtime, prefer short-lived identities, rotate them under owner policy, and audit access. The catalog has no Google Cloud Secret Manager or KMS node; this generic Secrets Manager represents the secret boundary, while the actual Google Cloud IAM and customer-managed-key integration must be selected during implementation.",
+      "component": {"nodeId": "gcm_secrets", "componentType": "secrets-manager", "label": "Credential and Key Service", "description": "Runtime source credentials and destination key references", "position": {"x": 600, "y": 0}, "properties": {"componentName": "Credential and Key Service", "purpose": "Resolve short-lived least-privilege source and destination credentials and key references at runtime; rotate secrets, audit access, and never place secret values in manifests, queue messages, logs, or traces.", "rotation": true, "encryption": true, "audit": true}, "highlightReason": "This reuses the catalog's credential-management component while explicitly leaving the Google Cloud provider mapping open."},
+      "requirementIds": ["legacy-constraint:4"]
+    },
+    {
+      "id": "gcm_11", "stepNumber": 11, "phase": "Establish scope and a safe control plane", "title": "Resolve credentials only for authorized work", "type": "add_connection",
+      "content": "The coordinator requests a scoped secret reference for the job; workers receive only the minimum source or destination access needed for their leased partition. Rotate or revoke credentials without rewriting durable manifests.",
+      "connection": {"edgeId": "gcm_coordinator_secrets", "sourceNodeId": "gcm_coordinator", "targetNodeId": "gcm_secrets", "connectionType": "api-call", "label": "Scoped secret references", "description": "Audited runtime resolution; secret material is not copied into migration state."},
+      "requirementIds": ["legacy-constraint:4"]
+    },
+    {
+      "id": "gcm_12", "stepNumber": 12, "phase": "Establish scope and a safe control plane", "title": "Choose a consistent snapshot and change-feed contract", "type": "decision_point",
+      "content": "Baseline copying is only consistent when each source's snapshot boundary can be related to its change stream. Record that boundary and its log position together; do not start a snapshot and an unrelated CDC stream and assume they converge.",
+      "decision": {"question": "How will a database baseline and its incremental changes describe one consistent history?", "chosen": "Use a source-supported consistent snapshot plus the matching durable CDC position, record both in the manifest, then apply changes in source order through a persisted watermark.", "chosenReason": "A verifiable boundary prevents changes from being omitted or applied twice without detection. If a source cannot expose this contract, pause planning and require a source-specific reconciliation or outage decision.", "alternatives": [{"option": "Copy tables while independently starting a change feed", "tradeoff": "The gap or overlap between reads and changes is undefined, so the target can be inconsistent."}, {"option": "Assume the source engine provides the required snapshot and log semantics", "tradeoff": "Unsupported engines or expired logs can make a seemingly successful run impossible to reconcile."}]},
+      "requirementIds": ["legacy-requirement:4","legacy-constraint:1","legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_13", "stepNumber": 13, "phase": "Establish scope and a safe control plane", "title": "Estimate duration from measured bottlenecks", "type": "explanation",
+      "content": "Treat this as a proposed estimation and benchmarking method, not an acceptance target supplied by the brief. Estimate duration from inventoried bytes divided by sustainable effective throughput, then include validation, CDC catch-up, retry reserve, and transformation cost. Effective throughput is bounded by the slowest source read, permitted network bandwidth, worker CPU, and destination write path. Record the inventory revision, observed rates, compression assumptions, measurement conditions, and uncertainty. The brief specifies petabyte-scale migration and qualitative downtime and bandwidth constraints, but no exact data volume, bandwidth rate, completion-time or downtime target, or budget; obtain owner approval before converting measurements into SLOs.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "gcm_14", "stepNumber": 14, "phase": "Inventory sources and move a resumable baseline", "title": "Add the source database adapter boundary", "type": "add_component",
+      "content": "Represent the actual source-engine adapters as a configured set, not as one assumed database vendor. Discover schemas, tables or collections, keys, partition boundaries, snapshot support, log-retention limits, and export restrictions. Preserve the source's consistency boundary and do not issue a full scan that overloads production without an approved load policy.",
+      "component": {"nodeId": "gcm_source_db", "componentType": "database", "label": "Source Database Adapters", "description": "Engine-specific snapshot reads and CDC capability discovery", "position": {"x": 900, "y": 560}, "properties": {"componentName": "Source Database Adapters", "purpose": "Discover configured source engines, schema, key ranges, consistent snapshot tokens, CDC positions and retention, and safe read limits; use engine-specific adapters without assuming one vendor or treating a read as a transactionally consistent export."}, "highlightReason": "The catalog Database component represents the requested database sources; its generic purpose preserves the unspecified engine choice."},
+      "requirementIds": ["legacy-requirement:1","legacy-requirement:3","legacy-requirement:4","legacy-requirement:5","legacy-constraint:1"]
+    },
+    {
+      "id": "gcm_15", "stepNumber": 15, "phase": "Inventory sources and move a resumable baseline", "title": "Add the file-source adapter", "type": "add_component",
+      "content": "Inventory file systems and source object stores using source-appropriate adapters. Capture stable object identity, version or snapshot where available, path/key, size, metadata, ACL policy, and content fingerprint. The File Storage catalog node is representative; NFS is only its catalog default and is not a claim that all sources use NFS.",
+      "component": {"nodeId": "gcm_source_files", "componentType": "file-storage", "label": "Source Files and Objects", "description": "Filesystem and object-store inventory adapters", "position": {"x": 900, "y": 800}, "properties": {"componentName": "Source Files and Objects", "purpose": "Inventory source file systems and object stores through source-specific adapters; capture stable version or snapshot identity, key/path, size, metadata, ACL mapping, and content fingerprint without assuming one source protocol."}, "highlightReason": "The existing File Storage component expresses file migration; one catalog type can front multiple configured adapters."},
+      "requirementIds": ["legacy-requirement:1","legacy-requirement:3","legacy-requirement:5","legacy-constraint:1"]
+    },
+    {
+      "id": "gcm_16", "stepNumber": 16, "phase": "Inventory sources and move a resumable baseline", "title": "Restrict the transfer network", "type": "add_component",
+      "content": "Allow only approved source, migration-worker, and destination endpoints and protocols. Log decisions for investigation while excluding payloads and credentials; security review must define actual routes and egress policy.",
+      "component": {"nodeId": "gcm_firewall", "componentType": "firewall", "label": "Migration Network Firewall", "description": "Restricted source-to-worker transfer policy", "position": {"x": 1200, "y": 560}, "properties": {"componentName": "Migration Network Firewall", "purpose": "Allow-list approved source, worker, and Google Cloud endpoints and required protocols, deny unrelated egress, and retain redacted security decision logs for audit.", "type": "Network Firewall", "ips": true, "logging": true}, "highlightReason": "The catalog Firewall supplies a concrete network control; exact rules remain environment-specific."},
+      "requirementIds": ["legacy-constraint:4"]
+    },
+    {
+      "id": "gcm_17", "stepNumber": 17, "phase": "Inventory sources and move a resumable baseline", "title": "Add a private transfer tunnel", "type": "add_component",
+      "content": "Use a private, encrypted path where the source and Google Cloud network design supports it. The VPN catalog component is an illustrative private-network option; separately require TLS for service/API traffic and encryption at rest at both ends. Validate available throughput and failover before scheduling the bulk copy.",
+      "component": {"nodeId": "gcm_vpn", "componentType": "vpn-gateway", "label": "Private Transfer Tunnel", "description": "Encrypted source-to-cloud network path", "position": {"x": 1500, "y": 560}, "properties": {"componentName": "Private Transfer Tunnel", "purpose": "Carry approved migration traffic over a private encrypted path where available; measure usable capacity, monitor tunnel health, and keep application TLS and at-rest encryption as separate controls.", "protocol": "IPSec", "encryption": "AES-256"}, "highlightReason": "The existing VPN Gateway reuses a supported network primitive; it is not a substitute for end-to-end TLS or storage encryption."},
+      "requirementIds": ["legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_18", "stepNumber": 18, "phase": "Inventory sources and move a resumable baseline", "title": "Apply network policy to database reads", "type": "add_connection",
+      "content": "Only the configured source database endpoints and approved snapshot/CDC protocols may enter the migration path. The source adapter still enforces its own identity and query/read limits.",
+      "connection": {"edgeId": "gcm_db_firewall", "sourceNodeId": "gcm_source_db", "targetNodeId": "gcm_firewall", "connectionType": "data-flow", "label": "Restricted database reads", "description": "Source snapshots and change records enter only over approved network rules."},
+      "requirementIds": ["legacy-requirement:1","legacy-requirement:4","legacy-constraint:4"]
+    },
+    {
+      "id": "gcm_19", "stepNumber": 19, "phase": "Inventory sources and move a resumable baseline", "title": "Apply network policy to file reads", "type": "add_connection",
+      "content": "File and object adapters use source-specific read permissions and protocol allow-lists. Never widen firewall access to make one incompatible source silently work.",
+      "connection": {"edgeId": "gcm_files_firewall", "sourceNodeId": "gcm_source_files", "targetNodeId": "gcm_firewall", "connectionType": "data-flow", "label": "Restricted file inventory and reads", "description": "Versioned file or object reads traverse explicitly approved source routes."},
+      "requirementIds": ["legacy-requirement:1","legacy-requirement:5","legacy-constraint:4"]
+    },
+    {
+      "id": "gcm_20", "stepNumber": 20, "phase": "Inventory sources and move a resumable baseline", "title": "Carry approved traffic through the private path", "type": "add_connection",
+      "content": "Route only allow-listed migration flows through the tunnel and record its health and effective throughput. A tunnel failure pauses or safely throttles affected work; do not fall back to an unapproved public route.",
+      "connection": {"edgeId": "gcm_firewall_vpn", "sourceNodeId": "gcm_firewall", "targetNodeId": "gcm_vpn", "connectionType": "data-flow", "label": "Filtered encrypted transfer", "description": "Approved database, file, and object traffic follows the private route."},
+      "requirementIds": ["legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_21", "stepNumber": 21, "phase": "Inventory sources and move a resumable baseline", "title": "Add the inventory and manifest planner", "type": "add_component",
+      "content": "Build an immutable manifest revision from source discovery. Partition work at source-safe boundaries such as table/key ranges or file/object prefixes, preserve snapshot/version identity, and assign each unit a deterministic idempotency key. Keep sensitive paths and metadata access-controlled.",
+      "component": {"nodeId": "gcm_planner", "componentType": "processing-worker", "label": "Inventory and Manifest Planner", "description": "Source discovery, deterministic work units, and immutable manifests", "position": {"x": 1800, "y": 560}, "properties": {"componentName": "Inventory and Manifest Planner", "purpose": "Discover database and file/object inventories, preserve source snapshot or version identity, create deterministic bounded partition manifests and idempotency keys, and estimate bytes and record counts without claiming that estimates are exact."}, "highlightReason": "The existing Processing Worker can perform asynchronous inventory and planning jobs without a new component type."},
+      "requirementIds": ["legacy-requirement:1","legacy-requirement:5","legacy-requirement:6","legacy-requirement:8","legacy-constraint:1"]
+    },
+    {
+      "id": "gcm_22", "stepNumber": 22, "phase": "Inventory sources and move a resumable baseline", "title": "Ask the coordinator to create the manifest", "type": "add_connection",
+      "content": "The coordinator validates source scope, snapshot token, adapter capabilities, requested transforms, and the operator-approved source-load policy before starting discovery.",
+      "connection": {"edgeId": "gcm_coordinator_planner", "sourceNodeId": "gcm_coordinator", "targetNodeId": "gcm_planner", "connectionType": "api-call", "label": "Versioned inventory plan", "description": "Authorized discovery request tied to source identity and a job revision."},
+      "requirementIds": ["legacy-requirement:1","legacy-requirement:5","legacy-constraint:1"]
+    },
+    {
+      "id": "gcm_23", "stepNumber": 23, "phase": "Inventory sources and move a resumable baseline", "title": "Read inventory through the approved route", "type": "add_connection",
+      "content": "The planner uses scoped credentials and source-safe reads through the private route. If a source cannot produce a stable inventory or consistent database snapshot, mark that source blocked and resolve its semantics before copy begins.",
+      "connection": {"edgeId": "gcm_vpn_planner", "sourceNodeId": "gcm_vpn", "targetNodeId": "gcm_planner", "connectionType": "data-flow", "label": "Private source discovery", "description": "Planner access to source adapters is protected by firewall policy and runtime credentials."},
+      "requirementIds": ["legacy-requirement:1","legacy-requirement:5","legacy-constraint:1","legacy-constraint:4"]
+    },
+    {
+      "id": "gcm_24", "stepNumber": 24, "phase": "Inventory sources and move a resumable baseline", "title": "Commit an immutable manifest revision", "type": "add_connection",
+      "content": "Persist manifest rows and a revision hash before enqueuing work. Progress should be computed against this frozen inventory revision; a later source rescan creates a new revision rather than silently changing the denominator mid-run.",
+      "connection": {"edgeId": "gcm_planner_metadata", "sourceNodeId": "gcm_planner", "targetNodeId": "gcm_metadata", "connectionType": "database-connection", "label": "Manifest and inventory evidence", "description": "Versioned source identities, partition boundaries, estimates, and snapshot positions."},
+      "requirementIds": ["legacy-requirement:6","legacy-constraint:1"]
+    },
+    {
+      "id": "gcm_25", "stepNumber": 25, "phase": "Inventory sources and move a resumable baseline", "title": "Add a durable partition work queue", "type": "add_component",
+      "content": "Queue manifest-unit references rather than bulk payloads. Use stable work IDs, visibility/lease semantics, bounded retries with backoff, and a quarantine path for repeatedly failing units. Queue delivery may repeat; it is not a claim of exactly-once execution.",
+      "component": {"nodeId": "gcm_queue", "componentType": "queue", "label": "Migration Work Queue", "description": "Durable, idempotent partition scheduling", "position": {"x": 2100, "y": 560}, "properties": {"componentName": "Migration Work Queue", "purpose": "Durably schedule manifest-unit references by stable ID, lease work, retry transient failures with backoff, and quarantine repeated failures for review; consumers deduplicate because delivery may repeat.", "durable": true, "backoff": "exponential"}, "highlightReason": "The catalog Queue supports durable asynchronous work and retry behavior; payload data remains outside the queue."},
+      "requirementIds": ["legacy-requirement:6","legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_26", "stepNumber": 26, "phase": "Inventory sources and move a resumable baseline", "title": "Schedule only a validated manifest", "type": "add_connection",
+      "content": "The coordinator releases work only for an approved manifest revision and pauses enqueueing when source pressure, target health, or network capacity crosses the operator-defined safety envelope.",
+      "connection": {"edgeId": "gcm_coordinator_queue", "sourceNodeId": "gcm_coordinator", "targetNodeId": "gcm_queue", "connectionType": "message-queue", "label": "Approved migration work", "description": "Leased, versioned partition references; no credentials or bulk data in messages."},
+      "requirementIds": ["legacy-requirement:6","legacy-constraint:3","legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_27", "stepNumber": 27, "phase": "Inventory sources and move a resumable baseline", "title": "Release inventory units to the queue", "type": "add_connection",
+      "content": "Enqueue one stable reference per manifest unit and record the accepted queue position. Rebuilding or retrying an enqueue must not create a second logical migration unit.",
+      "connection": {"edgeId": "gcm_planner_queue", "sourceNodeId": "gcm_planner", "targetNodeId": "gcm_queue", "connectionType": "message-queue", "label": "Manifest-unit references", "description": "Deterministic table/key ranges or file/object work IDs tied to a manifest revision."},
+      "requirementIds": ["legacy-requirement:1","legacy-requirement:6","legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_28", "stepNumber": 28, "phase": "Inventory sources and move a resumable baseline", "title": "Add bounded parallel copy workers", "type": "add_component",
+      "content": "Workers read one leased source unit, compress only when it reduces end-to-end cost without exceeding CPU limits, encrypt in transit, write to the destination or staging area, verify the write, and commit an idempotent checkpoint. Bound parallelism by the slowest measured source, network, worker, and destination capacity.",
+      "component": {"nodeId": "gcm_workers", "componentType": "processing-worker", "label": "Baseline Copy Workers", "description": "Resumable parallel database and file transfer", "position": {"x": 2400, "y": 560}, "properties": {"componentName": "Baseline Copy Workers", "purpose": "Read bounded database or file/object manifest units, use source-version-aware idempotency, optionally compress within CPU and bandwidth budgets, encrypt transport, verify destination writes, checkpoint after durable acknowledgement, and throttle to source, network, and target limits.", "tasks": "Data Processing", "autoscale": true}, "highlightReason": "The existing Processing Worker covers parallel copy and retry; autoscaling remains bounded by explicit source and network safety limits."},
+      "requirementIds": ["legacy-requirement:1","legacy-requirement:3","legacy-requirement:5","legacy-requirement:8","legacy-constraint:3","legacy-constraint:4","legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_29", "stepNumber": 29, "phase": "Inventory sources and move a resumable baseline", "title": "Dispatch work with at-least-once recovery", "type": "add_connection",
+      "content": "A worker acknowledges a queue lease only after durable output and checkpoint state are confirmed. A crash can replay work, so writes must be idempotent or reconciled by partition identity and source version before retry completion is reported.",
+      "connection": {"edgeId": "gcm_queue_workers", "sourceNodeId": "gcm_queue", "targetNodeId": "gcm_workers", "connectionType": "message-queue", "label": "Leased partition tasks", "description": "At-least-once work references with retry and deduplication semantics."},
+      "requirementIds": ["legacy-requirement:6","legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_30", "stepNumber": 30, "phase": "Inventory sources and move a resumable baseline", "title": "Copy from sources over the private route", "type": "add_connection",
+      "content": "Workers read source database and file units through the filtered tunnel using short-lived, least-privilege access. If connectivity drops, preserve the last verified checkpoint and resume from the same immutable source identity rather than silently advancing to newer data.",
+      "connection": {"edgeId": "gcm_vpn_workers", "sourceNodeId": "gcm_vpn", "targetNodeId": "gcm_workers", "connectionType": "data-flow", "label": "Encrypted source reads", "description": "Source snapshots and file/object versions enter bounded copy workers through approved network routes."},
+      "requirementIds": ["legacy-requirement:1","legacy-requirement:5","legacy-constraint:1","legacy-constraint:4","legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_31", "stepNumber": 31, "phase": "Inventory sources and move a resumable baseline", "title": "Add a Google Cloud staging bucket", "type": "add_component",
+      "content": "Stage large file/object partitions and transfer manifests in a destination bucket when direct publication would expose incomplete data. Use versioned object identities and checksums, restrict access to the migration identity, and apply the approved encryption and retention policy. Staging lifecycle and retention are cost/security decisions, not assumptions in the brief.",
+      "component": {"nodeId": "gcm_staging", "componentType": "object-storage", "label": "GCS Staging and Manifest Bucket", "description": "Versioned transfer objects and integrity evidence", "position": {"x": 2700, "y": 800}, "properties": {"componentName": "GCS Staging and Manifest Bucket", "purpose": "Hold versioned staging objects, immutable transfer manifests, and integrity evidence under restricted migration access; apply the approved at-rest encryption and lifecycle policy and avoid exposing incomplete objects as published data.", "provider": "GCS", "versioning": true, "checksumValidation": true}, "highlightReason": "The existing Object Storage component explicitly supports GCS, versioning, and checksum validation."},
+      "requirementIds": ["legacy-requirement:3","legacy-requirement:5","legacy-constraint:1","legacy-constraint:4"]
+    },
+    {
+      "id": "gcm_32", "stepNumber": 32, "phase": "Inventory sources and move a resumable baseline", "title": "Write and verify staged transfer units", "type": "add_connection",
+      "content": "Write to a key containing migration, manifest revision, and source-version identity. Compare source and destination checksums using a canonical encoding and record the verified generation before the work unit is complete.",
+      "connection": {"edgeId": "gcm_workers_staging", "sourceNodeId": "gcm_workers", "targetNodeId": "gcm_staging", "connectionType": "data-flow", "label": "Versioned staged partitions", "description": "Verified file/object payloads, manifest references, and integrity evidence."},
+      "requirementIds": ["legacy-requirement:3","legacy-requirement:5","legacy-constraint:1"]
+    },
+    {
+      "id": "gcm_33", "stepNumber": 33, "phase": "Inventory sources and move a resumable baseline", "title": "Add the target database boundary", "type": "add_component",
+      "content": "Represent the configured Google Cloud database target without choosing an engine absent from the brief. Confirm schema compatibility, key generation, collation, transaction semantics, capacity, and required transformations before execution; do not infer that every source can be copied byte-for-byte into every target engine.",
+      "component": {"nodeId": "gcm_target_db", "componentType": "database", "label": "Google Cloud Target Database", "description": "Configured destination database and transactional write path", "position": {"x": 3000, "y": 560}, "properties": {"componentName": "Google Cloud Target Database", "purpose": "Represent the approved destination database adapter; apply explicit schema and type mappings, preserve required keys and transaction semantics, encrypt at rest, and expose target commit identity for idempotent baseline and CDC writes."}, "highlightReason": "The catalog Database represents the target persistence boundary; a Google Cloud product or engine remains a deployment choice."},
+      "requirementIds": ["legacy-requirement:1","legacy-requirement:4","legacy-requirement:5","legacy-constraint:1","legacy-constraint:4"]
+    },
+    {
+      "id": "gcm_34", "stepNumber": 34, "phase": "Inventory sources and move a resumable baseline", "title": "Load baseline database partitions", "type": "add_connection",
+      "content": "Apply each baseline partition with an idempotency identity and destination-side reconciliation. Store schema mapping version and source snapshot position with the result; reject incompatible or partially applied units instead of marking them complete.",
+      "connection": {"edgeId": "gcm_workers_target_db", "sourceNodeId": "gcm_workers", "targetNodeId": "gcm_target_db", "connectionType": "database-connection", "label": "Mapped baseline database writes", "description": "Idempotent partition loads tied to source snapshot and schema-mapping revisions."},
+      "requirementIds": ["legacy-requirement:1","legacy-requirement:3","legacy-requirement:5","legacy-constraint:1","legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_35", "stepNumber": 35, "phase": "Inventory sources and move a resumable baseline", "title": "Add the published file/object target", "type": "add_component",
+      "content": "Use a distinct target namespace or bucket for completed data. Preserve required metadata, ACL mapping, and source versions; publish a manifest pointer only after every object in the relevant unit passes integrity validation.",
+      "component": {"nodeId": "gcm_target_files", "componentType": "object-storage", "label": "Google Cloud Target Files", "description": "Verified, versioned destination objects", "position": {"x": 3300, "y": 800}, "properties": {"componentName": "Google Cloud Target Files", "purpose": "Store approved destination files or objects under versioned identities, preserve mapped metadata and access policy, validate checksums, and publish only complete manifest units after verification.", "provider": "GCS", "versioning": true, "checksumValidation": true}, "highlightReason": "The existing Object Storage component supports GCS and makes version/checksum controls visible."},
+      "requirementIds": ["legacy-requirement:3","legacy-requirement:5","legacy-constraint:1","legacy-constraint:4"]
+    },
+    {
+      "id": "gcm_36", "stepNumber": 36, "phase": "Inventory sources and move a resumable baseline", "title": "Publish verified file units", "type": "add_connection",
+      "content": "Promote only the exact staging generation whose checksum and metadata checks passed. Keep the manifest's source version and target generation so a retry cannot replace newer target content with an older replay.",
+      "connection": {"edgeId": "gcm_staging_target_files", "sourceNodeId": "gcm_staging", "targetNodeId": "gcm_target_files", "connectionType": "data-flow", "label": "Validated object publication", "description": "Promote immutable, checksum-verified generations with source-version provenance."},
+      "requirementIds": ["legacy-requirement:3","legacy-requirement:5","legacy-constraint:1"]
+    },
+    {
+      "id": "gcm_37", "stepNumber": 37, "phase": "Inventory sources and move a resumable baseline", "title": "Add an ordered CDC apply path", "type": "add_component",
+      "content": "Consume database-native change records with source transaction identity and ordering. Deduplicate replay, preserve transaction boundaries where supported, apply only changes after the recorded snapshot position, and checkpoint only after the target commit is confirmed. CDC capability and source log retention must be verified per engine.",
+      "component": {"nodeId": "gcm_cdc", "componentType": "stream-processor", "label": "CDC Ordering and Apply", "description": "Ordered, replay-safe incremental database changes", "position": {"x": 2400, "y": 1000}, "properties": {"componentName": "CDC Ordering and Apply", "purpose": "Consume source-native change records after the matching snapshot position, deduplicate by source transaction/event identity, preserve supported transaction ordering, apply changes idempotently to the target, and checkpoint only after target commit acknowledgement." , "engine": "Apache Flink", "stateful": true}, "highlightReason": "The existing Stream Processor models ordered stateful deltas; the actual engine and connector depend on source capabilities."},
+      "requirementIds": ["legacy-requirement:4","legacy-constraint:1","legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_38", "stepNumber": 38, "phase": "Inventory sources and move a resumable baseline", "title": "Feed source changes through the protected route", "type": "add_connection",
+      "content": "Capture changes from the database's durable log position through the same approved network and credential controls. Alert and pause before the source log can expire or the apply lag exceeds the agreed cutover envelope.",
+      "connection": {"edgeId": "gcm_vpn_cdc", "sourceNodeId": "gcm_vpn", "targetNodeId": "gcm_cdc", "connectionType": "data-flow", "label": "Protected ordered change feed", "description": "Source-native CDC arrives with source transaction identity and a resumable log position."},
+      "requirementIds": ["legacy-requirement:4","legacy-requirement:6","legacy-constraint:1","legacy-constraint:4","legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_39", "stepNumber": 39, "phase": "Inventory sources and move a resumable baseline", "title": "Apply deltas to the destination", "type": "add_connection",
+      "content": "Maintain a target-applied watermark and reject gaps or out-of-order transactions where source semantics require ordering. A CDC retry must not double-apply a transaction; the target and checkpoint reconciliation path handles crashes between commit and offset advancement.",
+      "connection": {"edgeId": "gcm_cdc_target_db", "sourceNodeId": "gcm_cdc", "targetNodeId": "gcm_target_db", "connectionType": "database-connection", "label": "Ordered, idempotent change apply", "description": "Apply source changes beyond the baseline using persisted transaction identity and target acknowledgement."},
+      "requirementIds": ["legacy-requirement:4","legacy-constraint:1","legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_40", "stepNumber": 40, "phase": "Inventory sources and move a resumable baseline", "title": "Persist CDC progress with job state", "type": "add_connection",
+      "content": "Record captured and target-applied source positions separately, plus transaction identity and lag. On restart, reconcile the destination's committed position with the metadata checkpoint before resuming.",
+      "connection": {"edgeId": "gcm_cdc_metadata", "sourceNodeId": "gcm_cdc", "targetNodeId": "gcm_metadata", "connectionType": "database-connection", "label": "Captured and applied watermarks", "description": "Durable CDC checkpoints, source log position, and restart reconciliation state."},
+      "requirementIds": ["legacy-requirement:4","legacy-requirement:6","legacy-constraint:1","legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_41", "stepNumber": 41, "phase": "Catch up changes, validate, and cut over", "title": "Define a validation worker", "type": "add_component",
+      "content": "Compare logical source and destination evidence at compatible snapshot/watermark boundaries. Validate schema mappings, object generations and checksums, database row/key coverage, selected canonical record hashes, referential invariants, and required metadata/ACL mappings. A checksum mismatch blocks cutover and identifies the affected work unit for repair.",
+      "component": {"nodeId": "gcm_validator", "componentType": "processing-worker", "label": "Integrity and Reconciliation Worker", "description": "Source-to-target comparison and repair worklists", "position": {"x": 3600, "y": 560}, "properties": {"componentName": "Integrity and Reconciliation Worker", "purpose": "Compare compatible snapshot and CDC-watermark views; verify schema mapping, source/target object generations and checksums, database key/row coverage, canonical record hashes, referential invariants, and required metadata/ACL mappings; emit precise repair work for mismatches."}, "highlightReason": "The catalog Processing Worker can perform repeatable comparison jobs; no bespoke verifier node is necessary."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_42", "stepNumber": 42, "phase": "Catch up changes, validate, and cut over", "title": "Read source evidence for comparison", "type": "add_connection",
+      "content": "Read the same source snapshot/version and CDC watermark represented in the manifest. If the source has changed beyond that boundary, compare the matching historical view or pause to advance both sides consistently.",
+      "connection": {"edgeId": "gcm_vpn_validator", "sourceNodeId": "gcm_vpn", "targetNodeId": "gcm_validator", "connectionType": "data-flow", "label": "Protected source comparison reads", "description": "Validation reads use source-scoped credentials and a consistent snapshot/watermark reference."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "gcm_43", "stepNumber": 43, "phase": "Catch up changes, validate, and cut over", "title": "Compare database target state", "type": "add_connection",
+      "content": "Compare target records and schema using the source's declared mapping and the same logical boundary. Reconcile source/target commits after restarts; counts alone do not prove all records are equivalent.",
+      "connection": {"edgeId": "gcm_targetdb_validator", "sourceNodeId": "gcm_target_db", "targetNodeId": "gcm_validator", "connectionType": "database-connection", "label": "Target database evidence", "description": "Schema, row/key coverage, canonical hashes, and target-applied watermark."},
+      "requirementIds": ["legacy-requirement:3","legacy-constraint:1","legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_44", "stepNumber": 44, "phase": "Catch up changes, validate, and cut over", "title": "Verify staged and published objects", "type": "add_connection",
+      "content": "Read exact object generations from staging and target, compare checksums and required metadata, and verify that each manifest unit is either wholly published or remains explicitly incomplete.",
+      "connection": {"edgeId": "gcm_staging_validator", "sourceNodeId": "gcm_staging", "targetNodeId": "gcm_validator", "connectionType": "data-flow", "label": "Staged generation checks", "description": "Compare staged payload hashes, source version, and expected metadata."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "gcm_45", "stepNumber": 45, "phase": "Catch up changes, validate, and cut over", "title": "Verify the published object target", "type": "add_connection",
+      "content": "Verify the destination generation that applications will read, not only the staging copy. Persist mismatch details and require successful repair and revalidation before the unit contributes to cutover readiness.",
+      "connection": {"edgeId": "gcm_targetfiles_validator", "sourceNodeId": "gcm_target_files", "targetNodeId": "gcm_validator", "connectionType": "data-flow", "label": "Published generation checks", "description": "Validate target object checksums, versions, metadata, and visibility state."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_46", "stepNumber": 46, "phase": "Catch up changes, validate, and cut over", "title": "Record verification evidence", "type": "add_connection",
+      "content": "Store verifier version, manifest revision, source and target positions, checksums or comparison summaries, failed-unit identities, repair status, and approval actor. Do not store sensitive payloads in the report.",
+      "connection": {"edgeId": "gcm_validator_metadata", "sourceNodeId": "gcm_validator", "targetNodeId": "gcm_metadata", "connectionType": "database-connection", "label": "Validation report and repair state", "description": "Auditable verification evidence tied to immutable source and target revisions."},
+      "requirementIds": ["legacy-requirement:3","legacy-requirement:6","legacy-constraint:1","legacy-constraint:4","legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_47", "stepNumber": 47, "phase": "Catch up changes, validate, and cut over", "title": "Represent production workload clients", "type": "add_component",
+      "content": "Keep the workload entry point separate from the migration console. During baseline and catch-up, production continues using the source endpoint; the migration system must not accidentally send writes to the target early.",
+      "component": {"nodeId": "gcm_workload", "componentType": "web-app", "label": "Existing Workload Clients", "description": "Production application traffic before and after migration", "position": {"x": 3600, "y": 0}, "properties": {"componentName": "Existing Workload Clients", "purpose": "Represent applications that use the current source data endpoint until an approved cutover; preserve the application contract and avoid dual writes unless a separately designed consistency protocol requires them."}, "highlightReason": "The catalog Web App represents existing consumers and makes the cutover data path explicit."},
+      "requirementIds": ["legacy-requirement:2","legacy-constraint:1","legacy-constraint:2"]
+    },
+    {
+      "id": "gcm_48", "stepNumber": 48, "phase": "Catch up changes, validate, and cut over", "title": "Add a controlled blue-green endpoint", "type": "add_component",
+      "content": "Use one application-facing data endpoint whose active destination is explicit and auditable. This is a cutover abstraction, not round-robin between two writers: source remains active until the gate passes, then the target becomes active under a single-writer policy.",
+      "component": {"nodeId": "gcm_router", "componentType": "loadbalancer", "label": "Blue-Green Data Endpoint", "description": "Controlled single-writer source/target routing", "position": {"x": 3900, "y": 0}, "properties": {"componentName": "Blue-Green Data Endpoint", "purpose": "Expose one stable application endpoint and route to exactly one writable environment; keep source active until approved cutover, switch to the verified target, drain old connections, and record the active endpoint epoch.", "type": "Layer 4 (Network)", "healthCheck": true, "connectionDraining": true}, "highlightReason": "The existing Load Balancer models the stable endpoint; its purpose prevents unsafe round-robin or dual-writer interpretation."},
+      "requirementIds": ["legacy-requirement:2","legacy-constraint:1","legacy-constraint:2"]
+    },
+    {
+      "id": "gcm_49", "stepNumber": 49, "phase": "Catch up changes, validate, and cut over", "title": "Route production traffic through the stable endpoint", "type": "add_connection",
+      "content": "Keep endpoint behavior compatible so the application does not need to know the migration phase. Health checks confirm reachability, not data correctness; the separate validation gate remains mandatory.",
+      "connection": {"edgeId": "gcm_workload_router", "sourceNodeId": "gcm_workload", "targetNodeId": "gcm_router", "connectionType": "http", "label": "Stable application data endpoint", "description": "Production clients keep one contract while the approved active destination changes."},
+      "requirementIds": ["legacy-requirement:2","legacy-constraint:2"]
+    },
+    {
+      "id": "gcm_50", "stepNumber": 50, "phase": "Catch up changes, validate, and cut over", "title": "Keep source as the pre-cutover writer", "type": "add_connection",
+      "content": "The initial route remains on the source while baseline, CDC, and validation proceed. At cutover, fence source writes and drain in-flight transactions before declaring the final source watermark.",
+      "connection": {"edgeId": "gcm_router_source", "sourceNodeId": "gcm_router", "targetNodeId": "gcm_source_db", "connectionType": "database-connection", "label": "Source active before cutover", "description": "Single-writer source route remains authoritative until the final consistency gate."},
+      "requirementIds": ["legacy-requirement:2","legacy-constraint:1","legacy-constraint:2"]
+    },
+    {
+      "id": "gcm_51", "stepNumber": 51, "phase": "Catch up changes, validate, and cut over", "title": "Prepare the target route without activating it", "type": "add_connection",
+      "content": "Provision the destination route and verify it before use, but keep it inactive for production writes until the coordinator confirms the cutover epoch. Never infer activation from network reachability alone.",
+      "connection": {"edgeId": "gcm_router_target", "sourceNodeId": "gcm_router", "targetNodeId": "gcm_target_db", "connectionType": "database-connection", "label": "Target route, gated inactive", "description": "Prepared blue environment becomes active only after source fencing and validation approval."},
+      "requirementIds": ["legacy-requirement:2","legacy-constraint:1","legacy-constraint:2"]
+    },
+    {
+      "id": "gcm_52", "stepNumber": 52, "phase": "Catch up changes, validate, and cut over", "title": "Let an authorized operator control cutover", "type": "add_connection",
+      "content": "The coordinator requests a versioned route change only after required validations pass, the source is fenced, CDC reaches the final source watermark, and the approval policy is satisfied. The router reports the committed endpoint epoch for reconciliation.",
+      "connection": {"edgeId": "gcm_coordinator_router", "sourceNodeId": "gcm_coordinator", "targetNodeId": "gcm_router", "connectionType": "api-call", "label": "Approved endpoint epoch change", "description": "Single-writer route changes require a complete gate and auditable operator authorization."},
+      "requirementIds": ["legacy-requirement:2","legacy-requirement:3","legacy-constraint:1","legacy-constraint:2","legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_53", "stepNumber": 53, "phase": "Catch up changes, validate, and cut over", "title": "Choose a gated cutover sequence", "type": "decision_point",
+      "content": "Schedule cutover inside the business-approved downtime window. Before endpoint switch, stop or fence source writes, drain in-flight transactions, capture the final source boundary, apply through that boundary, run required validation, and obtain approval. If any check fails, leave the source authoritative and resume or repair; do not switch because a timer expired.",
+      "decision": {"question": "How can a blue-green switch minimize downtime without exposing stale or divergent data?", "chosen": "Use an online baseline and CDC catch-up, then a short explicit source write fence, final watermark drain, required source-target validation, approval, and a single endpoint-epoch switch.", "chosenReason": "Most bulk bytes move before the maintenance window, while the final source boundary and single-writer switch preserve a clear consistency story. The achievable outage depends on the measured residual lag and source/target behavior, not a universal duration.", "alternatives": [{"option": "Stop writes for the entire petabyte baseline", "tradeoff": "Consistency is simpler, but downtime grows with the full transfer and validation time."}, {"option": "Switch traffic while the change feed is behind", "tradeoff": "Applications can read stale data or create two divergent writers."}]},
+      "requirementIds": ["legacy-requirement:2","legacy-requirement:3","legacy-requirement:4","legacy-constraint:1","legacy-constraint:2","legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_54", "stepNumber": 54, "phase": "Catch up changes, validate, and cut over", "title": "Report cutover readiness from evidence", "type": "explanation",
+      "content": "The readiness report includes inventory and verification coverage, unresolved mismatches, captured and applied CDC watermarks, source log headroom, target health, routing epoch, operator approval, and the rollback mode that is actually available. A green network check or a high byte-copy percentage is not a cutover signal.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_55", "stepNumber": 55, "phase": "Recover safely and prove operational readiness", "title": "Add migration health and progress monitoring", "type": "add_component",
+      "content": "Track discovered and verified bytes/records, partition completion, source read pressure, effective bandwidth, worker saturation, queue age, retries/quarantine, checksum mismatches, CDC capture-to-apply lag, source log retention headroom, destination errors, cost estimates, and cutover state. Alert on loss of safety margin, not only process health.",
+      "component": {"nodeId": "gcm_monitor", "componentType": "monitoring", "label": "Migration Health and Progress", "description": "Correctness, throughput, lag, failure, and cost signals", "position": {"x": 4200, "y": 560}, "properties": {"componentName": "Migration Health and Progress", "purpose": "Measure inventory and verified coverage, source pressure, effective throughput, worker saturation, queue age, retries, quarantined units, checksum mismatches, CDC watermarks and lag, source log headroom, target errors, cost estimates, and cutover state; alert on safety-envelope breaches.", "stack": "Prometheus + Grafana", "metrics": true, "alerts": true}, "highlightReason": "The existing Monitoring component represents both user-facing progress and operator safety signals."},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_56", "stepNumber": 56, "phase": "Recover safely and prove operational readiness", "title": "Publish phase and correctness metrics", "type": "add_connection",
+      "content": "Export counters and watermarks from orchestration with job and manifest revision labels. Keep tenant and source identifiers appropriately protected and avoid placing secrets or raw data in metric dimensions.",
+      "connection": {"edgeId": "gcm_coordinator_monitor", "sourceNodeId": "gcm_coordinator", "targetNodeId": "gcm_monitor", "connectionType": "data-flow", "label": "Job state and verified progress", "description": "Phase, inventory, validation, approval, and cutover evidence for operators."},
+      "requirementIds": ["legacy-requirement:6"]
+    },
+    {
+      "id": "gcm_57", "stepNumber": 57, "phase": "Recover safely and prove operational readiness", "title": "Expose queue pressure and failed work", "type": "add_connection",
+      "content": "Measure oldest task age, lease expiry, retries, quarantined partitions, and consumer progress. Backpressure should stop new work before it harms the production source or consumes the remaining CDC retention window.",
+      "connection": {"edgeId": "gcm_queue_monitor", "sourceNodeId": "gcm_queue", "targetNodeId": "gcm_monitor", "connectionType": "data-flow", "label": "Queue age and retry signals", "description": "Durable work backlog, repeated failures, and quarantine counts."},
+      "requirementIds": ["legacy-requirement:6","legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_58", "stepNumber": 58, "phase": "Recover safely and prove operational readiness", "title": "Expose CDC lag and source log risk", "type": "add_connection",
+      "content": "Alert when captured-to-applied lag or source log retention headroom threatens the approved cutover plan. If logs may expire, stop claiming incremental continuity and require a new snapshot/reconciliation decision.",
+      "connection": {"edgeId": "gcm_cdc_monitor", "sourceNodeId": "gcm_cdc", "targetNodeId": "gcm_monitor", "connectionType": "data-flow", "label": "CDC watermarks and apply lag", "description": "Captured/applied positions, ordering gaps, and source retention risk."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_59", "stepNumber": 59, "phase": "Recover safely and prove operational readiness", "title": "Trace a work unit without tracing its payload", "type": "add_component",
+      "content": "Correlate a job command, manifest partition, queue lease, source read, target commit, verification, and checkpoint using opaque IDs. Redact credentials, record contents, and sensitive file paths; tracing complements durable audit records but does not replace them.",
+      "component": {"nodeId": "gcm_tracing", "componentType": "tracing", "label": "Migration Distributed Tracing", "description": "Cross-service work-unit diagnostics with redaction", "position": {"x": 4200, "y": 0}, "properties": {"componentName": "Migration Distributed Tracing", "purpose": "Correlate job, manifest unit, queue lease, source read, target acknowledgement, verification, and checkpoint with opaque identifiers while redacting credentials, record payloads, and sensitive paths; retain durable audit separately.", "platform": "Jaeger"}, "highlightReason": "The existing Tracing component provides end-to-end diagnostics without a custom observability node."},
+      "requirementIds": ["legacy-requirement:6","legacy-constraint:4","legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_60", "stepNumber": 60, "phase": "Recover safely and prove operational readiness", "title": "Correlate coordinator activity", "type": "add_connection",
+      "content": "Propagate one trace context across control-plane calls and link it to durable job/audit IDs. Sampling may reduce diagnostic detail at scale, so correctness counters and safety alerts must remain unsampled.",
+      "connection": {"edgeId": "gcm_coordinator_tracing", "sourceNodeId": "gcm_coordinator", "targetNodeId": "gcm_tracing", "connectionType": "data-flow", "label": "Redacted job traces", "description": "Correlate phase changes and bounded work references without sensitive payloads."},
+      "requirementIds": ["legacy-constraint:4","legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_61", "stepNumber": 61, "phase": "Recover safely and prove operational readiness", "title": "Make retries safe after partial failure", "type": "decision_point",
+      "content": "If a worker crashes after a target commit but before checkpoint or queue acknowledgement, assume the task will replay. Reconcile stable source-version and destination-generation identity, verify the prior write, and commit the checkpoint only when evidence matches. Quarantine persistent conflicts and resume unaffected partitions.",
+      "decision": {"question": "What is the recovery unit after a crash during a large copy?", "chosen": "Replay bounded immutable manifest units with stable idempotency keys, destination reconciliation, per-unit integrity evidence, and checkpoint-after-ack semantics.", "chosenReason": "This limits rework to a failed partition and prevents a worker restart from silently skipping, duplicating, or overwriting newer source state.", "alternatives": [{"option": "Restart the entire migration from the beginning", "tradeoff": "Petabyte-scale work is repeated and failures become increasingly expensive."}, {"option": "Advance the checkpoint before destination verification", "tradeoff": "A crash can leave a gap that progress metadata falsely labels complete."}]},
+      "requirementIds": ["legacy-requirement:3","legacy-requirement:6","legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_62", "stepNumber": 62, "phase": "Recover safely and prove operational readiness", "title": "Define rollback limits honestly", "type": "decision_point",
+      "content": "Retain the source and its recovery material through the approved rollback window, but distinguish pre-cutover abort from post-cutover reversal. Before target writes, route can return to the still-authoritative source after checking the final watermark. After target accepts writes, a safe reversal requires tested reverse change capture or a reconciled write freeze; otherwise fail forward and do not point clients at stale source data. The brief does not define that reverse path or its RPO.",
+      "decision": {"question": "When can the blue-green endpoint safely return to the source?", "chosen": "Before target writes, use an approved route reversal after state checks; after target writes, reverse only with a tested, reconciled reverse-sync or write-fence procedure, otherwise keep target authoritative and recover forward.", "chosenReason": "An endpoint flip alone cannot roll back new target writes. Being explicit about the rollback boundary prevents data loss and split brain.", "alternatives": [{"option": "Always flip back to the old source on target failure", "tradeoff": "Writes accepted only by the target disappear from the application view."}, {"option": "Delete or decommission the source immediately after cutover", "tradeoff": "Removes the recovery option before target behavior and data are proven in production."}]},
+      "requirementIds": ["legacy-requirement:2","legacy-requirement:7","legacy-constraint:1","legacy-constraint:2","legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_63", "stepNumber": 63, "phase": "Recover safely and prove operational readiness", "title": "Scale on measured headroom and safety", "type": "scale_trigger",
+      "content": "Watch effective throughput, source read pressure, worker CPU, tunnel capacity, queue age, target write latency, and CDC lag together. Add or remove parallel work only while the source, network, and target remain within owner-approved limits; pause or throttle when they do not. A larger worker pool cannot overcome a bandwidth cap and may increase cost or production impact.",
+      "scaleTrigger": {"metric": "Measured source pressure, available transfer bandwidth, target health, or CDC lag approaches its approved safety envelope", "action": "Throttle or pause new partitions first; change worker concurrency only after identifying the limiting stage and validating the effect on source, network, destination, and cost.", "impact": "Protects production and the cutover plan while pursuing measured transfer throughput without inventing a universal concurrency or bandwidth target."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_64", "stepNumber": 64, "phase": "Recover safely and prove operational readiness", "title": "Choose compression and transfer mode by evidence", "type": "decision_point",
+      "content": "Benchmark representative data types and source/target paths, including checksum and decompression work. Compare online transfer, provider-supported bulk seeding options where available, storage/egress charges, operational handling, and delta catch-up. Treat compression as a tradeoff between bytes moved and CPU/time, not an unconditional speedup. This is proposed benchmark work, not a numeric acceptance target in the brief; owners must approve thresholds after measuring representative workloads.",
+      "decision": {"question": "How should the migration optimize total time and cost under a bandwidth constraint?", "chosen": "Select bounded parallelism, compression, and online or supported offline seeding from measured end-to-end throughput, source impact, validation cost, and total service/transfer charges.", "chosenReason": "The bottleneck and cost model vary by source mix and route; measurements prevent paying for faster workers that cannot increase effective throughput.", "alternatives": [{"option": "Maximize worker count and always compress", "tradeoff": "Can saturate production, add CPU bottlenecks, and increase compute cost without improving transfer time."}, {"option": "Use one serial transfer path for every source", "tradeoff": "Avoids tuning but may extend the migration and downtime unnecessarily."}]},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "gcm_65", "stepNumber": 65, "phase": "Recover safely and prove operational readiness", "title": "Gate completion on reconciled evidence", "type": "explanation",
+      "content": "Before declaring success, reconcile every manifest unit as copied and verified or explicitly excluded with owner approval; confirm database and file/object coverage, required metadata and ACL mapping, source and target watermarks, no unresolved integrity mismatch, the active endpoint epoch, operator approval, and documented recovery limits. Run representative failure tests for worker restart, duplicate delivery, network interruption, source log pressure, destination throttling, and checksum mismatch. The guide defines a design, not proof of throughput, downtime, or a 95-plus AI assessment score.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_66", "stepNumber": 66, "phase": "Recover safely and prove operational readiness", "title": "Review unresolved assumptions before execution", "type": "explanation",
+      "content": "Obtain decisions for source engine and snapshot/CDC support, mapping and transformation behavior, validation methods and acceptance evidence, database/file consistency boundaries, target service and capacity, network/private-connectivity availability, usable bandwidth, acceptable source load, downtime window, RPO/RTO, retention and encryption ownership, rollback after target writes, and cost approval. Put selected values into a versioned migration plan and revalidate the plan if any source, target, or policy changes.",
+      "requirementIds": ["legacy-requirement:1","legacy-requirement:2","legacy-requirement:3","legacy-requirement:4","legacy-requirement:5","legacy-requirement:7","legacy-requirement:8","legacy-constraint:1","legacy-constraint:2","legacy-constraint:3","legacy-constraint:4","legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_67", "stepNumber": 67, "phase": "Recover safely and prove operational readiness", "title": "Keep measured outcomes separate from design intent", "type": "explanation",
+      "content": "Report actual bytes and records discovered, copied, and verified; effective throughput over the measured interval; source impact; time spent on validation and retries; downtime observed at cutover; reconciliation defects; and final cost. Compare these with owner-approved targets, disclose exclusions and uncertainty, and feed the measurements into the next migration plan. Neither a connected diagram nor an empty error queue proves that petabytes moved correctly.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "gcm_68", "stepNumber": 68, "phase": "Recover safely and prove operational readiness", "title": "Summarize the end-to-end transfer flow", "type": "explanation",
+      "content": "The operator submits a versioned job; the coordinator discovers sources and records snapshot-aligned manifests; a durable queue schedules idempotent partitions; bounded workers transfer database and file data through approved encrypted routes; GCS holds versioned staged and published objects; source CDC applies in order through a recorded target watermark; validators compare matching logical boundaries; and an approved single-writer cutover changes the production endpoint. A tested rollback policy distinguishes pre-cutover abort from post-cutover recovery. Durable evidence, source-aware recovery, and measured capacity—not an assumed service limit—make the design reviewable.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

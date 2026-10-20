@@ -1,0 +1,998 @@
+{
+  "problem_id": "ml_003",
+  "version": "1.1-review",
+  "requirementRevision": null,
+  "totalSteps": 54,
+  "phases": [
+    {
+      "name": "Separate supplied facts from interview questions",
+      "stepRange": [1, 8],
+      "description": "Preserve the supplied brief verbatim, identify unknown policy and traffic inputs, and establish the authenticated scoring boundary."
+    },
+    {
+      "name": "Build the point-in-time training path",
+      "stepRange": [9, 18],
+      "description": "Connect governed historical snapshots to time-consistent features, training orchestration, a class-imbalance strategy, and an immutable candidate model."
+    },
+    {
+      "name": "Validate and promote models deliberately",
+      "stepRange": [19, 30],
+      "description": "Evaluate holdout performance and protected-group behavior before registering, comparing, or serving a model version."
+    },
+    {
+      "name": "Serve explainable decisions and retain evidence",
+      "stepRange": [31, 46],
+      "description": "Return a score with feature attribution and reason codes while separating the sub-100ms decision path from durable compliance work."
+    },
+    {
+      "name": "Close the feedback loop and test scale triggers",
+      "stepRange": [47, 54],
+      "description": "Persist decision provenance, monitor measured outcomes, and make capacity and policy questions explicit before production commitments."
+    }
+  ],
+  "steps": [
+    {
+      "id": "ml003_brief",
+      "stepNumber": 1,
+      "phase": "Separate supplied facts from interview questions",
+      "title": "Keep the supplied brief intact",
+      "type": "explanation",
+      "content": "Supplied problem: Design a Credit Scoring ML Pipeline. Supplied description: Design a credit scoring system that uses ML to assess creditworthiness, handles imbalanced data, provides explainable decisions, and complies with fair lending regulations.\n\nRequirements (verbatim):\n- Train credit scoring models on historical data\n- Handle imbalanced classes (default vs non-default)\n- Provide feature importance for each decision\n- Detect and mitigate bias across protected groups\n- Generate adverse action reason codes\n- Support model versioning and comparison\n- Validate model performance on holdout sets\n- Produce regulatory compliance documentation\n\nConstraints (verbatim):\n- AUC-ROC above 0.85\n- Model must be explainable (regulatory requirement)\n- Bias metrics within fair lending thresholds\n- Scoring latency under 100ms\n- Handle 100k+ scoring requests per day\n\nHints (verbatim):\n- Use gradient boosting (XGBoost, LightGBM) as baseline\n- Implement SHAP values for model explainability\n- Use SMOTE or class weights for imbalanced data\n- Implement fairness-aware training with AIF360\n- Create a champion-challenger framework for model comparison\n- Use feature engineering on bureau and transaction data\n\nThese supplied statements are the scope. Architecture choices below are proposals to discuss, not extra requirements silently added to the brief.",
+      "requirementIds": []
+    },
+    {
+      "id": "ml003_unknowns",
+      "stepNumber": 2,
+      "phase": "Separate supplied facts from interview questions",
+      "title": "Mark unknowns as questions, not facts",
+      "type": "explanation",
+      "content": "Supplied facts: the brief names historical training, bureau and transaction feature engineering, an imbalanced default/non-default target, per-decision feature importance, protected-group bias mitigation, adverse-action reason codes, model comparison, holdout validation, compliance documentation, AUC-ROC above 0.85, latency under 100ms, and 100k+ scoring requests per day.\n\nClarifying questions: What event and observation window define default? Which protected groups, proxy features, fairness measures, and thresholds are approved by the fair-lending owner? What reason-code taxonomy and documentation format are required? What are peak request bursts, payload sizes, data-retention rules, and the measurement boundary for the 100ms target? Who can approve, compare, promote, and roll back a model?\n\nArchitecture assumptions to validate: historical outcomes can be joined lawfully to point-in-time bureau and transaction features; an online feature lookup is available for scoring; training and compliance evidence can run asynchronously; and the serving endpoint may return a score plus attribution to the decision service. None of these unknowns is asserted as a new product requirement.",
+      "requirementIds": []
+    },
+    {
+      "id": "ml003_split_decision",
+      "stepNumber": 3,
+      "phase": "Separate supplied facts from interview questions",
+      "title": "Choose a leakage-resistant holdout split",
+      "type": "decision_point",
+      "content": "Credit outcomes and bureau/transaction features evolve over time. A random split can let near-duplicate or later-period patterns leak across train and holdout. Start the discussion with a time-based holdout, then verify it matches the actual label horizon and deployment population.",
+      "decision": {
+        "question": "How should the first holdout be separated from training data?",
+        "chosen": "Use a chronological, point-in-time holdout and keep feature availability bounded by each decision timestamp.",
+        "chosenReason": "This makes the evaluation closer to scoring future applications and directly tests for temporal leakage; the exact periods depend on the label window and must be agreed with the domain owner.",
+        "alternatives": [
+          {"option": "Random stratified split", "tradeoff": "Preserves class proportions, but may overstate future performance when time or customer leakage exists."},
+          {"option": "Out-of-time cohort only", "tradeoff": "Strong temporal realism, but a single cohort may not represent all approved products or groups."}
+        ]
+      },
+      "requirementIds": []
+    },
+    {
+      "id": "ml003_imbalance_decision",
+      "stepNumber": 4,
+      "phase": "Separate supplied facts from interview questions",
+      "title": "Start imbalance handling without changing holdout reality",
+      "type": "decision_point",
+      "content": "The supplied hint permits SMOTE or class weights. Keep the holdout at its observed prevalence and fit any reweighting or resampling only inside training folds; otherwise the reported AUC and group metrics can describe an artificial population.",
+      "decision": {
+        "question": "Which imbalance treatment is the first baseline?",
+        "chosen": "Begin with class weights for the gradient-boosted classifier and compare alternatives only inside training folds.",
+        "chosenReason": "Class weights address unequal error costs without synthesizing applicant records. Validate calibration, subgroup behavior, and holdout AUC before selecting a production candidate.",
+        "alternatives": [
+          {"option": "SMOTE within training folds", "tradeoff": "Can help a rare class, but synthetic examples may be unrealistic and must not cross the holdout boundary."},
+          {"option": "Unweighted baseline", "tradeoff": "Useful as a comparison, but may underweight the default class when it is rare."}
+        ]
+      },
+      "requirementIds": []
+    },
+    {
+      "id": "ml003_gateway",
+      "stepNumber": 5,
+      "phase": "Separate supplied facts from interview questions",
+      "title": "Create the authenticated scoring boundary",
+      "type": "add_component",
+      "content": "Expose a versioned scoring contract through the existing API Gateway component. Authenticate the caller, validate the request shape, apply tenant/product authorization and rate limits, and attach a request identifier. The brief specifies 100k+ requests per day but not a peak rate; do not translate the daily floor into an invented capacity target.",
+      "requirementIds": ["legacy-constraint:5"],
+      "component": {
+        "nodeId": "ml003_gateway",
+        "componentType": "api-gateway",
+        "label": "Credit Scoring API",
+        "description": "Authenticated, versioned entry point for credit-scoring requests.",
+        "position": {"x": 0, "y": 260},
+        "highlightReason": "The request boundary owns caller authentication, validation, and admission control for the stated daily scoring volume.",
+        "properties": {
+          "componentName": "Credit Scoring API",
+          "purpose": "Accept authenticated, versioned scoring requests; validate required fields, enforce caller authorization and rate limits, and attach a traceable request ID. Capacity must be tested against the 100k+ daily floor and a separately clarified peak profile.",
+          "authentication": "JWT",
+          "inputValidation": true,
+          "rateLimiting": true
+        }
+      }
+    },
+    {
+      "id": "ml003_decision_service",
+      "stepNumber": 6,
+      "phase": "Separate supplied facts from interview questions",
+      "title": "Orchestrate one explainable decision response",
+      "type": "add_component",
+      "content": "Keep request validation, feature lookup, model invocation, reason-code mapping, and response assembly in a stateless decision service. Required features that are missing, stale, incompatible, or unavailable must fail closed with a retryable unavailable response; never score with an undocumented default or stale value. Use cached fallback only if the policy owner approves a freshness bound and compatible schema. Enforce the under-100ms budget, including durable audit-event acceptance; do not wait for database persistence, report generation, or training.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "ml003_decision_service",
+        "componentType": "backend-server",
+        "label": "Decision Orchestrator",
+        "description": "Stateless coordinator for feature lookup, inference, reason codes, and response assembly.",
+        "position": {"x": 280, "y": 260},
+        "highlightReason": "The synchronous path needs one owner for its latency budget and complete, attributable response.",
+        "properties": {
+          "componentName": "Decision Orchestrator",
+          "purpose": "Coordinate online feature retrieval, model inference, adverse-action reason mapping, and the response. Fail closed with a retryable unavailable response when required features are missing, stale, incompatible, or unavailable; allow cached fallback only under an owner-approved freshness bound and compatible schema. Return a score only after durable audit-event acceptance within the under-100ms end-to-end budget, without waiting for database persistence or evidence assembly."
+        }
+      }
+    },
+    {
+      "id": "ml003_edge_api_orchestrator",
+      "stepNumber": 7,
+      "phase": "Separate supplied facts from interview questions",
+      "title": "Route validated scoring requests to the decision service",
+      "type": "add_connection",
+      "content": "Forward only authenticated, validated requests and preserve the request identifier for tracing the complete decision and its later evidence.",
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:4", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "ml003_e_api_orchestrator",
+        "sourceNodeId": "ml003_gateway",
+        "targetNodeId": "ml003_decision_service",
+        "connectionType": "http",
+        "label": "Validated scoring request",
+        "description": "Authenticated request, caller context, product policy version, and trace ID."
+      }
+    },
+    {
+      "id": "ml003_history_store",
+      "stepNumber": 8,
+      "phase": "Separate supplied facts from interview questions",
+      "title": "Represent governed historical training snapshots",
+      "type": "add_component",
+      "content": "Store immutable, governed snapshots of historical bureau and transaction features with the outcome labels available at the relevant decision time. Access to sensitive attributes for fairness evaluation must be controlled and separated from online inference. Confirm lawful source, label definition, retention, and deletion rules with the owners.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:7", "legacy-requirement:8"],
+      "component": {
+        "nodeId": "ml003_history_store",
+        "componentType": "object-storage",
+        "label": "Point-in-Time Training Snapshots",
+        "description": "Governed historical bureau/transaction features, labels, and dataset manifests.",
+        "position": {"x": 280, "y": 620},
+        "highlightReason": "Training and evaluation must be reproducible from the historical information available at each decision time.",
+        "properties": {
+          "componentName": "Point-in-Time Training Snapshots",
+          "purpose": "Retain versioned, access-controlled snapshots of historical bureau and transaction features, outcome labels, source timestamps, and dataset manifests for reproducible training and holdout evaluation. Preserve a separately governed path for protected-group evaluation data."
+        }
+      }
+    },
+    {
+      "id": "ml003_feature_store",
+      "stepNumber": 9,
+      "phase": "Build the point-in-time training path",
+      "title": "Use consistent offline and online feature definitions",
+      "type": "add_component",
+      "content": "Centralize bureau and transaction feature definitions so training-time point-in-time joins and online scoring use the same transformations. The catalog has an exact Feature Store component; Feast is only an editable example platform choice, not a supplied requirement.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3"],
+      "component": {
+        "nodeId": "ml003_feature_store",
+        "componentType": "feature-store",
+        "label": "Credit Feature Store",
+        "description": "Shared point-in-time training and low-latency online feature definitions.",
+        "position": {"x": 650, "y": 620},
+        "highlightReason": "Feature parity prevents train/serve skew and supports auditable per-decision attributions.",
+        "properties": {
+          "componentName": "Credit Feature Store",
+          "purpose": "Define bureau and transaction features with source timestamps and versioned transformations; provide point-in-time training joins and bounded online lookups using the same definitions.",
+          "platform": "Custom"
+        }
+      }
+    },
+    {
+      "id": "ml003_mlops_pipeline",
+      "stepNumber": 10,
+      "phase": "Build the point-in-time training path",
+      "title": "Orchestrate reproducible model lifecycle stages",
+      "type": "add_component",
+      "content": "Represent data preparation, training, holdout evaluation, fairness review, registry approval, and deployment as versioned stages. A catalog MLOps Pipeline is a real fit; the selected platform remains provider-neutral until deployment needs are known.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8"],
+      "component": {
+        "nodeId": "ml003_mlops_pipeline",
+        "componentType": "mlops-pipeline",
+        "label": "Credit Model Lifecycle",
+        "description": "Versioned orchestration for training, validation, approval, and controlled deployment.",
+        "position": {"x": 650, "y": 930},
+        "highlightReason": "Separating lifecycle stages makes candidate comparison and evidence reproducible.",
+        "properties": {
+          "componentName": "Credit Model Lifecycle",
+          "purpose": "Orchestrate immutable dataset and code versions through feature preparation, training, holdout evaluation, fair-lending review, registry approval, and controlled champion/challenger deployment.",
+          "platform": "Custom",
+          "stages": "prepare -> train -> holdout and fairness review -> register -> compare -> approve"
+        }
+      }
+    },
+    {
+      "id": "ml003_training",
+      "stepNumber": 11,
+      "phase": "Build the point-in-time training path",
+      "title": "Train the baseline on historical, point-in-time features",
+      "type": "add_component",
+      "content": "Start with the supplied gradient-boosting hint and retain the dataset, feature, code, and configuration versions with the resulting artifact. Apply class weights only within training folds; preserve observed class prevalence in validation and holdout data.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2"],
+      "component": {
+        "nodeId": "ml003_training",
+        "componentType": "model-training",
+        "label": "Gradient-Boosted Model Training",
+        "description": "Historical supervised training with fold-local imbalance handling.",
+        "position": {"x": 1010, "y": 930},
+        "highlightReason": "Training must use historical labels without contaminating holdout data or changing its prevalence.",
+        "properties": {
+          "componentName": "Gradient-Boosted Model Training",
+          "purpose": "Train a credit-default classifier from versioned historical features and outcomes; use class weights as the initial imbalance baseline, fit preprocessing within training folds, and record reproducible data, code, and configuration references.",
+          "computeType": "CPU"
+        }
+      }
+    },
+    {
+      "id": "ml003_edge_history_features",
+      "stepNumber": 12,
+      "phase": "Build the point-in-time training path",
+      "title": "Materialize governed historical features",
+      "type": "add_connection",
+      "content": "Build feature values from source records with their as-of timestamps; do not let a later bureau refresh or repayment outcome leak into an earlier application row.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:7"],
+      "connection": {
+        "edgeId": "ml003_e_history_features",
+        "sourceNodeId": "ml003_history_store",
+        "targetNodeId": "ml003_feature_store",
+        "connectionType": "data-flow",
+        "label": "Timestamped bureau, transaction & outcome records",
+        "description": "Governed historical source snapshots and labels for point-in-time feature construction."
+      }
+    },
+    {
+      "id": "ml003_edge_features_training",
+      "stepNumber": 13,
+      "phase": "Build the point-in-time training path",
+      "title": "Create the training matrix without temporal leakage",
+      "type": "add_connection",
+      "content": "Join features as they were known at the decision timestamp and bind the target label to its approved outcome window. Store the join and feature-definition versions with the run.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:7"],
+      "connection": {
+        "edgeId": "ml003_e_features_training",
+        "sourceNodeId": "ml003_feature_store",
+        "targetNodeId": "ml003_training",
+        "connectionType": "data-flow",
+        "label": "Point-in-time feature matrix & labels",
+        "description": "Versioned training rows whose features predate the corresponding outcome label."
+      }
+    },
+    {
+      "id": "ml003_edge_lifecycle_training",
+      "stepNumber": 14,
+      "phase": "Build the point-in-time training path",
+      "title": "Run training from an auditable lifecycle definition",
+      "type": "add_connection",
+      "content": "The orchestration run pins the data snapshot, feature definitions, code, class-weight policy, and evaluation split so two candidates can be compared on a like-for-like basis.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:7"],
+      "connection": {
+        "edgeId": "ml003_e_lifecycle_training",
+        "sourceNodeId": "ml003_mlops_pipeline",
+        "targetNodeId": "ml003_training",
+        "connectionType": "api-call",
+        "label": "Pinned training configuration",
+        "description": "Dataset, feature, code, fold, and imbalance-treatment versions for a reproducible run."
+      }
+    },
+    {
+      "id": "ml003_smote_guard",
+      "stepNumber": 15,
+      "phase": "Build the point-in-time training path",
+      "title": "Keep any resampling inside training folds",
+      "type": "explanation",
+      "content": "If the team later compares SMOTE with class weights, perform resampling only after each training fold is formed. Never synthesize, resample, or rebalance the holdout. Report the natural-prevalence holdout metrics and inspect subgroup results; a better aggregate score alone does not establish fair or calibrated decisions.",
+      "requirementIds": []
+    },
+    {
+      "id": "ml003_holdout_decision",
+      "stepNumber": 16,
+      "phase": "Build the point-in-time training path",
+      "title": "Freeze the evaluation boundary before tuning",
+      "type": "decision_point",
+      "content": "The evaluation split is part of the model evidence, not a knob to move until a candidate passes. Clarify label maturity and time periods with the owners before selecting the holdout window.",
+      "decision": {
+        "question": "When may holdout data influence feature or model choices?",
+        "chosen": "Keep the holdout sealed for final evaluation; use training folds and a separate validation partition for iteration.",
+        "chosenReason": "Repeated tuning on the final holdout makes its estimate optimistic and weakens the evidence behind the AUC-ROC constraint.",
+        "alternatives": [
+          {"option": "Tune repeatedly on the holdout", "tradeoff": "Fast feedback, but the reported holdout score ceases to be an independent estimate."},
+          {"option": "Use only cross-validation", "tradeoff": "Useful for development, but it does not replace the requested holdout validation."}
+        ]
+      },
+      "requirementIds": []
+    },
+    {
+      "id": "ml003_candidate_model",
+      "stepNumber": 17,
+      "phase": "Build the point-in-time training path",
+      "title": "Treat each trained model as an immutable candidate",
+      "type": "add_component",
+      "content": "A candidate is an artifact plus its training manifest, feature schema, code/configuration references, and evaluation outputs. The catalog ML Model and Model Registry represent the artifact and its version history separately.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6"],
+      "component": {
+        "nodeId": "ml003_candidate_model",
+        "componentType": "ml-model",
+        "label": "Credit Default Classifier",
+        "description": "Versioned gradient-boosted classification artifact and feature schema.",
+        "position": {"x": 1370, "y": 930},
+        "highlightReason": "An immutable candidate can be independently validated, compared, approved, and rolled back.",
+        "properties": {
+          "componentName": "Credit Default Classifier",
+          "purpose": "Classify default versus non-default from the approved feature schema; expose a stable artifact and schema version, with training and evaluation provenance attached.",
+          "modelType": "Classification",
+          "framework": "XGBoost"
+        }
+      }
+    },
+    {
+      "id": "ml003_edge_training_candidate",
+      "stepNumber": 18,
+      "phase": "Build the point-in-time training path",
+      "title": "Publish the trained artifact as a candidate only",
+      "type": "add_connection",
+      "content": "Training emits a candidate artifact and manifest; it does not deploy directly to scoring. Preserve the unmodified holdout for the next gate.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6"],
+      "connection": {
+        "edgeId": "ml003_e_training_candidate",
+        "sourceNodeId": "ml003_training",
+        "targetNodeId": "ml003_candidate_model",
+        "connectionType": "data-flow",
+        "label": "Candidate artifact & training manifest",
+        "description": "Immutable model bytes, feature schema, training data reference, code/configuration versions, and fold-local imbalance treatment."
+      }
+    },
+    {
+      "id": "ml003_validation_gate",
+      "stepNumber": 19,
+      "phase": "Validate and promote models deliberately",
+      "title": "Create a holdout and fair-lending promotion gate",
+      "type": "add_component",
+      "content": "The catalog has no dedicated fair-lending evaluation component, so keep the existing domain-specific custom gate. Evaluate selection-rate ratio and group false-positive/false-negative gaps on the frozen holdout, using policy-approved cohort definitions, denominators, sample sizes, and uncertainty. The brief supplies no metric definitions or numeric cutoffs: treat the signed, versioned policy as a required input, fail the gate when it is missing, and never invent thresholds or claim compliance.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3"],
+      "component": {
+        "nodeId": "ml003_validation_gate",
+        "componentType": "custom-component",
+        "label": "Fair Lending & Holdout Validation Gate",
+        "description": "Domain-specific evaluation gate for holdout model quality and protected-group review.",
+        "position": {"x": 1730, "y": 620},
+        "highlightReason": "The catalog lacks a fair-lending validator; the supported generic component is explicitly named for the missing domain function.",
+        "properties": {
+          "componentName": "Fair Lending & Holdout Validation Gate",
+          "purpose": "Evaluate the frozen holdout with policy-approved selection-rate ratio and group false-positive/false-negative gaps. Record cohort definitions, denominators, sample sizes, uncertainty, mitigations, reviewer, and the versioned policy used. Require AUC-ROC above 0.85; block promotion when the approved fairness policy is missing, stale, unapproved, or any measure exceeds its configured threshold. Never invent cutoffs or claim compliance.",
+          "technology": "AIF360-compatible evaluation and versioned policy input",
+          "metricSuite": "Candidate measures: selection-rate ratio, false-positive-rate gap, and false-negative-rate gap by policy-approved protected cohort; denominators and minimum sample rules are versioned with the policy.",
+          "thresholdSource": "Signed, versioned fair-lending policy approved by the designated risk/compliance owner; threshold values are required inputs and have no defaults.",
+          "promotionRule": "Record rejected candidates with evidence, but mark them ineligible; promote or serve only when the current approved policy exists and every configured gate passes.",
+          "notes": "Metric names and numeric thresholds are policy-owned inputs. The architecture proposes no universal legal cutoff and does not itself establish compliance."
+        }
+      }
+    },
+    {
+      "id": "ml003_edge_candidate_validation",
+      "stepNumber": 20,
+      "phase": "Validate and promote models deliberately",
+      "title": "Evaluate candidate performance on the frozen holdout",
+      "type": "add_connection",
+      "content": "Measure holdout AUC-ROC on the population and label definition approved for the problem. A candidate at or below 0.85 fails the stated constraint; report confidence and subgroup slices without changing the holdout after observing results.",
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1"],
+      "connection": {
+        "edgeId": "ml003_e_candidate_validation",
+        "sourceNodeId": "ml003_candidate_model",
+        "targetNodeId": "ml003_validation_gate",
+        "connectionType": "data-flow",
+        "label": "Candidate predictions & holdout metrics",
+        "description": "Frozen-holdout outputs, AUC-ROC calculation, label-window definition, and evaluation provenance."
+      }
+    },
+    {
+      "id": "ml003_edge_training_validation",
+      "stepNumber": 21,
+      "phase": "Validate and promote models deliberately",
+      "title": "Bind evaluation results to the exact training run",
+      "type": "add_connection",
+      "content": "Pass the dataset and run manifest so reviewers can reproduce the holdout and compare the candidate with its predecessor rather than relying on a score without provenance.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1"],
+      "connection": {
+        "edgeId": "ml003_e_training_validation",
+        "sourceNodeId": "ml003_training",
+        "targetNodeId": "ml003_validation_gate",
+        "connectionType": "data-flow",
+        "label": "Run manifest & split provenance",
+        "description": "Training code, feature schema, data snapshot, split boundaries, and metric implementation references."
+      }
+    },
+    {
+      "id": "ml003_edge_group_eval",
+      "stepNumber": 22,
+      "phase": "Validate and promote models deliberately",
+      "title": "Evaluate protected groups in a controlled path",
+      "type": "add_connection",
+      "content": "Supply approved group membership only to the restricted evaluation path. It is used to measure and mitigate bias, not exposed as an online scoring feature or returned to unauthorized callers. Validate lawful basis and access with the data and compliance owners.",
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "ml003_e_group_eval",
+        "sourceNodeId": "ml003_history_store",
+        "targetNodeId": "ml003_validation_gate",
+        "connectionType": "data-flow",
+        "label": "Restricted protected-group evaluation view",
+        "description": "Restricted cohort evidence for approved selection-rate and error-rate measures, isolated from online scoring and returned only to the authorized review path."
+      }
+    },
+    {
+      "id": "ml003_fairness_decision",
+      "stepNumber": 23,
+      "phase": "Validate and promote models deliberately",
+      "title": "Ask policy owners to define fair-lending thresholds",
+      "type": "decision_point",
+      "content": "The brief requires bias metrics within fair-lending thresholds but does not name metrics, groups, numeric thresholds, confidence rules, or mitigations. Treat the gate as blocked until policy owners supply and approve these definitions; AIF360 is a supplied implementation hint, not a substitute for policy.",
+      "decision": {
+        "question": "What makes a candidate pass the fair-lending review?",
+        "chosen": "Require documented, owner-approved group definitions, metric formulas, thresholds, and mitigation review before a promotion decision.",
+        "chosenReason": "This preserves the explicit constraint without fabricating legal or policy values and gives each model version reviewable evidence.",
+        "alternatives": [
+          {"option": "Choose a familiar parity metric and threshold in engineering", "tradeoff": "Quick to implement, but may not satisfy the applicable policy or jurisdiction."},
+          {"option": "Skip the check until later", "tradeoff": "Allows an unreviewed candidate to appear valid despite an explicit fair-lending constraint."}
+        ]
+      },
+      "requirementIds": []
+    },
+    {
+      "id": "ml003_explainability_validation",
+      "stepNumber": 24,
+      "phase": "Validate and promote models deliberately",
+      "title": "Check that explanations are faithful and usable",
+      "type": "explanation",
+      "content": "Use the supplied SHAP hint to inspect feature attribution, but test whether the explanation is stable enough for the decision context and maps to a permitted, comprehensible reason. Global feature importance is not a per-applicant explanation. Do not expose protected attributes or imply that attribution proves causality.",
+      "requirementIds": []
+    },
+    {
+      "id": "ml003_registry",
+      "stepNumber": 25,
+      "phase": "Validate and promote models deliberately",
+      "title": "Version candidates and champion-challenger comparisons",
+      "type": "add_component",
+      "content": "Store immutable artifact versions with their dataset, feature, code, holdout, fairness-review, and explanation evidence. Compare challengers against the current champion on the same approved evaluation protocol; the registry records candidates but does not approve them by itself.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8"],
+      "component": {
+        "nodeId": "ml003_registry",
+        "componentType": "model-registry",
+        "label": "Model Registry & Comparison",
+        "description": "Versioned candidate/champion artifacts with linked evidence and approval state.",
+        "position": {"x": 2100, "y": 620},
+        "highlightReason": "A registry makes version comparison, provenance, approval, and rollback explicit.",
+        "properties": {
+          "componentName": "Model Registry & Comparison",
+          "purpose": "Track immutable candidate and champion versions, feature schemas, training manifests, holdout results, the signed fair-lending policy version and reviewer approval, explanations, deployment state, and rollback references.",
+          "platform": "Custom"
+        }
+      }
+    },
+    {
+      "id": "ml003_edge_gate_registry",
+      "stepNumber": 26,
+      "phase": "Validate and promote models deliberately",
+      "title": "Register only candidates with complete gate evidence",
+      "type": "add_connection",
+      "content": "Keep rejected candidates and their results traceable, but mark them ineligible for serving. A pass requires both the stated AUC-ROC condition and the separately approved fair-lending thresholds.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "ml003_e_gate_registry",
+        "sourceNodeId": "ml003_validation_gate",
+        "targetNodeId": "ml003_registry",
+        "connectionType": "data-flow",
+        "label": "Gate result, review evidence & candidate state",
+        "description": "Version-linked holdout results, metric definitions, signed policy version, and reviewer decision; rejected candidates remain auditable but ineligible for promotion."
+      }
+    },
+    {
+      "id": "ml003_serving",
+      "stepNumber": 27,
+      "phase": "Validate and promote models deliberately",
+      "title": "Isolate online inference behind a serving contract",
+      "type": "add_component",
+      "content": "Serve only the approved model version and matching feature schema. The online endpoint returns a score and per-decision attribution to the orchestrator; measure the full request path against the under-100ms constraint rather than treating model execution time as the whole latency.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "ml003_serving",
+        "componentType": "model-serving",
+        "label": "Approved Model Serving",
+        "description": "Online inference for the currently approved model and schema version.",
+        "position": {"x": 2470, "y": 260},
+        "highlightReason": "Version pinning and a measured inference contract protect explainability and end-to-end latency.",
+        "properties": {
+          "componentName": "Approved Model Serving",
+          "purpose": "Load only a registry-approved artifact and matching feature schema; return a score, model version, and per-decision feature attribution within its allocated share of the under-100ms end-to-end budget.",
+          "platform": "Custom API",
+          "autoscaling": true
+        }
+      }
+    },
+    {
+      "id": "ml003_edge_registry_serving",
+      "stepNumber": 28,
+      "phase": "Validate and promote models deliberately",
+      "title": "Deploy a pinned approved model version",
+      "type": "add_connection",
+      "content": "Promote by immutable version reference, not a mutable file path. Keep the prior champion available for rollback and record which version served every decision.",
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "ml003_e_registry_serving",
+        "sourceNodeId": "ml003_registry",
+        "targetNodeId": "ml003_serving",
+        "connectionType": "data-flow",
+        "label": "Approved artifact & feature schema",
+        "description": "Pinned immutable model version, schema, approval record, and rollback target."
+      }
+    },
+    {
+      "id": "ml003_champion_challenger",
+      "stepNumber": 29,
+      "phase": "Validate and promote models deliberately",
+      "title": "Compare a challenger without hiding the champion",
+      "type": "decision_point",
+      "content": "The supplied brief asks for champion-challenger comparison but does not specify an online traffic split. First compare candidates using the same frozen offline evaluation and fairness protocol. If a live comparison is later approved, define its cohort, consent/policy constraints, stop criteria, and rollback procedure before routing any traffic.",
+      "decision": {
+        "question": "How should a candidate be compared with the current champion?",
+        "chosen": "Use versioned offline comparison first, then require an explicit approval and experiment plan before any live challenger exposure.",
+        "chosenReason": "This satisfies comparison while avoiding an invented experiment percentage or an unreviewed credit decision path.",
+        "alternatives": [
+          {"option": "Replace the champion immediately", "tradeoff": "Simple deployment, but loses a controlled comparison and ready rollback target."},
+          {"option": "Route an assumed share of live applications", "tradeoff": "May create policy and customer-impact risk when no exposure plan was supplied."}
+        ]
+      },
+      "requirementIds": []
+    },
+    {
+      "id": "ml003_rollback",
+      "stepNumber": 30,
+      "phase": "Validate and promote models deliberately",
+      "title": "Make rollback an explicit, versioned operation",
+      "type": "explanation",
+      "content": "A rollback restores the previous approved artifact and matching feature schema, then records the reason and effective time. Trigger review on holdout or observed performance regression, fairness-threshold breach, explanation failure, or latency approaching the stated bound; the exact operational thresholds beyond those in the brief remain to be agreed.",
+      "requirementIds": []
+    },
+    {
+      "id": "ml003_reason_mapper",
+      "stepNumber": 31,
+      "phase": "Serve explainable decisions and retain evidence",
+      "title": "Map model evidence to permitted adverse-action reasons",
+      "type": "add_component",
+      "content": "The catalog has no dedicated adverse-action reason-code node. This is decision application logic, so reuse the existing Backend Server component rather than introducing an unsupported type. Map the per-decision attribution and applicable policy version to an approved reason-code taxonomy; fail closed or route for review when a faithful code cannot be produced.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:2"],
+      "component": {
+        "nodeId": "ml003_reason_mapper",
+        "componentType": "backend-server",
+        "label": "Adverse-Action Reason Mapper",
+        "description": "Maps decision-specific model evidence to the approved adverse-action code taxonomy.",
+        "position": {"x": 2820, "y": 530},
+        "highlightReason": "Reason-code mapping is application logic; the catalog Backend Server is a supported semantic match.",
+        "properties": {
+          "componentName": "Adverse-Action Reason Mapper",
+          "purpose": "Map the score, per-decision feature attribution, product context, and versioned approved policy to supported adverse-action reason codes. Preserve traceability and never infer a reason from global feature importance alone."
+        }
+      }
+    },
+    {
+      "id": "ml003_edge_serving_reason",
+      "stepNumber": 32,
+      "phase": "Serve explainable decisions and retain evidence",
+      "title": "Pass score and local attribution to reason mapping",
+      "type": "add_connection",
+      "content": "The explanation travels with the exact model version and feature schema. Do not substitute a global feature ranking or expose protected-group attributes as reasons.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:2"],
+      "connection": {
+        "edgeId": "ml003_e_serving_reason",
+        "sourceNodeId": "ml003_serving",
+        "targetNodeId": "ml003_reason_mapper",
+        "connectionType": "data-flow",
+        "label": "Decision score, SHAP attribution & model version",
+        "description": "Per-applicant model output and local evidence bound to the artifact and feature schema that produced it."
+      }
+    },
+    {
+      "id": "ml003_compliance_processor",
+      "stepNumber": 33,
+      "phase": "Serve explainable decisions and retain evidence",
+      "title": "Generate reviewable regulatory evidence",
+      "type": "add_component",
+      "content": "The catalog does not contain a purpose-built regulatory-documentation component. Use its generic custom component for this named evidence function: assemble versioned dataset/model manifests, holdout results, fairness review and mitigation records, approvals, reason-code policy version, and decision provenance. Confirm the required document format and retention with compliance; this asynchronous work is not on the scoring response path.",
+      "requirementIds": ["legacy-requirement:8"],
+      "component": {
+        "nodeId": "ml003_compliance_processor",
+        "componentType": "custom-component",
+        "label": "Regulatory Evidence & Decision Audit",
+        "description": "Asynchronous assembly of version-linked model and decision documentation.",
+        "position": {"x": 2470, "y": 1010},
+        "highlightReason": "The existing catalog has no regulatory-documentation node; this uses the supported generic custom component for that specific function.",
+        "properties": {
+          "componentName": "Regulatory Evidence & Decision Audit",
+          "purpose": "Assemble traceable evidence for each model version and decision, including data/code/feature manifests, holdout AUC-ROC, approved fair-lending measures and mitigations, reviewer approvals, model version, reason-code policy, and audit references. Run asynchronously and follow compliance-approved format and retention.",
+          "technology": "Versioned evidence assembly",
+          "notes": "Required report format, retention, and approval authority are open questions; do not treat this component as legal approval."
+        }
+      }
+    },
+    {
+      "id": "ml003_evidence_archive",
+      "stepNumber": 34,
+      "phase": "Serve explainable decisions and retain evidence",
+      "title": "Retain generated evidence in durable storage",
+      "type": "add_component",
+      "content": "Use the existing Object Storage component for durable, version-linked documentation artifacts. Apply access controls, encryption, integrity checks, retention, and deletion rules selected by the organization; the brief does not provide numeric retention or cloud-provider requirements.",
+      "requirementIds": ["legacy-requirement:8"],
+      "component": {
+        "nodeId": "ml003_evidence_archive",
+        "componentType": "object-storage",
+        "label": "Compliance Evidence Archive",
+        "description": "Durable, access-controlled model and decision evidence artifacts.",
+        "position": {"x": 2820, "y": 1010},
+        "highlightReason": "Compliance documentation needs a durable location separate from the synchronous scoring response.",
+        "properties": {
+          "componentName": "Compliance Evidence Archive",
+          "purpose": "Store integrity-checked, access-controlled, version-linked compliance artifacts and report outputs under organization-approved encryption, retention, and deletion policies."
+        }
+      }
+    },
+    {
+      "id": "ml003_decision_log",
+      "stepNumber": 35,
+      "phase": "Serve explainable decisions and retain evidence",
+      "title": "Persist decision provenance for later review",
+      "type": "add_component",
+      "content": "An idempotent asynchronous consumer writes the record needed to reconstruct what was served: request reference, model and feature versions, score, local attribution reference, mapped reasons, policy version, and timestamps. Minimize stored applicant data and restrict access under approved retention policy; database write latency stays off the scoring response path.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8"],
+      "component": {
+        "nodeId": "ml003_decision_log",
+        "componentType": "database",
+        "label": "Decision Provenance Store",
+        "description": "Restricted operational record populated asynchronously from durable decision events.",
+        "position": {"x": 2100, "y": 1010},
+        "highlightReason": "A durable decision record links each reason code to the exact model and policy that produced it.",
+        "properties": {
+          "componentName": "Decision Provenance Store",
+          "purpose": "Persist minimal, access-controlled decision provenance from the durable event queue through an idempotent asynchronous consumer: request reference, timestamps, model and feature versions, score, reason codes, policy version, and links to local attribution and compliance evidence.",
+          "type": "RDBMS",
+          "engine": "postgresql",
+          "workload": "OLTP",
+          "encryption": true,
+          "rbac": true,
+          "auditLog": true
+        }
+      }
+    },
+    {
+      "id": "ml003_audit_queue",
+      "stepNumber": 36,
+      "phase": "Serve explainable decisions and retain evidence",
+      "title": "Move audit and delayed outcomes off the request path",
+      "type": "add_component",
+      "content": "Publish a minimal, durable decision event before returning a score; consumers persist provenance, assemble evidence, reconcile delayed repayment outcomes, and prepare future training snapshots asynchronously. The response waits only for bounded durable queue acceptance, not database writes or evidence assembly. Make replay idempotent and monitor queue age; if durable acceptance fails or exceeds the request budget, return a retryable unavailable response rather than an unlogged score.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:8", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "ml003_audit_queue",
+        "componentType": "queue",
+        "label": "Decision & Outcome Events",
+        "description": "Durable asynchronous events for evidence assembly and delayed label reconciliation.",
+        "position": {"x": 1730, "y": 1010},
+        "highlightReason": "Asynchronous evidence and outcome processing must not consume the scoring latency budget.",
+        "properties": {
+          "componentName": "Decision & Outcome Events",
+          "purpose": "Durably accept minimal idempotent decision-audit events within the request budget, then buffer them for asynchronous provenance persistence, evidence assembly, and future training snapshots; expose retry, replay, and backlog-age signals.",
+          "durable": true,
+          "backoff": "exponential"
+        }
+      }
+    },
+    {
+      "id": "ml003_monitoring",
+      "stepNumber": 37,
+      "phase": "Serve explainable decisions and retain evidence",
+      "title": "Observe service, model, and fairness signals",
+      "type": "add_component",
+      "content": "Measure full-path latency against under 100ms, request volume against the 100k+ daily floor and clarified peak profile, feature freshness/missingness, model version, holdout and observed AUC-ROC, calibration, drift, delayed outcome coverage, and approved group metrics. Trigger policy-owner review on a fairness threshold breach; do not invent unspecified threshold values.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "ml003_monitoring",
+        "componentType": "monitoring",
+        "label": "Scoring & Model Monitoring",
+        "description": "Operational, model-quality, feature-freshness, and approved fairness telemetry.",
+        "position": {"x": 1370, "y": 1010},
+        "highlightReason": "The quality and latency constraints must be measured after deployment and by relevant cohort.",
+        "properties": {
+          "componentName": "Scoring & Model Monitoring",
+          "purpose": "Observe end-to-end latency, scoring volume, feature freshness and missingness, model version, AUC-ROC when labels mature, drift, outcome coverage, selection-rate ratios, and false-positive/false-negative gaps by approved protected cohort. Tag each result with its policy version and alert against owner-approved thresholds without supplying defaults."
+        }
+      }
+    },
+    {
+      "id": "ml003_edge_registry_compliance",
+      "stepNumber": 38,
+      "phase": "Serve explainable decisions and retain evidence",
+      "title": "Attach registry history to compliance evidence",
+      "type": "add_connection",
+      "content": "The documentation process needs the immutable model artifact reference, lifecycle state, comparison results, approver, and effective dates for each release.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8"],
+      "connection": {
+        "edgeId": "ml003_e_registry_compliance",
+        "sourceNodeId": "ml003_registry",
+        "targetNodeId": "ml003_compliance_processor",
+        "connectionType": "data-flow",
+        "label": "Version, comparison & approval history",
+        "description": "Registry provenance and release state for reproducible model documentation."
+      }
+    },
+    {
+      "id": "ml003_edge_gate_compliance",
+      "stepNumber": 39,
+      "phase": "Serve explainable decisions and retain evidence",
+      "title": "Preserve holdout and fairness-review evidence",
+      "type": "add_connection",
+      "content": "Store the exact metric definitions, holdout window, cohort denominators, uncertainty, mitigations, and reviewer disposition used to pass or reject a candidate.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "ml003_e_gate_compliance",
+        "sourceNodeId": "ml003_validation_gate",
+        "targetNodeId": "ml003_compliance_processor",
+        "connectionType": "data-flow",
+        "label": "Holdout, fairness & mitigation evidence",
+        "description": "Gate result, cohort denominators, uncertainty, mitigations, policy version, configured thresholds, and reviewer approval attached to the candidate version."
+      }
+    },
+    {
+      "id": "ml003_edge_decision_audit",
+      "stepNumber": 40,
+      "phase": "Serve explainable decisions and retain evidence",
+      "title": "Use decision records as traceable audit inputs",
+      "type": "add_connection",
+      "content": "Reference the persisted decision record and protected evidence link; keep direct identifiers out of generated reports unless the approved purpose requires them.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8"],
+      "connection": {
+        "edgeId": "ml003_e_decision_audit",
+        "sourceNodeId": "ml003_decision_log",
+        "targetNodeId": "ml003_compliance_processor",
+        "connectionType": "database-connection",
+        "label": "Decision provenance & evidence references",
+        "description": "Restricted, minimal audit fields linking an outcome to its model, feature schema, and reason-code policy."
+      }
+    },
+    {
+      "id": "ml003_edge_queue_compliance",
+      "stepNumber": 41,
+      "phase": "Serve explainable decisions and retain evidence",
+      "title": "Assemble evidence asynchronously and idempotently",
+      "type": "add_connection",
+      "content": "Consumers acknowledge only after durable processing, deduplicate by event identity, retry transient failures, and expose failed or delayed evidence work for review.",
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "ml003_e_queue_compliance",
+        "sourceNodeId": "ml003_audit_queue",
+        "targetNodeId": "ml003_compliance_processor",
+        "connectionType": "message-queue",
+        "label": "Durable decision and outcome events",
+        "description": "Replayable, idempotent audit events kept outside the synchronous scoring path."
+      }
+    },
+    {
+      "id": "ml003_edge_compliance_archive",
+      "stepNumber": 42,
+      "phase": "Serve explainable decisions and retain evidence",
+      "title": "Write completed documents to the evidence archive",
+      "type": "add_connection",
+      "content": "Persist generated artifacts with integrity metadata and links to the source versions. Retention, legal hold, access, and deletion behavior remain organization decisions to clarify.",
+      "requirementIds": ["legacy-requirement:8"],
+      "connection": {
+        "edgeId": "ml003_e_compliance_archive",
+        "sourceNodeId": "ml003_compliance_processor",
+        "targetNodeId": "ml003_evidence_archive",
+        "connectionType": "data-flow",
+        "label": "Versioned compliance documents & manifests",
+        "description": "Durable report artifacts, checksums, source-version references, and review metadata."
+      }
+    },
+    {
+      "id": "ml003_edge_decision_features",
+      "stepNumber": 43,
+      "phase": "Serve explainable decisions and retain evidence",
+      "title": "Look up only bounded online features",
+      "type": "add_connection",
+      "content": "Resolve the approved feature set using request identity and as-of semantics, returning schema and freshness metadata. Set a strict timeout within the total under-100ms budget; if required data is missing, stale, incompatible, or unavailable, fail closed with a retryable unavailable response. A cache fallback is allowed only under an owner-approved freshness bound and matching schema; do not invent either threshold.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "ml003_e_decision_features",
+        "sourceNodeId": "ml003_decision_service",
+        "targetNodeId": "ml003_feature_store",
+        "connectionType": "api-call",
+        "label": "Authorized online feature lookup",
+        "description": "Bounded request-time lookup returns schema and freshness metadata; ineligible required features fail closed rather than silently falling back."
+      }
+    },
+    {
+      "id": "ml003_edge_features_decision",
+      "stepNumber": 44,
+      "phase": "Serve explainable decisions and retain evidence",
+      "title": "Return a schema- and freshness-checked feature vector",
+      "type": "add_connection",
+      "content": "Return only the serving feature schema, with source freshness and missingness metadata. Reject schema mismatch and preserve the exact vector reference needed for decision review under approved data-minimization rules.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "ml003_e_features_decision",
+        "sourceNodeId": "ml003_feature_store",
+        "targetNodeId": "ml003_decision_service",
+        "connectionType": "data-flow",
+        "label": "Versioned features & freshness metadata",
+        "description": "Online feature values compatible with the pinned model schema and traceable source state."
+      }
+    },
+    {
+      "id": "ml003_edge_decision_serving",
+      "stepNumber": 45,
+      "phase": "Serve explainable decisions and retain evidence",
+      "title": "Invoke the pinned model inside the latency budget",
+      "type": "add_connection",
+      "content": "Send the validated feature vector with request and model-version context. Bound inference time and include network, feature lookup, reason mapping, and response serialization in the complete latency measurement.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "ml003_e_decision_serving",
+        "sourceNodeId": "ml003_decision_service",
+        "targetNodeId": "ml003_serving",
+        "connectionType": "api-call",
+        "label": "Validated features & pinned model context",
+        "description": "Inference request bound to the approved artifact and compatible feature schema."
+      }
+    },
+    {
+      "id": "ml003_edge_serving_decision",
+      "stepNumber": 46,
+      "phase": "Serve explainable decisions and retain evidence",
+      "title": "Return a score with per-decision feature attribution",
+      "type": "add_connection",
+      "content": "Return the exact artifact version, score, and local attribution together. This supports feature importance for the individual decision while keeping the output within the under-100ms end-to-end constraint.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "ml003_e_serving_decision",
+        "sourceNodeId": "ml003_serving",
+        "targetNodeId": "ml003_decision_service",
+        "connectionType": "data-flow",
+        "label": "Score, SHAP values & served model version",
+        "description": "Decision-specific attribution and score linked to the precise model artifact and feature schema."
+      }
+    },
+    {
+      "id": "ml003_edge_decision_reasons",
+      "stepNumber": 47,
+      "phase": "Close the feedback loop and test scale triggers",
+      "title": "Apply the approved reason-code policy",
+      "type": "add_connection",
+      "content": "Pass the decision context, local attribution, and effective policy version. The mapper selects only supported adverse-action reasons and preserves the evidence used for each code.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:2"],
+      "connection": {
+        "edgeId": "ml003_e_decision_reasons",
+        "sourceNodeId": "ml003_decision_service",
+        "targetNodeId": "ml003_reason_mapper",
+        "connectionType": "api-call",
+        "label": "Decision context, attribution & policy version",
+        "description": "Inputs needed to produce faithful, versioned adverse-action reason codes."
+      }
+    },
+    {
+      "id": "ml003_edge_reasons_decision",
+      "stepNumber": 48,
+      "phase": "Close the feedback loop and test scale triggers",
+      "title": "Return reason codes before completing the response",
+      "type": "add_connection",
+      "content": "Return codes and their evidence references to the orchestrator. If explanation or mapping is unavailable, do not silently return an unexplained adverse decision; follow a policy-approved fallback or review path.",
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "ml003_e_reasons_decision",
+        "sourceNodeId": "ml003_reason_mapper",
+        "targetNodeId": "ml003_decision_service",
+        "connectionType": "data-flow",
+        "label": "Approved reason codes & evidence references",
+        "description": "Versioned reasons mapped from the local model evidence and approved taxonomy."
+      }
+    },
+    {
+      "id": "ml003_edge_decision_store",
+      "stepNumber": 49,
+      "phase": "Close the feedback loop and test scale triggers",
+      "title": "Persist provenance asynchronously from the durable decision event",
+      "type": "add_connection",
+      "content": "After the scoring response is returned, an idempotent consumer persists the minimal decision record and provenance from the durable event. Deduplicate by event identity; monitor consumer lag and retries so database persistence remains off the latency-critical path without silently dropping audit records.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8"],
+      "connection": {
+        "edgeId": "ml003_e_decision_store",
+        "sourceNodeId": "ml003_audit_queue",
+        "targetNodeId": "ml003_decision_log",
+        "connectionType": "database-connection",
+        "label": "Decision, model version & reason-code record",
+        "description": "Minimal durable provenance committed under the approved privacy and retention policy."
+      }
+    },
+    {
+      "id": "ml003_edge_decision_queue",
+      "stepNumber": 50,
+      "phase": "Close the feedback loop and test scale triggers",
+      "title": "Enqueue asynchronous evidence and delayed outcomes",
+      "type": "add_connection",
+      "content": "Publish a minimal versioned decision event with an idempotency key, decision/model/feature/policy versions, reason codes, and protected evidence references. Wait only for bounded durable queue acceptance within the latency budget; do not wait for database persistence or label maturity. If acceptance fails, return a retryable unavailable response so a completed but unaudited decision is never returned.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:8", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "ml003_e_decision_queue",
+        "sourceNodeId": "ml003_decision_service",
+        "targetNodeId": "ml003_audit_queue",
+        "connectionType": "message-queue",
+        "label": "Versioned decision event & idempotency key",
+        "description": "Durable, replayable minimal provenance event; consumers persist it asynchronously, outside the scoring response path."
+      }
+    },
+    {
+      "id": "ml003_edge_serving_monitoring",
+      "stepNumber": 51,
+      "phase": "Close the feedback loop and test scale triggers",
+      "title": "Monitor inference and model-quality signals",
+      "type": "add_connection",
+      "content": "Emit model version, inference duration, output and attribution availability, and later quality labels. Compute AUC-ROC only when outcomes mature and compare with the stated above-0.85 constraint; monitor approved fairness measures by valid cohort.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "ml003_e_serving_monitoring",
+        "sourceNodeId": "ml003_serving",
+        "targetNodeId": "ml003_monitoring",
+        "connectionType": "data-flow",
+        "label": "Versioned inference, attribution & latency telemetry",
+        "description": "Inference health and delayed outcome signals keyed by served model and feature versions."
+      }
+    },
+    {
+      "id": "ml003_edge_decision_monitoring",
+      "stepNumber": 52,
+      "phase": "Close the feedback loop and test scale triggers",
+      "title": "Measure the whole scoring request, not one service",
+      "type": "add_connection",
+      "content": "Measure from accepted API request through feature retrieval, inference, reason mapping, durable event acceptance, and response. Track provenance-store consumer lag and queue backlog separately from request latency. Report latency distribution and volume against the supplied target; the brief does not specify percentile or burst profile, so agree those before declaring an SLO pass.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:4", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "ml003_e_decision_monitoring",
+        "sourceNodeId": "ml003_decision_service",
+        "targetNodeId": "ml003_monitoring",
+        "connectionType": "data-flow",
+        "label": "End-to-end latency, volume & response completeness",
+        "description": "Trace-derived measurements from API acceptance through the completed score and reason-code response."
+      }
+    },
+    {
+      "id": "ml003_capacity_trigger",
+      "stepNumber": 53,
+      "phase": "Close the feedback loop and test scale triggers",
+      "title": "Scale from measured demand and the stated daily floor",
+      "type": "scale_trigger",
+      "content": "Treat 100k+ scoring requests per day as the supplied minimum volume, not as a complete peak-capacity profile. Load-test realistic bursts and request sizes once product owners provide them; scale stateless gateway, orchestration, and serving capacity when measured concurrency or latency approaches the agreed operating boundary. Do not invent an RPS target from an unknown traffic shape.",
+      "scaleTrigger": {
+        "metric": "Observed daily scoring volume (100k+ requests/day in the brief), peak concurrency, and full-path latency approaching the under-100ms constraint",
+        "action": "Load-test with an owner-approved burst profile; add serving/orchestration capacity or apply bounded admission control, then remeasure feature-store and reason-mapping bottlenecks.",
+        "impact": "Protects the stated daily volume and latency target without assuming traffic distribution; overload must be visible and handled under an approved policy rather than silently returning an incomplete decision."
+      },
+      "requirementIds": []
+    },
+    {
+      "id": "ml003_final_checks",
+      "stepNumber": 54,
+      "phase": "Close the feedback loop and test scale triggers",
+      "title": "Review failure behavior and unresolved policy inputs",
+      "type": "explanation",
+      "content": "Before relying on the pipeline, test stale/missing features, schema mismatch, unavailable model or attribution, reason-code mapping failure, duplicate audit events, delayed or corrected labels, data-source outage, queue backlog, registry rollback, holdout leakage, and a protected-group threshold breach. Confirm the supplied AUC-ROC and latency constraints with measured evidence. The fair-lending numeric thresholds, exact regulatory document format, label horizon, retention policy, peak traffic shape, and approval authority are unresolved questions—not assumptions to fill in silently.",
+      "requirementIds": []
+    }
+  ]
+}

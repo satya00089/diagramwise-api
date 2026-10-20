@@ -1,0 +1,1038 @@
+{
+  "problem_id": "6901ef1b9420d83630aca878",
+  "version": "1.0.0-review-draft",
+  "requirementRevision": null,
+  "totalSteps": 40,
+  "phases": [
+    {
+      "name": "Contract, assumptions, and ingress",
+      "stepRange": [1, 10],
+      "description": "Separate the supplied requirements from design assumptions, then establish the alert and responder entry points."
+    },
+    {
+      "name": "Identity, incident state, and schedule truth",
+      "stepRange": [11, 20],
+      "description": "Authorize responder actions and persist incident, policy, schedule, and rotation state before dispatching work."
+    },
+    {
+      "name": "Delivery, acknowledgement, and escalation",
+      "stepRange": [21, 36],
+      "description": "Deliver through durable work, re-check escalation eligibility, and distinguish provider delivery from human acknowledgement."
+    },
+    {
+      "name": "Operations and review questions",
+      "stepRange": [37, 40],
+      "description": "Measure response and delivery health, then surface unresolved product and capacity decisions."
+    }
+  ],
+  "steps": [
+    {
+      "id": "oncall-introduction",
+      "stepNumber": 1,
+      "phase": "Contract, assumptions, and ingress",
+      "title": "Start from the supplied brief",
+      "type": "explanation",
+      "content": "This is a review draft for the frozen problem fixture. The brief asks for schedules, escalation, multiple notification channels, incident acknowledgement and resolution, response-time tracking, manual controls, and monitoring-system integration. The component sequence below is one defensible design, not a claim that the prompt mandates a particular vendor or deployment topology.",
+      "requirementIds": []
+    },
+    {
+      "id": "oncall-functional-requirements",
+      "stepNumber": 2,
+      "phase": "Contract, assumptions, and ingress",
+      "title": "Functional requirements from the prompt",
+      "type": "explanation",
+      "content": "Functional requirements (preserved verbatim from the problem): Define on-call schedules and rotations; Escalate alerts to on-call engineers; Support escalation policies; Multi-channel notifications (SMS, phone, push); Acknowledge and resolve incidents; Track incident response times; Override and manual escalation; Integration with monitoring systems. These map to legacy-requirement:1 through legacy-requirement:8 in that order.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-requirement:8"
+      ]
+    },
+    {
+      "id": "oncall-quality-constraints",
+      "stepNumber": 3,
+      "phase": "Contract, assumptions, and ingress",
+      "title": "Non-functional constraints from the prompt",
+      "type": "explanation",
+      "content": "Non-functional constraints (preserved verbatim): Reliable alert delivery; Handle notification failures; Support timezone-aware schedules; Prevent alert fatigue; Low latency for critical alerts. They map to legacy-constraint:1 through legacy-constraint:5 in that order. The brief gives no numeric latency or availability target, so this draft does not invent one.",
+      "requirementIds": [
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "oncall-design-assumptions",
+      "stepNumber": 4,
+      "phase": "Contract, assumptions, and ingress",
+      "title": "Label what the prompt leaves open",
+      "type": "explanation",
+      "content": "Design assumptions, not facts supplied by the problem: alerts have a stable source event identifier; responders and schedule editors have authenticated identities; schedules use named time zones; a policy contains ordered targets and configurable acknowledgement windows; and notification providers expose delivery outcomes that may be delayed or ambiguous. The prompt does not specify DAU, alert rate, retention, regions, numeric latency/availability SLOs, tenancy, provider contracts, or compliance needs. Capacity and retention choices remain open until those are supplied.",
+      "requirementIds": []
+    },
+    {
+      "id": "oncall-alert-dedup-decision",
+      "stepNumber": 5,
+      "phase": "Contract, assumptions, and ingress",
+      "title": "Deduplicate retries without hiding distinct incidents",
+      "type": "decision_point",
+      "content": "Monitoring sources commonly retry webhooks, and alert storms can fatigue responders. Treat source event IDs as idempotency keys; group only when a configured fingerprint and policy say alerts represent the same ongoing condition. Keep the grouping window configurable and retain the original events for audit.",
+      "decision": {
+        "question": "How should repeated monitoring events affect incident creation?",
+        "chosen": "Idempotently accept a repeated source event and apply explicit, configurable grouping rules to related events.",
+        "chosenReason": "Retries must not create duplicate incidents, while broad time-window deduplication could suppress a genuinely new failure. Recording the source event and grouping decision makes the behavior inspectable.",
+        "alternatives": [
+          {
+            "option": "Create a new incident for every webhook delivery.",
+            "tradeoff": "Simple ingestion, but retries and alert storms multiply notifications and response work."
+          },
+          {
+            "option": "Merge every matching alert within a fixed global time window.",
+            "tradeoff": "Reduces noise, but can merge unrelated incidents and delay response to a recurrence."
+          }
+        ]
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "oncall-add-monitoring-source",
+      "stepNumber": 6,
+      "phase": "Contract, assumptions, and ingress",
+      "title": "Add monitoring-system integrations",
+      "type": "add_component",
+      "content": "Accept signed, schema-validated webhooks from monitoring systems. Preserve the source event ID, event time, severity, affected service, and deduplication fingerprint. Authentication method and provider-specific payload mapping are assumptions to confirm with the actual integrations.",
+      "component": {
+        "nodeId": "oncall_alert_source",
+        "componentType": "monitoring",
+        "label": "Monitoring Integrations",
+        "description": "External monitoring and alert sources that submit incident signals.",
+        "position": {
+          "x": 0,
+          "y": 70
+        },
+        "properties": {
+          "componentName": "Monitoring Integrations",
+          "purpose": "Receive alert events from external monitoring systems with stable source event IDs, severity, timestamps, and service context. Provider protocols and payload schemas are integration-specific assumptions."
+        },
+        "data": {
+          "originalComponentId": "monitoring"
+        },
+        "highlightReason": "Makes the required monitoring-system integration an explicit system boundary."
+      },
+      "requirementIds": [
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "oncall-add-responder-client",
+      "stepNumber": 7,
+      "phase": "Contract, assumptions, and ingress",
+      "title": "Add the responder client",
+      "type": "add_component",
+      "content": "Responders need an authenticated surface to inspect an incident, acknowledge it, resolve it, or request a manual escalation. The same identity should be attached to each state-changing action for audit. Push is one notification channel; SMS and phone delivery are handled by channel adapters later.",
+      "component": {
+        "nodeId": "oncall_responder_client",
+        "componentType": "mobile-app",
+        "label": "Responder App",
+        "description": "Responder-facing incident view and acknowledgement controls.",
+        "position": {
+          "x": 0,
+          "y": 390
+        },
+        "properties": {
+          "componentName": "Responder App",
+          "purpose": "Let an authenticated responder view incident context, acknowledge or resolve an incident, and request an audited manual escalation. Receives push notifications when the device channel is available."
+        },
+        "data": {
+          "originalComponentId": "mobile-app"
+        },
+        "highlightReason": "Provides the acknowledgement, resolution, and manual-control surface."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-requirement:7",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "oncall-add-api-gateway",
+      "stepNumber": 8,
+      "phase": "Contract, assumptions, and ingress",
+      "title": "Validate both incoming paths",
+      "type": "add_component",
+      "content": "Use one API boundary for monitoring webhooks and responder commands, with distinct authentication and rate limits per caller. Keep webhook acceptance short: validate, persist or enqueue safely, and return an idempotent receipt instead of waiting on SMS, phone, or push providers.",
+      "component": {
+        "nodeId": "oncall_api_gateway",
+        "componentType": "api-gateway",
+        "label": "Webhook and Responder API",
+        "description": "Validates, authenticates, and routes alert and responder requests.",
+        "position": {
+          "x": 330,
+          "y": 225
+        },
+        "properties": {
+          "componentName": "Webhook and Responder API",
+          "purpose": "Validate monitoring webhook signatures and responder requests, apply caller-specific rate limits, and route requests without waiting for notification-provider delivery."
+        },
+        "data": {
+          "originalComponentId": "api-gateway"
+        },
+        "highlightReason": "Keeps external ingestion and interactive responder traffic behind explicit request validation."
+      },
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "oncall-connect-monitoring-gateway",
+      "stepNumber": 9,
+      "phase": "Contract, assumptions, and ingress",
+      "title": "Route monitoring events to the API boundary",
+      "type": "add_connection",
+      "content": "Accept a webhook only after signature and schema validation. A source retry with the same event key must return the original receipt and must not create another incident.",
+      "connection": {
+        "edgeId": "oncall_monitoring_to_gateway",
+        "sourceNodeId": "oncall_alert_source",
+        "targetNodeId": "oncall_api_gateway",
+        "connectionType": "https",
+        "label": "Signed alert webhooks",
+        "description": "Monitoring sources submit validated alert events with stable event identifiers; webhook retries are idempotent."
+      },
+      "requirementIds": [
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "oncall-connect-responder-gateway",
+      "stepNumber": 10,
+      "phase": "Contract, assumptions, and ingress",
+      "title": "Route responder commands through the same boundary",
+      "type": "add_connection",
+      "content": "The client submits acknowledge, resolve, override, and manual-escalation commands through authenticated APIs. The server checks the actor's permissions and the incident's current version before accepting each change.",
+      "connection": {
+        "edgeId": "oncall_responder_to_gateway",
+        "sourceNodeId": "oncall_responder_client",
+        "targetNodeId": "oncall_api_gateway",
+        "connectionType": "https",
+        "label": "Responder commands",
+        "description": "Authenticated incident reads and state-changing responder actions enter through the API boundary."
+      },
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:7",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "oncall-add-identity",
+      "stepNumber": 11,
+      "phase": "Identity, incident state, and schedule truth",
+      "title": "Add identity and authorization",
+      "type": "add_component",
+      "content": "Identity details are not specified in the problem. Assume responders, schedule editors, and administrators have distinct permissions, and that manual overrides require an authenticated actor and an audit record. Monitoring integrations use separate credentials from human users.",
+      "component": {
+        "nodeId": "oncall_identity_service",
+        "componentType": "auth-service",
+        "label": "Identity and Authorization",
+        "description": "Authenticates people and monitoring integrations and checks roles for state changes.",
+        "position": {
+          "x": 625,
+          "y": 35
+        },
+        "properties": {
+          "componentName": "Identity and Authorization",
+          "purpose": "Authenticate responder and schedule-editor identities, authorize incident actions, and validate separate credentials for monitoring integrations. Role boundaries are explicit design assumptions because the prompt does not specify tenancy or access control."
+        },
+        "data": {
+          "originalComponentId": "auth-service"
+        },
+        "highlightReason": "Protects acknowledgement, schedule edits, and manual escalation from unauthenticated changes."
+      },
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:1"
+      ]
+    },
+    {
+      "id": "oncall-connect-gateway-identity",
+      "stepNumber": 12,
+      "phase": "Identity, incident state, and schedule truth",
+      "title": "Authorize state-changing requests",
+      "type": "add_connection",
+      "content": "The API verifies the caller before executing a responder command. For webhook callers, use integration-specific credentials and reject invalid signatures before creating state.",
+      "connection": {
+        "edgeId": "oncall_gateway_to_identity",
+        "sourceNodeId": "oncall_api_gateway",
+        "targetNodeId": "oncall_identity_service",
+        "connectionType": "api-call",
+        "label": "Caller authentication and authorization",
+        "description": "Resolve the caller identity and permission for responder actions or a registered monitoring integration."
+      },
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:7",
+        "legacy-constraint:1"
+      ]
+    },
+    {
+      "id": "oncall-add-incident-service",
+      "stepNumber": 13,
+      "phase": "Identity, incident state, and schedule truth",
+      "title": "Model incident lifecycle and policy application",
+      "type": "add_component",
+      "content": "Keep incident state transitions explicit: accepted/open, acknowledged, and resolved. Apply the configured escalation policy to an incident snapshot, record each notification attempt and actor action, and reject stale or invalid transitions. Deduplication and fatigue controls must be visible in the incident history rather than silently dropping alerts.",
+      "component": {
+        "nodeId": "oncall_incident_service",
+        "componentType": "backend-server",
+        "label": "Incident and Policy Service",
+        "description": "Owns incident state, escalation policy execution, and responder commands.",
+        "position": {
+          "x": 625,
+          "y": 245
+        },
+        "properties": {
+          "componentName": "Incident and Policy Service",
+          "purpose": "Create and deduplicate incidents, apply versioned escalation policies, enforce acknowledge and resolve transitions, record manual overrides and notification outcomes, and persist timestamps for response-time reporting."
+        },
+        "data": {
+          "originalComponentId": "backend-server"
+        },
+        "highlightReason": "Centralizes the state machine so retries, acknowledgements, and policy changes have one authority."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-constraint:1",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "oncall-connect-gateway-incident",
+      "stepNumber": 14,
+      "phase": "Identity, incident state, and schedule truth",
+      "title": "Route alerts and responder actions to incident state",
+      "type": "add_connection",
+      "content": "Webhook creation, acknowledgement, resolution, and manual escalation all pass through the incident service. State-changing requests carry an idempotency key or expected incident version so client retries do not replay a transition.",
+      "connection": {
+        "edgeId": "oncall_gateway_to_incident",
+        "sourceNodeId": "oncall_api_gateway",
+        "targetNodeId": "oncall_incident_service",
+        "connectionType": "api-call",
+        "label": "Validated alert and responder commands",
+        "description": "Create or inspect incidents and apply authorized acknowledge, resolve, override, and manual-escalation commands."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:5",
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "oncall-add-schedule-engine",
+      "stepNumber": 15,
+      "phase": "Identity, incident state, and schedule truth",
+      "title": "Resolve the current and next on-call targets",
+      "type": "add_component",
+      "content": "Represent rotations, overrides, and escalation-policy steps as versioned data. Store each schedule's IANA time-zone identifier and recurring local-time rule; materialize upcoming instants in UTC. The product must define what happens at ambiguous or nonexistent local times during daylight-saving changes.",
+      "component": {
+        "nodeId": "oncall_schedule_engine",
+        "componentType": "backend-server",
+        "label": "Schedule and Escalation Engine",
+        "description": "Resolves rotations, time-zone-aware handoffs, policy steps, and due escalation work.",
+        "position": {
+          "x": 960,
+          "y": 55
+        },
+        "properties": {
+          "componentName": "Schedule and Escalation Engine",
+          "purpose": "Resolve the active on-call target from versioned rotations and overrides, compute escalation deadlines from policy rules, and materialize local schedule rules into UTC instants using their named time zones."
+        },
+        "data": {
+          "originalComponentId": "backend-server"
+        },
+        "highlightReason": "Makes schedule resolution and time-zone transitions an explicit, testable responsibility."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-constraint:3",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "oncall-connect-incident-scheduler",
+      "stepNumber": 16,
+      "phase": "Identity, incident state, and schedule truth",
+      "title": "Resolve policy targets from current schedule state",
+      "type": "add_connection",
+      "content": "For a new incident or due escalation, resolve the recipient from the applicable policy and the schedule version. Persist which policy step and schedule version were used so later edits do not silently rewrite the explanation of a past notification.",
+      "connection": {
+        "edgeId": "oncall_incident_to_schedule",
+        "sourceNodeId": "oncall_incident_service",
+        "targetNodeId": "oncall_schedule_engine",
+        "connectionType": "api-call",
+        "label": "Recipient and next policy step",
+        "description": "Resolve the current on-call recipient and the next escalation deadline against versioned schedule and policy state."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "oncall-add-primary-store",
+      "stepNumber": 17,
+      "phase": "Identity, incident state, and schedule truth",
+      "title": "Persist the source of truth",
+      "type": "add_component",
+      "content": "A relational store is a design choice, not a supplied requirement. It supports transactional incident transitions, versioned policies and schedules, unique idempotency keys, notification-attempt history, audit records, and response timestamps. Retention and regional durability targets need product input.",
+      "component": {
+        "nodeId": "oncall_primary_store",
+        "componentType": "database",
+        "label": "Incident and Schedule Store",
+        "description": "Transactional source of truth for incidents, policies, schedules, delivery attempts, and audit history.",
+        "position": {
+          "x": 960,
+          "y": 275
+        },
+        "properties": {
+          "componentName": "Incident and Schedule Store",
+          "purpose": "Persist incident state and timestamps, versioned schedules and escalation policies, deduplication keys, outbox records, notification attempts, and immutable actor audit entries transactionally."
+        },
+        "data": {
+          "originalComponentId": "database"
+        },
+        "highlightReason": "Anchors retries, schedule resolution, audit, and response-time reporting to durable state."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:3",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-constraint:1",
+        "legacy-constraint:3",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "oncall-connect-incident-store",
+      "stepNumber": 18,
+      "phase": "Identity, incident state, and schedule truth",
+      "title": "Commit incident transitions and audit history",
+      "type": "add_connection",
+      "content": "Acknowledge, resolve, deduplicate, and override operations update incident state and append their audit facts in one transaction. Record created, first-notified, acknowledged, and resolved timestamps so response measures have a defined event source.",
+      "connection": {
+        "edgeId": "oncall_incident_to_store",
+        "sourceNodeId": "oncall_incident_service",
+        "targetNodeId": "oncall_primary_store",
+        "connectionType": "database-connection",
+        "label": "Transactional incident and audit state",
+        "description": "Persist state transitions, expected versions, idempotency records, response timestamps, policy snapshots, and actor audit events."
+      },
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-constraint:1",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "oncall-connect-schedule-store",
+      "stepNumber": 19,
+      "phase": "Identity, incident state, and schedule truth",
+      "title": "Read versioned rotations and policies",
+      "type": "add_connection",
+      "content": "The schedule engine reads schedule, override, and policy versions from durable state. Cache only after measuring the read path; if a cache is later introduced, invalidation and maximum staleness must be explicit because a stale rotation can page the wrong person.",
+      "connection": {
+        "edgeId": "oncall_schedule_to_store",
+        "sourceNodeId": "oncall_schedule_engine",
+        "targetNodeId": "oncall_primary_store",
+        "connectionType": "database-connection",
+        "label": "Versioned schedule and policy reads",
+        "description": "Resolve rotations, overrides, time zones, and escalation rules from the authoritative versioned records."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:3",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "oncall-durable-timers-decision",
+      "stepNumber": 20,
+      "phase": "Identity, incident state, and schedule truth",
+      "title": "Persist deadlines instead of sleeping in memory",
+      "type": "decision_point",
+      "content": "Store each next escalation due time and policy-step version durably. A timer worker can scan or lease due records and publish them to the queue; after restart it can find overdue work again. In-memory sleeps alone lose deadlines during deploys or process failures.",
+      "decision": {
+        "question": "Where does the system keep acknowledgement deadlines and escalation timers?",
+        "chosen": "Persist dueAt, incident version, policy step, and lease state; recover due work by polling or an equivalent durable scheduler.",
+        "chosenReason": "A process restart must not erase an escalation deadline. Re-checking current incident state also makes delayed and duplicate timer events safe.",
+        "alternatives": [
+          {
+            "option": "Sleep in a request handler or worker process until the timeout expires.",
+            "tradeoff": "Easy to prototype but loses or duplicates timers across restarts and deployments."
+          },
+          {
+            "option": "Use a managed scheduler without a durable incident deadline in the system database.",
+            "tradeoff": "Can work, but reconciliation and policy-version checks are harder if scheduler state and incident state diverge."
+          }
+        ]
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-constraint:1",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "oncall-add-delivery-queue",
+      "stepNumber": 21,
+      "phase": "Delivery, acknowledgement, and escalation",
+      "title": "Add durable notification and due-work queues",
+      "type": "add_component",
+      "content": "Separate the synchronous incident state transition from provider calls. Use durable work records for initial notifications, retries, and escalation deadlines. Queue messages can be delivered more than once; consumers must be idempotent and verify the incident is still eligible before sending.",
+      "component": {
+        "nodeId": "oncall_delivery_queue",
+        "componentType": "queue",
+        "label": "Notification and Escalation Queue",
+        "description": "Durable asynchronous work for notification attempts and due escalation checks.",
+        "position": {
+          "x": 1280,
+          "y": 205
+        },
+        "properties": {
+          "componentName": "Notification and Escalation Queue",
+          "purpose": "Buffer initial notification attempts, provider retries, and due escalation checks durably; support bounded retry, delayed work, dead-letter review, and idempotent consumption."
+        },
+        "data": {
+          "originalComponentId": "queue"
+        },
+        "highlightReason": "Moves unreliable, variable-latency provider work off the critical alert-acceptance request."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "oncall-connect-incident-queue",
+      "stepNumber": 22,
+      "phase": "Delivery, acknowledgement, and escalation",
+      "title": "Publish committed incident work",
+      "type": "add_connection",
+      "content": "The incident service writes an outbox row in the same database transaction as the incident transition. A publisher retries unsent outbox rows until queue acceptance is recorded; this closes the database-to-queue dual-write gap without claiming exactly-once delivery.",
+      "connection": {
+        "edgeId": "oncall_incident_to_queue",
+        "sourceNodeId": "oncall_incident_service",
+        "targetNodeId": "oncall_delivery_queue",
+        "connectionType": "message-queue",
+        "label": "Committed notification work",
+        "description": "Publish durable outbox events for initial delivery, manual escalation, and retry scheduling after incident state commits."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:4",
+        "legacy-requirement:7",
+        "legacy-constraint:1",
+        "legacy-constraint:2"
+      ]
+    },
+    {
+      "id": "oncall-connect-scheduler-queue",
+      "stepNumber": 23,
+      "phase": "Delivery, acknowledgement, and escalation",
+      "title": "Enqueue due escalation checks",
+      "type": "add_connection",
+      "content": "The schedule engine emits a due-work event for a persisted deadline. The event identifies the incident and policy step; it does not authorize a notification by itself. The worker re-checks acknowledgement, resolution, schedule version, and the current policy before advancing.",
+      "connection": {
+        "edgeId": "oncall_schedule_to_queue",
+        "sourceNodeId": "oncall_schedule_engine",
+        "targetNodeId": "oncall_delivery_queue",
+        "connectionType": "message-queue",
+        "label": "Persisted deadline becomes due work",
+        "description": "Queue a check for the due incident and policy step; worker-side state validation prevents stale timer events from escalating."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-constraint:1",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "oncall-add-delivery-worker",
+      "stepNumber": 24,
+      "phase": "Delivery, acknowledgement, and escalation",
+      "title": "Process notification attempts outside the request path",
+      "type": "add_component",
+      "content": "Workers lease queue messages, validate their incident and policy versions, and perform bounded provider attempts. Use per-channel concurrency and provider quotas so an outage or a burst does not starve all delivery work. A retry is work to complete, not evidence that a notification reached a human.",
+      "component": {
+        "nodeId": "oncall_delivery_worker",
+        "componentType": "processing-worker",
+        "label": "Delivery and Escalation Workers",
+        "description": "Consumes due work, validates current incident state, and runs bounded notification attempts.",
+        "position": {
+          "x": 1600,
+          "y": 205
+        },
+        "properties": {
+          "componentName": "Delivery and Escalation Workers",
+          "purpose": "Consume queue work with idempotency keys, validate that incidents remain open and escalation steps remain current, apply bounded retry with backoff, and record each provider outcome."
+        },
+        "data": {
+          "originalComponentId": "processing-worker"
+        },
+        "highlightReason": "Contains slow and failure-prone notification work behind durable, retryable processing."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "oncall-connect-queue-worker",
+      "stepNumber": 25,
+      "phase": "Delivery, acknowledgement, and escalation",
+      "title": "Lease work with at-least-once semantics",
+      "type": "add_connection",
+      "content": "Acknowledge a queue message only after the outcome or a durable retry/dead-letter decision is recorded. Crashes may cause redelivery, so the worker's idempotency key should cover incident, policy step, recipient, channel, and attempt class.",
+      "connection": {
+        "edgeId": "oncall_queue_to_worker",
+        "sourceNodeId": "oncall_delivery_queue",
+        "targetNodeId": "oncall_delivery_worker",
+        "connectionType": "message-queue",
+        "label": "At-least-once delivery work",
+        "description": "Lease initial sends and due checks; worker records outcomes before acknowledging or arranging retry."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:4",
+        "legacy-constraint:1",
+        "legacy-constraint:2"
+      ]
+    },
+    {
+      "id": "oncall-connect-worker-schedule",
+      "stepNumber": 26,
+      "phase": "Delivery, acknowledgement, and escalation",
+      "title": "Re-check eligibility before advancing a policy",
+      "type": "add_connection",
+      "content": "Before sending a later escalation step, read authoritative incident state. If the incident is acknowledged or resolved, cancel remaining escalation work. If the policy or schedule changed, follow the explicitly selected versioning rule and record why the target changed.",
+      "connection": {
+        "edgeId": "oncall_worker_to_schedule",
+        "sourceNodeId": "oncall_delivery_worker",
+        "targetNodeId": "oncall_schedule_engine",
+        "connectionType": "api-call",
+        "label": "Revalidate due step and recipient",
+        "description": "Resolve the current policy and schedule version after confirming the incident is still open and unacknowledged."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-constraint:1",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "oncall-add-channel-dispatcher",
+      "stepNumber": 27,
+      "phase": "Delivery, acknowledgement, and escalation",
+      "title": "Dispatch through SMS, phone, and push adapters",
+      "type": "add_component",
+      "content": "Select only channels permitted by the responder's preferences and the policy. Keep provider credentials and rate limits behind adapters. Record provider acceptance, delivery receipts when available, and human acknowledgement as separate facts.",
+      "component": {
+        "nodeId": "oncall_channel_dispatcher",
+        "componentType": "notification-service",
+        "label": "Multi-channel Notification Service",
+        "description": "Routes alert attempts through SMS, phone, and push provider adapters.",
+        "position": {
+          "x": 1920,
+          "y": 205
+        },
+        "properties": {
+          "componentName": "Multi-channel Notification Service",
+          "purpose": "Dispatch policy-authorized SMS, phone, and push notifications through replaceable provider adapters; record provider responses and receipts separately from responder acknowledgement.",
+          "channels": "All"
+        },
+        "data": {
+          "originalComponentId": "notification-service"
+        },
+        "highlightReason": "Provides the required channels while isolating provider-specific failures and credentials."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:4",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "oncall-connect-worker-dispatcher",
+      "stepNumber": 28,
+      "phase": "Delivery, acknowledgement, and escalation",
+      "title": "Send only after current-state checks pass",
+      "type": "add_connection",
+      "content": "The worker invokes a provider adapter with a stable notification-attempt key. Provider acceptance means the request was accepted by that provider; it does not mean the person saw, received, or acknowledged the alert.",
+      "connection": {
+        "edgeId": "oncall_worker_to_dispatcher",
+        "sourceNodeId": "oncall_delivery_worker",
+        "targetNodeId": "oncall_channel_dispatcher",
+        "connectionType": "api-call",
+        "label": "Policy-authorized channel attempt",
+        "description": "Send to the selected recipient and channel with a stable attempt key and channel-specific provider limits."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:4",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "oncall-connect-dispatcher-responder",
+      "stepNumber": 29,
+      "phase": "Delivery, acknowledgement, and escalation",
+      "title": "Deliver push to the responder app",
+      "type": "add_connection",
+      "content": "Push reaches the responder client when the device channel is available; SMS and phone use the registered endpoint through their respective adapters. A provider receipt updates delivery status only. Escalation stops only after the incident service accepts an acknowledgement or resolution.",
+      "connection": {
+        "edgeId": "oncall_dispatcher_to_responder",
+        "sourceNodeId": "oncall_channel_dispatcher",
+        "targetNodeId": "oncall_responder_client",
+        "connectionType": "data-flow",
+        "label": "Push notification to responder app",
+        "description": "Deliver push to the responder app when its device channel is available. SMS and phone use their registered provider endpoints; receipts do not constitute human acknowledgement."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:4",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "oncall-acknowledgement-flow",
+      "stepNumber": 30,
+      "phase": "Delivery, acknowledgement, and escalation",
+      "title": "Treat acknowledgement as a state transition",
+      "type": "explanation",
+      "content": "The responder's acknowledgement returns through the client, API boundary, and incident service. In one conditional transaction, record actor and acknowledgedAt, move the incident to acknowledged, and cancel or invalidate future escalation steps. Resolution records resolvedAt separately. Provider callbacks alone never acknowledge or resolve an incident.",
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-constraint:1"
+      ]
+    },
+    {
+      "id": "oncall-provider-failure-decision",
+      "stepNumber": 31,
+      "phase": "Delivery, acknowledgement, and escalation",
+      "title": "Recover from provider timeouts and channel failure",
+      "type": "decision_point",
+      "content": "Retry transient provider timeouts with bounded exponential backoff and jitter, honoring provider rate limits. If the attempt remains unsuccessful, try the next policy-authorized channel or escalation target. Keep status pending or failed until evidence supports a stronger state; do not report delivery or acknowledgement based only on a request timeout.",
+      "decision": {
+        "question": "What happens when an SMS, phone, or push provider fails or returns an ambiguous timeout?",
+        "chosen": "Record the ambiguous attempt, retry with a stable key and bounded backoff, then use an alternate permitted channel or escalation target; expose unresolved work for operator review.",
+        "chosenReason": "A timeout can occur after a provider accepted a request. Stable keys limit duplicate sends where supported, while distinct delivery and acknowledgement states avoid false success. The allowed retry window and fallback ordering depend on provider contracts and must be configured.",
+        "alternatives": [
+          {
+            "option": "Retry indefinitely on the same provider and channel.",
+            "tradeoff": "Can keep transient work alive, but delays other channels and may violate provider quotas or fatigue responders."
+          },
+          {
+            "option": "Mark the attempt delivered as soon as the provider API returns success.",
+            "tradeoff": "Confuses provider acceptance with device delivery and human awareness."
+          },
+          {
+            "option": "Fail the incident immediately on the first provider error.",
+            "tradeoff": "Makes failures visible but abandons transient recovery and configured fallback channels."
+          }
+        ]
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:4",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "oncall-worker-redelivery-decision",
+      "stepNumber": 32,
+      "phase": "Delivery, acknowledgement, and escalation",
+      "title": "Make retries safe under worker crashes",
+      "type": "decision_point",
+      "content": "Assume at-least-once queue delivery. If a worker crashes after provider acceptance but before saving the outcome, a retry may repeat the call. Use the provider's idempotency support when available, persist attempt state, deduplicate callbacks, and reconcile ambiguous attempts rather than promising exactly-once notification delivery.",
+      "decision": {
+        "question": "How should the system handle a crash between provider acceptance and outcome persistence?",
+        "chosen": "Use idempotent attempts where provider contracts allow, persist a stable attempt key, and mark uncertain outcomes for bounded retry or reconciliation.",
+        "chosenReason": "A database and external provider cannot generally commit one atomic transaction. The design makes duplicate risk explicit and keeps an auditable distinction between accepted, delivered, failed, and acknowledged.",
+        "alternatives": [
+          {
+            "option": "Claim exactly-once delivery across the database, queue, and providers.",
+            "tradeoff": "Misrepresents the independent failure boundaries and creates false confidence about duplicate sends."
+          },
+          {
+            "option": "Drop every message after an uncertain provider result.",
+            "tradeoff": "Avoids some duplicates but can silently lose a critical alert."
+          }
+        ]
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:4",
+        "legacy-constraint:1",
+        "legacy-constraint:2"
+      ]
+    },
+    {
+      "id": "oncall-manual-override-decision",
+      "stepNumber": 33,
+      "phase": "Delivery, acknowledgement, and escalation",
+      "title": "Keep manual escalation auditable and concurrency-safe",
+      "type": "decision_point",
+      "content": "A manual override should state the actor, reason, selected recipient or target, and optional expiry. Apply it with an expected incident and policy version so a concurrent acknowledgement or resolution wins safely. An override changes routing; it does not erase prior attempts or silently reset response-time clocks.",
+      "decision": {
+        "question": "How should manual overrides interact with automatic escalation?",
+        "chosen": "Record an authorized, version-checked override as an auditable policy action while preserving the incident timeline.",
+        "chosenReason": "This gives responders a recovery path without losing who changed the route or racing an acknowledgement. Override expiration and whether it pauses automation are explicit product decisions.",
+        "alternatives": [
+          {
+            "option": "Allow an override to edit the incident's current recipient in place with no audit event.",
+            "tradeoff": "Simple but makes incident history and accountability unreliable."
+          },
+          {
+            "option": "Disallow manual escalation and require every action to follow the automated policy.",
+            "tradeoff": "Predictable but removes the requested operator recovery path."
+          }
+        ]
+      },
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:7",
+        "legacy-constraint:1"
+      ]
+    },
+    {
+      "id": "oncall-store-queue-outage-decision",
+      "stepNumber": 34,
+      "phase": "Delivery, acknowledgement, and escalation",
+      "title": "Recover when the queue or scheduler is unavailable",
+      "type": "decision_point",
+      "content": "If queue publication fails, retain committed outbox rows and retry publication; do not return a success response that implies dispatch occurred. If a timer worker is down, persisted dueAt rows are found after recovery and revalidated against current incident state. Dead-letter exhausted work with enough context for safe operator replay and alert through an independent operations path where available.",
+      "decision": {
+        "question": "What durable recovery path remains when asynchronous infrastructure is unavailable?",
+        "chosen": "Keep incident and outbox state durable, retry unsent work after recovery, reconcile overdue timers, and isolate exhausted messages for review.",
+        "chosenReason": "The database commit is the recoverable boundary. Reconciliation restores liveness after a queue or worker outage without claiming that the notification was sent while the provider path was unavailable.",
+        "alternatives": [
+          {
+            "option": "Discard work when queue publication fails and rely on the monitoring source to retry.",
+            "tradeoff": "Couples internal recovery to external retry behavior and risks loss if the source stops retrying."
+          },
+          {
+            "option": "Block the webhook request until all notification providers recover.",
+            "tradeoff": "Makes alert acceptance depend on slow third parties and can cause source timeouts and duplicate submissions."
+          }
+        ]
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "oncall-delivery-scale-trigger",
+      "stepNumber": 35,
+      "phase": "Delivery, acknowledgement, and escalation",
+      "title": "Scale from deadline risk, not queue depth alone",
+      "type": "scale_trigger",
+      "content": "The prompt requires low latency for critical alerts but gives no numeric target. Agree a critical-alert SLO first, then alert and scale using oldest due-work age, time-to-deadline, and provider-specific latency/error rates. Queue depth alone can hide a small number of critically overdue incidents.",
+      "scaleTrigger": {
+        "metric": "Oldest due notification age and time remaining to its escalation deadline, segmented by channel",
+        "action": "Increase eligible worker capacity, apply channel-specific backpressure, and page operations when the agreed critical-alert SLO is at risk.",
+        "impact": "Protects timely critical delivery while avoiding uncontrolled provider bursts; numeric thresholds require an agreed SLO and provider quotas.",
+        "component": {
+          "nodeId": "oncall_delivery_worker",
+          "componentType": "processing-worker",
+          "label": "Delivery and Escalation Workers",
+          "description": "Worker pool sized against due-work age and channel quotas.",
+          "position": {
+            "x": 1600,
+            "y": 205
+          },
+          "properties": {
+            "componentName": "Delivery and Escalation Workers",
+            "purpose": "Consume queue work with idempotency keys, validate current incident state, and scale within provider quotas based on due-work age and the agreed critical-alert SLO."
+          },
+          "data": {
+            "originalComponentId": "processing-worker"
+          },
+          "highlightReason": "Ties capacity changes to overdue critical work while respecting provider limits."
+        }
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:4",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "oncall-response-time-definition",
+      "stepNumber": 36,
+      "phase": "Delivery, acknowledgement, and escalation",
+      "title": "Define response-time measures from lifecycle events",
+      "type": "explanation",
+      "content": "Track receivedAt, firstAttemptAt, providerAcceptedAt, acknowledgedAt, and resolvedAt as separate timestamps. Derive time-to-acknowledge from the accepted incident event to the first valid human acknowledgement; define whether duplicate or grouped source events affect that denominator. The prompt asks for response-time tracking but supplies no reporting windows, percentile targets, or retention period.",
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "oncall-add-operations-monitoring",
+      "stepNumber": 37,
+      "phase": "Operations and review questions",
+      "title": "Observe the reliability boundary",
+      "type": "add_component",
+      "content": "Measure webhook acceptance and deduplication, outbox age, queue oldest-due age, provider outcomes by channel, escalation lateness, acknowledgement latency, and failed or dead-lettered work. Keep an independent alert path for this system's own delivery failures to avoid relying only on the failing notification route.",
+      "component": {
+        "nodeId": "oncall_operations_monitoring",
+        "componentType": "monitoring",
+        "label": "On-call Platform Observability",
+        "description": "Operational metrics and alerts for ingestion, schedules, queues, providers, and response outcomes.",
+        "position": {
+          "x": 1600,
+          "y": 430
+        },
+        "properties": {
+          "componentName": "On-call Platform Observability",
+          "purpose": "Monitor webhook acceptance, outbox and queue lag, time-zone schedule jobs, provider outcomes, overdue escalations, response times, and dead-letter volume; route platform-health alerts through an independent path where available."
+        },
+        "data": {
+          "originalComponentId": "monitoring"
+        },
+        "highlightReason": "Makes delivery degradation and missed escalation deadlines visible to operators."
+      },
+      "requirementIds": [
+        "legacy-requirement:6",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "oncall-connect-incident-observability",
+      "stepNumber": 38,
+      "phase": "Operations and review questions",
+      "title": "Export lifecycle and response signals",
+      "type": "add_connection",
+      "content": "Emit structured lifecycle and timing signals without putting provider payloads or sensitive responder details in metric labels. Preserve detailed records in the authorized incident audit store and use bounded-cardinality dimensions for dashboards.",
+      "connection": {
+        "edgeId": "oncall_incident_to_observability",
+        "sourceNodeId": "oncall_incident_service",
+        "targetNodeId": "oncall_operations_monitoring",
+        "connectionType": "event-stream",
+        "label": "Incident lifecycle and response metrics",
+        "description": "Export state-transition counts, acknowledgement and resolution timings, and escalation outcomes for operational reporting."
+      },
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-constraint:1",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "oncall-connect-worker-observability",
+      "stepNumber": 39,
+      "phase": "Operations and review questions",
+      "title": "Watch dispatch and retry health",
+      "type": "add_connection",
+      "content": "Export per-channel attempt outcomes, provider latency and throttling, retry counts, oldest due work, and dead-letter volume. Alert on symptoms that put the agreed critical-alert SLO at risk; the SLO and thresholds remain open because the brief does not specify them.",
+      "connection": {
+        "edgeId": "oncall_worker_to_observability",
+        "sourceNodeId": "oncall_delivery_worker",
+        "targetNodeId": "oncall_operations_monitoring",
+        "connectionType": "event-stream",
+        "label": "Provider, retry, and queue health",
+        "description": "Export delivery outcomes, channel errors, retry state, due-work age, and dead-letter signals."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:4",
+        "legacy-requirement:6",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "oncall-open-questions",
+      "stepNumber": 40,
+      "phase": "Operations and review questions",
+      "title": "Questions to settle before sizing or implementation",
+      "type": "explanation",
+      "content": "Open questions: What alert and incident volumes, peak burst, and number of schedules should be supported? What are the critical-alert latency and availability SLOs? Which regions and failure domains are required? Which SMS, voice, and push providers and delivery receipts are available? What retry windows and acknowledgement timeouts should policies allow? How should daylight-saving gaps and repeated local times be resolved? What are the retention, privacy, tenancy, and compliance rules? What should manual overrides do to active timers? These answers determine capacity, topology, and operational thresholds; none is asserted as a supplied fact here.",
+      "requirementIds": []
+    }
+  ]
+}

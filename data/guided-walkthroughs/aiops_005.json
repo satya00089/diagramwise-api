@@ -1,0 +1,309 @@
+{
+  "problem_id": "aiops_005",
+  "version": "1.0-review",
+  "totalSteps": 49,
+  "phases": [
+    {"name": "Normalize and buffer monitoring alerts", "stepRange": [1, 10], "description": "Define the frozen targets, authenticate 10+ source integrations, normalize alert identity, and buffer bursts in a replayable log."},
+    {"name": "Deduplicate and correlate incidents", "stepRange": [11, 24], "description": "Use stateful event-time windows, topology and message similarity to make durable, explainable incident candidates without discarding raw evidence."},
+    {"name": "Guard decisions and serve operators", "stepRange": [25, 39], "description": "Rank by severity and business impact, fail open for critical alerts, persist suppression reasons, and expose incidents and operator feedback securely."},
+    {"name": "Learn safely and prove the operating targets", "stepRange": [40, 49], "description": "Train from reviewed actions, observe lag and decision quality, scale storm paths, and validate all five constraints with representative tests."}
+  ],
+  "steps": [
+    {
+      "id": "alert_01", "stepNumber": 1, "phase": "Normalize and buffer monitoring alerts", "title": "Freeze the alert-management contract", "type": "explanation",
+      "content": "The frozen requirements are: Correlate alerts from multiple monitoring tools; Deduplicate redundant and flapping alerts; Group related alerts into incidents; Suppress non-actionable alerts intelligently; Rank alerts by severity and business impact; Provide context enrichment for each alert; Handle alert storms during major outages; Learn from operator actions on alert handling. The frozen constraints are: Alert correlation latency under 10 seconds; Reduce alert volume by 80%; Zero suppression of critical actionable alerts; Handle 100k+ alerts per hour; Support integration with 10+ monitoring tools. Event size, incident cardinality, burst multiplier, severity taxonomy, and the measurement window for 80% reduction are not supplied. Treat the capacities below as hypotheses to load-test, not verified performance.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "alert_02", "stepNumber": 2, "phase": "Normalize and buffer monitoring alerts", "title": "Represent the monitoring-tool fleet", "type": "add_component",
+      "content": "Treat Prometheus-style metrics, log alerting, APM, cloud monitoring, and other tools as independent producers. Each of 10+ integrations gets a stable source ID, credential, schema version, and ownership record; the single fleet node represents many adapters, not one tool.",
+      "component": {"nodeId": "alert_sources", "componentType": "monitoring", "label": "Monitoring Tool Fleet", "description": "Ten or more independent alert producers", "position": {"x": 0, "y": 220}, "properties": {"componentName": "Monitoring Tool Fleet", "purpose": "Represent 10+ source integrations with distinct source IDs, credentials, schema versions, event timestamps, and original severity; forward every raw alert, including critical alerts."}, "highlightReason": "Multi-tool ingestion and the 10+ integration constraint must be explicit at the source boundary."},
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "alert_03", "stepNumber": 3, "phase": "Normalize and buffer monitoring alerts", "title": "Authenticate and bound ingestion", "type": "add_component",
+      "content": "Accept TLS-protected webhooks or polling adapter submissions. Validate payload size, source identity, and schema, and apply per-source quotas; throttle with a retryable response rather than silently losing a critical alert.",
+      "component": {"nodeId": "alert_ingest", "componentType": "api-gateway", "label": "Alert Ingest Gateway", "description": "Authenticated, bounded source ingress", "position": {"x": 300, "y": 220}, "properties": {"componentName": "Alert Ingest Gateway", "purpose": "Validate source-scoped webhook and adapter requests, propagate event IDs and receipt time, reject invalid schema, and return retryable backpressure without discarding accepted alerts.", "inputValidation": true, "authentication": "API Key", "rateLimiting": true, "tlsTermination": true, "throttling": true}, "highlightReason": "The ingress boundary protects availability and prevents one integration from impersonating another."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "alert_04", "stepNumber": 4, "phase": "Normalize and buffer monitoring alerts", "title": "Deliver source alerts to the gateway", "type": "add_connection",
+      "content": "Each connector submits the original alert with tool event ID, source ID, event time, tenant, severity, and raw payload over TLS. Acknowledgment means accepted for durable publishing, not that correlation has finished.",
+      "connection": {"edgeId": "sources_ingest", "sourceNodeId": "alert_sources", "targetNodeId": "alert_ingest", "connectionType": "http", "label": "Authenticated raw alerts", "description": "Source-scoped TLS ingestion with stable event IDs, bounded retries, and retryable backpressure."},
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "alert_05", "stepNumber": 5, "phase": "Normalize and buffer monitoring alerts", "title": "Keep connector and operator identity separate", "type": "add_component",
+      "content": "Authorize source credentials for only their own tenant and integration, and operator identities for only their incident scope. Rotate credentials; reject absent or mismatched claims before any tenant-scoped state lookup.",
+      "component": {"nodeId": "alert_auth", "componentType": "auth-service", "label": "Source and Operator Identity", "description": "Tenant-scoped credentials and RBAC", "position": {"x": 300, "y": -20}, "properties": {"componentName": "Source and Operator Identity", "purpose": "Verify connector identity and operator RBAC using tenant-scoped claims; require MFA for operator access and deny cross-tenant incident or feedback reads.", "oauth": true, "mfa": true}, "highlightReason": "Shared correlation state and feedback must not mix tenants or let one source spoof another."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "alert_06", "stepNumber": 6, "phase": "Normalize and buffer monitoring alerts", "title": "Verify each producer before normalization", "type": "add_connection",
+      "content": "Resolve the trusted tenant and integration from credentials, not a tenant field supplied in an alert body; pass only verified claims downstream.",
+      "connection": {"edgeId": "ingest_auth", "sourceNodeId": "alert_ingest", "targetNodeId": "alert_auth", "connectionType": "api-call", "label": "Source authorization", "description": "Validate connector credential, tenant scope, schema version, and source permissions."},
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "alert_07", "stepNumber": 7, "phase": "Normalize and buffer monitoring alerts", "title": "Normalize heterogeneous tool payloads", "type": "add_component",
+      "content": "A registry of 10+ source adapters maps vendor fields into alertId, tenantId, sourceId, entity/service, environment, eventTime, ingestTime, originalSeverity, message, and topology tags. Preserve the original payload reference. Quarantine malformed records with visible errors and retry; never reinterpret an unknown critical severity as low.",
+      "component": {"nodeId": "alert_normalizer", "componentType": "backend-server", "label": "Alert Adapter and Normalizer", "description": "Versioned source schemas and canonical alert envelope", "position": {"x": 600, "y": 220}, "properties": {"componentName": "Alert Adapter and Normalizer", "purpose": "Normalize 10+ tool schemas into a tenant-scoped alert envelope with stable alertId, sourceId, eventTime, ingestTime, entity, originalSeverity, message, and raw-payload reference; quarantine malformed input safely.", "retry": true}, "highlightReason": "A common, versioned envelope lets one pipeline correlate alerts across tools without losing their origin."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "alert_08", "stepNumber": 8, "phase": "Normalize and buffer monitoring alerts", "title": "Pass authorized alerts to the adapter", "type": "add_connection",
+      "content": "Carry trusted tenant and source claims alongside the original event ID. The adapter records mapping failures and never emits an alert with an invented success status.",
+      "connection": {"edgeId": "ingest_normalizer", "sourceNodeId": "alert_ingest", "targetNodeId": "alert_normalizer", "connectionType": "api-call", "label": "Validated source payload", "description": "Forward accepted payload and verified identity for canonical normalization."},
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "alert_09", "stepNumber": 9, "phase": "Normalize and buffer monitoring alerts", "title": "Buffer alert storms in a durable log", "type": "add_component",
+      "content": "Partition by tenant and stable entity/service key to preserve relevant ordering while spreading hot producers. Choose partition count, replication, and retention only after event size, burst shape, and recovery objectives are specified and load-tested; the frozen brief supplies none of those values. Monitor lag and storage, and use backpressure or pause consumption before accepted alerts can be silently discarded.",
+      "component": {"nodeId": "alert_log", "componentType": "message-broker", "label": "Durable Alert Log", "description": "Partitioned replayable alert ingress", "position": {"x": 900, "y": 220}, "properties": {"componentName": "Durable Alert Log", "purpose": "Buffer normalized alerts during storms, preserve per-key order, support replay after worker failure, and retain accepted critical alerts until downstream processing and archival succeed.", "durable": true}, "highlightReason": "A durable log decouples tool bursts from correlation and makes failure recovery explicit."},
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "alert_10", "stepNumber": 10, "phase": "Normalize and buffer monitoring alerts", "title": "Publish canonical alerts durably", "type": "add_connection",
+      "content": "Publish with a deterministic tenant/source/event key and acknowledge ingestion only after durable commit. Retry safely with the same key; apply bounded backpressure and a quarantined failure path instead of dropping events.",
+      "connection": {"edgeId": "normalizer_log", "sourceNodeId": "alert_normalizer", "targetNodeId": "alert_log", "connectionType": "event-stream", "label": "Canonical alert envelope", "description": "Durable, keyed, idempotent publish of normalized alerts with original severity and event time."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "alert_11", "stepNumber": 11, "phase": "Deduplicate and correlate incidents", "title": "Fingerprint and debounce in event time", "type": "add_component",
+      "content": "Fingerprint tenant, source, service/entity, normalized condition, and severity. Use a bounded event-time sliding window sized from observed alert behavior and the correlation-latency budget; track repeated alerts and flap transitions with hysteresis, and emit a summary plus provenance for every duplicate. Late events revise incidents asynchronously rather than extending the initial under-10-second correlation path indefinitely.",
+      "component": {"nodeId": "alert_dedup", "componentType": "stream-processor", "label": "Fingerprint and Window Processor", "description": "Stateful deduplication and flap detection", "position": {"x": 1200, "y": 220}, "properties": {"componentName": "Fingerprint and Window Processor", "purpose": "Statefully fingerprint tenant-scoped alerts, count duplicates, debounce flapping transitions, and emit a bounded event-time candidate with original critical severity preserved.", "engine": "Apache Flink", "windowing": true, "stateful": true}, "highlightReason": "Explicit state and windows reduce redundant pages while retaining a trace of every incoming alert."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "alert_12", "stepNumber": 12, "phase": "Deduplicate and correlate incidents", "title": "Read the log with replayable offsets", "type": "add_connection",
+      "content": "Consume by partition key with checkpointed offsets. If the processor restarts, recompute and upsert by deterministic fingerprint/window ID so replay does not create duplicate incidents or pages.",
+      "connection": {"edgeId": "log_dedup", "sourceNodeId": "alert_log", "targetNodeId": "alert_dedup", "connectionType": "event-stream", "label": "Keyed alert stream", "description": "Replayable source records with event time, severity, and checkpointed offsets."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "alert_13", "stepNumber": 13, "phase": "Deduplicate and correlate incidents", "title": "Choose a bounded deduplication rule", "type": "decision_point",
+      "content": "Choose a bounded event-time grouping window from observed alert behavior and the latency budget, with a correction path for late events. Fingerprint collisions must never erase a critical actionable event: keep its raw record, increment duplicate count, and route critical status onward even when messages repeat.",
+      "decision": {"question": "How should duplicates and flapping alerts be grouped within the latency budget?", "chosen": "Use tenant-scoped fingerprints, a bounded event-time window sized from replay and load evidence, hysteresis for flap transitions, and asynchronous late corrections.", "chosenReason": "A bounded, measured window reduces repeat pages while allowing the first incident decision to complete inside the frozen 10-second limit and preserving critical evidence.", "alternatives": [{"option": "Drop repeated messages at the gateway", "tradeoff": "Loses provenance and may hide a critical escalation."}, {"option": "Wait for an unbounded quiet period", "tradeoff": "Can delay a major outage beyond the correlation limit."}]},
+      "componentUpdate": {"nodeId": "alert_dedup", "properties": {"purpose": "Use tenant-scoped fingerprints and a bounded event-time window sized from replay/load evidence, with flap hysteresis; emit the first critical signal immediately, preserve duplicate counts, and issue late corrections without blocking initial correlation."}},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "alert_14", "stepNumber": 14, "phase": "Deduplicate and correlate incidents", "title": "Add service topology and business context", "type": "add_component",
+      "content": "Store tenant-scoped entity-to-service dependencies, owner/on-call, environment, recent changes, service tier, and business-impact tags. Version snapshots so an alert can cite the context used when it was grouped. Missing or stale topology must lower confidence, never trigger silent suppression.",
+      "component": {"nodeId": "alert_topology", "componentType": "database", "label": "Topology and Service Context", "description": "Versioned dependency graph and business-impact metadata", "position": {"x": 1500, "y": -60}, "properties": {"componentName": "Topology and Service Context", "purpose": "Store tenant-scoped service/entity relationships, owners, recent changes, criticality, service tier, and business impact with versioned read snapshots for correlation and enrichment."}, "highlightReason": "Temporal proximity alone cannot explain related alerts or rank their business impact."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6"]
+    },
+    {
+      "id": "alert_15", "stepNumber": 15, "phase": "Deduplicate and correlate incidents", "title": "Serve message-similarity evidence", "type": "add_component",
+      "content": "A versioned NLP similarity model proposes semantic matches between differently worded alert messages after hard tenant/entity filters. Calibrate thresholds on incident labels; a timeout falls back to deterministic temporal and topology rules, never to suppression.",
+      "component": {"nodeId": "alert_similarity", "componentType": "model-serving", "label": "Alert Similarity Model", "description": "Versioned NLP inference for alert messages", "position": {"x": 1500, "y": 460}, "properties": {"componentName": "Alert Similarity Model", "purpose": "Return calibrated NLP message-similarity evidence with model version and confidence after tenant/entity filters; timeout to a rule-only correlation path.", "autoscaling": true}, "highlightReason": "Message similarity helps relate alerts across tools but remains evidence, not sole authority to suppress."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-constraint:1"]
+    },
+    {
+      "id": "alert_16", "stepNumber": 16, "phase": "Deduplicate and correlate incidents", "title": "Build explainable incident candidates", "type": "add_component",
+      "content": "Combine temporal proximity, topology edges, shared entity/change, and bounded NLP similarity into a tenant-scoped incident key. Enrich each alert with owner, service, environment, topology path, business tier, related alerts, and evidence/version. Prefer a separate candidate over a low-confidence merge; keep a correlation deadline under 10 seconds measured from accepted ingest to incident write or critical route.",
+      "component": {"nodeId": "alert_correlator", "componentType": "backend-server", "label": "Incident Correlator", "description": "Temporal, topological, and semantic grouping", "position": {"x": 1500, "y": 220}, "properties": {"componentName": "Incident Correlator", "purpose": "Group tenant-scoped alert candidates into idempotent incidents using bounded temporal windows, topology and NLP evidence; attach service context and confidence, and preserve each raw alert and critical severity.", "retry": true}, "highlightReason": "The incident is the operator-facing unit that connects deduplication, enrichment, ranking, and traceable decisions."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "alert_17", "stepNumber": 17, "phase": "Deduplicate and correlate incidents", "title": "Send windowed candidates to correlation", "type": "add_connection",
+      "content": "Carry fingerprint, duplicate count, flap state, all source IDs, original severity, and late-correction marker. A replay uses the same deterministic candidate key.",
+      "connection": {"edgeId": "dedup_correlator", "sourceNodeId": "alert_dedup", "targetNodeId": "alert_correlator", "connectionType": "event-stream", "label": "Windowed alert candidates", "description": "Send deduplicated candidates with raw-alert references and unchanged criticality."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:7"]
+    },
+    {
+      "id": "alert_18", "stepNumber": 18, "phase": "Deduplicate and correlate incidents", "title": "Read topology and impact context", "type": "add_connection",
+      "content": "Resolve service dependencies and business tier by trusted tenant/entity key using a bounded lookup. Annotate a missing or stale graph snapshot explicitly rather than inventing context.",
+      "connection": {"edgeId": "correlator_topology", "sourceNodeId": "alert_correlator", "targetNodeId": "alert_topology", "connectionType": "database-connection", "label": "Versioned topology lookup", "description": "Fetch owner, dependency path, recent change, service tier, and business impact for enrichment."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6"]
+    },
+    {
+      "id": "alert_19", "stepNumber": 19, "phase": "Deduplicate and correlate incidents", "title": "Request bounded semantic similarity", "type": "add_connection",
+      "content": "Score only same-tenant candidate pairs inside the temporal/topological search bound. Record model version and score; on timeout, use deterministic grouping and surface lower confidence.",
+      "connection": {"edgeId": "correlator_similarity", "sourceNodeId": "alert_correlator", "targetNodeId": "alert_similarity", "connectionType": "api-call", "label": "NLP similarity evidence", "description": "Bounded versioned inference for differently worded alert messages; rule-only fallback on timeout."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-constraint:1"]
+    },
+    {
+      "id": "alert_20", "stepNumber": 20, "phase": "Deduplicate and correlate incidents", "title": "Persist incident state and evidence", "type": "add_component",
+      "content": "Use idempotent incident and alert membership keys. Persist candidate version, source alert references, enrichment snapshot, rank/suppression reason, notification key, and operator action history. Deduplication changes presentation, never deletes source evidence.",
+      "component": {"nodeId": "alert_incidents", "componentType": "database", "label": "Incident and Decision Store", "description": "Durable incident state, alert membership, and decision audit", "position": {"x": 1800, "y": 220}, "properties": {"componentName": "Incident and Decision Store", "purpose": "Idempotently persist incident membership, raw-alert references, topology/model versions, enrichment, rank, suppression decisions, notification keys, and operator-action audit per tenant."}, "highlightReason": "Operators and reviewers need durable incident state and a reason for every grouped or suppressed alert."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8"]
+    },
+    {
+      "id": "alert_21", "stepNumber": 21, "phase": "Deduplicate and correlate incidents", "title": "Upsert the incident candidate", "type": "add_connection",
+      "content": "Write the first candidate under a deterministic incident ID before notifying; later duplicates and late alerts revise membership idempotently. Persist original critical status so later ranking cannot erase it.",
+      "connection": {"edgeId": "correlator_incidents", "sourceNodeId": "alert_correlator", "targetNodeId": "alert_incidents", "connectionType": "database-connection", "label": "Idempotent incident upsert", "description": "Persist candidate, alert membership, evidence versions, context, and original severity."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "alert_22", "stepNumber": 22, "phase": "Deduplicate and correlate incidents", "title": "Choose evidence-weighted incident grouping", "type": "decision_point",
+      "content": "Use topology and temporal overlap as hard evidence; NLP similarity may increase confidence inside a bounded candidate set. Record the contributing evidence and leave uncertain alerts as separate incidents. Do not allow a message-similarity score to merge unrelated tenants or suppress a critical alert.",
+      "decision": {"question": "When should two alerts become one incident?", "chosen": "Merge only same-tenant alerts with a bounded temporal window and corroborating topology/entity or calibrated message evidence; record evidence and confidence.", "chosenReason": "This limits accidental cross-service merges while still correlating differently worded signals from independent tools.", "alternatives": [{"option": "Group only by timestamp", "tradeoff": "Creates false incidents during broad outages and misses delayed related alerts."}, {"option": "Let an opaque similarity score merge any pair", "tradeoff": "Can merge unrelated services and hides the reason for grouping."}]},
+      "componentUpdate": {"nodeId": "alert_correlator", "properties": {"purpose": "Group same-tenant alerts within bounded time using entity/topology and calibrated NLP evidence; persist confidence, provenance, enrichment, and deterministic incident keys; keep uncertain alerts separate."}},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "alert_23", "stepNumber": 23, "phase": "Deduplicate and correlate incidents", "title": "Archive unmodified alert evidence", "type": "add_component",
+      "content": "Retain raw payloads and normalized envelopes with tenant keys, encryption, access control, and bounded retention for audit, incident reconstruction, offline labels, and safe replay. Archive failure raises a visible alarm and holds offset completion rather than silently discarding critical evidence.",
+      "component": {"nodeId": "alert_archive", "componentType": "object-storage", "label": "Raw Alert and Feedback Archive", "description": "Immutable evidence and replay material", "position": {"x": 1200, "y": -60}, "properties": {"componentName": "Raw Alert and Feedback Archive", "purpose": "Retain tenant-scoped raw alert payloads, normalized envelopes, source IDs, model/decision versions, and feedback snapshots with encryption, access control, and lifecycle retention for audit and replay."}, "highlightReason": "Noise reduction is trustworthy only when every suppressed or deduplicated input remains reconstructable."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7"]
+    },
+    {
+      "id": "alert_24", "stepNumber": 24, "phase": "Deduplicate and correlate incidents", "title": "Copy every accepted alert into the archive", "type": "add_connection",
+      "content": "Archive an immutable copy from the durable log, independent of notification suppression. Use event ID as an idempotency key and alert on archival lag; replay from log retention while archival is impaired.",
+      "connection": {"edgeId": "log_archive", "sourceNodeId": "alert_log", "targetNodeId": "alert_archive", "connectionType": "data-flow", "label": "Raw alert evidence", "description": "Write immutable source payload and normalized envelope by deterministic alert ID."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7"]
+    },
+    {
+      "id": "alert_25", "stepNumber": 25, "phase": "Guard decisions and serve operators", "title": "Add a conservative policy and ranking gate", "type": "add_component",
+      "content": "Rank an incident using original severity, affected service tier, customer/business impact, dependency blast radius, and confidence. Suppress only clearly non-actionable low-risk duplicate notifications with a recorded reason and expiry; never suppress a critical actionable alert. Unknown severity, missing topology/model, or policy timeout fails open to notification.",
+      "component": {"nodeId": "alert_policy", "componentType": "backend-server", "label": "Ranking and Suppression Guard", "description": "Business-impact ranking with critical fail-open policy", "position": {"x": 2100, "y": 220}, "properties": {"componentName": "Ranking and Suppression Guard", "purpose": "Rank incidents by original severity, service tier, business impact, and blast radius; suppress only low-risk duplicate notifications with auditable reason and expiry; fail open on critical, unknown, or uncertain input.", "retry": true}, "highlightReason": "An explicit policy boundary prevents a model score or outage from silently burying an actionable page."},
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "alert_26", "stepNumber": 26, "phase": "Guard decisions and serve operators", "title": "Evaluate incident candidates against policy", "type": "add_connection",
+      "content": "Send evidence, original critical flag, impact context, and confidence to the guard. Apply a short timeout so the policy call cannot consume the entire correlation budget.",
+      "connection": {"edgeId": "correlator_policy", "sourceNodeId": "alert_correlator", "targetNodeId": "alert_policy", "connectionType": "api-call", "label": "Enriched incident candidate", "description": "Pass original severity, context version, business impact, correlation evidence, and deadline."},
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "alert_27", "stepNumber": 27, "phase": "Guard decisions and serve operators", "title": "Persist every rank and suppression decision", "type": "add_connection",
+      "content": "Use a conditional incident-version upsert to record rank, policy version, suppression decision, reason, TTL, and whether the notification was delivered. A stored duplicate may reduce pages, but the raw alert and incident membership remain visible.",
+      "connection": {"edgeId": "policy_incidents", "sourceNodeId": "alert_policy", "targetNodeId": "alert_incidents", "connectionType": "database-connection", "label": "Decision audit upsert", "description": "Persist rank, impact evidence, suppression reason/expiry, policy version, and notification key."},
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "alert_28", "stepNumber": 28, "phase": "Guard decisions and serve operators", "title": "Choose fail-open critical routing", "type": "decision_point",
+      "content": "Critical actionable alerts remain independently routable even when they duplicate an existing incident or the policy/model/topology path fails. Use the original or upgraded critical classification; uncertain severity is treated as actionable. The 80% volume-reduction goal is subordinate to zero critical suppression.",
+      "decision": {"question": "What happens when suppression confidence or a dependency is unavailable?", "chosen": "Never suppress critical actionable or unknown-severity alerts; fail open to an idempotent urgent route and audit the reason.", "chosenReason": "This preserves the zero-critical-suppression constraint under model drift, missing context, or policy outage, while allowing safe low-risk noise reduction.", "alternatives": [{"option": "Suppress until the model recovers", "tradeoff": "Hides potentially critical events during the worst outage window."}, {"option": "Use a single static severity threshold", "tradeoff": "Ignores business impact and can bury an important incident tagged incorrectly by a tool."}]},
+      "componentUpdate": {"nodeId": "alert_policy", "properties": {"purpose": "Rank by original severity, service tier, business impact, and blast radius; suppress only confidently non-actionable low-risk duplicates with reason/TTL; never suppress critical actionable or unknown alerts and fail open on dependency failure."}},
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "alert_29", "stepNumber": 29, "phase": "Guard decisions and serve operators", "title": "Add incident delivery", "type": "add_component",
+      "content": "Send actionable incident updates to the on-call destination and operator console. Key delivery by incident version and channel to avoid duplicate pages on replay; critical delivery must not wait for the suppression model or ranking gate.",
+      "component": {"nodeId": "alert_delivery", "componentType": "notification-service", "label": "Incident Notification Service", "description": "Idempotent on-call and in-app delivery", "position": {"x": 2400, "y": 220}, "properties": {"componentName": "Incident Notification Service", "purpose": "Deliver actionable incident updates to on-call and in-app channels using incident/version idempotency keys; urgently route critical alerts even if policy or model services are unavailable.", "channels": "All", "fanout": true}, "highlightReason": "The delivery path must remain available when noise-reduction dependencies fail."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "alert_30", "stepNumber": 30, "phase": "Guard decisions and serve operators", "title": "Deliver ranked actionable incidents", "type": "add_connection",
+      "content": "Only low-risk, confidently non-actionable notifications are withheld; all critical and unresolved high-risk incidents are delivered. The decision store retains the rank and any suppression reason.",
+      "connection": {"edgeId": "policy_delivery", "sourceNodeId": "alert_policy", "targetNodeId": "alert_delivery", "connectionType": "api-call", "label": "Actionable incident update", "description": "Idempotent delivery of unsuppressed incidents with severity, business impact, and owner."},
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "alert_31", "stepNumber": 31, "phase": "Guard decisions and serve operators", "title": "Give critical alerts an independent urgent route", "type": "add_connection",
+      "content": "The correlator immediately sends original or escalated critical alerts to delivery with the same incident/version notification key used by the policy path. Delivery deduplicates the two paths. If the policy path times out, this direct route still pages and records the fallback for later reconciliation.",
+      "connection": {"edgeId": "correlator_critical_delivery", "sourceNodeId": "alert_correlator", "targetNodeId": "alert_delivery", "connectionType": "api-call", "label": "Critical fail-open bypass", "description": "Urgently deliver every critical actionable alert with idempotency key without awaiting suppression policy."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "alert_32", "stepNumber": 32, "phase": "Guard decisions and serve operators", "title": "Show incident evidence to operators", "type": "add_component",
+      "content": "Display grouped alerts, source tools, topology and change context, rank and impact, suppressed duplicates, confidence, and the exact decision trail. Operators can confirm, split, merge, mark noisy, or escalate; every action carries actor and incident version.",
+      "component": {"nodeId": "alert_console", "componentType": "web-app", "label": "Operator Incident Console", "description": "Reviewable incidents and feedback actions", "position": {"x": 2700, "y": 220}, "properties": {"componentName": "Operator Incident Console", "purpose": "Present tenant-authorized incident evidence, alert membership, impact rank, suppression reasons, and context; capture confirm/split/merge/noisy/escalate actions with actor and version."}, "highlightReason": "Human review provides both a safe operational override and the labels needed to improve correlation."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8"]
+    },
+    {
+      "id": "alert_33", "stepNumber": 33, "phase": "Guard decisions and serve operators", "title": "Add the incident and feedback API", "type": "add_component",
+      "content": "The API enforces tenant and role scope on reads and actions, uses optimistic incident versions for split/merge/escalate, writes an audit event before acknowledging feedback, and keeps delivery state separate from viewing state.",
+      "component": {"nodeId": "alert_operator_api", "componentType": "backend-server", "label": "Incident and Feedback API", "description": "Authorized incident reads and audited operator actions", "position": {"x": 2700, "y": -60}, "properties": {"componentName": "Incident and Feedback API", "purpose": "Serve tenant-scoped incident evidence and apply version-checked operator confirm/split/merge/noisy/escalate actions with actor, reason, timestamp, and audit event.", "retry": true}, "highlightReason": "Feedback must be a durable, authorized action rather than an untrusted note on the frontend."},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8"]
+    },
+    {
+      "id": "alert_34", "stepNumber": 34, "phase": "Guard decisions and serve operators", "title": "Send operator reads and actions through the API", "type": "add_connection",
+      "content": "Submit incident ID, expected version, action type, and rationale over TLS. Render only server-authorized incident context; show a version conflict for concurrent edits instead of overwriting a teammate's decision.",
+      "connection": {"edgeId": "console_operator_api", "sourceNodeId": "alert_console", "targetNodeId": "alert_operator_api", "connectionType": "http", "label": "Incident review and feedback", "description": "Authenticated tenant-scoped incident reads and optimistic, audited operator actions."},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8"]
+    },
+    {
+      "id": "alert_35", "stepNumber": 35, "phase": "Guard decisions and serve operators", "title": "Read incidents and write feedback atomically", "type": "add_connection",
+      "content": "Return the evidence and context used by the decision. Store actor, action, reason, timestamp, and incident version before telling the operator that feedback was accepted.",
+      "connection": {"edgeId": "operator_api_incidents", "sourceNodeId": "alert_operator_api", "targetNodeId": "alert_incidents", "connectionType": "database-connection", "label": "Incident state and action audit", "description": "Read authorized incident evidence and conditionally append versioned operator feedback."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:8"]
+    },
+    {
+      "id": "alert_36", "stepNumber": 36, "phase": "Guard decisions and serve operators", "title": "Surface delivered incidents in the console", "type": "add_connection",
+      "content": "Push incident IDs and versioned delivery status into the console; the browser fetches full evidence through the authorized API. On-call paging remains a separate notification channel.",
+      "connection": {"edgeId": "delivery_console", "sourceNodeId": "alert_delivery", "targetNodeId": "alert_console", "connectionType": "websocket", "label": "Incident notification", "description": "Send versioned incident notification IDs, not unscoped full alert payloads, to the operator UI."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "alert_37", "stepNumber": 37, "phase": "Guard decisions and serve operators", "title": "Queue reviewed operator actions", "type": "add_component",
+      "content": "Use a durable feedback queue or outbox so accepted actions are not lost between the incident write and learning pipeline. Include tenant, incident version, actor role, correction, and evidence IDs; redact personal data before training.",
+      "component": {"nodeId": "alert_feedback_queue", "componentType": "queue", "label": "Operator Feedback Queue", "description": "Durable, versioned learning events", "position": {"x": 3000, "y": -60}, "properties": {"componentName": "Operator Feedback Queue", "purpose": "Durably carry reviewed, tenant-scoped operator actions and incident versions to offline evaluation with idempotent delivery and redacted training fields."}, "highlightReason": "Operator corrections should survive API or trainer outages without coupling incident handling to model updates."},
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "alert_38", "stepNumber": 38, "phase": "Guard decisions and serve operators", "title": "Publish an audited feedback event", "type": "add_connection",
+      "content": "Publish from a transactional outbox after the action is persisted; retry with action ID so duplicate deliveries cannot double-count a correction.",
+      "connection": {"edgeId": "operator_api_feedback", "sourceNodeId": "alert_operator_api", "targetNodeId": "alert_feedback_queue", "connectionType": "message-queue", "label": "Reviewed operator action", "description": "At-least-once outbox event with stable action ID, incident version, and redacted evidence."},
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "alert_39", "stepNumber": 39, "phase": "Guard decisions and serve operators", "title": "Authorize every operator read and write", "type": "add_connection",
+      "content": "Verify role, tenant, and incident access at the API, including feedback mutation rights. MFA applies to human operator sessions; source API keys cannot read incidents.",
+      "connection": {"edgeId": "operator_api_auth", "sourceNodeId": "alert_operator_api", "targetNodeId": "alert_auth", "connectionType": "api-call", "label": "Operator RBAC decision", "description": "Resolve tenant-scoped operator identity, incident access, MFA, and action permissions."},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8"]
+    },
+    {
+      "id": "alert_40", "stepNumber": 40, "phase": "Learn safely and prove the operating targets", "title": "Evaluate corrections off the hot path", "type": "add_component",
+      "content": "The worker aggregates confirmed merges/splits, false suppression, noisy labels, and escalation actions. It builds candidate thresholds or models offline with tenant boundaries, holdout sets, calibration, and critical-recall gates. Operator behavior is biased training data, so no direct online reinforcement-learning update should alter suppression from a single click.",
+      "component": {"nodeId": "alert_learning", "componentType": "processing-worker", "label": "Feedback Evaluation Worker", "description": "Offline labels, calibration, and guarded model promotion", "position": {"x": 3300, "y": -60}, "properties": {"componentName": "Feedback Evaluation Worker", "purpose": "Build redacted, tenant-scoped training/evaluation sets from reviewed operator actions; compare candidate models against holdouts for critical recall, false suppression, incident quality, and volume reduction before gated promotion.", "tasks": "Data Processing", "autoscale": true}, "highlightReason": "Learning from operator actions must improve quality without making suppression unsafe in production."},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "alert_41", "stepNumber": 41, "phase": "Learn safely and prove the operating targets", "title": "Consume feedback idempotently", "type": "add_connection",
+      "content": "Checkpoint action IDs and separate model evaluation failures from live incident handling. A worker outage accumulates feedback but does not block paging or correlation.",
+      "connection": {"edgeId": "feedback_learning", "sourceNodeId": "alert_feedback_queue", "targetNodeId": "alert_learning", "connectionType": "message-queue", "label": "Versioned action labels", "description": "Read reviewed actions for offline correlation and suppression evaluation, deduplicated by action ID."},
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "alert_42", "stepNumber": 42, "phase": "Learn safely and prove the operating targets", "title": "Promote only validated model versions", "type": "add_connection",
+      "content": "Publish a signed candidate to serving only after a reviewed holdout and canary pass; keep the prior version ready for rollback. A failed critical-recall or false-suppression gate blocks promotion even if volume reduction improves.",
+      "connection": {"edgeId": "learning_similarity", "sourceNodeId": "alert_learning", "targetNodeId": "alert_similarity", "connectionType": "data-flow", "label": "Approved model version", "description": "Stage and canary a versioned similarity model after offline critical-safety and quality gates."},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "alert_43", "stepNumber": 43, "phase": "Learn safely and prove the operating targets", "title": "Retain feedback and model provenance", "type": "add_connection",
+      "content": "Archive training snapshot hashes, source incident IDs, redaction status, candidate metrics, approver, canary result, and rollback pointer for reproducible review. Keep access tenant-scoped.",
+      "connection": {"edgeId": "learning_archive", "sourceNodeId": "alert_learning", "targetNodeId": "alert_archive", "connectionType": "data-flow", "label": "Feedback and evaluation provenance", "description": "Store immutable evaluation input and release evidence with model version and approval history."},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "alert_44", "stepNumber": 44, "phase": "Learn safely and prove the operating targets", "title": "Observe the whole correlation path", "type": "add_component",
+      "content": "Track accepted-to-incident and accepted-to-critical-delivery latency, broker age, partition skew, drop/quarantine counts, model fallbacks, false suppression, critical recall, incident merge/split corrections, and raw-alert-to-notification reduction. Slice by tenant and tool; sample traces but never sample away safety counters.",
+      "component": {"nodeId": "alert_health", "componentType": "monitoring", "label": "Correlation Target Monitor", "description": "Latency, lag, quality, safety, and reduction measures", "position": {"x": 2400, "y": 500}, "properties": {"componentName": "Correlation Target Monitor", "purpose": "Measure the frozen correlation-latency, alert-volume-reduction, zero-critical-suppression, throughput, and integration targets, plus storm lag, model fallback, and incident quality by tenant/source; measurements show attainment only after validation."}, "highlightReason": "The five frozen constraints require separate end-to-end and safety measurements, not an aggregate accuracy score."},
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "alert_45", "stepNumber": 45, "phase": "Learn safely and prove the operating targets", "title": "Report policy and delivery outcomes", "type": "add_connection",
+      "content": "Emit decision and delivery counters keyed by source, tenant, severity, incident, and policy version. Reconcile critical inputs against delivered pages rather than assuming an unsuppressed decision was delivered.",
+      "connection": {"edgeId": "policy_health", "sourceNodeId": "alert_policy", "targetNodeId": "alert_health", "connectionType": "data-flow", "label": "Policy safety metrics", "description": "Report suppression reasons, ranking, critical bypass, and notification-delivery outcomes."},
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "alert_46", "stepNumber": 46, "phase": "Learn safely and prove the operating targets", "title": "Measure storm backlog at the log", "type": "add_connection",
+      "content": "Measure ingress rate, partition skew, oldest unprocessed age, replay lag, and archive lag. Alert before queue age plus processing budget threatens the under-10-second correlation target.",
+      "connection": {"edgeId": "log_health", "sourceNodeId": "alert_log", "targetNodeId": "alert_health", "connectionType": "data-flow", "label": "Ingress and lag metrics", "description": "Export per-partition rate, backlog age, retry/quarantine, and archive/replay lag."},
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "alert_47", "stepNumber": 47, "phase": "Learn safely and prove the operating targets", "title": "Scale on backlog age, not average throughput", "type": "scale_trigger",
+      "content": "The 100k+ alerts/hour constraint does not specify event size, peak storm rate, or key skew, so average rate alone cannot size the system. Scale broker and worker capacity from measured hot-key skew, backlog age, model latency, and incident-store write pressure; preserve per-key ordering and critical-route capacity. Backpressure producers before accepted alerts can be lost; if enrichment or model inference fails, continue rule-only correlation and urgent critical delivery.",
+      "scaleTrigger": {"metric": "Observed queue age and correlation tail latency approach the frozen 10-second limit, or critical-delivery lag rises during a storm", "action": "Increase broker and keyed stream/correlator capacity based on measured skew and write pressure; protect critical-route capacity and shed only optional enrichment", "impact": "Validate under-10-second correlation and 100k+ alerts/hour with representative peak-storm and failure tests; the brief does not specify storm peak or capacity headroom."},
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "alert_48", "stepNumber": 48, "phase": "Learn safely and prove the operating targets", "title": "Require a safety gate for learning", "type": "decision_point",
+      "content": "Use operator corrections as labeled evidence and evaluate offline on both ordinary and storm/critical holdouts. Require human review, critical actionable recall, false-suppression analysis, incident precision, and canary rollback before any model or threshold can change live suppression. A candidate that improves the 80% volume target but harms critical recall is rejected.",
+      "decision": {"question": "How may operator feedback change the live correlation policy?", "chosen": "Use versioned offline training and evaluation, explicit critical-safety gates, human approval, canary rollout, and rollback.", "chosenReason": "Operator actions are useful but biased; gated promotion prevents one bad label or model drift from suppressing an actionable critical alert.", "alternatives": [{"option": "Update live suppression weights after each operator action", "tradeoff": "A mistaken or adversarial click could change paging immediately."}, {"option": "Never learn from feedback", "tradeoff": "Misses recurring noise patterns and operator corrections that can improve incident quality."}]},
+      "componentUpdate": {"nodeId": "alert_learning", "properties": {"purpose": "Build versioned, redacted learning sets from reviewed operator actions; require holdout critical-recall and false-suppression gates, human approval, canary, and rollback before promoting a model or suppression threshold."}},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "alert_49", "stepNumber": 49, "phase": "Learn safely and prove the operating targets", "title": "Review the five acceptance measures", "type": "explanation",
+      "content": "Run a local replay and representative multi-tool load/failure suite before promotion. Measure accepted-ingest-to-incident correlation under 10 seconds, including bursts and model/topology failure; compare emitted operator notifications against raw accepted alerts for the agreed window to test 80% alert-volume reduction; reconcile every critical actionable raw alert to an unsuppressed, delivered incident for zero critical suppression; sustain 100k+ alerts/hour with storm headroom and no silent accepted-alert loss; demonstrate 10+ live monitoring-tool adapters with schema and credential tests. Track false merges/splits, missing enrichment, flap handling, operator corrections, and model rollback separately. This review draft supplies a design and structural fixture, not measured attainment of those targets.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

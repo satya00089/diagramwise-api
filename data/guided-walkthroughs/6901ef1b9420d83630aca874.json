@@ -1,0 +1,608 @@
+{
+  "problem_id": "6901ef1b9420d83630aca874",
+  "version": "1.0.0-review-draft",
+  "requirementRevision": null,
+  "totalSteps": 32,
+  "phases": [
+    {
+      "name": "Establish request and location paths",
+      "stepRange": [1, 8],
+      "description": "Separate the frozen brief from design assumptions, then connect rider and driver clients to the matching boundary."
+    },
+    {
+      "name": "Find and rank eligible drivers",
+      "stepRange": [9, 15],
+      "description": "Use fresh geospatial state and durable trip data to shortlist candidates by service type, distance, wait, ratings, and surge."
+    },
+    {
+      "name": "Offer, accept, and retry safely",
+      "stepRange": [16, 25],
+      "description": "Buffer matching work, prevent double assignment, notify drivers, and return live status while rejected or expired offers re-enter matching."
+    },
+    {
+      "name": "Scale, observe, and review open decisions",
+      "stepRange": [26, 32],
+      "description": "Make concurrency and scale behavior explicit, measure the seconds-level objective, and identify policies the brief leaves open."
+    }
+  ],
+  "steps": [
+    {
+      "id": "urm_01",
+      "stepNumber": 1,
+      "phase": "Establish request and location paths",
+      "title": "Read the brief before choosing targets",
+      "type": "explanation",
+      "content": "Frozen problem: Find a Rider for Uber or Uber Eats. Brief: Design a matching algorithm to efficiently connect riders/customers with drivers in real-time. Requirements: Match riders with nearby drivers; Optimize for wait time and distance; Handle simultaneous requests; Driver acceptance and timeout; Prioritize based on ratings and surge; Support different service types (pool, premium); Handle millions of matches per day; Real-time location tracking. Constraints: Match within seconds; Balance driver utilization; Handle driver rejections; Minimize rider wait time; Fair matching algorithm. The brief gives no exact QPS, location-update cadence, offer deadline, retention period, fairness formula, or numeric latency percentile. All technology and policy choices below are assumptions for review, not facts from the brief.",
+      "requirementIds": []
+    },
+    {
+      "id": "urm_02",
+      "stepNumber": 2,
+      "phase": "Establish request and location paths",
+      "title": "Add the rider client",
+      "type": "add_component",
+      "content": "Represent the rider app that submits a pickup, destination, and requested service class, then receives an offer or assignment state. Validate the actual request fields and consent rules with the product API; the brief does not specify them.",
+      "component": {
+        "nodeId": "rider_app",
+        "componentType": "mobile-app",
+        "label": "Rider App",
+        "description": "Requests a ride and receives matching status",
+        "position": { "x": 0, "y": 160 },
+        "properties": {
+          "componentName": "Rider App",
+          "purpose": "Submit a pickup and service-class request; display pending, matched, and failed states from the server."
+        },
+        "highlightReason": "The existing Mobile App catalog component represents the rider client; no new component type is needed."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "urm_03",
+      "stepNumber": 3,
+      "phase": "Establish request and location paths",
+      "title": "Add the driver client",
+      "type": "add_component",
+      "content": "Represent the driver app as the source of availability, location updates, offer responses, and live assignment status. Location freshness and background-update behavior are open product and platform decisions.",
+      "component": {
+        "nodeId": "driver_app",
+        "componentType": "mobile-app",
+        "label": "Driver App",
+        "description": "Publishes driver state and accepts or rejects offers",
+        "position": { "x": 0, "y": 500 },
+        "properties": {
+          "componentName": "Driver App",
+          "purpose": "Send authenticated location and availability updates, receive eligible offers, and return an idempotent accept or reject response."
+        },
+        "highlightReason": "The same supported Mobile App component models a second client role without inventing a catalog node."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "urm_04",
+      "stepNumber": 4,
+      "phase": "Establish request and location paths",
+      "title": "Add the authenticated matching API",
+      "type": "add_component",
+      "content": "Use the API boundary to authenticate rider and driver requests, validate coordinates and service class, apply abuse controls, and attach idempotency keys to retried ride requests and offer responses.",
+      "component": {
+        "nodeId": "matching_api",
+        "componentType": "api-gateway",
+        "label": "Matching API Gateway",
+        "description": "Validates and routes rider and driver traffic",
+        "position": { "x": 360, "y": 330 },
+        "properties": {
+          "componentName": "Matching API Gateway",
+          "purpose": "Authenticate clients, validate request shape and service class, enforce rate limits, and route location, ride-request, and offer-response APIs."
+        },
+        "highlightReason": "API Gateway is a supported catalog component with authentication, validation, and throttling properties."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:8"]
+    },
+    {
+      "id": "urm_05",
+      "stepNumber": 5,
+      "phase": "Establish request and location paths",
+      "title": "Send rider requests through the API",
+      "type": "add_connection",
+      "content": "The rider submits a request through the authenticated API. Return a request identifier immediately, but do not report a match until an eligible driver has accepted and the assignment is committed.",
+      "connection": {
+        "edgeId": "rider_to_matching_api",
+        "sourceNodeId": "rider_app",
+        "targetNodeId": "matching_api",
+        "connectionType": "https",
+        "label": "Ride request + service class",
+        "description": "Authenticated, idempotent request with pickup and requested service type"
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "urm_06",
+      "stepNumber": 6,
+      "phase": "Establish request and location paths",
+      "title": "Send driver location and offer responses",
+      "type": "add_connection",
+      "content": "Use one client-to-API path for timestamped location/availability updates and explicit accept or reject responses. Reject stale or out-of-order location updates according to a freshness policy that must be measured and approved.",
+      "connection": {
+        "edgeId": "driver_to_matching_api",
+        "sourceNodeId": "driver_app",
+        "targetNodeId": "matching_api",
+        "connectionType": "https",
+        "label": "Location + availability + offer response",
+        "description": "Driver actions are authenticated, timestamped, and safe to retry"
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "urm_07",
+      "stepNumber": 7,
+      "phase": "Establish request and location paths",
+      "title": "Add the matching coordinator",
+      "type": "add_component",
+      "content": "The coordinator owns request lifecycle and orchestration: validate eligible service class, enqueue matching work, issue offers, and report state. Keep candidate scoring and durable assignment semantics explicit rather than hiding them in a generic API handler.",
+      "component": {
+        "nodeId": "match_coordinator",
+        "componentType": "backend-server",
+        "label": "Matching Coordinator",
+        "description": "Coordinates requests, offers, and assignment state",
+        "position": { "x": 740, "y": 330 },
+        "properties": {
+          "componentName": "Matching Coordinator",
+          "purpose": "Coordinate request state, candidate ranking, bounded offer rounds, idempotency, and live updates; keep matching policy versioned and testable."
+        },
+        "highlightReason": "Backend Server is the existing catalog fit for application orchestration."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4"]
+    },
+    {
+      "id": "urm_08",
+      "stepNumber": 8,
+      "phase": "Establish request and location paths",
+      "title": "Route requests and driver events to matching",
+      "type": "add_connection",
+      "content": "The coordinator receives both rider requests and driver state changes behind the same authenticated boundary. Partition work by geographic area and service class only as a design assumption; measure skew before fixing partition counts.",
+      "connection": {
+        "edgeId": "api_to_match_coordinator",
+        "sourceNodeId": "matching_api",
+        "targetNodeId": "match_coordinator",
+        "connectionType": "internal-rpc",
+        "label": "Validated requests + driver events",
+        "description": "API forwards idempotency keys, timestamps, and service-class constraints"
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:8"]
+    },
+    {
+      "id": "urm_09",
+      "stepNumber": 9,
+      "phase": "Find and rank eligible drivers",
+      "title": "Add a live geospatial driver index",
+      "type": "add_component",
+      "content": "Use the supported Cache component as a low-latency geospatial index of currently available drivers, keyed or partitioned by location cell and service eligibility. Treat it as a candidate index, not the durable source of truth for an assignment.",
+      "component": {
+        "nodeId": "driver_geo_cache",
+        "componentType": "cache",
+        "label": "Live Driver Geo Index",
+        "description": "Finds nearby, recently updated eligible drivers",
+        "position": { "x": 1120, "y": 170 },
+        "properties": {
+          "componentName": "Live Driver Geo Index",
+          "purpose": "Maintain fresh available-driver location and service eligibility in geospatial cells; expire stale entries and return candidates for authoritative validation."
+        },
+        "highlightReason": "The catalog Cache component supports the fast-changing candidate index; its purpose explains the geospatial role without a custom node."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:8"]
+    },
+    {
+      "id": "urm_10",
+      "stepNumber": 10,
+      "phase": "Find and rank eligible drivers",
+      "title": "Refresh and query nearby driver candidates",
+      "type": "add_connection",
+      "content": "Location updates refresh the candidate index; matching searches nearby cells and filters by service class and current availability. Apply a freshness cutoff so stale positions cannot be treated as reliable proximity.",
+      "connection": {
+        "edgeId": "coordinator_to_geo_index",
+        "sourceNodeId": "match_coordinator",
+        "targetNodeId": "driver_geo_cache",
+        "connectionType": "geospatial-read-write",
+        "label": "Location refresh + nearby candidates",
+        "description": "Fast spatial lookup is advisory; confirm driver state before committing an assignment"
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1"]
+    },
+    {
+      "id": "urm_11",
+      "stepNumber": 11,
+      "phase": "Find and rank eligible drivers",
+      "title": "Choose a reviewable ranking policy",
+      "type": "decision_point",
+      "content": "Assumption to validate: score only eligible candidates, using estimated pickup time and distance alongside driver utilization, rating, and the applicable surge context. The weights, tie-break rules, and treatment of pooled rides are policy decisions, not supplied by the brief. Keep the score explainable and log its policy version.",
+      "decision": {
+        "question": "How should nearby eligible drivers be ranked?",
+        "chosen": "Use a versioned score that balances pickup ETA and distance with utilization, rating, and applicable surge policy, then apply a deterministic tie-break within a fairness-aware cohort.",
+        "chosenReason": "This combines the stated optimization and prioritization signals while making utilization and fairness measurable; it avoids claiming that a single nearest-driver rule satisfies all goals.",
+        "alternatives": [
+          {
+            "option": "Always offer to the closest driver",
+            "tradeoff": "Can repeatedly favor the same drivers and ignore utilization, ratings, surge policy, or service eligibility."
+          },
+          {
+            "option": "Run a global optimum over every driver for each request",
+            "tradeoff": "May add coordination latency and contention; benchmark it against bounded regional matching before adopting it."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "urm_12",
+      "stepNumber": 12,
+      "phase": "Find and rank eligible drivers",
+      "title": "Add durable trip and driver state",
+      "type": "add_component",
+      "content": "Keep ride requests, driver availability, offer attempts, and final assignments in durable storage. Enforce valid state transitions and use a conditional write or transaction for exclusive assignment; cache contents alone must never grant a ride.",
+      "component": {
+        "nodeId": "trip_database",
+        "componentType": "database",
+        "label": "Trip & Driver State Database",
+        "description": "Durable request lifecycle and assignment authority",
+        "position": { "x": 1120, "y": 510 },
+        "properties": {
+          "componentName": "Trip & Driver State Database",
+          "purpose": "Persist request and offer state, driver availability, service eligibility, ratings/surge inputs as appropriate, and the authoritative conditional assignment transition."
+        },
+        "highlightReason": "The existing Database catalog component is appropriate for durable state and conditional assignment semantics."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6"]
+    },
+    {
+      "id": "urm_13",
+      "stepNumber": 13,
+      "phase": "Find and rank eligible drivers",
+      "title": "Read authoritative state before an offer",
+      "type": "add_connection",
+      "content": "The coordinator reads durable request and driver state to validate cache candidates, recheck service eligibility, and avoid offering to a driver already assigned or no longer available. Define the transaction and consistency boundary with the chosen database before implementation.",
+      "connection": {
+        "edgeId": "coordinator_to_trip_db",
+        "sourceNodeId": "match_coordinator",
+        "targetNodeId": "trip_database",
+        "connectionType": "database-read-transaction",
+        "label": "Request + eligibility + assignment state",
+        "description": "Durable state is authoritative for availability and lifecycle transitions"
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6"]
+    },
+    {
+      "id": "urm_14",
+      "stepNumber": 14,
+      "phase": "Find and rank eligible drivers",
+      "title": "Separate service classes during candidate selection",
+      "type": "explanation",
+      "content": "Pool and premium requests must not share an undifferentiated candidate set. Apply service eligibility before ranking; pooled-trip compatibility and premium-specific guarantees need explicit product rules. Ratings and surge affect ranking only under an approved, auditable policy.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6"]
+    },
+    {
+      "id": "urm_15",
+      "stepNumber": 15,
+      "phase": "Find and rank eligible drivers",
+      "title": "Expand the search without losing the wait objective",
+      "type": "decision_point",
+      "content": "Assumption to validate: begin with nearby cells and expand the search region when no suitable candidate responds, while honoring a request deadline and service-class constraints. A radius schedule and maximum wait are intentionally left open because the brief provides neither.",
+      "decision": {
+        "question": "What should happen when the first local candidate set is empty or declines?",
+        "chosen": "Expand eligible geospatial cells in bounded rounds, retain the original request age and service class, and stop or offer a clear no-match outcome at an approved deadline.",
+        "chosenReason": "This provides a controlled path to minimize wait without silently broadening eligibility or waiting indefinitely.",
+        "alternatives": [
+          {
+            "option": "Search only the first cell once",
+            "tradeoff": "Can fail to match despite nearby eligible drivers just outside the initial boundary."
+          },
+          {
+            "option": "Expand until any driver is found with no deadline",
+            "tradeoff": "Can violate service eligibility and leave riders waiting without a bound."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "urm_16",
+      "stepNumber": 16,
+      "phase": "Offer, accept, and retry safely",
+      "title": "Add a durable matching work queue",
+      "type": "add_component",
+      "content": "Use a queue to decouple incoming requests from matching execution, absorb bursts, and re-enqueue a request after a rejection or offer expiry. Preserve request age, attempt identity, and service class across retries.",
+      "component": {
+        "nodeId": "matching_queue",
+        "componentType": "queue",
+        "label": "Matching & Retry Queue",
+        "description": "Buffers requests and bounded retry work",
+        "position": { "x": 1510, "y": 330 },
+        "properties": {
+          "componentName": "Matching & Retry Queue",
+          "purpose": "Durably buffer matching requests and retry events with request identity, age, service class, and attempt number; make rejection and expiry visible to workers."
+        },
+        "highlightReason": "The supported Queue component matches asynchronous dispatch and retry work."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "urm_17",
+      "stepNumber": 17,
+      "phase": "Offer, accept, and retry safely",
+      "title": "Enqueue matching work",
+      "type": "add_connection",
+      "content": "A validated request becomes durable work before asynchronous matching begins. Expose queue age and oldest-request age so backpressure is visible instead of turning into silent wait-time growth.",
+      "connection": {
+        "edgeId": "coordinator_to_matching_queue",
+        "sourceNodeId": "match_coordinator",
+        "targetNodeId": "matching_queue",
+        "connectionType": "enqueue",
+        "label": "Idempotent request + retry work",
+        "description": "Durable work item keeps original age, requested service, and offer-attempt state"
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:1"]
+    },
+    {
+      "id": "urm_18",
+      "stepNumber": 18,
+      "phase": "Offer, accept, and retry safely",
+      "title": "Add horizontally scalable match workers",
+      "type": "add_component",
+      "content": "Workers consume bounded batches, find and rank candidates, create offers, and schedule the next attempt only after a rejection or expiry. Partition by region and service class as an assumption, while monitoring hot cells and keeping request age in the scheduling policy.",
+      "component": {
+        "nodeId": "match_workers",
+        "componentType": "processing-worker",
+        "label": "Candidate & Offer Workers",
+        "description": "Ranks candidates and advances matching attempts",
+        "position": { "x": 1900, "y": 330 },
+        "properties": {
+          "componentName": "Candidate & Offer Workers",
+          "purpose": "Consume matching work, filter eligible candidates, rank with a versioned policy, create bounded offers, and requeue rejected or expired requests."
+        },
+        "highlightReason": "Processing Worker is a supported catalog component for independently scalable matching work."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "urm_19",
+      "stepNumber": 19,
+      "phase": "Offer, accept, and retry safely",
+      "title": "Dispatch queued work to workers",
+      "type": "add_connection",
+      "content": "Scale workers against queue age and arrival rate; keep retries bounded and idempotent. A worker crash must leave work available for redelivery without duplicating an accepted assignment.",
+      "connection": {
+        "edgeId": "queue_to_match_workers",
+        "sourceNodeId": "matching_queue",
+        "targetNodeId": "match_workers",
+        "connectionType": "queue-consume",
+        "label": "Matching jobs + rejected/expired retries",
+        "description": "At-least-once delivery is handled with idempotent job and assignment state"
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "urm_20",
+      "stepNumber": 20,
+      "phase": "Offer, accept, and retry safely",
+      "title": "Give workers candidate and authoritative state access",
+      "type": "add_connection",
+      "content": "Workers use the geo index to shortlist nearby eligible drivers and durable storage to revalidate each candidate and record the offer attempt. Apply the ranking policy only to the correct service class and retain the decision inputs needed for fairness review.",
+      "connection": {
+        "edgeId": "workers_to_geo_index",
+        "sourceNodeId": "match_workers",
+        "targetNodeId": "driver_geo_cache",
+        "connectionType": "geospatial-candidate-query",
+        "label": "Fresh nearby eligible candidates",
+        "description": "Candidate lookup is bounded by region, freshness, and requested service type"
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "urm_21",
+      "stepNumber": 21,
+      "phase": "Offer, accept, and retry safely",
+      "title": "Claim drivers and commit one assignment",
+      "type": "add_connection",
+      "content": "Before treating an offer as assigned, atomically transition the request and driver state using conditional writes or a transaction. A competing worker or simultaneous request must lose cleanly, then refresh candidates; an accepted offer is not success until this commit wins.",
+      "connection": {
+        "edgeId": "workers_to_trip_db",
+        "sourceNodeId": "match_workers",
+        "targetNodeId": "trip_database",
+        "connectionType": "conditional-assignment-transaction",
+        "label": "Offer lease + exclusive assignment",
+        "description": "Conditional state transition prevents duplicate driver or request assignment"
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4"]
+    },
+    {
+      "id": "urm_22",
+      "stepNumber": 22,
+      "phase": "Offer, accept, and retry safely",
+      "title": "Add the driver offer notification path",
+      "type": "add_component",
+      "content": "Deliver an offer with a stable offer identifier, request context permitted for the driver, and an explicit expiry. The offer window is a configurable assumption that must be tuned against the match-within-seconds objective and driver response data.",
+      "component": {
+        "nodeId": "driver_notifications",
+        "componentType": "notification-service",
+        "label": "Driver Offer Notifications",
+        "description": "Delivers offers and response state to drivers",
+        "position": { "x": 2300, "y": 80 },
+        "properties": {
+          "componentName": "Driver Offer Notifications",
+          "purpose": "Deliver an idempotent, expiring offer to the selected driver and report delivery/response state without making notification delivery the assignment authority."
+        },
+        "highlightReason": "Notification Service is an existing catalog component suitable for push delivery."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "urm_23",
+      "stepNumber": 23,
+      "phase": "Offer, accept, and retry safely",
+      "title": "Send selected-driver offers",
+      "type": "add_connection",
+      "content": "Only notify a driver after the offer attempt is recorded. Treat duplicate notifications and callbacks as the same offer; on a rejection or expiry, mark that attempt terminal and enqueue the next eligible candidate round.",
+      "connection": {
+        "edgeId": "workers_to_driver_notifications",
+        "sourceNodeId": "match_workers",
+        "targetNodeId": "driver_notifications",
+        "connectionType": "push-notification",
+        "label": "Selected driver offer + expiry",
+        "description": "Stable offer ID supports idempotent delivery and response reconciliation"
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "urm_24",
+      "stepNumber": 24,
+      "phase": "Offer, accept, and retry safely",
+      "title": "Deliver the offer to the driver app",
+      "type": "add_connection",
+      "content": "Push delivery wakes the driver client; the client fetches current offer details and submits accept or reject through the authenticated API. Do not rely on push delivery order or a client-side timer as the source of truth.",
+      "connection": {
+        "edgeId": "notification_to_driver_app",
+        "sourceNodeId": "driver_notifications",
+        "targetNodeId": "driver_app",
+        "connectionType": "push",
+        "label": "Offer notification",
+        "description": "Driver retrieves authoritative offer state and responds through the API"
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3"]
+    },
+    {
+      "id": "urm_25",
+      "stepNumber": 25,
+      "phase": "Offer, accept, and retry safely",
+      "title": "Stream matching status to both clients",
+      "type": "add_connection",
+      "content": "Use a persistent client update channel for pending, offer, accepted, and no-match state. Reconnects must fetch the latest durable state; delivery can be repeated and is not proof that a driver accepted.",
+      "connection": {
+        "edgeId": "coordinator_to_rider_updates",
+        "sourceNodeId": "match_coordinator",
+        "targetNodeId": "rider_app",
+        "connectionType": "websocket",
+        "label": "Ride status updates",
+        "description": "Rider receives server-owned status and can recover by fetching the request state"
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4"]
+    },
+    {
+      "id": "urm_26",
+      "stepNumber": 26,
+      "phase": "Scale, observe, and review open decisions",
+      "title": "Return offer and assignment status to the driver",
+      "type": "add_connection",
+      "content": "The coordinator streams the current offer lifecycle to the driver app. Accept/reject still travels through the API and is serialized by the durable state transition, so a late response cannot resurrect an expired offer.",
+      "connection": {
+        "edgeId": "coordinator_to_driver_updates",
+        "sourceNodeId": "match_coordinator",
+        "targetNodeId": "driver_app",
+        "connectionType": "websocket",
+        "label": "Offer lifecycle + assignment state",
+        "description": "Live view is recoverable from authoritative persisted state"
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3"]
+    },
+    {
+      "id": "urm_27",
+      "stepNumber": 27,
+      "phase": "Scale, observe, and review open decisions",
+      "title": "Make simultaneous requests safe",
+      "type": "decision_point",
+      "content": "Assumption to validate: every ride request and offer response has an idempotency key; workers may process queue deliveries more than once; and one durable conditional transition arbitrates a driver claimed by competing requests. Define recovery for database timeouts and ambiguous commit outcomes before launch.",
+      "decision": {
+        "question": "How do concurrent requests avoid assigning one driver twice?",
+        "chosen": "Use durable request/offer identifiers and an atomic conditional assignment transition; losers reload state and continue with another candidate rather than assuming success.",
+        "chosenReason": "Queue delivery and network responses can repeat or race. A single authoritative transition makes the winner explicit and supports safe retries.",
+        "alternatives": [
+          {
+            "option": "Trust the in-memory worker's candidate list",
+            "tradeoff": "Other workers and regions can concurrently select the same driver."
+          },
+          {
+            "option": "Treat client acceptance as the final assignment",
+            "tradeoff": "A late or duplicated response can conflict with an already expired or reassigned offer."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4"]
+    },
+    {
+      "id": "urm_28",
+      "stepNumber": 28,
+      "phase": "Scale, observe, and review open decisions",
+      "title": "Scale on queue age and matching latency",
+      "type": "scale_trigger",
+      "content": "Millions of matches per day is the stated volume, but the peak rate and geographic skew are unspecified. Load-test arrival bursts and hot cells before choosing partition counts or capacity.",
+      "scaleTrigger": {
+        "metric": "Oldest matching-queue age, queue depth by region/service class, and request-to-committed-assignment latency",
+        "action": "Scale candidate workers horizontally and rebalance hot geographic partitions; shed or defer non-critical work before delaying active matching",
+        "impact": "Keeps worker capacity responsive to bursts while exposing whether the seconds-level objective is actually met"
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "urm_29",
+      "stepNumber": 29,
+      "phase": "Scale, observe, and review open decisions",
+      "title": "Add matching-path observability",
+      "type": "add_component",
+      "content": "Observe request age and outcomes by region and service class, candidate count and pickup distance, location freshness, offer delivery/accept/reject/expiry, worker lag, assignment conflicts, match wait time, utilization, and fairness measures. Avoid retaining precise location longer than an approved policy allows.",
+      "component": {
+        "nodeId": "matching_monitoring",
+        "componentType": "monitoring",
+        "label": "Matching SLO & Fairness Monitoring",
+        "description": "Measures latency, retries, utilization, and assignment quality",
+        "position": { "x": 2700, "y": 420 },
+        "properties": {
+          "componentName": "Matching SLO & Fairness Monitoring",
+          "purpose": "Track queue age, end-to-end match latency, candidate pickup distance, location freshness, candidate and offer outcomes, assignment conflicts, driver utilization, and reviewed fairness indicators."
+        },
+        "highlightReason": "Monitoring is an existing catalog component; its configured metrics and alerts make the stated constraints measurable."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "urm_30",
+      "stepNumber": 30,
+      "phase": "Scale, observe, and review open decisions",
+      "title": "Observe queue and worker behavior",
+      "type": "add_connection",
+      "content": "Export processed match volume, queue age, worker lag, retry counts, and regional/service-class partitions so scaling and deadline behavior can be evaluated against real traffic.",
+      "connection": {
+        "edgeId": "queue_to_matching_monitoring",
+        "sourceNodeId": "matching_queue",
+        "targetNodeId": "matching_monitoring",
+        "connectionType": "metrics",
+        "label": "Queue age + retry lag",
+        "description": "Queue pressure and retries are visible by region and service class"
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1"]
+    },
+    {
+      "id": "urm_31",
+      "stepNumber": 31,
+      "phase": "Scale, observe, and review open decisions",
+      "title": "Observe match outcomes and fairness",
+      "type": "add_connection",
+      "content": "Export end-to-end match latency, candidate pickup distance, offer outcomes, assignment conflicts, utilization, and reviewed fairness indicators. Use aggregates and access controls so operational metrics do not become an unintended location-history store.",
+      "connection": {
+        "edgeId": "workers_to_matching_monitoring",
+        "sourceNodeId": "match_workers",
+        "targetNodeId": "matching_monitoring",
+        "connectionType": "metrics",
+        "label": "Latency + outcomes + utilization",
+        "description": "Worker and assignment quality signals support SLO and fairness review"
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "urm_32",
+      "stepNumber": 32,
+      "phase": "Scale, observe, and review open decisions",
+      "title": "Review assumptions and open questions",
+      "type": "explanation",
+      "content": "Assumptions in this draft: mobile clients use an authenticated API; a cache provides a fresh geospatial candidate index; a database can enforce an atomic assignment transition; a queue and horizontally scalable workers handle bursts and retries; and push/WebSocket updates are advisory views over durable state. Open questions: What are peak and regional request rates? What does “within seconds” mean at p50/p95/p99? How often may drivers update location, and what staleness is acceptable? What is the offer deadline and retry/radius-expansion policy? How are pool compatibility, premium guarantees, ratings, surge, utilization, and fairness weighted and audited? Which routing/ETA source is authoritative? What location data retention and recovery objectives are approved? Validate these with stakeholders and load/failure tests; none is settled by the frozen brief.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

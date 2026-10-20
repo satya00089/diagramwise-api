@@ -1,0 +1,695 @@
+{
+  "problem_id": "6901ef1b9420d83630aca86a",
+  "version": "1.0.0-review-draft",
+  "requirementRevision": null,
+  "totalSteps": 36,
+  "phases": [
+    {
+      "name": "Search hotels and read current availability",
+      "stepRange": [1, 16],
+      "description": "Build a connected search path, use the catalog search and cache primitives, and keep committed room inventory authoritative."
+    },
+    {
+      "name": "Model inventory and prevent competing reservations",
+      "stepRange": [17, 20],
+      "description": "Make the room-type inventory assumption explicit and show how a transaction arbitrates overlapping booking requests."
+    },
+    {
+      "name": "Coordinate payment, cancellation, and confirmation",
+      "stepRange": [21, 33],
+      "description": "Connect payment outcomes and durable booking events to confirmation, availability refresh, cancellation, and refund handling."
+    },
+    {
+      "name": "Scale from measured demand",
+      "stepRange": [34, 36],
+      "description": "Scale stateless work independently while preserving per-inventory-key consistency; the brief gives no numeric capacity target."
+    }
+  ],
+  "steps": [
+    {
+      "id": "hbs_01",
+      "stepNumber": 1,
+      "phase": "Search hotels and read current availability",
+      "title": "Separate brief facts from design assumptions",
+      "type": "explanation",
+      "content": "Brief facts: the requirements call for hotel search by location and dates, real-time room availability, booking and cancellation, concurrent-request safety, payment processing and confirmation, room inventory and types, and support for millions of bookings. The constraints explicitly call out double booking, same-room races, real-time availability updates, cancellations and refunds, and payment transaction consistency. The supplied hints (locking, database transactions, inventory management, event sourcing, and caching) are candidate approaches, not additional requirements. Design assumptions in this draft: sellable inventory is counted by hotel, room type, and stay date; a relational OLTP store provides the local transaction boundary; physical room assignment can happen later if hotel operations require it. The brief does not name a database engine or payment provider, define cancellation/refund eligibility, quantify availability freshness or traffic, or specify deployment geography. Confirm these choices before implementation.",
+      "requirementIds": []
+    },
+    {
+      "id": "hbs_02",
+      "stepNumber": 2,
+      "phase": "Search hotels and read current availability",
+      "title": "Add the guest-facing booking client",
+      "type": "add_component",
+      "content": "Let a guest submit location, arrival and departure dates, and a room type, then review availability and reservation status. Keep final availability and payment state server-authoritative.",
+      "component": {
+        "nodeId": "hbs_guest_client",
+        "componentType": "web-app",
+        "label": "Guest Booking Client",
+        "description": "Search and reservation experience",
+        "position": { "x": 0, "y": 240 },
+        "properties": {
+          "componentName": "Guest Booking Client",
+          "purpose": "Collect hotel location, stay dates, room type, booking and cancellation requests; display server-confirmed availability and reservation status."
+        },
+        "highlightReason": "The catalog Web App fits the guest experience and keeps booking authority in backend services."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3"]
+    },
+    {
+      "id": "hbs_03",
+      "stepNumber": 3,
+      "phase": "Search hotels and read current availability",
+      "title": "Add the public API boundary",
+      "type": "add_component",
+      "content": "Validate search and reservation inputs, authenticate callers, and deduplicate retried booking commands when they carry the same idempotency key. Do not treat gateway deduplication as the inventory concurrency control.",
+      "component": {
+        "nodeId": "hbs_api_gateway",
+        "componentType": "api-gateway",
+        "label": "Booking API Gateway",
+        "description": "Validated entry point for search and reservation commands",
+        "position": { "x": 300, "y": 240 },
+        "properties": {
+          "componentName": "Booking API Gateway",
+          "purpose": "Validate and route hotel search, booking, and cancellation requests; deduplicate client retries that reuse an idempotency key.",
+          "inputValidation": true,
+          "deduplication": true
+        },
+        "highlightReason": "The catalog API Gateway exposes validation and request-deduplication properties needed at the public boundary."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3"]
+    },
+    {
+      "id": "hbs_04",
+      "stepNumber": 4,
+      "phase": "Search hotels and read current availability",
+      "title": "Connect the guest client to the API",
+      "type": "add_connection",
+      "content": "Send search and reservation commands over the API boundary. The client may retry a timed-out request, so a booking retry must preserve its idempotency key.",
+      "connection": {
+        "edgeId": "hbs_guest_to_gateway",
+        "sourceNodeId": "hbs_guest_client",
+        "targetNodeId": "hbs_api_gateway",
+        "connectionType": "http",
+        "label": "Search and reservation API",
+        "description": "Guest search, booking, and cancellation requests with stable retry identity."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3"]
+    },
+    {
+      "id": "hbs_05",
+      "stepNumber": 5,
+      "phase": "Search hotels and read current availability",
+      "title": "Add hotel search orchestration",
+      "type": "add_component",
+      "content": "Translate location and stay dates into hotel candidates, then ask the inventory owner for the sellable room-type count observed by its authoritative read before presenting the result. That observation can change before a hold is created, so it is not a reservation guarantee or a freshness-time promise. Search ranking and ranking signals are outside the supplied brief.",
+      "component": {
+        "nodeId": "hbs_search_service",
+        "componentType": "backend-server",
+        "label": "Hotel Search Service",
+        "description": "Find candidate hotels and verify requested stay availability",
+        "position": { "x": 620, "y": 80 },
+        "properties": {
+          "componentName": "Hotel Search Service",
+          "purpose": "Search hotel candidates by location and dates, use the search index and availability cache as accelerators, and report the inventory-owner read without promising that the observed count remains available or meets an unstated freshness interval."
+        },
+        "highlightReason": "The catalog Backend Server is a fitting service primitive; no hotel-search-specific catalog component is needed."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:7"]
+    },
+    {
+      "id": "hbs_06",
+      "stepNumber": 6,
+      "phase": "Search hotels and read current availability",
+      "title": "Add a hotel-location search index",
+      "type": "add_component",
+      "content": "Use a search index to narrow hotel candidates by location. Keep room availability out of this index as an authority; an index update can lag a committed booking.",
+      "component": {
+        "nodeId": "hbs_hotel_search_index",
+        "componentType": "search-engine",
+        "label": "Hotel Search Index",
+        "description": "Location-oriented hotel candidate lookup",
+        "position": { "x": 940, "y": 0 },
+        "properties": {
+          "componentName": "Hotel Search Index",
+          "purpose": "Return hotel candidates for a location query; the search index is not the source of truth for sellable room inventory."
+        },
+        "highlightReason": "The existing Search Engine catalog concept fits location candidate lookup without selecting a vendor or engine."
+      },
+      "requirementIds": ["legacy-requirement:1"]
+    },
+    {
+      "id": "hbs_07",
+      "stepNumber": 7,
+      "phase": "Search hotels and read current availability",
+      "title": "Add an availability read cache",
+      "type": "add_component",
+      "content": "Cache availability lookups to reduce repeated read work, but mark cached counts as provisional and potentially behind committed inventory changes. A cache hit cannot authorize a reservation or replace a live inventory check; no cache freshness interval is specified.",
+      "component": {
+        "nodeId": "hbs_availability_cache",
+        "componentType": "cache",
+        "label": "Availability Read Cache",
+        "description": "Accelerates repeated availability reads while inventory remains authoritative",
+        "position": { "x": 940, "y": 220 },
+        "properties": {
+          "componentName": "Availability Read Cache",
+          "purpose": "Accelerate repeated hotel and room-type availability reads; treat values as provisional and refresh or invalidate them after committed inventory changes.",
+          "cacheStrategy": "cache-aside"
+        },
+        "highlightReason": "The catalog Cache supports the brief's availability-cache hint; cache-aside is used without inventing a TTL target."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "hbs_08",
+      "stepNumber": 8,
+      "phase": "Search hotels and read current availability",
+      "title": "Add the booking and inventory owner",
+      "type": "add_component",
+      "content": "Keep reservation state transitions and room-type inventory mutations behind one service boundary. This service owns the transaction that turns available inventory into a pending hold and later a confirmed or cancelled reservation.",
+      "component": {
+        "nodeId": "hbs_booking_inventory_service",
+        "componentType": "backend-server",
+        "label": "Booking and Inventory Service",
+        "description": "Authoritative reservation and room-type inventory operations",
+        "position": { "x": 940, "y": 500 },
+        "properties": {
+          "componentName": "Booking and Inventory Service",
+          "purpose": "Own room-type inventory reads and transactional reservation holds, confirmations, cancellations, and inventory release; validate each requested stay against committed inventory."
+        },
+        "highlightReason": "The catalog Backend Server expresses the domain service without introducing an unsupported hotel-specific component type."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "hbs_09",
+      "stepNumber": 9,
+      "phase": "Search hotels and read current availability",
+      "title": "Add the transactional booking store",
+      "type": "add_component",
+      "content": "Assume an OLTP relational store for reservation and per-night inventory records. Its transaction covers local reservation, inventory, payment-state, and outbox records; it cannot atomically commit an external payment-provider operation. The chosen database engine is intentionally unspecified; verify that it supports the required multi-row transaction and row-lock behavior.",
+      "component": {
+        "nodeId": "hbs_booking_store",
+        "componentType": "database",
+        "label": "Booking and Room Inventory Store",
+        "description": "Transactional source of truth for holds, reservations, and room-type nights",
+        "position": { "x": 1260, "y": 500 },
+        "properties": {
+          "componentName": "Booking and Room Inventory Store",
+          "purpose": "Persist room-type inventory by stay date, reservation and payment state, idempotency records, and transactional outbox entries; serve as the authoritative booking state.",
+          "type": "RDBMS",
+          "workload": "OLTP",
+          "auditLog": true
+        },
+        "highlightReason": "The catalog Database supports OLTP and audit properties; RDBMS is an explicit design assumption, not a frozen brief fact."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "hbs_10",
+      "stepNumber": 10,
+      "phase": "Search hotels and read current availability",
+      "title": "Route guest searches to hotel search",
+      "type": "add_connection",
+      "content": "Send location and date search requests to the hotel search service. Candidate discovery does not itself reserve inventory.",
+      "connection": {
+        "edgeId": "hbs_gateway_to_search",
+        "sourceNodeId": "hbs_api_gateway",
+        "targetNodeId": "hbs_search_service",
+        "connectionType": "http",
+        "label": "Hotel search request",
+        "description": "Location and stay-date criteria for hotel candidate discovery."
+      },
+      "requirementIds": ["legacy-requirement:1"]
+    },
+    {
+      "id": "hbs_11",
+      "stepNumber": 11,
+      "phase": "Search hotels and read current availability",
+      "title": "Route booking and cancellation commands",
+      "type": "add_connection",
+      "content": "Route reservation creation and cancellation to the inventory owner, where the operation can be checked against authoritative state.",
+      "connection": {
+        "edgeId": "hbs_gateway_to_booking",
+        "sourceNodeId": "hbs_api_gateway",
+        "targetNodeId": "hbs_booking_inventory_service",
+        "connectionType": "http",
+        "label": "Booking and cancellation commands",
+        "description": "Reservation commands enter the service that owns inventory and reservation state."
+      },
+      "requirementIds": ["legacy-requirement:3"]
+    },
+    {
+      "id": "hbs_12",
+      "stepNumber": 12,
+      "phase": "Search hotels and read current availability",
+      "title": "Connect candidate lookup to the location index",
+      "type": "add_connection",
+      "content": "Use the location index only to find hotels worth checking. Date-specific room counts are verified through the inventory owner.",
+      "connection": {
+        "edgeId": "hbs_search_to_index",
+        "sourceNodeId": "hbs_search_service",
+        "targetNodeId": "hbs_hotel_search_index",
+        "connectionType": "api-call",
+        "label": "Location candidate lookup",
+        "description": "Search hotel metadata by location without treating the index as reservation inventory."
+      },
+      "requirementIds": ["legacy-requirement:1"]
+    },
+    {
+      "id": "hbs_13",
+      "stepNumber": 13,
+      "phase": "Search hotels and read current availability",
+      "title": "Use cached counts as a read accelerator",
+      "type": "add_connection",
+      "content": "Read a cached count when useful, but label it provisional and reconcile it with the inventory owner before telling the guest that a room is currently available.",
+      "connection": {
+        "edgeId": "hbs_search_to_cache",
+        "sourceNodeId": "hbs_search_service",
+        "targetNodeId": "hbs_availability_cache",
+        "connectionType": "api-call",
+        "label": "Provisional availability lookup",
+        "description": "Cache-assisted read that cannot authorize a booking."
+      },
+      "requirementIds": ["legacy-requirement:2"]
+    },
+    {
+      "id": "hbs_14",
+      "stepNumber": 14,
+      "phase": "Search hotels and read current availability",
+      "title": "Verify availability with the inventory owner",
+      "type": "add_connection",
+      "content": "Read committed inventory for each requested room type and stay date from the booking owner. This is the freshest authoritative observation in this design, not a hold or a promise that the room remains available after the read; the brief gives no measurable freshness interval. Booking repeats the check inside its write transaction.",
+      "connection": {
+        "edgeId": "hbs_search_to_booking",
+        "sourceNodeId": "hbs_search_service",
+        "targetNodeId": "hbs_booking_inventory_service",
+        "connectionType": "api-call",
+        "label": "Current room-type availability",
+        "description": "Live inventory-owner check for location candidates, room type, and stay dates."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "hbs_15",
+      "stepNumber": 15,
+      "phase": "Search hotels and read current availability",
+      "title": "Persist inventory and reservation state transactionally",
+      "type": "add_connection",
+      "content": "Persist local reservation, inventory, and payment-state transitions on the booking store. Its transaction covers those local records and the outbox only; payment-provider calls remain outside that transaction and are reconciled by the saga.",
+      "connection": {
+        "edgeId": "hbs_booking_to_store",
+        "sourceNodeId": "hbs_booking_inventory_service",
+        "targetNodeId": "hbs_booking_store",
+        "connectionType": "database-connection",
+        "label": "Authoritative reservation transaction",
+        "description": "Inventory, reservation, idempotency, payment state, and outbox records."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "hbs_16",
+      "stepNumber": 16,
+      "phase": "Search hotels and read current availability",
+      "title": "Decide whether a cache hit can promise a room",
+      "type": "decision_point",
+      "content": "A cache can accelerate candidate reads, but a concurrent booking may commit after the cached value was written. Verify current inventory at the inventory owner and repeat the check inside the reservation transaction.",
+      "decision": {
+        "question": "Can cached availability authorize a booking?",
+        "chosen": "No. Use the cache as a provisional read accelerator, then verify committed inventory at the authoritative booking and inventory service; the reservation transaction performs its own final check.",
+        "chosenReason": "Only the inventory transaction can arbitrate competing claims. Cache freshness alone cannot prevent an oversell.",
+        "alternatives": [
+          {
+            "option": "Treat a cache hit as a reservation guarantee",
+            "tradeoff": "A concurrent booking can consume the last room after the cached count was written."
+          },
+          {
+            "option": "Remove all availability caching",
+            "tradeoff": "This avoids stale cache reads but gives up the brief's suggested read optimization; the authoritative check is still required either way."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "hbs_17",
+      "stepNumber": 17,
+      "phase": "Model inventory and prevent competing reservations",
+      "title": "Choose the inventory unit",
+      "type": "decision_point",
+      "content": "The brief names room types and room inventory, but does not say whether a reservation is assigned to a physical room at booking time. Make the room-type nightly count an explicit assumption and defer physical room assignment unless hotel operations require it.",
+      "decision": {
+        "question": "What does one sellable inventory unit represent?",
+        "chosen": "Assumption: track available counts by hotel, room type, and each stay date. Reserve the requested count across every night; assign a physical room later only if hotel operations require it.",
+        "chosenReason": "The brief requires room types and inventory but does not specify physical-room assignment. A nightly room-type count supports date-range availability without inventing a hotel-specific room allocation rule.",
+        "alternatives": [
+          {
+            "option": "Reserve a specific physical room for the full stay at search time",
+            "tradeoff": "The brief does not say room assignment must happen that early, and early assignment can reduce flexibility for hotel operations."
+          },
+          {
+            "option": "Keep one undated count per hotel",
+            "tradeoff": "It cannot answer date-specific availability or protect inventory for overlapping stays."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1"]
+    },
+    {
+      "id": "hbs_18",
+      "stepNumber": 18,
+      "phase": "Model inventory and prevent competing reservations",
+      "title": "Choose the same-room race control",
+      "type": "decision_point",
+      "content": "Two requests can observe the last room at nearly the same time. Let the transactional inventory store choose one winner; request-level retries alone do not serialize different guests competing for the same room type and night.",
+      "decision": {
+        "question": "How does one request claim scarce room-type inventory when bookings race?",
+        "chosen": "Assumption: in one database transaction, lock the requested hotel, room-type, and stay-date rows in deterministic date order; verify each count, create an expiring hold and idempotency record, and decrement all nights only if every night is available. Roll back the whole transaction if any night fails.",
+        "chosenReason": "A single transaction gives overlapping requests one inventory authority and prevents partial multi-night reservations. Confirm that the chosen database engine supports the required row-lock and rollback behavior.",
+        "alternatives": [
+          {
+            "option": "Use a versioned conditional update for each night",
+            "tradeoff": "Optimistic locking can work, but every conflict and partial multi-night retry needs explicit atomic handling."
+          },
+          {
+            "option": "Check availability in the application and decrement later",
+            "tradeoff": "Concurrent requests can both pass the check and oversell the last room."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "hbs_19",
+      "stepNumber": 19,
+      "phase": "Model inventory and prevent competing reservations",
+      "title": "Keep every night in the same reservation transaction",
+      "type": "explanation",
+      "content": "For a multi-night stay, lock or conditionally claim all requested nightly inventory rows, create the hold, and record the idempotency key in one transaction. If a night is unavailable or any write fails, roll back the entire reservation rather than retaining a partial stay.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "hbs_20",
+      "stepNumber": 20,
+      "phase": "Model inventory and prevent competing reservations",
+      "title": "Give a pending hold a recoverable state",
+      "type": "explanation",
+      "content": "A hold needs a durable state, expiry/reconciliation policy, and idempotent transition so a client retry or process failure cannot create a second reservation. The brief does not provide a hold duration; choose it with payment and hotel policy owners rather than embedding a guessed number.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "hbs_21",
+      "stepNumber": 21,
+      "phase": "Coordinate payment, cancellation, and confirmation",
+      "title": "Add payment orchestration",
+      "type": "add_component",
+      "content": "Integrate with a payment provider through an idempotent payment operation and reconcile uncertain outcomes before confirming or releasing a reservation. The brief does not select a provider or payment method.",
+      "component": {
+        "nodeId": "hbs_payment_service",
+        "componentType": "payment-service",
+        "label": "Payment Service",
+        "description": "Provider-facing payment, reconciliation, and refund operations",
+        "position": { "x": 1260, "y": 220 },
+        "properties": {
+          "componentName": "Payment Service",
+          "purpose": "Submit idempotent payment operations to the configured provider, reconcile uncertain outcomes, and track refunds without selecting a provider in this draft."
+        },
+        "highlightReason": "The catalog Payment Service directly fits payment processing; omitting its provider selector avoids inventing a vendor."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "hbs_22",
+      "stepNumber": 22,
+      "phase": "Coordinate payment, cancellation, and confirmation",
+      "title": "Add a durable booking event queue",
+      "type": "add_component",
+      "content": "Publish committed booking, cancellation, and inventory-change events from an outbox written with the reservation transaction. Consumers may retry delivery, so event handling must be idempotent.",
+      "component": {
+        "nodeId": "hbs_booking_events",
+        "componentType": "queue",
+        "label": "Booking Event Queue",
+        "description": "Durable delivery of committed booking lifecycle events",
+        "position": { "x": 1580, "y": 500 },
+        "properties": {
+          "componentName": "Booking Event Queue",
+          "purpose": "Deliver confirmed booking, cancellation, refund-status, and inventory-change events from a transactional outbox to idempotent consumers.",
+          "durable": true
+        },
+        "highlightReason": "The catalog Queue fits asynchronous event delivery; the outbox in the booking transaction closes the database-to-queue dual-write gap."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "hbs_23",
+      "stepNumber": 23,
+      "phase": "Coordinate payment, cancellation, and confirmation",
+      "title": "Add booking notifications",
+      "type": "add_component",
+      "content": "Notify guests only from committed reservation events. Delivery channels and guest preference rules are not specified by the brief, so keep them configurable.",
+      "component": {
+        "nodeId": "hbs_notifications",
+        "componentType": "notification-service",
+        "label": "Booking Notifications",
+        "description": "Confirmation and cancellation messages",
+        "position": { "x": 1900, "y": 500 },
+        "properties": {
+          "componentName": "Booking Notifications",
+          "purpose": "Send confirmation, cancellation, and refund-status messages after committed booking events using configured guest channels."
+        },
+        "highlightReason": "The catalog Notification Service covers confirmations without assuming a channel or provider."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:3"]
+    },
+    {
+      "id": "hbs_24",
+      "stepNumber": 24,
+      "phase": "Coordinate payment, cancellation, and confirmation",
+      "title": "Start payment after the inventory hold",
+      "type": "add_connection",
+      "content": "After the inventory transaction creates a pending hold, request payment using the reservation operation's stable idempotency identity. Do not keep a database lock open while waiting on a network provider.",
+      "connection": {
+        "edgeId": "hbs_booking_to_payment",
+        "sourceNodeId": "hbs_booking_inventory_service",
+        "targetNodeId": "hbs_payment_service",
+        "connectionType": "api-call",
+        "label": "Idempotent payment operation",
+        "description": "A durable reservation operation identity links the payment attempt to its pending hold."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "hbs_25",
+      "stepNumber": 25,
+      "phase": "Coordinate payment, cancellation, and confirmation",
+      "title": "Reconcile payment outcomes with the reservation owner",
+      "type": "add_connection",
+      "content": "Return the provider operation identity and outcome to the booking owner. A timeout is an unknown outcome until reconciled, not proof that payment failed.",
+      "connection": {
+        "edgeId": "hbs_payment_to_booking",
+        "sourceNodeId": "hbs_payment_service",
+        "targetNodeId": "hbs_booking_inventory_service",
+        "connectionType": "api-call",
+        "label": "Payment result and reconciliation",
+        "description": "Idempotent payment outcome lets the reservation state machine confirm, continue reconciling, or compensate."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "hbs_26",
+      "stepNumber": 26,
+      "phase": "Coordinate payment, cancellation, and confirmation",
+      "title": "Publish only committed lifecycle events",
+      "type": "add_connection",
+      "content": "Write the outbox record in the same database transaction as a reservation confirmation, cancellation, or inventory change. A relay publishes committed records and retries safely after a crash.",
+      "connection": {
+        "edgeId": "hbs_booking_to_events",
+        "sourceNodeId": "hbs_booking_inventory_service",
+        "targetNodeId": "hbs_booking_events",
+        "connectionType": "message-queue",
+        "label": "Transactional outbox events",
+        "description": "Committed booking lifecycle and inventory changes are delivered with retryable, idempotent event identity."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "hbs_27",
+      "stepNumber": 27,
+      "phase": "Coordinate payment, cancellation, and confirmation",
+      "title": "Send confirmations from committed events",
+      "type": "add_connection",
+      "content": "The notification consumer sends confirmation or cancellation only after the corresponding booking state has committed. Repeated events must not create duplicate guest-visible actions where the channel supports idempotency.",
+      "connection": {
+        "edgeId": "hbs_events_to_notifications",
+        "sourceNodeId": "hbs_booking_events",
+        "targetNodeId": "hbs_notifications",
+        "connectionType": "message-queue",
+        "label": "Committed booking notifications",
+        "description": "Confirmation, cancellation, and refund-status events for asynchronous guest messaging."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:3"]
+    },
+    {
+      "id": "hbs_28",
+      "stepNumber": 28,
+      "phase": "Coordinate payment, cancellation, and confirmation",
+      "title": "Refresh cached availability after inventory commits",
+      "type": "add_connection",
+      "content": "Consume committed inventory-change events to evict or refresh affected hotel, room-type, and stay-date cache entries. This asynchronous projection may lag and has no promised freshness interval; the live inventory check remains the correctness boundary while a refresh is pending.",
+      "connection": {
+        "edgeId": "hbs_events_to_cache",
+        "sourceNodeId": "hbs_booking_events",
+        "targetNodeId": "hbs_availability_cache",
+        "connectionType": "message-queue",
+        "label": "Availability invalidation events",
+        "description": "Committed inventory changes invalidate or refresh derived availability cache entries."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "hbs_29",
+      "stepNumber": 29,
+      "phase": "Coordinate payment, cancellation, and confirmation",
+      "title": "Refresh search projections from booking events",
+      "type": "add_connection",
+      "content": "If hotel search metadata or availability projections are maintained asynchronously, update them from committed events and tolerate replay. Those projections can lag and have no promised freshness interval; search results never replace the booking transaction's final inventory check.",
+      "connection": {
+        "edgeId": "hbs_events_to_search",
+        "sourceNodeId": "hbs_booking_events",
+        "targetNodeId": "hbs_search_service",
+        "connectionType": "message-queue",
+        "label": "Committed inventory changes",
+        "description": "Refresh derived search results after booking or cancellation without making the projection authoritative."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "hbs_30",
+      "stepNumber": 30,
+      "phase": "Coordinate payment, cancellation, and confirmation",
+      "title": "Choose a recoverable payment state machine",
+      "type": "decision_point",
+      "content": "The inventory database and payment provider do not share one ACID transaction. Keep that boundary explicit and make retry, timeout, confirmation, release, and refund states durable.",
+      "decision": {
+        "question": "How can a reservation and an external payment reach a consistent outcome?",
+        "chosen": "Use a saga: create a pending inventory hold, call payment with a stable idempotency key, confirm only after a durable success is reconciled, and expire or release the hold after a confirmed failure. Treat an uncertain provider result as pending until reconciled; issue cancellation refunds as separate idempotent operations. This coordinates eventual state across systems; it is not a shared ACID transaction or an immediate-finality guarantee.",
+        "chosenReason": "A local database transaction cannot atomically commit an external provider operation. Durable states and compensating actions make partial failure visible and recoverable.",
+        "alternatives": [
+          {
+            "option": "Hold inventory database locks open during provider authorization",
+            "tradeoff": "Network delays or provider outages extend locks and can reduce inventory write availability."
+          },
+          {
+            "option": "Confirm the reservation before reconciling payment",
+            "tradeoff": "A failed or unknown payment can leave a confirmed booking without the required payment outcome."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "hbs_31",
+      "stepNumber": 31,
+      "phase": "Coordinate payment, cancellation, and confirmation",
+      "title": "Make cancellation and refund policy an input",
+      "type": "decision_point",
+      "content": "Cancellation eligibility, deadlines, fees, and refund amounts are not in the frozen brief. Do not hard-code a policy; apply the hotel or product policy supplied for the reservation and record each release and refund transition.",
+      "decision": {
+        "question": "What does cancellation do to a confirmed reservation and its payment?",
+        "chosen": "Assumption: the booking service validates the applicable cancellation policy, which is not specified in the brief, releases the affected room-type nights transactionally, and requests any required refund through an idempotent payment operation.",
+        "chosenReason": "Inventory release and refund can fail independently, so each needs a durable state and retry path. The brief requires cancellation and refunds but does not define eligibility or amounts.",
+        "alternatives": [
+          {
+            "option": "Always refund the full payment on cancellation",
+            "tradeoff": "The brief does not establish that all reservations are refundable or that the full amount is due."
+          },
+          {
+            "option": "Release inventory only after the refund completes",
+            "tradeoff": "A provider delay can unnecessarily keep a cancelled room unavailable."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "hbs_32",
+      "stepNumber": 32,
+      "phase": "Coordinate payment, cancellation, and confirmation",
+      "title": "Choose an audit trail without hiding source state",
+      "type": "decision_point",
+      "content": "The brief suggests event sourcing for an audit trail. Keep the booking row and inventory transaction authoritative in this draft, and preserve committed transitions through the transactional outbox; use full event sourcing only if replay and historical reconstruction are confirmed product requirements.",
+      "decision": {
+        "question": "Should the first design make the event log the sole reservation source of truth?",
+        "chosen": "Use transactional reservation and inventory state with an append-only outbox/event history for audit and asynchronous consumers; do not claim full event sourcing is required by the brief.",
+        "chosenReason": "This provides durable, replayable change delivery while keeping double-booking control in one transactional inventory owner. It avoids introducing event-sourced projections and rebuild rules without a stated need.",
+        "alternatives": [
+          {
+            "option": "Make every reservation read a fold over the complete event log",
+            "tradeoff": "This adds projection, replay, schema-evolution, and recovery obligations not established by the brief."
+          },
+          {
+            "option": "Publish events without a transactional outbox",
+            "tradeoff": "A crash between the database commit and publish can omit an audit or availability event."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "hbs_33",
+      "stepNumber": 33,
+      "phase": "Coordinate payment, cancellation, and confirmation",
+      "title": "Walk through confirmation and cancellation outcomes",
+      "type": "explanation",
+      "content": "For booking, commit a pending hold first, reconcile payment, then commit confirmation and its outbox event. On a definitive payment failure, release the hold; on an unknown outcome, reconcile before retrying or releasing. For cancellation, apply the configured policy, release inventory, and track any refund independently until it reaches a durable result.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "hbs_34",
+      "stepNumber": 34,
+      "phase": "Scale from measured demand",
+      "title": "Choose a scale path without inventing capacity targets",
+      "type": "decision_point",
+      "content": "The brief's 'millions of bookings' is a scale requirement, not demonstrated capacity. It gives no request rate, growth curve, latency objective, geography, or database capacity. Treat stateless horizontal scaling and inventory partitioning as candidate approaches; measure demand and write hot spots before choosing partitions or shards.",
+      "decision": {
+        "question": "How should the system grow to support millions of bookings while keeping inventory correct?",
+        "chosen": "Assumption: use stateless gateway and service instances as a scale-out path to validate against the brief's millions-of-bookings target; this design has not demonstrated that capacity. Use measured booking contention and query load to decide whether to partition inventory by hotel or another key, while keeping each inventory key under one transactionally consistent owner.",
+        "chosenReason": "This creates a path to add capacity without claiming an unsupported QPS, shard count, or availability target. Partitioning must preserve atomic claims for the requested hotel, room type, and dates.",
+        "alternatives": [
+          {
+            "option": "Choose a fixed shard count before observing booking distribution",
+            "tradeoff": "Unknown hot hotels and uneven demand can create hotspots or costly rebalancing."
+          },
+          {
+            "option": "Scale every part of the system together",
+            "tradeoff": "Search, payment, and inventory can have different bottlenecks and need not scale in lockstep."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-requirement:4", "legacy-constraint:2"]
+    },
+    {
+      "id": "hbs_35",
+      "stepNumber": 35,
+      "phase": "Scale from measured demand",
+      "title": "Scale when measured headroom requires it",
+      "type": "scale_trigger",
+      "content": "Watch booking throughput alongside inventory row-lock contention, transaction latency, search latency, cache invalidation lag, and event queue age. Set operational thresholds from measured workload and owner-approved objectives; the brief provides no numeric targets.",
+      "scaleTrigger": {
+        "metric": "Measured booking volume, inventory contention, transaction latency, search latency, cache invalidation lag, or event queue age approaches its approved operating envelope",
+        "action": "Scale the stateless tier that is constrained, reduce avoidable inventory contention, and partition a hot inventory key only after validating transaction and reservation semantics across the partition boundary.",
+        "impact": "Adds capacity at the measured bottleneck while retaining one correctness authority for each inventory claim; no fixed throughput or latency promise is implied."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-requirement:2", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "hbs_36",
+      "stepNumber": 36,
+      "phase": "Scale from measured demand",
+      "title": "Review the design against the frozen brief",
+      "type": "explanation",
+      "content": "The resulting graph connects location/date search, current inventory verification, atomic room-type holds, payment reconciliation, cancellations and refunds, and committed confirmation events. Validate the chosen database engine's transaction behavior, the payment provider's idempotency/reconciliation contract, hotel cancellation policy, freshness objective, and measured capacity before implementation. This local review draft does not claim browser replay, save/reload, production quality, or publication.",
+      "requirementIds": []
+    }
+  ]
+}

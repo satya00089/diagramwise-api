@@ -1,0 +1,600 @@
+{
+  "problem_id": "ml_006",
+  "version": "1.0-review-draft",
+  "totalSteps": 45,
+  "phases": [
+    {
+      "name": "Define the multilingual processing contract",
+      "stepRange": [1, 3],
+      "description": "Translate each requested NLP capability and numerical target into separate measurable acceptance criteria."
+    },
+    {
+      "name": "Create real-time and batch intake paths",
+      "stepRange": [4, 15],
+      "description": "Provide a protected API, durable batch handoff, shared normalization, and explicit model tasks for every requested analysis."
+    },
+    {
+      "name": "Connect entity and document analysis",
+      "stepRange": [16, 34],
+      "description": "Keep real-time requests short, let batch jobs use durable object references, run dependent extraction in order, and aggregate the full result."
+    },
+    {
+      "name": "Measure quality, latency, and throughput",
+      "stepRange": [35, 45],
+      "description": "Observe both service paths and choose language-aware quality gates and independent scaling policies."
+    }
+  ],
+  "steps": [
+    {
+      "id": "nlp_scope",
+      "stepNumber": 1,
+      "phase": "Define the multilingual processing contract",
+      "title": "Preserve every requested NLP capability and target",
+      "type": "explanation",
+      "content": "Problem: Design a Natural Language Processing Pipeline. Description: Design an NLP pipeline that processes unstructured text through entity extraction, relation extraction, sentiment analysis, topic modeling, and text classification at scale. Frozen metadata: difficulty Medium; category ML - NLP; estimated time 45-60 minutes. Functional requirements: Extract named entities (people, organizations, locations); Identify relationships between entities; Classify documents into categories; Perform sentiment and opinion analysis; Extract key phrases and topics; Handle multiple languages; Process structured and unstructured text; Provide API for batch and real-time processing. Constraints: Entity extraction F1-score above 90%; Classification accuracy above 85%; Process 10k+ documents per hour in batch; Real-time processing under 500ms per document; Support at least 10 languages. Hints: Use transformer-based models (BERT, RoBERTa) for NER; Implement SpaCy for fast entity extraction; Use fine-tuned models per domain for accuracy; Implement text preprocessing (tokenization, normalization); Use BERTopic or LDA for topic modeling; Deploy models behind a FastAPI service. These are design inputs and targets, not measured results.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "nlp_measurement",
+      "stepNumber": 2,
+      "phase": "Define the multilingual processing contract",
+      "title": "Treat quality and capacity numbers as test gates",
+      "type": "explanation",
+      "content": "Measure entity F1 and document classification accuracy by language and relevant domain, not only as a global average. Benchmark batch throughput on representative document lengths and language mixes. Measure real-time end-to-end latency from API ingress through response serialization; the brief does not specify payload size, traffic burst shape, or language distribution.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "nlp_routing_choice",
+      "stepNumber": 3,
+      "phase": "Define the multilingual processing contract",
+      "title": "Choose a shared multilingual preprocessing contract",
+      "type": "decision_point",
+      "content": "Normalize Unicode, preserve original text and offsets, detect or accept a declared language, and tokenize with a model-compatible versioned pipeline. Route to language and domain configurations without silently translating away entity spans or sentiment cues.",
+      "decision": {
+        "question": "How should the pipeline handle at least ten languages without erasing language-specific evidence?",
+        "chosen": "Use language-aware routing to multilingual transformer models such as XLM-R and domain-fine-tuned BERT/RoBERTa models, with spaCy as a fast baseline where language-level evaluation supports it.",
+        "chosenReason": "One multilingual entry contract can support a varied language mix while per-language evaluation reveals where a dedicated model or fallback is needed.",
+        "alternatives": [
+          {"option": "Translate every input to one language before all analysis", "tradeoff": "Translation can change entity boundaries, opinion nuance, and provenance, and adds latency."},
+          {"option": "Use one unqualified model for every language", "tradeoff": "Aggregate scores can conceal poor quality for less represented languages."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "nlp_api",
+      "stepNumber": 4,
+      "phase": "Create real-time and batch intake paths",
+      "title": "Expose one documented API for real-time and batch jobs",
+      "type": "add_component",
+      "content": "Provide request validation, authentication, language hints, correlation IDs, and separate synchronous and batch submission contracts. A batch submission returns a job reference rather than holding an API connection open for the full corpus.",
+      "component": {
+        "nodeId": "nlp_api",
+        "componentType": "api-gateway",
+        "label": "NLP API: Real-Time and Batch Submission",
+        "description": "Protected API boundary for synchronous analysis and asynchronous document jobs.",
+        "position": {"x": 0, "y": 180},
+        "properties": {"componentName": "NLP Request API", "purpose": "Validate and authenticate real-time analysis and batch job requests, attach trace and language context, and return a job reference for asynchronous submissions."},
+        "highlightReason": "One API contract supports the requested batch and real-time modes while making their response behavior explicit."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-requirement:7"]
+    },
+    {
+      "id": "nlp_storage",
+      "stepNumber": 5,
+      "phase": "Create real-time and batch intake paths",
+      "title": "Keep large batch documents and results in object storage",
+      "type": "add_component",
+      "content": "Store batch inputs, manifests, and completed outputs durably with access controls, encryption, and an agreed retention policy. Pass object references through queues so large document bodies do not become queue payloads.",
+      "component": {
+        "nodeId": "nlp_storage",
+        "componentType": "object-storage",
+        "label": "Batch Documents and NLP Results",
+        "description": "Durable inputs, manifests, and result files for asynchronous processing.",
+        "position": {"x": 280, "y": 450},
+        "properties": {"componentName": "NLP Batch Object Store", "purpose": "Store encrypted batch inputs, manifests, and outputs with controlled retention; queue only bounded document or object references."},
+        "highlightReason": "Object references support large unstructured and structured batches without oversized messages."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "nlp_queue",
+      "stepNumber": 6,
+      "phase": "Create real-time and batch intake paths",
+      "title": "Buffer batch work with bounded retries and visible lag",
+      "type": "add_component",
+      "content": "Use a durable queue for batch job or chunk references, with idempotency keys, bounded retry policy, a dead-letter path, and oldest-message-age monitoring. Tune consumer concurrency to sustain the 10k+ documents-per-hour objective without exhausting downstream model capacity.",
+      "component": {
+        "nodeId": "nlp_queue",
+        "componentType": "queue",
+        "label": "Durable Batch Work Queue",
+        "description": "Replayable job references with bounded retries and consumer-lag signals.",
+        "position": {"x": 280, "y": 180},
+        "properties": {"componentName": "NLP Batch Queue", "purpose": "Buffer idempotent document or chunk references, bound retries, route exhausted work for review, and expose queue age and depth for throughput control."},
+        "highlightReason": "A durable queue separates bulk arrivals from inference execution and makes batch backpressure observable."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "nlp_batch_worker",
+      "stepNumber": 7,
+      "phase": "Create real-time and batch intake paths",
+      "title": "Run batch chunks with checkpointed progress",
+      "type": "add_component",
+      "content": "Claim bounded chunks, record job and chunk progress, and retry only idempotent work. Limit each worker's concurrency to protect shared model capacity and preserve per-document identity through the result aggregation step.",
+      "component": {
+        "nodeId": "nlp_batch_worker",
+        "componentType": "backend-server",
+        "label": "Batch Job Coordinator",
+        "description": "Loads bounded chunks and tracks retryable batch progress.",
+        "position": {"x": 570, "y": 180},
+        "properties": {"componentName": "NLP Batch Coordinator", "purpose": "Load document references, track idempotent chunk progress, limit concurrency against model capacity, and persist per-document results and job completion state."},
+        "highlightReason": "The worker makes batch retries and progress independent from the real-time request lifetime."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "nlp_preprocess",
+      "stepNumber": 8,
+      "phase": "Create real-time and batch intake paths",
+      "title": "Normalize structured and unstructured text consistently",
+      "type": "add_component",
+      "content": "Validate structured fields and extract text from supported unstructured inputs. Normalize Unicode and whitespace, preserve source offsets and metadata, tokenize with the selected model contract, identify language, and enforce a versioned allowlist of at least 10 supported languages. Route only to validated language/model pairs, and return or record an explicit unsupported-language outcome for inputs outside that allowlist.",
+      "component": {
+        "nodeId": "nlp_preprocess",
+        "componentType": "stream-processor",
+        "label": "Text Normalization and Language Router",
+        "description": "Versioned normalization, tokenization, input validation, and language-aware routing for at least 10 supported languages.",
+        "position": {"x": 870, "y": 180},
+        "properties": {"componentName": "NLP Preprocessor", "purpose": "Handle structured and unstructured input, preserve offsets and provenance, normalize and tokenize text, resolve language, and route through a versioned registry containing at least 10 explicitly supported languages and compatible model versions."},
+        "highlightReason": "A shared, versioned preprocessing boundary keeps batch and real-time model inputs consistent across at least 10 explicitly supported languages."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "nlp_ner",
+      "stepNumber": 9,
+      "phase": "Create real-time and batch intake paths",
+      "title": "Extract people, organizations, and locations",
+      "type": "add_component",
+      "content": "Run multilingual NER that emits entity type, confidence, source offsets, language, and model version. Evaluate F1 above 90% on representative language and domain slices; compare a fast spaCy path with transformer or fine-tuned alternatives rather than assuming one performs best everywhere.",
+      "component": {
+        "nodeId": "nlp_ner",
+        "componentType": "model-serving",
+        "label": "Multilingual Named Entity Recognition",
+        "description": "People, organization, and location spans with confidence and provenance.",
+        "position": {"x": 1180, "y": 50},
+        "properties": {"componentName": "Multilingual NER Model", "purpose": "Extract person, organization, and location spans with type, confidence, language, model version, and preserved source offsets; benchmark F1 by language and domain."},
+        "highlightReason": "Named entity spans and provenance are the explicit input to downstream relation extraction."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "nlp_relations",
+      "stepNumber": 10,
+      "phase": "Create real-time and batch intake paths",
+      "title": "Extract typed relationships between identified entities",
+      "type": "add_component",
+      "content": "Consume the document tokens and NER spans, then return typed relations linked to the source entities and text evidence. Preserve an explicit no-relation result rather than forcing a relation for every entity pair.",
+      "component": {
+        "nodeId": "nlp_relations",
+        "componentType": "model-serving",
+        "label": "Entity Relation Extraction",
+        "description": "Typed links between recognized entities with supporting text spans.",
+        "position": {"x": 1480, "y": 50},
+        "properties": {"componentName": "Relation Extraction Model", "purpose": "Identify typed relationships from normalized text and NER spans; retain evidence offsets, confidence, language, and model version."},
+        "highlightReason": "Explicit entity inputs make the dependency between named-entity and relationship extraction reviewable."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "nlp_classification",
+      "stepNumber": 11,
+      "phase": "Create real-time and batch intake paths",
+      "title": "Classify documents against the agreed category taxonomy",
+      "type": "add_component",
+      "content": "Return category labels and confidence using a versioned taxonomy. Measure accuracy above 85% on held-out, language-aware data and define what happens when confidence is low or a document belongs to an unseen category.",
+      "component": {
+        "nodeId": "nlp_classification",
+        "componentType": "model-serving",
+        "label": "Document Classification",
+        "description": "Versioned category predictions with confidence and fallback status.",
+        "position": {"x": 1180, "y": 190},
+        "properties": {"componentName": "Document Classifier", "purpose": "Assign taxonomy versioned category labels with confidence and explicit low-confidence or unknown-category outcomes; evaluate accuracy by language and domain."},
+        "highlightReason": "The taxonomy and uncertainty behavior make the classification accuracy target measurable."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "nlp_sentiment",
+      "stepNumber": 12,
+      "phase": "Create real-time and batch intake paths",
+      "title": "Analyze sentiment and opinion with language context",
+      "type": "add_component",
+      "content": "Return polarity or opinion labels with confidence and language context. Retain the analyzed text evidence and distinguish neutral or ambiguous language from a confident positive or negative result.",
+      "component": {
+        "nodeId": "nlp_sentiment",
+        "componentType": "model-serving",
+        "label": "Sentiment and Opinion Analysis",
+        "description": "Language-aware sentiment outputs with confidence and evidence references.",
+        "position": {"x": 1180, "y": 330},
+        "properties": {"componentName": "Sentiment Model", "purpose": "Analyze sentiment and opinion with language-aware confidence, evidence references, and an explicit uncertain or neutral result."},
+        "highlightReason": "Separate sentiment output lets the pipeline measure opinion analysis without conflating it with topic or category labels."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "nlp_topics",
+      "stepNumber": 13,
+      "phase": "Create real-time and batch intake paths",
+      "title": "Extract key phrases and document topics",
+      "type": "add_component",
+      "content": "Produce key phrases and topic assignments with model or topic-model version. Compare BERTopic, LDA, or a domain-fine-tuned approach on the corpus and language mix; do not imply that all options have the same latency or multilingual quality.",
+      "component": {
+        "nodeId": "nlp_topics",
+        "componentType": "model-serving",
+        "label": "Key Phrase and Topic Extraction",
+        "description": "Document phrases and topic assignments with versioned model metadata.",
+        "position": {"x": 1180, "y": 470},
+        "properties": {"componentName": "Topic and Key Phrase Model", "purpose": "Extract key phrases and topics with language, corpus, and model-version metadata; evaluate BERTopic, LDA, or fine-tuned alternatives on representative data."},
+        "highlightReason": "A distinct topic task makes the key-phrase and topic requirement independently observable."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "nlp_aggregate",
+      "stepNumber": 14,
+      "phase": "Create real-time and batch intake paths",
+      "title": "Merge task outputs into a traceable document response",
+      "type": "add_component",
+      "content": "Join NER spans, relations, categories, sentiment, and topics by document and request identity. Return per-task model versions, confidence, evidence offsets, warnings, and partial-failure status so the caller can distinguish missing analysis from an empty result.",
+      "component": {
+        "nodeId": "nlp_aggregate",
+        "componentType": "backend-server",
+        "label": "NLP Result Aggregator",
+        "description": "Combines independent analysis outputs and preserves per-task status.",
+        "position": {"x": 1770, "y": 250},
+        "properties": {"componentName": "NLP Result Aggregator", "purpose": "Join task outputs by document ID, retain task-level confidence, evidence, language and model versions, and report partial failures explicitly."},
+        "highlightReason": "A single aggregation contract serves both API responses and durable batch result records."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:4"]
+    },
+    {
+      "id": "nlp_monitoring",
+      "stepNumber": 15,
+      "phase": "Create real-time and batch intake paths",
+      "title": "Observe quality and service behavior by mode and language",
+      "type": "add_component",
+      "content": "Monitor request latency, error and partial-result rates, queue age, document throughput, model version, language distribution, and quality signals when labels become available. Separate the real-time latency view from batch completion throughput.",
+      "component": {
+        "nodeId": "nlp_monitoring",
+        "componentType": "monitoring",
+        "label": "NLP Quality and Operations Monitoring",
+        "description": "Per-language model and service signals for online requests and batch jobs.",
+        "position": {"x": 1770, "y": 500},
+        "properties": {"componentName": "NLP Monitoring", "purpose": "Track per-language task quality when labels arrive, real-time latency, batch throughput and queue age, errors, partial results, and model versions."},
+        "highlightReason": "Separate online and batch signals are necessary to evaluate their different targets."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "nlp_api_preprocess",
+      "stepNumber": 16,
+      "phase": "Connect entity and document analysis",
+      "title": "Send real-time requests through shared preprocessing",
+      "type": "add_connection",
+      "content": "The synchronous route passes bounded text and metadata to the shared preprocessing contract, with its deadline and trace context attached.",
+      "connection": {"edgeId": "nlp_api_to_preprocess", "sourceNodeId": "nlp_api", "targetNodeId": "nlp_preprocess", "connectionType": "api-call", "label": "Real-time text request", "description": "Forward validated bounded input and request deadline to the shared normalization path."},
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:4"]
+    },
+    {
+      "id": "nlp_api_queue",
+      "stepNumber": 17,
+      "phase": "Connect entity and document analysis",
+      "title": "Submit batch jobs without occupying a synchronous request",
+      "type": "add_connection",
+      "content": "The API returns a job identifier after placing bounded job references on the asynchronous path. Clients can query or receive completion through the documented job contract.",
+      "connection": {"edgeId": "nlp_api_to_queue", "sourceNodeId": "nlp_api", "targetNodeId": "nlp_queue", "connectionType": "message-queue", "label": "Batch job reference", "description": "Enqueue idempotent job or chunk references for asynchronous processing."},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "nlp_api_storage",
+      "stepNumber": 18,
+      "phase": "Connect entity and document analysis",
+      "title": "Persist batch input before queueing its manifest",
+      "type": "add_connection",
+      "content": "Store the batch documents and manifest, then submit their object references. This keeps queue messages bounded and allows a job to resume after worker failure.",
+      "connection": {"edgeId": "nlp_api_to_storage", "sourceNodeId": "nlp_api", "targetNodeId": "nlp_storage", "connectionType": "data-flow", "label": "Batch input and manifest", "description": "Persist large input before sending object references through the batch queue."},
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "nlp_storage_queue",
+      "stepNumber": 19,
+      "phase": "Connect entity and document analysis",
+      "title": "Make stored manifests available to queued jobs",
+      "type": "add_connection",
+      "content": "Queue only the immutable manifest or object keys needed to load a batch. Avoid duplicating document bodies in the queue.",
+      "connection": {"edgeId": "nlp_storage_to_queue", "sourceNodeId": "nlp_storage", "targetNodeId": "nlp_queue", "connectionType": "event-stream", "label": "Manifest reference", "description": "Make stored batch references available to the asynchronous consumer."},
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "nlp_queue_worker",
+      "stepNumber": 20,
+      "phase": "Connect entity and document analysis",
+      "title": "Dispatch batch references to bounded workers",
+      "type": "add_connection",
+      "content": "Workers claim jobs with an idempotency key and record progress before acknowledging completed chunks.",
+      "connection": {"edgeId": "nlp_queue_to_worker", "sourceNodeId": "nlp_queue", "targetNodeId": "nlp_batch_worker", "connectionType": "message-queue", "label": "Claimed batch work", "description": "Deliver bounded work with retry and progress identity."},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "nlp_storage_worker",
+      "stepNumber": 21,
+      "phase": "Connect entity and document analysis",
+      "title": "Load the batch object by its manifest reference",
+      "type": "add_connection",
+      "content": "The worker reads the exact stored input version, preserving document IDs and source metadata for later aggregation.",
+      "connection": {"edgeId": "nlp_storage_to_worker", "sourceNodeId": "nlp_storage", "targetNodeId": "nlp_batch_worker", "connectionType": "data-flow", "label": "Versioned batch input", "description": "Read the stored input and manifest referenced by the queued job."},
+      "requirementIds": ["legacy-requirement:7"]
+    },
+    {
+      "id": "nlp_worker_preprocess",
+      "stepNumber": 22,
+      "phase": "Connect entity and document analysis",
+      "title": "Reuse the same preprocessing rules for batch documents",
+      "type": "add_connection",
+      "content": "The worker submits bounded document chunks through the shared normalization, language, and tokenization version used by real-time requests.",
+      "connection": {"edgeId": "nlp_worker_to_preprocess", "sourceNodeId": "nlp_batch_worker", "targetNodeId": "nlp_preprocess", "connectionType": "api-call", "label": "Batch document chunk", "description": "Run batch input through the shared versioned preprocessing contract."},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "nlp_preprocess_ner",
+      "stepNumber": 23,
+      "phase": "Connect entity and document analysis",
+      "title": "Pass normalized, language-aware text to NER",
+      "type": "add_connection",
+      "content": "Preserve tokens, source offsets, language, and trace identity on the NER request.",
+      "connection": {"edgeId": "nlp_preprocess_to_ner", "sourceNodeId": "nlp_preprocess", "targetNodeId": "nlp_ner", "connectionType": "data-flow", "label": "Tokens and language context", "description": "Provide normalized text while retaining original evidence offsets and language."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "nlp_ner_relations",
+      "stepNumber": 24,
+      "phase": "Connect entity and document analysis",
+      "title": "Run relation extraction over recognized entity spans",
+      "type": "add_connection",
+      "content": "The relation model receives entity spans and their document context, so each predicted relationship can refer back to identified people, organizations, and locations.",
+      "connection": {"edgeId": "nlp_ner_to_relations", "sourceNodeId": "nlp_ner", "targetNodeId": "nlp_relations", "connectionType": "data-flow", "label": "Entity spans and context", "description": "Use recognized entities as candidates for typed relation extraction."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2"]
+    },
+    {
+      "id": "nlp_ner_aggregate",
+      "stepNumber": 25,
+      "phase": "Connect entity and document analysis",
+      "title": "Retain entity results in the combined response",
+      "type": "add_connection",
+      "content": "Send entity types, offsets, confidences, and model version to the result join.",
+      "connection": {"edgeId": "nlp_ner_to_aggregate", "sourceNodeId": "nlp_ner", "targetNodeId": "nlp_aggregate", "connectionType": "data-flow", "label": "Named entity results", "description": "Attach typed entity spans and their provenance to the document response."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:8"]
+    },
+    {
+      "id": "nlp_relations_aggregate",
+      "stepNumber": 26,
+      "phase": "Connect entity and document analysis",
+      "title": "Join relationships with their source entities",
+      "type": "add_connection",
+      "content": "Keep relation endpoints and supporting evidence linked to the same document and entity IDs.",
+      "connection": {"edgeId": "nlp_relations_to_aggregate", "sourceNodeId": "nlp_relations", "targetNodeId": "nlp_aggregate", "connectionType": "data-flow", "label": "Entity relationships", "description": "Join typed relation predictions and evidence with the recognized entity results."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:8"]
+    },
+    {
+      "id": "nlp_preprocess_classification",
+      "stepNumber": 27,
+      "phase": "Connect entity and document analysis",
+      "title": "Run document categorization from normalized text",
+      "type": "add_connection",
+      "content": "Category classification can proceed independently of relation extraction once normalized language-aware text is available.",
+      "connection": {"edgeId": "nlp_preprocess_to_classification", "sourceNodeId": "nlp_preprocess", "targetNodeId": "nlp_classification", "connectionType": "data-flow", "label": "Normalized document", "description": "Send model-compatible text and language context to the category classifier."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6"]
+    },
+    {
+      "id": "nlp_classification_aggregate",
+      "stepNumber": 28,
+      "phase": "Connect entity and document analysis",
+      "title": "Add versioned category predictions to the result",
+      "type": "add_connection",
+      "content": "Retain taxonomy version, confidence, and low-confidence status with each category result.",
+      "connection": {"edgeId": "nlp_classification_to_aggregate", "sourceNodeId": "nlp_classification", "targetNodeId": "nlp_aggregate", "connectionType": "data-flow", "label": "Document categories", "description": "Join category predictions with taxonomy and confidence metadata."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8"]
+    },
+    {
+      "id": "nlp_preprocess_sentiment",
+      "stepNumber": 29,
+      "phase": "Connect entity and document analysis",
+      "title": "Analyze opinion in parallel with independent tasks",
+      "type": "add_connection",
+      "content": "Run sentiment analysis on the shared normalized input rather than waiting for relation extraction.",
+      "connection": {"edgeId": "nlp_preprocess_to_sentiment", "sourceNodeId": "nlp_preprocess", "targetNodeId": "nlp_sentiment", "connectionType": "data-flow", "label": "Normalized document", "description": "Send language-aware input to the independent sentiment task."},
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6"]
+    },
+    {
+      "id": "nlp_sentiment_aggregate",
+      "stepNumber": 30,
+      "phase": "Connect entity and document analysis",
+      "title": "Join sentiment with confidence and evidence references",
+      "type": "add_connection",
+      "content": "Keep opinion output distinct from category and topic results, including neutral or uncertain states.",
+      "connection": {"edgeId": "nlp_sentiment_to_aggregate", "sourceNodeId": "nlp_sentiment", "targetNodeId": "nlp_aggregate", "connectionType": "data-flow", "label": "Sentiment and opinion", "description": "Attach sentiment, confidence, and evidence metadata to the document result."},
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:8"]
+    },
+    {
+      "id": "nlp_preprocess_topics",
+      "stepNumber": 31,
+      "phase": "Connect entity and document analysis",
+      "title": "Extract key phrases and topics from the shared input",
+      "type": "add_connection",
+      "content": "Run phrase and topic analysis as an independent task after normalization; apply its own batch or real-time resource policy if measured costs differ.",
+      "connection": {"edgeId": "nlp_preprocess_to_topics", "sourceNodeId": "nlp_preprocess", "targetNodeId": "nlp_topics", "connectionType": "data-flow", "label": "Normalized document", "description": "Send versioned text and language context to topic and phrase analysis."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "nlp_topics_aggregate",
+      "stepNumber": 32,
+      "phase": "Connect entity and document analysis",
+      "title": "Include phrase and topic outputs in the response",
+      "type": "add_connection",
+      "content": "Attach phrase spans and topic assignments with the corpus and model version used to produce them.",
+      "connection": {"edgeId": "nlp_topics_to_aggregate", "sourceNodeId": "nlp_topics", "targetNodeId": "nlp_aggregate", "connectionType": "data-flow", "label": "Key phrases and topics", "description": "Join phrase and topic output with document and model-version metadata."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8"]
+    },
+    {
+      "id": "nlp_aggregate_api",
+      "stepNumber": 33,
+      "phase": "Connect entity and document analysis",
+      "title": "Return real-time results through the API contract",
+      "type": "add_connection",
+      "content": "Return the combined response or a clearly marked partial result before the request deadline. Do not report a missing task response as an empty prediction.",
+      "connection": {"edgeId": "nlp_aggregate_to_api", "sourceNodeId": "nlp_aggregate", "targetNodeId": "nlp_api", "connectionType": "api-call", "label": "Combined analysis response", "description": "Return task results, confidence, evidence, and partial status to the caller."},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:4"]
+    },
+    {
+      "id": "nlp_aggregate_storage",
+      "stepNumber": 34,
+      "phase": "Connect entity and document analysis",
+      "title": "Persist batch results by job and document identity",
+      "type": "add_connection",
+      "content": "Write completed batch results and per-document status to durable storage so clients can retrieve results after asynchronous processing.",
+      "connection": {"edgeId": "nlp_aggregate_to_storage", "sourceNodeId": "nlp_aggregate", "targetNodeId": "nlp_storage", "connectionType": "data-flow", "label": "Batch outputs and status", "description": "Persist completed results with job, document, language, and model-version identifiers."},
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "nlp_api_monitoring",
+      "stepNumber": 35,
+      "phase": "Measure quality, latency, and throughput",
+      "title": "Measure end-to-end real-time behavior",
+      "type": "add_connection",
+      "content": "Emit request latency, language, task completion status, errors, and correlation IDs while respecting text privacy and retention policy.",
+      "connection": {"edgeId": "nlp_api_to_monitoring", "sourceNodeId": "nlp_api", "targetNodeId": "nlp_monitoring", "connectionType": "event-stream", "label": "Online request telemetry", "description": "Measure full-path latency, task status, and errors for synchronous traffic."},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:4"]
+    },
+    {
+      "id": "nlp_queue_monitoring",
+      "stepNumber": 36,
+      "phase": "Measure quality, latency, and throughput",
+      "title": "Watch batch backlog and completed-document rate",
+      "type": "add_connection",
+      "content": "Track queue age, depth, retry count, and completed documents per hour separately from online latency.",
+      "connection": {"edgeId": "nlp_queue_to_monitoring", "sourceNodeId": "nlp_queue", "targetNodeId": "nlp_monitoring", "connectionType": "event-stream", "label": "Batch lag and throughput", "description": "Expose backlog, retries, and completion rate for the 10k+ documents-per-hour target."},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "nlp_ner_monitoring",
+      "stepNumber": 37,
+      "phase": "Measure quality, latency, and throughput",
+      "title": "Attribute entity quality and latency to model versions",
+      "type": "add_connection",
+      "content": "When labeled evaluation or production feedback is available, attribute NER precision, recall, F1, and inference time to language, domain, and model version.",
+      "connection": {"edgeId": "nlp_ner_to_monitoring", "sourceNodeId": "nlp_ner", "targetNodeId": "nlp_monitoring", "connectionType": "event-stream", "label": "NER quality and runtime", "description": "Attribute language-level NER evidence and latency to the deployed model version."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "nlp_relations_monitoring",
+      "stepNumber": 38,
+      "phase": "Measure quality, latency, and throughput",
+      "title": "Measure relation extraction independently",
+      "type": "add_connection",
+      "content": "Monitor relation output validity, confidence, runtime, and model version so errors in entity detection can be separated from relation classification.",
+      "connection": {"edgeId": "nlp_relations_to_monitoring", "sourceNodeId": "nlp_relations", "targetNodeId": "nlp_monitoring", "connectionType": "event-stream", "label": "Relation task signals", "description": "Record relation-task runtime, status, and available quality feedback."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "nlp_classification_monitoring",
+      "stepNumber": 39,
+      "phase": "Measure quality, latency, and throughput",
+      "title": "Track classification accuracy by taxonomy and language",
+      "type": "add_connection",
+      "content": "Record taxonomy and model versions with labeled accuracy and low-confidence outcomes; review language slices before relying on a global score. Measure task runtime as part of the end-to-end real-time latency budget.",
+      "connection": {"edgeId": "nlp_classification_to_monitoring", "sourceNodeId": "nlp_classification", "targetNodeId": "nlp_monitoring", "connectionType": "event-stream", "label": "Classification quality", "description": "Attribute accuracy evidence and runtime to language, taxonomy, and model version."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "nlp_sentiment_monitoring",
+      "stepNumber": 40,
+      "phase": "Measure quality, latency, and throughput",
+      "title": "Watch sentiment drift and uncertain outputs",
+      "type": "add_connection",
+      "content": "Monitor language-level output distributions and uncertain cases, and review them against labeled opinion data instead of treating distribution shifts as proof of model failure. Measure task runtime as part of the end-to-end real-time latency budget.",
+      "connection": {"edgeId": "nlp_sentiment_to_monitoring", "sourceNodeId": "nlp_sentiment", "targetNodeId": "nlp_monitoring", "connectionType": "event-stream", "label": "Sentiment task signals", "description": "Record sentiment version, latency, uncertainty, and available evaluation evidence."},
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "nlp_topics_monitoring",
+      "stepNumber": 41,
+      "phase": "Measure quality, latency, and throughput",
+      "title": "Keep topic-model behavior visible by corpus version",
+      "type": "add_connection",
+      "content": "Track topic and phrase outputs with corpus and model versions, latency against the end-to-end real-time budget, and batch resource use; topic quality requires its own reviewed evaluation approach.",
+      "connection": {"edgeId": "nlp_topics_to_monitoring", "sourceNodeId": "nlp_topics", "targetNodeId": "nlp_monitoring", "connectionType": "event-stream", "label": "Topic task signals", "description": "Record topic and phrase runtime, model or corpus version, and reviewed quality signals."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "nlp_order_choice",
+      "stepNumber": 42,
+      "phase": "Measure quality, latency, and throughput",
+      "title": "Keep dependent extraction ordered and independent tasks parallel",
+      "type": "decision_point",
+      "content": "Relation extraction depends on recognized entity spans. Classification, sentiment, and topics can run independently after shared preprocessing, subject to measured resource contention and the synchronous deadline.",
+      "decision": {
+        "question": "Which model tasks belong on the critical dependency chain?",
+        "chosen": "Run NER first and relation extraction over its entity spans; run classification, sentiment, and topic analysis in parallel from normalized text.",
+        "chosenReason": "This preserves the data dependency for relations and reduces avoidable serial work for independent document tasks.",
+        "alternatives": [
+          {"option": "Run every model sequentially", "tradeoff": "Unnecessary serial latency can consume the under-500ms real-time budget."},
+          {"option": "Run relation extraction before entity recognition", "tradeoff": "The relation task lacks the explicit entity spans this design uses as candidates."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "nlp_scale_trigger",
+      "stepNumber": 43,
+      "phase": "Measure quality, latency, and throughput",
+      "title": "Scale the two workload modes against different signals",
+      "type": "scale_trigger",
+      "content": "Do not let a batch backlog consume every model worker needed by real-time traffic. Reserve or prioritize online capacity and cap batch concurrency using measured service time and queue age.",
+      "scaleTrigger": {
+        "metric": "Real-time end-to-end latency and batch oldest-job age/completed documents per hour",
+        "action": "Scale online capacity to sustain the tested request profile; independently add bounded batch consumers when queue age rises, subject to model capacity and the 10k+ documents-per-hour target.",
+        "impact": "Separating control signals protects the real-time latency objective while allowing batch throughput to grow without starving interactive requests."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "nlp_quality_gate",
+      "stepNumber": 44,
+      "phase": "Measure quality, latency, and throughput",
+      "title": "Gate model versions on language-level evidence",
+      "type": "decision_point",
+      "content": "Set evaluation data and release criteria before promoting model changes. Keep NER F1 and classification accuracy as separate metrics; success on one does not imply success on the other or in every supported language.",
+      "decision": {
+        "question": "What evidence is required before using a new multilingual model version?",
+        "chosen": "Require entity extraction F1 above 90% and classification accuracy above 85% on agreed representative language and domain slices, then verify the language coverage and latency budget before release.",
+        "chosenReason": "The explicit brief thresholds become testable gates, and sliced evaluation prevents strong languages from hiding weak ones.",
+        "alternatives": [
+          {"option": "Promote when a single aggregate score passes", "tradeoff": "A global score can mask a language-specific failure."},
+          {"option": "Use model family or parameter count as the quality gate", "tradeoff": "Architecture labels do not establish measured accuracy on this corpus."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "nlp_acceptance",
+      "stepNumber": 45,
+      "phase": "Measure quality, latency, and throughput",
+      "title": "Verify throughput and latency with representative documents",
+      "type": "explanation",
+      "content": "Benchmark at least 10 languages, representative structured and unstructured inputs, and realistic document lengths. Verify batch processing sustains 10k+ documents per hour and real-time processing remains under 500ms per document while returning all requested tasks or an explicit partial status. These are acceptance targets; this local walkthrough reports no performance or publication gate as passed.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

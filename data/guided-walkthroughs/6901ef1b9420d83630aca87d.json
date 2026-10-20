@@ -1,0 +1,610 @@
+{
+  "problem_id": "6901ef1b9420d83630aca87d",
+  "version": "2026-10-13-review",
+  "requirementRevision": null,
+  "totalSteps": 42,
+  "phases": [
+    {
+      "name": "Frame the contract",
+      "stepRange": [1, 5],
+      "description": "Keep the supplied brief intact, distinguish required behavior from assumptions, and decide which data belongs on peers versus the tracker."
+    },
+    {
+      "name": "Assemble discovery and peer paths",
+      "stepRange": [6, 18],
+      "description": "Build a connected control plane for peer discovery and a separate direct data path between seeding and downloading clients."
+    },
+    {
+      "name": "Make pieces verifiable and resumable",
+      "stepRange": [19, 26],
+      "description": "Define piece metadata, integrity checks, rejection behavior, and durable restart state without confusing integrity with content safety."
+    },
+    {
+      "name": "Control churn, bandwidth, abuse, and privacy",
+      "stepRange": [27, 32],
+      "description": "Handle peer departures, choose pieces across several peers, share upload capacity fairly, and state what tracker and peer identities reveal."
+    },
+    {
+      "name": "Scale, availability, and validation",
+      "stepRange": [33, 42],
+      "description": "Scale tracker metadata independently from file bytes, explain limits during outages and seed loss, and validate open capacity and protocol assumptions."
+    }
+  ],
+  "steps": [
+    {
+      "id": "bittorrent_01",
+      "stepNumber": 1,
+      "phase": "Frame the contract",
+      "title": "Restate the exact problem",
+      "type": "explanation",
+      "content": "The brief is ‘Create a Distributed File Transfer System like Bittorrent’: design a peer-to-peer file sharing system for distributing large files efficiently. The system must support peer-to-peer distribution, split files into chunks, discover peers through a tracker, support seeding and leeching, verify chunk integrity, download from multiple peers, handle millions of swarms, and resume interrupted downloads. The brief does not specify a traffic profile, file-size distribution, protocol version, latency target, availability SLO, trust model, or privacy guarantee.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "bittorrent_02",
+      "stepNumber": 2,
+      "phase": "Frame the contract",
+      "title": "Keep every stated requirement visible",
+      "type": "explanation",
+      "content": "Treat each supplied requirement as observable behavior: a client obtains bytes from peers rather than a central content server; files are represented as independently requestable pieces; a tracker returns candidate peers for a swarm; complete seeders and partial leechers both contribute; received pieces are verified; the client can request from multiple peers concurrently; tracker state scales across millions of swarms; and a restart can continue from verified local pieces.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "bittorrent_03",
+      "stepNumber": 3,
+      "phase": "Frame the contract",
+      "title": "Translate the stated constraints and hints",
+      "type": "explanation",
+      "content": "The constraints are efficient bandwidth utilization, peer churn, malicious peers, fair resource sharing, and a scalable tracker. The supplied hints point to chunking and hashing, tit-for-tat, a distributed hash table as a trackerless option, rarest-piece-first scheduling, and magnet links for metadata. Use these as design prompts, not as fixed product decisions: the required baseline still includes a tracker, and exact bandwidth, fairness, abuse, and scale policies need workload and product decisions.",
+      "requirementIds": ["legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "bittorrent_04",
+      "stepNumber": 4,
+      "phase": "Frame the contract",
+      "title": "Mark assumptions instead of inventing targets",
+      "type": "explanation",
+      "content": "For this review draft, assume clients can accept inbound connections when reachable, otherwise use outbound peer connections; peer wire traffic is protected by the protocol and transport choices still need agreement. A torrent or magnet identifies metadata and its expected piece hashes. Assume the tracker stores expiring peer membership, not file payloads. No number is asserted for chunk size, swarms per second, peer-list size, lease duration, retry delay, completion time, or availability. Obtain those from expected file sizes, churn, network conditions, and the product SLO before sizing or promising capacity.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "bittorrent_05",
+      "stepNumber": 5,
+      "phase": "Frame the contract",
+      "title": "Separate swarm metadata from file bytes",
+      "type": "explanation",
+      "content": "A swarm is identified by an infohash. Torrent metadata supplies file layout and piece-hash commitments; a magnet link can start with the infohash and tracker URLs, then obtain metadata from peers. The tracker indexes live peer endpoints by swarm and returns a bounded sample. Peers exchange the actual blocks directly. Keeping payload off the tracker prevents its bandwidth and storage from growing with every downloaded byte, while still making tracker discovery a required service.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:7"]
+    },
+    {
+      "id": "bittorrent_06",
+      "stepNumber": 6,
+      "phase": "Assemble discovery and peer paths",
+      "title": "Add the downloading peer client",
+      "type": "add_component",
+      "content": "This logical leecher is also allowed to upload pieces it has already verified. It owns local scheduling, the verified-piece bitmap, download checkpoints, and the destination files; these responsibilities stay on the peer rather than becoming a central file service.",
+      "component": {
+        "nodeId": "bt_downloader",
+        "componentType": "desktop-app",
+        "label": "Torrent Client (Leecher)",
+        "description": "Downloads, verifies, persists, and can re-share pieces",
+        "position": {"x": 0, "y": 240},
+        "properties": {
+          "componentName": "Torrent Client (Leecher)",
+          "purpose": "Runs the peer protocol, obtains torrent metadata from a torrent file or magnet flow, requests piece blocks, schedules across connected peers, verifies each completed piece before marking it complete, persists a verified-piece bitmap for resume, and uploads only verified pieces. This is a client role with local files, not a central payload server."
+        },
+        "highlightReason": "The catalog Desktop App represents a user-controlled peer and keeps piece scheduling, verification, and resume state at the client."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "bittorrent_07",
+      "stepNumber": 7,
+      "phase": "Assemble discovery and peer paths",
+      "title": "Add the seeding and active peer role",
+      "type": "add_component",
+      "content": "A seeder has all pieces and remains available to upload; a leecher can become a seeder after completing and verifying the file. In a real swarm this node represents many independently operated peer clients, not a single central origin.",
+      "component": {
+        "nodeId": "bt_seeders",
+        "componentType": "desktop-app",
+        "label": "Torrent Client (Seeder and Active Peer)",
+        "description": "Serves verified pieces and may also download missing pieces",
+        "position": {"x": 900, "y": 80},
+        "properties": {
+          "componentName": "Torrent Client (Seeder and Active Peer)",
+          "purpose": "Represents independent seeder and partial leecher clients in a swarm. A seeder advertises its availability and uploads verified pieces; a partial leecher can upload already verified pieces while fetching the rest. Each peer controls its own upload slots and may leave at any time."
+        },
+        "highlightReason": "A second catalog Desktop App makes the direct peer-to-peer payload path explicit and shows that seeding and leeching are client roles."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "bittorrent_08",
+      "stepNumber": 8,
+      "phase": "Assemble discovery and peer paths",
+      "title": "Add the tracker API boundary",
+      "type": "add_component",
+      "content": "The gateway validates announce requests and protects tracker control endpoints. It returns discovery metadata only; block traffic does not pass through this gateway.",
+      "component": {
+        "nodeId": "bt_tracker_gateway",
+        "componentType": "api-gateway",
+        "label": "Tracker API Gateway",
+        "description": "Validated, rate-limited swarm announce entry point",
+        "position": {"x": 360, "y": 240},
+        "properties": {
+          "componentName": "Tracker API Gateway",
+          "purpose": "Accept tracker announce and stop requests over the agreed secure transport, validate infohash and endpoint fields, enforce request limits and abuse controls, and forward control metadata to tracker partitions. It returns bounded peer discovery responses and never proxies peer payload blocks."
+        },
+        "highlightReason": "The catalog API Gateway supplies the established entry-point type without inventing a tracker-specific component."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "bittorrent_09",
+      "stepNumber": 9,
+      "phase": "Assemble discovery and peer paths",
+      "title": "Add the horizontally scalable tracker",
+      "type": "add_component",
+      "content": "Tracker workers process announce and stop events, partition work by infohash, refresh peer leases, and select a bounded set of candidates. Tracker replicas handle discovery and churn; they do not store the shared file.",
+      "component": {
+        "nodeId": "bt_tracker",
+        "componentType": "backend-server",
+        "label": "Tracker Service",
+        "description": "Partitions swarm membership and returns candidate peers",
+        "position": {"x": 690, "y": 240},
+        "properties": {
+          "componentName": "Tracker Service",
+          "purpose": "Handle announce, stop, and peer-selection operations; partition swarm membership by infohash, refresh expiring peer leases, and return bounded peer samples. Replicate tracker metadata for failover without carrying file payload, and scale independent partitions for many swarms and skewed hot swarms."
+        },
+        "highlightReason": "The catalog Backend Server expresses stateless tracker application logic while the swarm registry remains an explicit data boundary."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "bittorrent_10",
+      "stepNumber": 10,
+      "phase": "Assemble discovery and peer paths",
+      "title": "Add the swarm membership registry",
+      "type": "add_component",
+      "content": "Persist only the index needed to find active peers: swarm key, peer endpoint, last refresh or expiry, and minimal protocol state. Do not put filenames, downloaded bytes, or unnecessary user identity in this registry.",
+      "component": {
+        "nodeId": "bt_swarm_registry",
+        "componentType": "database",
+        "label": "Swarm Membership Registry",
+        "description": "Expiring peer membership indexed by infohash",
+        "position": {"x": 1010, "y": 240},
+        "properties": {
+          "componentName": "Swarm Membership Registry",
+          "purpose": "Store the minimum live membership needed for peer selection: infohash, peer endpoint and lease expiry, partition key, and protocol state. Expire stale entries, support bounded lookups, and replicate the registry for tracker recovery. It stores neither file bytes nor a claim that a peer or manifest is trustworthy."
+        },
+        "highlightReason": "The catalog Database represents durable or replicated tracker metadata; its engine and consistency choice remain capacity and failure-test decisions."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "bittorrent_11",
+      "stepNumber": 11,
+      "phase": "Assemble discovery and peer paths",
+      "title": "Add operational and abuse signals",
+      "type": "add_component",
+      "content": "Observe whether discovery and transfer work while minimizing identifiers in logs. Metrics should expose invalid-piece rates and repeated abusive announces without turning raw peer addresses or filenames into long-lived telemetry.",
+      "component": {
+        "nodeId": "bt_observability",
+        "componentType": "monitoring",
+        "label": "Swarm Health and Abuse Monitoring",
+        "description": "Aggregate discovery, transfer, integrity, and tracker health",
+        "position": {"x": 700, "y": 500},
+        "properties": {
+          "componentName": "Swarm Health and Abuse Monitoring",
+          "purpose": "Track aggregate announce latency and errors, active lease expiry, peer connection failures, verified and rejected piece rates, swarm completion, bytes exchanged, tracker partition load, and recovery lag. Redact or avoid raw IP addresses, peer IDs, infohashes, filenames, and payload data unless a documented short-retention security need requires them."
+        },
+        "highlightReason": "The catalog Monitoring component provides existing metrics and alerting without adding a new component type."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "bittorrent_12",
+      "stepNumber": 12,
+      "phase": "Assemble discovery and peer paths",
+      "title": "Announce a swarm to the gateway",
+      "type": "add_connection",
+      "content": "The client announces its infohash, listening endpoint, and event state. Refresh cadence, authentication for private swarms, and request limits are policy choices to validate against churn and tracker load.",
+      "connection": {
+        "edgeId": "bt_announce",
+        "sourceNodeId": "bt_downloader",
+        "targetNodeId": "bt_tracker_gateway",
+        "connectionType": "http",
+        "label": "Secure tracker announce / stop",
+        "description": "Client announces an infohash and endpoint; the tracker renews or removes its expiring membership lease. The agreed secure transport protects the tracker request in transit but does not hide the peer address from other swarm participants."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "bittorrent_13",
+      "stepNumber": 13,
+      "phase": "Assemble discovery and peer paths",
+      "title": "Route validated discovery to a tracker partition",
+      "type": "add_connection",
+      "content": "Route by infohash so the tracker can update and query one swarm partition. Hot-swarm behavior still needs measurement; routing by key alone does not eliminate a popular swarm's read or announce load.",
+      "connection": {
+        "edgeId": "bt_gateway_to_tracker",
+        "sourceNodeId": "bt_tracker_gateway",
+        "targetNodeId": "bt_tracker",
+        "connectionType": "api-call",
+        "label": "Validated announce and peer query",
+        "description": "The gateway forwards validated control-plane requests keyed by infohash to the owning tracker partition; file bytes never use this route."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "bittorrent_14",
+      "stepNumber": 14,
+      "phase": "Assemble discovery and peer paths",
+      "title": "Refresh and query swarm membership",
+      "type": "add_connection",
+      "content": "Membership updates must be idempotent and expire after missed refreshes. Use a lookup that can return a bounded peer sample rather than materializing the entire swarm for each announce.",
+      "connection": {
+        "edgeId": "bt_tracker_to_registry",
+        "sourceNodeId": "bt_tracker",
+        "targetNodeId": "bt_swarm_registry",
+        "connectionType": "database-connection",
+        "label": "Lease-backed membership lookup",
+        "description": "Tracker workers upsert or remove the peer's lease and select a bounded set of active endpoints for the same infohash."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "bittorrent_15",
+      "stepNumber": 15,
+      "phase": "Assemble discovery and peer paths",
+      "title": "Return a bounded peer sample",
+      "type": "add_connection",
+      "content": "The tracker returns candidate endpoints and swarm metadata needed to connect. The client retries other candidates when peers churn; tracker membership is a discovery hint, not a guarantee that every returned peer is reachable or still online.",
+      "connection": {
+        "edgeId": "bt_peer_sample",
+        "sourceNodeId": "bt_tracker",
+        "targetNodeId": "bt_downloader",
+        "connectionType": "http",
+        "label": "Bounded peer sample and announce result",
+        "description": "The response contains a capped sample for this infohash, reducing per-announce fanout while allowing the client to try several peers."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "bittorrent_16",
+      "stepNumber": 16,
+      "phase": "Assemble discovery and peer paths",
+      "title": "Transfer piece blocks directly between peers",
+      "type": "add_connection",
+      "content": "The seeder sends requested blocks straight to the downloading peer. Chunking enables parallel requests from multiple peers and lets a client verify and retain completed pieces independently; bandwidth remains subject to peer upload capacity and network congestion.",
+      "connection": {
+        "edgeId": "bt_seed_to_leecher",
+        "sourceNodeId": "bt_seeders",
+        "targetNodeId": "bt_downloader",
+        "connectionType": "data-flow",
+        "label": "Direct verified-piece block transfer",
+        "description": "Peers exchange requested blocks directly; the tracker is not in the payload path, and the receiving peer checks the completed piece against its manifest commitment."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "bittorrent_17",
+      "stepNumber": 17,
+      "phase": "Assemble discovery and peer paths",
+      "title": "Allow verified partial peers to upload",
+      "type": "add_connection",
+      "content": "A leecher can upload pieces it has already verified while continuing to download. This reciprocal path increases useful swarm capacity without allowing unverified bytes to become another peer's source.",
+      "connection": {
+        "edgeId": "bt_leecher_to_seed",
+        "sourceNodeId": "bt_downloader",
+        "targetNodeId": "bt_seeders",
+        "connectionType": "data-flow",
+        "label": "Reciprocal upload of verified pieces",
+        "description": "A partial downloader contributes only verified pieces; actual peer-to-peer sessions are many-to-many and are created from the tracker sample."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "bittorrent_18",
+      "stepNumber": 18,
+      "phase": "Assemble discovery and peer paths",
+      "title": "Report aggregate service health",
+      "type": "add_connection",
+      "content": "Send aggregate service and integrity signals to monitoring. Avoid putting file contents, filenames, or durable raw peer identifiers in routine telemetry.",
+      "connection": {
+        "edgeId": "bt_tracker_metrics",
+        "sourceNodeId": "bt_tracker",
+        "targetNodeId": "bt_observability",
+        "connectionType": "data-flow",
+        "label": "Redacted tracker and swarm metrics",
+        "description": "Publish aggregate announce, lease, partition, abuse, and integrity counters with bounded retention and identifier redaction."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "bittorrent_19",
+      "stepNumber": 19,
+      "phase": "Make pieces verifiable and resumable",
+      "title": "Define pieces and request blocks",
+      "type": "explanation",
+      "content": "The torrent metadata maps file paths and offsets into pieces and commits to an expected hash for each piece. A client may subdivide a piece into request blocks to pipeline network work, but it should publish and mark the piece complete only after the full piece passes verification. The piece-size distribution and block request window remain workload-dependent choices.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:6"]
+    },
+    {
+      "id": "bittorrent_20",
+      "stepNumber": 20,
+      "phase": "Make pieces verifiable and resumable",
+      "title": "Choose piece sizing by measurement",
+      "type": "decision_point",
+      "content": "Piece size trades metadata and hash overhead against retry cost, parallelism, and the delay before a piece can be verified. Do not bake in a number before collecting file-size and network measurements.",
+      "decision": {
+        "question": "How should piece and request-block sizes be selected?",
+        "chosen": "Version the metadata format and choose piece size from measured file-size and network distributions; benchmark several candidates, while allowing smaller request blocks to pipeline transfer.",
+        "chosenReason": "The brief requires chunking and multi-peer optimization but supplies no file sizes, network conditions, or interoperability version from which a universal size could be justified.",
+        "alternatives": [
+          {"option": "Use small pieces everywhere", "tradeoff": "Improves retry granularity and scheduling but increases hash metadata and can raise request overhead."},
+          {"option": "Use large pieces everywhere", "tradeoff": "Reduces metadata overhead but increases re-download cost and delays verification of a completed piece."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "bittorrent_21",
+      "stepNumber": 21,
+      "phase": "Make pieces verifiable and resumable",
+      "title": "Bind expected hashes to the selected metadata",
+      "type": "explanation",
+      "content": "A piece hash is useful only when the expected hash comes from the exact metadata the client intended to download. The infohash identifies or commits to that metadata under the selected protocol version. For a new protocol, a collision-resistant hash such as SHA-256 is a reasonable assumption; interoperating with an existing BitTorrent version requires its specified hash and metadata rules instead of silently substituting an algorithm.",
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "bittorrent_22",
+      "stepNumber": 22,
+      "phase": "Make pieces verifiable and resumable",
+      "title": "Verify before marking or serving a piece",
+      "type": "decision_point",
+      "content": "Verify the reconstructed piece before changing its bitmap state or serving it to another peer. A mismatch is a failed piece, never a partial success.",
+      "decision": {
+        "question": "When can a received piece be trusted for transfer and resume?",
+        "chosen": "Reassemble the piece, compare its version-appropriate cryptographic hash with the expected metadata commitment, and only then atomically mark it verified and eligible for upload.",
+        "chosenReason": "Hash verification detects corruption or a peer sending bytes inconsistent with the selected metadata, and prevents the client from spreading an unverified piece.",
+        "alternatives": [
+          {"option": "Trust successful transport delivery", "tradeoff": "Fast but cannot detect malicious or corrupted payload bytes and can spread bad data."},
+          {"option": "Check only a whole-file hash at the end", "tradeoff": "Finds a final mismatch too late to isolate the bad peer or efficiently retry only affected pieces."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "bittorrent_23",
+      "stepNumber": 23,
+      "phase": "Make pieces verifiable and resumable",
+      "title": "Do not confuse integrity with benign content",
+      "type": "explanation",
+      "content": "A matching piece hash proves that bytes match the selected manifest; it does not prove that the manifest came from a safe publisher or that the file is harmless. A malicious publisher can create a manifest that correctly hashes malicious content. If publisher authenticity matters, require a trusted signature or independently trusted infohash, display publisher provenance, avoid automatic execution or extraction, and apply the product's scanning and quarantine policy. These are separate controls from peer and chunk integrity.",
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "bittorrent_24",
+      "stepNumber": 24,
+      "phase": "Make pieces verifiable and resumable",
+      "title": "Reject bad data and respond proportionately",
+      "type": "explanation",
+      "content": "On a hash mismatch, discard the candidate piece, keep it out of the verified bitmap, request it from another peer, and record a bounded integrity event. Repeated invalid data can trigger a temporary peer cooldown or quarantine and an abuse signal, but a single failure should not create an irreversible identity-wide ban: transport damage, stale metadata, and incompatible protocol versions need diagnosis too. Never expose the rejected bytes as a complete file.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "bittorrent_25",
+      "stepNumber": 25,
+      "phase": "Make pieces verifiable and resumable",
+      "title": "Persist resumable verified-piece state",
+      "type": "decision_point",
+      "content": "Resume must reconstruct trusted progress after a crash, not merely remember that a peer once reported bytes. The local state is associated with the exact metadata identity and destination file layout.",
+      "decision": {
+        "question": "What should be persisted to resume an interrupted download safely?",
+        "chosen": "Persist the infohash, file mapping, and bitmap for pieces that passed verification; on restart, recheck persisted pieces against their expected hashes before advertising them as available.",
+        "chosenReason": "The bitmap avoids redownloading known-good pieces while a restart-time recheck catches disk damage, incomplete writes, or stale state.",
+        "alternatives": [
+          {"option": "Persist only a byte offset", "tradeoff": "Cannot represent holes or out-of-order pieces and may trust bytes that were never fully verified."},
+          {"option": "Discard all progress after restart", "tradeoff": "Simple but wastes bandwidth and fails the explicit resume requirement."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "bittorrent_26",
+      "stepNumber": 26,
+      "phase": "Make pieces verifiable and resumable",
+      "title": "Make piece completion crash-safe",
+      "type": "explanation",
+      "content": "Write received blocks to their intended offsets, verify the complete piece, flush data as required by the durability target, and persist its verified bit only after the data is safely written. On restart, rehash any piece whose durable completion is uncertain and fetch it again if the check fails. Treat temporary files, sparse files, path traversal, symlinks, and archive extraction as untrusted-input concerns; do not execute or automatically unpack a downloaded payload.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "bittorrent_27",
+      "stepNumber": 27,
+      "phase": "Control churn, bandwidth, abuse, and privacy",
+      "title": "Expire departed peers and retry discovery",
+      "type": "explanation",
+      "content": "Peer churn is normal. Refresh a tracker lease while a client participates, send a stop event when possible, and expire membership after missed refreshes. If a sampled endpoint fails, mark it unreachable for a bounded interval, continue with other peers, and reannounce with backoff. A stale peer list must not block already-connected peers from finishing their transfers.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "bittorrent_28",
+      "stepNumber": 28,
+      "phase": "Control churn, bandwidth, abuse, and privacy",
+      "title": "Schedule rare pieces across available peers",
+      "type": "decision_point",
+      "content": "The client knows which pieces each connected peer advertises. It can then request work from several peers without making the tracker schedule each block.",
+      "decision": {
+        "question": "How should a client choose the next piece when multiple peers are connected?",
+        "chosen": "Use rarest-piece-first among currently available, unverified pieces, with randomized tie-breaking and bounded parallel block requests; use an endgame policy that cancels redundant requests after the first valid completion.",
+        "chosenReason": "Rarest-first protects pieces with few remaining sources, while parallel requests use independent peer bandwidth and endgame cancellation limits waste near completion.",
+        "alternatives": [
+          {"option": "Always download pieces in file order", "tradeoff": "Simplifies playback order but can leave rare pieces with too few sources and reduce swarm resilience."},
+          {"option": "Ask the tracker to assign each block", "tradeoff": "Adds tracker coordination and load to the payload path even though peers already know their own piece availability."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "bittorrent_29",
+      "stepNumber": 29,
+      "phase": "Control churn, bandwidth, abuse, and privacy",
+      "title": "Make upload sharing fair without promising equality",
+      "type": "decision_point",
+      "content": "Tit-for-tat gives peers an incentive to contribute, but fairness depends on a policy for asymmetric links, new peers, and peers that have no pieces yet. The system cannot guarantee equal upload or completion for every participant.",
+      "decision": {
+        "question": "How should peers allocate upload opportunities?",
+        "chosen": "Use tit-for-tat style preference for useful contributors plus a bounded optimistic-unchoke opportunity for discovery and bootstrap; apply per-peer upload limits and revisit the policy using measured completion and contribution outcomes.",
+        "chosenReason": "Reciprocity discourages persistent free riding, while optimistic unchoking gives new or currently unhelpful peers a chance to exchange an initial piece and become useful contributors.",
+        "alternatives": [
+          {"option": "Serve every peer equally", "tradeoff": "Easy to explain but can waste scarce upload capacity on slow or non-contributing sessions."},
+          {"option": "Serve only the highest recent contributors", "tradeoff": "Rewards contribution but can prevent bootstrap and penalize peers with asymmetric or temporarily poor connectivity."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "bittorrent_30",
+      "stepNumber": 30,
+      "phase": "Control churn, bandwidth, abuse, and privacy",
+      "title": "Adapt transfer to actual link capacity",
+      "type": "explanation",
+      "content": "Pipeline a bounded number of requests per peer, adjust from observed round-trip time and goodput, and obey transport congestion control plus the user's upload and download limits. Avoid letting a fast peer monopolize all piece slots. Cancel duplicate endgame requests after a valid copy arrives and avoid repeated retries for an endpoint that has gone stale. Tune all windows with representative bandwidth and churn measurements rather than invented constants.",
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "bittorrent_31",
+      "stepNumber": 31,
+      "phase": "Control churn, bandwidth, abuse, and privacy",
+      "title": "State the privacy boundary plainly",
+      "type": "explanation",
+      "content": "A tracker can observe an infohash and the announcing IP address and port; connected peers generally learn one another's reachable network endpoints. HTTPS to the tracker protects that control request in transit but does not provide anonymity or hide a peer from other peers. Minimize identity collection, use short and documented endpoint retention, redact identifiers from ordinary logs, avoid filenames and content in telemetry, and offer authenticated private swarms only where the product defines their access policy. Do not claim that ordinary peer-to-peer transfer conceals participation.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "bittorrent_32",
+      "stepNumber": 32,
+      "phase": "Control churn, bandwidth, abuse, and privacy",
+      "title": "Treat DHT and magnet metadata as explicit choices",
+      "type": "decision_point",
+      "content": "The hints mention a distributed hash table and magnet links. A magnet link carries an infohash and often tracker URLs; metadata exchange is a separate peer protocol step. A DHT can provide an additional discovery path when tracker discovery is unavailable, but it also changes privacy, abuse, and protocol complexity.",
+      "decision": {
+        "question": "Should trackerless DHT discovery be part of the first design?",
+        "chosen": "Keep tracker discovery as the required baseline and make DHT an optional, separately measured extension; support magnet metadata only with protocol-version and provenance checks.",
+        "chosenReason": "This satisfies the stated tracker requirement while preserving the hint as a possible availability extension without presenting DHT as mandatory or anonymous.",
+        "alternatives": [
+          {"option": "Use DHT as the only discovery system", "tradeoff": "Removes a central tracker dependency but conflicts with the explicit tracker requirement and complicates policy, observability, and privacy."},
+          {"option": "Use only hosted torrent files", "tradeoff": "Simplifies metadata distribution but does not support the hinted magnet workflow and may centralize metadata availability."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "bittorrent_33",
+      "stepNumber": 33,
+      "phase": "Scale, availability, and validation",
+      "title": "Scale tracker metadata by swarm key",
+      "type": "scale_trigger",
+      "content": "The file-transfer payload stays peer-to-peer. Scale the tracker and membership registry from measured discovery demand, independently of total bytes exchanged between peers.",
+      "scaleTrigger": {
+        "metric": "Measured announce rate, bounded peer-query latency, lease-refresh load, registry pressure, and skew by infohash approach agreed operational limits.",
+        "action": "Add tracker partitions keyed by infohash, replicate membership state for recovery, cap peer samples, and isolate hot-swarm reads or announces based on observed skew; load-test consistency and expiry behavior after each change.",
+        "impact": "Separates tracker control-plane capacity from payload bandwidth while making hot swarms and registry replication explicit scaling costs."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "bittorrent_34",
+      "stepNumber": 34,
+      "phase": "Scale, availability, and validation",
+      "title": "Test hot swarms as well as many small ones",
+      "type": "scale_trigger",
+      "content": "Millions of swarms does not reveal the number of active peers, announces per second, or skew. A uniform test can miss one very popular swarm, churn bursts, and a long tail of nearly inactive swarms.",
+      "scaleTrigger": {
+        "metric": "Load-test results for active swarm count, announce and stop rates, peer churn, peer-sample reads, hot-key skew, and metadata retention are compared with approved targets.",
+        "action": "Run separate workloads for many quiet swarms, a few hot swarms, synchronized client restarts, and tracker-partition failover; change partitioning or sampling only from measured bottlenecks.",
+        "impact": "Produces a defensible capacity model for tracker metadata instead of treating the phrase ‘millions of swarms’ as a complete traffic specification."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "bittorrent_35",
+      "stepNumber": 35,
+      "phase": "Scale, availability, and validation",
+      "title": "Define behavior during tracker failure",
+      "type": "explanation",
+      "content": "Replicated tracker partitions and more than one configured announce endpoint can reduce discovery downtime, subject to the chosen consistency and failover model. Existing peer sessions can continue transferring while connected; a client with a cached peer sample can try those endpoints, but new discovery and fresh membership may be impaired. Expired or stale peers must be treated as unreachable hints, not current truth. An optional DHT can add a separate discovery path but brings its own security and privacy tradeoffs.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "bittorrent_36",
+      "stepNumber": 36,
+      "phase": "Scale, availability, and validation",
+      "title": "Be explicit about file availability limits",
+      "type": "explanation",
+      "content": "The tracker stores no complete payload, so tracker replication cannot restore a lost file. A swarm can finish a download only while the connected peers collectively have every required piece; if no reachable peer has a missing piece, progress stops. Encourage seeding and show availability honestly, but do not promise a file remains available after its last complete copy leaves. Any archival copy or guaranteed retention tier is a separate product requirement and architecture decision.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "bittorrent_37",
+      "stepNumber": 37,
+      "phase": "Scale, availability, and validation",
+      "title": "Separate malicious peers from malicious files",
+      "type": "explanation",
+      "content": "A malicious peer may send blocks that fail their expected hash, spam announces, or probe endpoints; validate inputs, rate-limit discovery, reject invalid pieces, and apply bounded cooldowns with auditable abuse signals. A malicious publisher may instead provide a self-consistent manifest for harmful content. Hash checks cannot detect that. Publisher signatures or trusted infohashes, safe file-path handling, user consent, scanning, and quarantine address different threats and should be selected from the product's trust and moderation requirements.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "bittorrent_38",
+      "stepNumber": 38,
+      "phase": "Scale, availability, and validation",
+      "title": "Measure correctness and recovery, not only throughput",
+      "type": "explanation",
+      "content": "Track completed and rejected piece counts, time to first peer, time to first verified piece, useful bytes per peer, swarm completion and seed availability, stale-peer failures, resume recheck outcomes, tracker announce latency, and partition recovery. Break down aggregate signals enough to find hot swarms while keeping raw peer IPs, peer IDs, infohashes, filenames, and payload out of routine retained telemetry.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "bittorrent_39",
+      "stepNumber": 39,
+      "phase": "Scale, availability, and validation",
+      "title": "Set targets from the missing workload facts",
+      "type": "explanation",
+      "content": "Before calling this design production-ready, obtain the expected file and piece-size distributions, active and hot swarm counts, announce rate and churn, peer upload/download distribution, supported NAT and transport behavior, tracker consistency needs, resume durability target, regions, privacy retention policy, and availability objective. Then define measurable completion, discovery, and recovery percentiles. The frozen brief supplies none of those values, so this walkthrough assigns no numerical SLO or capacity guarantee.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "bittorrent_40",
+      "stepNumber": 40,
+      "phase": "Scale, availability, and validation",
+      "title": "Exercise churn, corruption, and recovery",
+      "type": "scale_trigger",
+      "content": "Test peer and tracker failures as normal operating conditions, and verify that failures do not silently mark bad bytes complete or report unavailable data as healthy.",
+      "scaleTrigger": {
+        "metric": "Piece mismatch and retry rates, time to rediscover peers, lease cleanup lag, verified-state recovery, tracker failover time, completion rate, and useful upload per peer under churn.",
+        "action": "Inject peer departures during piece transfer, corrupt and replay blocks, restart clients between data flush and bitmap update, remove the final seeder, and fail a tracker partition; compare behavior with the chosen security, availability, and recovery objectives.",
+        "impact": "Validates the integrity, resume, availability, and fairness claims under failures rather than inferring them from a connected happy-path graph."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "bittorrent_41",
+      "stepNumber": 41,
+      "phase": "Scale, availability, and validation",
+      "title": "Replay the end-to-end design",
+      "type": "explanation",
+      "content": "A client identifies a swarm from torrent or magnet metadata, announces to the tracker, receives a bounded peer sample, and requests pieces directly from several peers. It verifies each piece against the selected metadata before persisting or re-sharing it, uses rarest-first and fair upload slots to protect swarm utility, and resumes from rechecked verified state. The tracker stores expiring membership rather than file bytes; monitoring uses aggregate, redacted signals. Tracker availability helps peers find one another but cannot replace a missing seeder or guarantee anonymity.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "bittorrent_42",
+      "stepNumber": 42,
+      "phase": "Scale, availability, and validation",
+      "title": "Keep unresolved decisions visible",
+      "type": "explanation",
+      "content": "This is a review draft, not a deployed capacity plan. Confirm protocol and hash-version interoperability, whether magnet metadata exchange and DHT are in scope, private-swarm authentication, the publisher trust and content-safety policy, peer endpoint retention, fairness behavior for asymmetric links, durable resume semantics, and the actual swarm and bandwidth workload. Use those answers to set shard count, lease and retry policies, peer-list bounds, transfer windows, and measurable availability and completion targets.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

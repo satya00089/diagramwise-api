@@ -1,0 +1,719 @@
+{
+  "problem_id": "6901ef1b9420d83630aca877",
+  "version": "1.0.0-review-draft",
+  "requirementRevision": null,
+  "totalSteps": 39,
+  "phases": [
+    {
+      "name": "Clients, identity, and upload control",
+      "stepRange": [1, 11],
+      "description": "Start with device and browser entry points, then make identity and authorization explicit before accepting media operations."
+    },
+    {
+      "name": "Durable originals and ownership metadata",
+      "stepRange": [12, 18],
+      "description": "Separate large immutable photo bytes from the metadata needed to organize albums, grants, and search."
+    },
+    {
+      "name": "Async media processing, index, and delivery",
+      "stepRange": [19, 35],
+      "description": "Move expensive transforms off the upload path, index derived metadata, and deliver authorized renditions near users."
+    },
+    {
+      "name": "Scale, privacy, and unresolved decisions",
+      "stepRange": [36, 39],
+      "description": "Review scale and privacy boundaries and label assumptions and questions the brief leaves open."
+    }
+  ],
+  "steps": [
+    {
+      "id": "photo_01",
+      "stepNumber": 1,
+      "phase": "Clients, identity, and upload control",
+      "title": "Separate stated needs from design assumptions",
+      "type": "explanation",
+      "content": "The frozen brief asks for uploads, albums, tag/location/date search, sharing, device backup, face detection and recognition, billions of photos, and multiple resolutions. It does not specify DAU, upload rate, photo-size distribution, latency or availability SLOs, retention, or consistency targets. We will make those gaps visible rather than invent numeric targets.",
+      "requirementIds": []
+    },
+    {
+      "id": "photo_02",
+      "stepNumber": 2,
+      "phase": "Clients, identity, and upload control",
+      "title": "Start with the device backup client",
+      "type": "add_component",
+      "content": "The mobile client supports explicit user-selected backup, resumable uploads, and retry after connectivity loss. A stable client media identifier and checksum let the service recognize a retried upload without creating duplicate photo records.",
+      "component": {
+        "nodeId": "photo_mobile_app",
+        "componentType": "mobile-app",
+        "label": "Mobile App",
+        "description": "iOS and Android photo browsing and opt-in device backup",
+        "position": {"x": 40, "y": 250},
+        "properties": {
+          "componentName": "Mobile App",
+          "purpose": "Lets users browse albums and opt into resumable device backup using stable media IDs and checksums so retries do not create duplicate photo records."
+        },
+        "data": {"originalComponentId": "mobile-app", "semanticRole": "frontend"},
+        "highlightReason": "The brief explicitly requires automatic backup from devices; this client owns consent and retry-safe upload initiation.",
+        "semanticRole": "frontend"
+      },
+      "requirementIds": ["legacy-requirement:5"]
+    },
+    {
+      "id": "photo_03",
+      "stepNumber": 3,
+      "phase": "Clients, identity, and upload control",
+      "title": "Add the browser experience",
+      "type": "add_component",
+      "content": "The web client handles interactive uploads, album organization, sharing controls, search, and viewing. It uses the same authenticated APIs and permission model as mobile instead of maintaining a second source of truth.",
+      "component": {
+        "nodeId": "photo_web_app",
+        "componentType": "web-app",
+        "label": "Web App",
+        "description": "Browser client for uploads, albums, search, and sharing",
+        "position": {"x": 40, "y": 500},
+        "properties": {
+          "componentName": "Web App",
+          "purpose": "Provides browser-based photo uploads, album management, sharing, metadata search, and rendition viewing through the same APIs and authorization rules as mobile."
+        },
+        "data": {"originalComponentId": "web-app", "semanticRole": "frontend"},
+        "highlightReason": "A browser client serves the Flickr/Google Photos-style interactive workflow while sharing the mobile API contract.",
+        "semanticRole": "frontend"
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4"]
+    },
+    {
+      "id": "photo_04",
+      "stepNumber": 4,
+      "phase": "Clients, identity, and upload control",
+      "title": "Give clients one protected API entry point",
+      "type": "add_component",
+      "content": "The gateway validates request shape, applies per-account and per-device admission controls, and routes authenticated API calls. Large photo bytes should not be proxied through this tier; it returns short-lived upload authorization for direct object-storage transfer.",
+      "component": {
+        "nodeId": "photo_api_gateway",
+        "componentType": "api-gateway",
+        "label": "Photo API Gateway",
+        "description": "Authenticated API entry point and upload-intent routing",
+        "position": {"x": 360, "y": 360},
+        "properties": {
+          "componentName": "Photo API Gateway",
+          "purpose": "Routes authenticated photo and album APIs, validates requests, applies admission controls, and returns short-lived upload authorization without proxying large media bytes."
+        },
+        "data": {"originalComponentId": "api-gateway", "semanticRole": "api-gateway"},
+        "highlightReason": "Separates control-plane requests from high-volume direct media transfer and offers one place for request protections.",
+        "semanticRole": "api-gateway"
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "photo_05",
+      "stepNumber": 5,
+      "phase": "Clients, identity, and upload control",
+      "title": "Establish identity and authorization",
+      "type": "add_component",
+      "content": "Authentication identifies the actor; authorization checks ownership or an explicit album grant on every read, write, and share operation. Face recognition is treated as sensitive and opt-in in this draft, not silently enabled for every account.",
+      "component": {
+        "nodeId": "photo_auth",
+        "componentType": "auth-service",
+        "label": "Identity & Access Service",
+        "description": "User identity, sessions, and album-level authorization",
+        "position": {"x": 670, "y": 170},
+        "properties": {
+          "componentName": "Identity & Access Service",
+          "purpose": "Authenticates users and evaluates ownership, album grants, and opt-in processing permissions before private photo or face-related data is exposed."
+        },
+        "data": {"originalComponentId": "auth-service", "semanticRole": "security"},
+        "highlightReason": "Sharing and face-related processing make explicit authorization and consent central design boundaries.",
+        "semanticRole": "security"
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "photo_06",
+      "stepNumber": 6,
+      "phase": "Clients, identity, and upload control",
+      "title": "Centralize photo and album rules",
+      "type": "add_component",
+      "content": "This service owns photo records, album membership, share grants, upload intents, and permission checks. It commits verified photo metadata and a processing event in one database transaction through an outbox; a relay publishes the event after commit so a crash between the database write and broker publish does not silently strand processing work.",
+      "component": {
+        "nodeId": "photo_metadata_api",
+        "componentType": "backend-server",
+        "label": "Photo & Album API",
+        "description": "Photo metadata, album membership, upload intents, and sharing rules",
+        "position": {"x": 670, "y": 420},
+        "properties": {
+          "componentName": "Photo & Album API",
+          "purpose": "Owns photo and album metadata, upload intents, share grants, and authorization checks; records processing events in a transactional outbox with the metadata change."
+        },
+        "data": {"originalComponentId": "backend-server", "semanticRole": "backend"},
+        "highlightReason": "A single policy-owning service keeps album membership, sharing, and photo visibility consistent across clients.",
+        "semanticRole": "backend"
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "photo_07",
+      "stepNumber": 7,
+      "phase": "Clients, identity, and upload control",
+      "title": "Connect mobile to the API",
+      "type": "add_connection",
+      "content": "Mobile calls the API to obtain an upload intent, create albums, update metadata, and search. The service can make backup retries idempotent using the authenticated account and client media ID.",
+      "connection": {
+        "edgeId": "photo_mobile_to_gateway",
+        "sourceNodeId": "photo_mobile_app",
+        "targetNodeId": "photo_api_gateway",
+        "connectionType": "https",
+        "label": "Authenticated API & backup intents",
+        "description": "Mobile sends authenticated control requests and retry-safe backup metadata; media bytes use a separately authorized direct upload."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "photo_08",
+      "stepNumber": 8,
+      "phase": "Clients, identity, and upload control",
+      "title": "Connect the browser to the same API",
+      "type": "add_connection",
+      "content": "Web actions use the same authenticated API and policy checks, preventing browser-specific sharing rules from drifting from mobile behavior.",
+      "connection": {
+        "edgeId": "photo_web_to_gateway",
+        "sourceNodeId": "photo_web_app",
+        "targetNodeId": "photo_api_gateway",
+        "connectionType": "https",
+        "label": "Authenticated photo and album APIs",
+        "description": "Browser sends uploads, album, search, and sharing control requests through the shared API entry point."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4"]
+    },
+    {
+      "id": "photo_09",
+      "stepNumber": 9,
+      "phase": "Clients, identity, and upload control",
+      "title": "Check identity before private operations",
+      "type": "add_connection",
+      "content": "The gateway delegates identity and access evaluation. A valid session alone is insufficient: the actor must own the photo or hold a current grant for the requested album.",
+      "connection": {
+        "edgeId": "photo_gateway_to_auth",
+        "sourceNodeId": "photo_api_gateway",
+        "targetNodeId": "photo_auth",
+        "connectionType": "api-call",
+        "label": "Identity and grant checks",
+        "description": "Resolve the principal and evaluate ownership, album grants, and processing consent for protected operations."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "photo_10",
+      "stepNumber": 10,
+      "phase": "Clients, identity, and upload control",
+      "title": "Route domain operations to the photo service",
+      "type": "add_connection",
+      "content": "The photo service is the policy-enforcing boundary for upload state, album membership, visibility, sharing, and metadata search coordination.",
+      "connection": {
+        "edgeId": "photo_gateway_to_service",
+        "sourceNodeId": "photo_api_gateway",
+        "targetNodeId": "photo_metadata_api",
+        "connectionType": "http",
+        "label": "Photo, album, and share commands",
+        "description": "Forward validated commands to the service that applies the photo and album domain rules."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:3"]
+    },
+    {
+      "id": "photo_11",
+      "stepNumber": 11,
+      "phase": "Clients, identity, and upload control",
+      "title": "Keep control traffic separate from media bytes",
+      "type": "explanation",
+      "content": "The synchronous path creates an authorized upload intent and metadata identity; the client then transfers bytes directly to private object storage. This reduces API bandwidth pressure, but the intent must be short-lived, scoped to one object and account, and unusable for reading unrelated photos.",
+      "requirementIds": []
+    },
+    {
+      "id": "photo_12",
+      "stepNumber": 12,
+      "phase": "Durable originals and ownership metadata",
+      "title": "Store originals and renditions as objects",
+      "type": "add_component",
+      "content": "Object storage holds original uploads and immutable derived renditions separately from relational metadata. Use checksums to detect incomplete or corrupted transfer. The frozen brief suggests S3 as an example; the provider is replaceable. Avoid a numeric capacity estimate because none is supplied.",
+      "component": {
+        "nodeId": "photo_object_store",
+        "componentType": "object-storage",
+        "label": "Private Photo Object Store",
+        "description": "Original uploads and versioned derived renditions",
+        "position": {"x": 1010, "y": 170},
+        "properties": {
+          "componentName": "Private Photo Object Store",
+          "purpose": "Stores large original photos and immutable thumbnails or resolution variants outside the metadata database; private access is mediated by scoped upload and delivery authorization.",
+          "provider": "S3",
+          "checksumValidation": true
+        },
+        "data": {"originalComponentId": "object-storage", "semanticRole": "storage"},
+        "highlightReason": "Object storage is a catalog component and matches the brief hint for efficient storage of large photos.",
+        "semanticRole": "storage"
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1"]
+    },
+    {
+      "id": "photo_13",
+      "stepNumber": 13,
+      "phase": "Durable originals and ownership metadata",
+      "title": "Keep ownership and album metadata queryable",
+      "type": "add_component",
+      "content": "Store photo IDs, owner IDs, object keys, checksums, dimensions, capture timestamps, user-supplied tags, location fields subject to policy, album membership, and sharing grants here. The search requirement can use these tags; the brief's machine-learning tagging hint does not select a model or quality target, so automated tags remain an optional, unchosen enrichment. Keeping bytes out of rows avoids database growth dominated by large blobs. Hash-based partitioning is a scale direction, not a chosen shard count.",
+      "component": {
+        "nodeId": "photo_metadata_db",
+        "componentType": "database",
+        "label": "Photo & Album Metadata DB",
+        "description": "Transactional ownership, album, grant, and photo metadata",
+        "position": {"x": 1010, "y": 450},
+        "properties": {
+          "componentName": "Photo & Album Metadata DB",
+          "purpose": "Stores transactional photo ownership, object references, tags and capture metadata, album membership, share grants, and processing outbox rows while keeping photo bytes in object storage.",
+          "type": "RDBMS",
+          "engine": "postgresql",
+          "workload": "OLTP",
+          "sharding": "Hash-based"
+        },
+        "data": {"originalComponentId": "database", "semanticRole": "database"},
+        "highlightReason": "Album membership and access grants need transactional metadata; partitioning can be introduced as measured scale requires.",
+        "semanticRole": "database"
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "photo_14",
+      "stepNumber": 14,
+      "phase": "Durable originals and ownership metadata",
+      "title": "Issue scoped upload authorization",
+      "type": "add_connection",
+      "content": "The service records an upload intent and returns a short-lived scoped URL or equivalent authorization. The object key is generated server-side and bound to the authenticated owner; the object remains private until metadata commit and validation complete.",
+      "connection": {
+        "edgeId": "photo_service_to_object_store",
+        "sourceNodeId": "photo_metadata_api",
+        "targetNodeId": "photo_object_store",
+        "connectionType": "https",
+        "label": "Scoped upload intents and object access",
+        "description": "The service authorizes one object key and later reads or writes private originals and renditions under owner-aware policy."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "photo_15",
+      "stepNumber": 15,
+      "phase": "Durable originals and ownership metadata",
+      "title": "Transfer browser uploads directly",
+      "type": "add_connection",
+      "content": "The browser uploads large bytes directly to the scoped object key, using multipart/resumable transfer when supported. The client reports completion, but the backend verifies object size and checksum before marking the photo ready.",
+      "connection": {
+        "edgeId": "photo_web_to_object_store",
+        "sourceNodeId": "photo_web_app",
+        "targetNodeId": "photo_object_store",
+        "connectionType": "data-flow",
+        "label": "Scoped direct photo upload",
+        "description": "Browser transfers media bytes directly to the private object store using a short-lived, owner-scoped upload grant."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "photo_16",
+      "stepNumber": 16,
+      "phase": "Durable originals and ownership metadata",
+      "title": "Use the same direct-transfer path for backup",
+      "type": "add_connection",
+      "content": "Mobile backup uses the same private object path with retry-safe session state. A repeated completion event for the same account and client media ID must not create a second visible photo or album entry.",
+      "connection": {
+        "edgeId": "photo_mobile_to_object_store",
+        "sourceNodeId": "photo_mobile_app",
+        "targetNodeId": "photo_object_store",
+        "connectionType": "data-flow",
+        "label": "Resumable device backup bytes",
+        "description": "Mobile transfers selected photos directly to the private object store and retries with a stable account-scoped media identity."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "photo_17",
+      "stepNumber": 17,
+      "phase": "Durable originals and ownership metadata",
+      "title": "Commit photo, album, and grant metadata",
+      "type": "add_connection",
+      "content": "The service stores ownership, tags, metadata, album membership, and an outbox event in one transaction. A relay publishes committed outbox rows to the durable stream and retries failed publishes. Sharing adds an explicit grant to an album or photo; it does not make the object public or bypass authorization checks.",
+      "connection": {
+        "edgeId": "photo_service_to_metadata_db",
+        "sourceNodeId": "photo_metadata_api",
+        "targetNodeId": "photo_metadata_db",
+        "connectionType": "database-connection",
+        "label": "Photo, album, and access records",
+        "description": "Persist transactional ownership, searchable metadata, album membership, and scoped share grants."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "photo_18",
+      "stepNumber": 18,
+      "phase": "Durable originals and ownership metadata",
+      "title": "Define when an upload becomes visible",
+      "type": "explanation",
+      "content": "A useful state progression is initiated → uploading → verified → processing → ready, with failed or quarantined states for invalid media. Only verified objects with committed owner metadata become visible. Define orphan cleanup and deletion propagation so retries, partial uploads, and account deletion do not strand private data indefinitely.",
+      "requirementIds": []
+    },
+    {
+      "id": "photo_19",
+      "stepNumber": 19,
+      "phase": "Async media processing, index, and delivery",
+      "title": "Buffer work after durable upload",
+      "type": "add_component",
+      "content": "A durable event stream decouples upload completion from thumbnails, resolution variants, metadata extraction, and opt-in face analysis. Events carry stable job IDs and object versions so retries are idempotent and stale work cannot overwrite a newer photo state.",
+      "component": {
+        "nodeId": "photo_media_events",
+        "componentType": "message-broker",
+        "label": "Media Processing Events",
+        "description": "Durable events for verified uploads and requested reprocessing",
+        "position": {"x": 1320, "y": 720},
+        "properties": {
+          "componentName": "Media Processing Events",
+          "purpose": "Buffers verified-upload and reprocessing events so image transforms and optional face analysis run asynchronously with retryable, idempotent job identities."
+        },
+        "data": {"originalComponentId": "message-broker", "semanticRole": "message-broker"},
+        "highlightReason": "The image processing pipeline should absorb upload bursts without delaying the user's durable upload acknowledgment.",
+        "semanticRole": "message-broker"
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "photo_20",
+      "stepNumber": 20,
+      "phase": "Async media processing, index, and delivery",
+      "title": "Scale media processing independently",
+      "type": "add_component",
+      "content": "Workers validate media, extract dimensions and capture metadata, generate thumbnails and requested resolutions, and perform face detection or recognition only when the user has opted in. Isolate malformed files, cap resource use, and make each output deterministic for a given object version and transform profile.",
+      "component": {
+        "nodeId": "photo_media_worker",
+        "componentType": "processing-worker",
+        "label": "Media & Vision Workers",
+        "description": "Asynchronous validation, renditions, metadata extraction, and consented face analysis",
+        "position": {"x": 1620, "y": 720},
+        "properties": {
+          "componentName": "Media & Vision Workers",
+          "purpose": "Validates uploaded media, extracts metadata, creates thumbnails and resolution variants, and performs face detection or recognition only under explicit user consent.",
+          "tasks": "ML Inference",
+          "autoscale": true
+        },
+        "data": {"originalComponentId": "processing-worker", "semanticRole": "backend"},
+        "highlightReason": "Background workers satisfy the image pipeline requirement while scaling separately from interactive API traffic.",
+        "semanticRole": "backend"
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "photo_21",
+      "stepNumber": 21,
+      "phase": "Async media processing, index, and delivery",
+      "title": "Publish work only for verified objects",
+      "type": "add_connection",
+      "content": "The outbox relay publishes an event only for verified object creation or a committed reprocessing request. It retries until the durable stream accepts the event; consumers can replay it after a crash, and idempotency keys prevent duplicate renditions or repeated metadata updates.",
+      "connection": {
+        "edgeId": "photo_object_to_events",
+        "sourceNodeId": "photo_object_store",
+        "targetNodeId": "photo_media_events",
+        "connectionType": "event-stream",
+        "label": "Verified object and version events",
+        "description": "Publish durable notifications for verified uploads or explicit reprocessing requests, including object version and idempotency identity."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:4"]
+    },
+    {
+      "id": "photo_22",
+      "stepNumber": 22,
+      "phase": "Async media processing, index, and delivery",
+      "title": "Feed workers from the durable event stream",
+      "type": "add_connection",
+      "content": "Workers process at bounded concurrency and acknowledge only completed or safely recorded jobs. Retries use backoff and poison media is quarantined rather than retrying forever.",
+      "connection": {
+        "edgeId": "photo_events_to_worker",
+        "sourceNodeId": "photo_media_events",
+        "targetNodeId": "photo_media_worker",
+        "connectionType": "message-queue",
+        "label": "Retryable transform and vision jobs",
+        "description": "Deliver bounded, idempotent background jobs for media validation, renditions, metadata extraction, and consented vision tasks."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "photo_23",
+      "stepNumber": 23,
+      "phase": "Async media processing, index, and delivery",
+      "title": "Write immutable renditions without replacing originals",
+      "type": "add_connection",
+      "content": "Workers write thumbnails and requested resolution variants under distinct keys that encode the source version and transform profile. This makes retries safe and lets clients select a rendition appropriate to the viewport or bandwidth.",
+      "connection": {
+        "edgeId": "photo_worker_to_objects",
+        "sourceNodeId": "photo_media_worker",
+        "targetNodeId": "photo_object_store",
+        "connectionType": "data-flow",
+        "label": "Immutable thumbnails and resolution variants",
+        "description": "Write derived renditions under versioned, distinct object keys while preserving the uploaded original."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "photo_24",
+      "stepNumber": 24,
+      "phase": "Async media processing, index, and delivery",
+      "title": "Update metadata after processing",
+      "type": "add_connection",
+      "content": "The worker records derived dimensions, processing state, permitted location fields, and opt-in face results against the correct photo version. A consent change or deletion request must also remove or invalidate dependent face data.",
+      "connection": {
+        "edgeId": "photo_worker_to_metadata",
+        "sourceNodeId": "photo_media_worker",
+        "targetNodeId": "photo_metadata_db",
+        "connectionType": "database-connection",
+        "label": "Processing state and extracted metadata",
+        "description": "Persist version-matched rendition status and only policy-approved metadata or consented face-analysis results."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "photo_25",
+      "stepNumber": 25,
+      "phase": "Async media processing, index, and delivery",
+      "title": "Index searchable fields separately from photo bytes",
+      "type": "add_component",
+      "content": "A search index supports combinations of tags, permitted location fields, and capture date without scanning object storage. It is derived from authoritative metadata, so index lag and rebuild behavior must be explicit; authorization still happens against current grants before results or image URLs are returned.",
+      "component": {
+        "nodeId": "photo_search_index",
+        "componentType": "search-engine",
+        "label": "Photo Metadata Search Index",
+        "description": "Search by tags, allowed location, and capture date",
+        "position": {"x": 1920, "y": 470},
+        "properties": {
+          "componentName": "Photo Metadata Search Index",
+          "purpose": "Indexes tags, permitted location fields, capture date, and photo identifiers for queries without scanning large photo objects; current authorization is checked outside the index."
+        },
+        "data": {"originalComponentId": "search-engine", "semanticRole": "backend"},
+        "highlightReason": "The brief requires metadata search across tags, location, and date, which is a distinct query workload from object retrieval.",
+        "semanticRole": "backend"
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:2"]
+    },
+    {
+      "id": "photo_26",
+      "stepNumber": 26,
+      "phase": "Async media processing, index, and delivery",
+      "title": "Index new and changed metadata asynchronously",
+      "type": "add_connection",
+      "content": "Workers update the search index idempotently after metadata extraction or edits. Deletes and permission-sensitive changes need tombstones or replayable events so stale index entries cannot indefinitely surface removed photos.",
+      "connection": {
+        "edgeId": "photo_worker_to_search",
+        "sourceNodeId": "photo_media_worker",
+        "targetNodeId": "photo_search_index",
+        "connectionType": "data-flow",
+        "label": "Versioned metadata and search documents",
+        "description": "Upsert or tombstone searchable metadata using photo-version-aware, replayable updates."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "photo_27",
+      "stepNumber": 27,
+      "phase": "Async media processing, index, and delivery",
+      "title": "Authorize search results against current grants",
+      "type": "add_connection",
+      "content": "The API queries the index for candidate IDs, then filters or validates them against current ownership and album grants before returning metadata or a signed rendition URL. Eventual index consistency is acceptable only if the product's freshness and revocation expectations permit it.",
+      "connection": {
+        "edgeId": "photo_service_to_search",
+        "sourceNodeId": "photo_metadata_api",
+        "targetNodeId": "photo_search_index",
+        "connectionType": "api-call",
+        "label": "Search candidates with access filtering",
+        "description": "Query by tags, allowed location, or date, then verify candidate visibility against current ownership and share grants."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "photo_28",
+      "stepNumber": 28,
+      "phase": "Async media processing, index, and delivery",
+      "title": "Deliver popular renditions from the edge",
+      "type": "add_component",
+      "content": "A CDN accelerates thumbnails and resolution variants near users. Private media must remain private at the edge: use scoped signed delivery, carefully designed cache keys, and a defined revocation or expiry policy instead of making an origin public for convenience.",
+      "component": {
+        "nodeId": "photo_cdn",
+        "componentType": "cdn",
+        "label": "Private Rendition CDN",
+        "description": "Low-latency delivery for authorized photo variants",
+        "position": {"x": 2220, "y": 190},
+        "properties": {
+          "componentName": "Private Rendition CDN",
+          "purpose": "Caches immutable photo renditions near viewers while requiring scoped signed access and a deliberate cache-key and revocation policy for private content.",
+          "provider": "AWS CloudFront"
+        },
+        "data": {"originalComponentId": "cdn", "semanticRole": "cdn"},
+        "highlightReason": "The brief calls for fast photo retrieval and thumbnails; a CDN addresses delivery latency without exposing private origins.",
+        "semanticRole": "cdn"
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "photo_29",
+      "stepNumber": 29,
+      "phase": "Async media processing, index, and delivery",
+      "title": "Use object storage as a private CDN origin",
+      "type": "add_connection",
+      "content": "Only completed immutable renditions are cache candidates. Private-origin access and signed viewer authorization remain enforced; cache TTL and revocation behavior are open policy decisions, not assumed numeric targets.",
+      "connection": {
+        "edgeId": "photo_objects_to_cdn",
+        "sourceNodeId": "photo_object_store",
+        "targetNodeId": "photo_cdn",
+        "connectionType": "data-flow",
+        "label": "Private rendition origin",
+        "description": "Serve immutable variants from a non-public object origin after scoped viewer authorization."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "photo_30",
+      "stepNumber": 30,
+      "phase": "Async media processing, index, and delivery",
+      "title": "Deliver authorized variants to mobile",
+      "type": "add_connection",
+      "content": "Mobile requests a rendition appropriate for its display and network, using a scoped authorization result from the API. The client never receives a reusable credential that grants access to an entire private bucket.",
+      "connection": {
+        "edgeId": "photo_cdn_to_mobile",
+        "sourceNodeId": "photo_cdn",
+        "targetNodeId": "photo_mobile_app",
+        "connectionType": "https",
+        "label": "Authorized thumbnails and resolutions",
+        "description": "Deliver appropriately sized renditions through the edge only after the application grants scoped viewing access."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "photo_31",
+      "stepNumber": 31,
+      "phase": "Async media processing, index, and delivery",
+      "title": "Deliver authorized variants to the browser",
+      "type": "add_connection",
+      "content": "The browser uses the same signed delivery boundary and receives thumbnails before full-resolution downloads when that improves perceived latency. Avoid caching user-specific authorization responses as shared media objects.",
+      "connection": {
+        "edgeId": "photo_cdn_to_web",
+        "sourceNodeId": "photo_cdn",
+        "targetNodeId": "photo_web_app",
+        "connectionType": "https",
+        "label": "Authorized web photo delivery",
+        "description": "Return cached immutable renditions over HTTPS while keeping access checks separate from shared cacheable bytes."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "photo_32",
+      "stepNumber": 32,
+      "phase": "Async media processing, index, and delivery",
+      "title": "Treat face analysis as opt-in sensitive processing",
+      "type": "explanation",
+      "content": "Face detection can identify regions; recognition or grouping links faces across photos and is more sensitive. In this draft, recognition is disabled until the user opts in, access to derived face data is restricted, and deletion or consent withdrawal triggers cleanup. The brief does not define jurisdiction, legal basis, retention, or a user-facing review workflow.",
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "photo_33",
+      "stepNumber": 33,
+      "phase": "Async media processing, index, and delivery",
+      "title": "Observe upload and processing health",
+      "type": "add_component",
+      "content": "Monitor upload completion and checksum failures, queue age, transform retries, processing freshness, search-index lag, CDN errors, and authorization denials. Alerts should identify a failing boundary without logging private image bytes, signed URLs, or unnecessary location and face data.",
+      "component": {
+        "nodeId": "photo_monitoring",
+        "componentType": "monitoring",
+        "label": "Photo Platform Monitoring",
+        "description": "Service health, queue lag, processing freshness, and privacy-safe alerts",
+        "position": {"x": 1620, "y": 990},
+        "properties": {
+          "componentName": "Photo Platform Monitoring",
+          "purpose": "Tracks upload integrity, queue age, worker failures, search freshness, delivery errors, and authorization outcomes without collecting private media or credentials."
+        },
+        "data": {"originalComponentId": "monitoring", "semanticRole": "monitoring"},
+        "highlightReason": "Billions of photos and asynchronous processing require visibility into both user-facing health and background backlog.",
+        "semanticRole": "monitoring"
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "photo_34",
+      "stepNumber": 34,
+      "phase": "Async media processing, index, and delivery",
+      "title": "Measure the synchronous service path",
+      "type": "add_connection",
+      "content": "Collect aggregate request latency, upload-intent errors, metadata write failures, and access-check outcomes. Keep high-cardinality photo IDs and secrets out of metric labels.",
+      "connection": {
+        "edgeId": "photo_service_to_monitoring",
+        "sourceNodeId": "photo_metadata_api",
+        "targetNodeId": "photo_monitoring",
+        "connectionType": "data-flow",
+        "label": "API health and privacy-safe metrics",
+        "description": "Export aggregate service health and authorization outcomes without photo content or signed credentials."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "photo_35",
+      "stepNumber": 35,
+      "phase": "Async media processing, index, and delivery",
+      "title": "Measure backlog and rendition freshness",
+      "type": "add_connection",
+      "content": "Alert on queue age, repeated poison jobs, and time from verified upload to ready thumbnail. These measurements will determine worker capacity and any future freshness SLO; the brief supplies no numeric threshold.",
+      "connection": {
+        "edgeId": "photo_worker_to_monitoring",
+        "sourceNodeId": "photo_media_worker",
+        "targetNodeId": "photo_monitoring",
+        "connectionType": "data-flow",
+        "label": "Job, retry, and rendition freshness metrics",
+        "description": "Report aggregate processing duration, retry counts, backlog, and rendition readiness without sensitive content."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "photo_36",
+      "stepNumber": 36,
+      "phase": "Scale, privacy, and unresolved decisions",
+      "title": "Scale by measured access patterns",
+      "type": "decision_point",
+      "content": "Billions of photos imply partitioned metadata and object storage, but the right partition key and shard count depend on users, upload skew, reads, and sharing patterns. Start with account-scoped IDs and hash distribution; watch for hot accounts and album fan-out before choosing a more complex partition scheme.",
+      "decision": {
+        "question": "How should metadata storage scale as the photo corpus grows?",
+        "chosen": "Partition metadata by a stable account-scoped key and keep object bytes in object storage; determine shard count from measured workload and growth forecasts.",
+        "chosenReason": "It aligns related ownership and album queries while avoiding a fabricated traffic or capacity number. Object storage scales independently from transactional metadata.",
+        "alternatives": [
+          {"option": "One unpartitioned relational database indefinitely", "tradeoff": "Simpler initially, but it may not meet the stated billions-of-photos scale and creates a larger migration boundary."},
+          {"option": "Shard by capture date only", "tradeoff": "Can distribute ingestion, but user album queries and recent-time ranges may create scatter-gather or hot partitions."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:7"]
+    },
+    {
+      "id": "photo_37",
+      "stepNumber": 37,
+      "phase": "Scale, privacy, and unresolved decisions",
+      "title": "Assumptions in this review draft",
+      "type": "explanation",
+      "content": "Assumptions: (1) photos are private by default and sharing grants are scoped to albums or selected photos; (2) S3 and CloudFront are replaceable reference choices, with S3 suggested by the frozen hint; (3) PostgreSQL is a replaceable reference database engine because the brief names no engine; (4) the metadata database is authoritative and the search index may lag while current access checks remain authoritative; (5) direct uploads use expiring, object-scoped authorization and checksums; (6) face recognition is opt-in and treated as sensitive. These are proposed choices, not facts supplied by the problem.",
+      "requirementIds": []
+    },
+    {
+      "id": "photo_38",
+      "stepNumber": 38,
+      "phase": "Scale, privacy, and unresolved decisions",
+      "title": "Open questions before sizing or production design",
+      "type": "explanation",
+      "content": "Open questions: What are DAU, uploads per second, peak-to-average ratio, photo-size distribution, and geographic mix? What upload, search, and thumbnail latency and availability targets are required? What are retention, deletion, backup, and disaster-recovery objectives? How fresh must search and thumbnails be? Which sharing roles and revocation delay are acceptable? What location and face-recognition consent, retention, and jurisdictional rules apply? If automated tagging is selected, what model, tag taxonomy, and quality bar should it meet? How many resolutions and formats must be retained?",
+      "requirementIds": []
+    },
+    {
+      "id": "photo_39",
+      "stepNumber": 39,
+      "phase": "Scale, privacy, and unresolved decisions",
+      "title": "Review the end-to-end trust boundaries",
+      "type": "explanation",
+      "content": "Trace the upload from authenticated intent to verified private object, committed metadata, durable asynchronous work, derived renditions, indexed metadata, and authorized CDN delivery. Failure handling must preserve the original, make retries idempotent, repair or remove stale indexes, and honor access revocation and deletion. Validate these behaviors against measured targets once the open questions are answered.",
+      "requirementIds": []
+    }
+  ]
+}

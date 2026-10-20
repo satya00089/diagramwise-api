@@ -1,0 +1,403 @@
+{
+  "problem_id": "6901ef1b9420d83630aca888",
+  "version": "1.0-review",
+  "requirementRevision": null,
+  "totalSteps": 57,
+  "phases": [
+    {"name": "Define the campaign contract", "stepRange": [1, 7], "description": "Separate supplied facts from assumptions, derive the supported average rate, and establish correctness invariants."},
+    {"name": "Protect and spread the burst", "stepRange": [8, 23], "description": "Build the public edge, authenticated intake, durable queues, ledger, delivery, secrets, and operations path using existing catalog components."},
+    {"name": "Connect claim and recovery flows", "stepRange": [24, 46], "description": "Trace static delivery, protected admission, FIFO processing, authoritative stock, voucher events, credentials, and telemetry."},
+    {"name": "Make fairness and failure policy explicit", "stepRange": [47, 52], "description": "Choose ordering and inventory authority, then specify idempotency, sold-out, outage, abuse, and backpressure behavior."},
+    {"name": "Validate the one-hour campaign", "stepRange": [53, 57], "description": "Measure the actual burst, separate acceptance from completion latency, test invariants, and state the scaling tradeoff."}
+  ],
+  "steps": [
+    {
+      "id": "burger_01_brief", "stepNumber": 1, "phase": "Define the campaign contract",
+      "title": "Start from the supplied brief", "type": "explanation",
+      "content": "Facts: distribute 6 million free burgers in one hour; handle millions of concurrent requests; provide first-come-first-served fairness, duplicate-claim prevention, real-time inventory, vouchers, sold-out handling, bot prevention, and authentication. Constraints: an extreme spike in minutes, accurate count, no overselling, low claim latency, and the system must not crash. Do not turn unspecified product policy into a technical guarantee.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "burger_02_average", "stepNumber": 2, "phase": "Define the campaign contract",
+      "title": "Derive an average, not a peak guarantee", "type": "explanation",
+      "content": "The title's target implies 6,000,000 burgers / 3,600 seconds = 1,666.67 burgers per second on average (100,000 burgers per minute) across the full hour. Assuming one successful voucher redeems exactly one burger, that is also 1,666.67 successful claims per second on average. This is arithmetic, not a peak-capacity target: the brief gives no arrival curve, retry rate, or peak request rate, and millions of concurrent requests can arrive unevenly. Agree the burst shape and load-test it.",
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:1"]
+    },
+    {
+      "id": "burger_03_assumptions", "stepNumber": 3, "phase": "Define the campaign contract",
+      "title": "Expose assumptions that affect fairness", "type": "explanation",
+      "content": "Assumptions for review: one voucher redeems one burger, and at most one successful claim is allowed per authenticated account per campaign. The brief does not define household limits, location eligibility, opening-time rules, voucher expiry, pickup verification, or data-retention policy; product owners must decide these. It also gives no arrival curve or peak RPS, numeric claim-latency SLO, or numeric availability/uptime target. Do not infer any of those from the one-hour average; agree them and test the burst. Use verified identity for uniqueness only after approving the claim-limit policy.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "burger_04_invariants", "stepNumber": 4, "phase": "Define the campaign contract",
+      "title": "Write the invariants before choosing stores", "type": "explanation",
+      "content": "Committed vouchers never exceed 6 million; each principal obeys the approved claim limit; repeating an idempotency key returns its original outcome; and a voucher is visible only after a durable claim commit. A sold-out result is final only after authoritative remaining stock reaches zero and all earlier accepted requests have a terminal outcome.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "burger_05_entities", "stepNumber": 5, "phase": "Define the campaign contract",
+      "title": "Model claims so operators can explain them", "type": "explanation",
+      "content": "Core records: Campaign, InventoryBucket, ClaimRequest, Claim, Voucher, and OutboxEvent. Store campaign, verified principal, idempotency key, acceptance sequence, state, and timestamps. Enforce uniqueness for campaign plus principal under the one-claim assumption and for campaign plus principal plus idempotency key. Preallocated bucket capacities must sum exactly to campaign stock.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "burger_06_api", "stepNumber": 6, "phase": "Define the campaign contract",
+      "title": "Separate claim submission from claim status", "type": "explanation",
+      "content": "POST /campaigns/{campaignId}/claims accepts an Idempotency-Key and returns a request ID plus accepted/pending only after durable queue acknowledgement. An authorized status endpoint returns pending, claimed with the same voucher, rejected, or sold_out. Scope status reads to the authenticated caller. Exact eligibility and response schema remain product decisions.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8"]
+    },
+    {
+      "id": "burger_07_pending", "stepNumber": 7, "phase": "Define the campaign contract",
+      "title": "Do not tell a queued user they won", "type": "explanation",
+      "content": "Queue acceptance means pending, not claimed. Keep the client in a clear waiting state and expose the durable outcome through polling or an authorized notification. Never show a voucher before the database commit; never infer sold out from a stale cache counter.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "burger_08_client", "stepNumber": 8, "phase": "Protect and spread the burst",
+      "title": "Serve the campaign experience", "type": "add_component",
+      "content": "Use the existing web-app catalog component. Render campaign instructions and clear pending, claimed, rejected, and sold-out states; keep identity, eligibility, order, and inventory decisions on the server.",
+      "component": {"nodeId": "burger_client", "componentType": "web-app", "label": "Burger Claim Web App", "description": "Campaign page, authenticated claim action, and status view.", "position": {"x": 0, "y": 220}, "properties": {"componentName": "Burger Claim Web App", "purpose": "Render campaign instructions and user-visible claim status. The client never decides identity, eligibility, ordering, or inventory."}, "highlightReason": "The public entry must support millions of concurrent requests without trusting browser-side stock decisions."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-requirement:8"]
+    },
+    {
+      "id": "burger_09_cdn", "stepNumber": 9, "phase": "Protect and spread the burst",
+      "title": "Move static assets to the edge", "type": "add_component",
+      "content": "Use the catalog CDN for versioned public campaign assets. Do not shared-cache authenticated claim outcomes or treat cached stock as authoritative.",
+      "component": {"nodeId": "campaign_cdn", "componentType": "cdn", "label": "Campaign CDN", "description": "Edge delivery for static campaign content.", "position": {"x": 270, "y": 220}, "properties": {"componentName": "Campaign CDN", "purpose": "Serve versioned public assets near users; bypass shared caching for authenticated claim and status responses."}, "highlightReason": "Static traffic should not consume scarce claim API capacity during the spike."},
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:1"]
+    },
+    {
+      "id": "burger_10_waf", "stepNumber": 10, "phase": "Protect and spread the burst",
+      "title": "Filter abusive traffic at the edge", "type": "add_component",
+      "content": "Apply WAF request-shape and available bot protections before origin. Log investigation-safe categories without bearer tokens, voucher values, or unnecessary personal data.",
+      "component": {"nodeId": "edge_waf", "componentType": "firewall", "label": "Campaign WAF", "description": "Edge filtering for abusive dynamic requests.", "position": {"x": 540, "y": 220}, "properties": {"componentName": "Campaign WAF", "purpose": "Apply campaign web protections before API admission; combine risk signals with identity and rate limits, not an IP-only person test.", "type": "WAF", "ips": true, "logging": true}, "highlightReason": "Bot attacks and retries must not consume queue, authentication, or inventory capacity."},
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "burger_11_balancer", "stepNumber": 11, "phase": "Protect and spread the burst",
+      "title": "Distribute only to healthy API instances", "type": "add_component",
+      "content": "Use the catalog application load balancer with health checks. Scale stateless intake on measured demand while bounding downstream concurrency; more API instances do not create ledger or queue capacity.",
+      "component": {"nodeId": "traffic_lb", "componentType": "loadbalancer", "label": "Claim API Load Balancer", "description": "Health-checked routing across stateless API instances.", "position": {"x": 810, "y": 220}, "properties": {"componentName": "Claim API Load Balancer", "purpose": "Distribute dynamic requests to healthy stateless API instances and scale using measured demand with explicit downstream limits.", "type": "Layer 7 (Application)", "algorithm": "least-connections", "healthCheck": true}, "highlightReason": "Load balancing and autoscaling must be paired with dependency protection."},
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "burger_12_gateway", "stepNumber": 12, "phase": "Protect and spread the burst",
+      "title": "Validate and route API operations", "type": "add_component",
+      "content": "Use the existing API Gateway for TLS/API routing, request validation, authentication, and coarse rate limits. Gateway deduplication is an optimization; durable idempotency still belongs in the claim ledger.",
+      "component": {"nodeId": "claim_gateway", "componentType": "api-gateway", "label": "Campaign API Gateway", "description": "Validated authenticated routing for claim and status endpoints.", "position": {"x": 1080, "y": 220}, "properties": {"componentName": "Campaign API Gateway", "purpose": "Validate request shape, route claim/status calls, and apply coarse limits. Gateway deduplication is not the durable duplicate-claim guarantee.", "inputValidation": true, "authentication": "JWT", "rateLimiting": true, "deduplication": true, "tlsTermination": true}, "highlightReason": "One API boundary gives consistent request validation and protection."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "burger_13_auth", "stepNumber": 13, "phase": "Protect and spread the burst",
+      "title": "Authenticate the person, not a body field", "type": "add_component",
+      "content": "Validate signed identity and derive principal ID from trusted claims. Ignore caller-supplied user IDs. Provider and eligibility evidence are not specified by the brief.",
+      "component": {"nodeId": "identity_service", "componentType": "auth-service", "label": "User Identity Service", "description": "Authentication and verified principal context.", "position": {"x": 1350, "y": 80}, "properties": {"componentName": "User Identity Service", "purpose": "Validate signed identity and derive a stable principal for eligibility, per-user limits, ownership, and idempotency."}, "highlightReason": "Duplicate prevention and fairness fail if a caller can forge their claim identity."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8"]
+    },
+    {
+      "id": "burger_14_limiter", "stepNumber": 14, "phase": "Protect and spread the burst",
+      "title": "Rate-limit without treating an IP as a person", "type": "add_component",
+      "content": "Use distributed limits by verified principal plus complementary network/device risk. Thresholds are unspecified; set them through abuse and false-positive tests and provide step-up review for suspicious activity.",
+      "component": {"nodeId": "anti_abuse_limit", "componentType": "rate-limiter", "label": "Per-User Claim Limiter", "description": "Distributed principal and risk-aware throttling.", "position": {"x": 1350, "y": 360}, "properties": {"componentName": "Per-User Claim Limiter", "purpose": "Throttle by verified principal with complementary network/device risk signals; measure false positives and avoid blanket shared-IP blocks.", "algorithm": "Sliding Window", "distributed": true, "backend": "Redis"}, "highlightReason": "Per-user limits are suggested by the brief and protect both fairness and capacity."},
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "burger_15_api", "stepNumber": 15, "phase": "Protect and spread the burst",
+      "title": "Keep intake stateless and truthful", "type": "add_component",
+      "content": "Validate campaign state and enqueue an idempotent claim intent. Return accepted/pending after durable queue acknowledgement; voucher creation and notification happen later.",
+      "component": {"nodeId": "claim_api", "componentType": "webserver", "label": "Claim API Service", "description": "Stateless claim submission and authorized status handling.", "position": {"x": 1620, "y": 220}, "properties": {"componentName": "Claim API Service", "purpose": "Validate campaign and payload, use the verified principal and idempotency key, and enqueue durable work. Acknowledge only after queue persistence and never mint a voucher here."}, "highlightReason": "A short path supports low latency and lets durable queueing absorb bursts."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "burger_16_redis", "stepNumber": 16, "phase": "Protect and spread the burst",
+      "title": "Use Redis for a fast provisional inventory gate", "type": "add_component",
+      "content": "Use the catalog Redis-compatible cache for atomic Lua candidate counters and short-lived rate/idempotency hints. Its state is rebuildable and never authorizes a voucher.",
+      "component": {"nodeId": "redis_inventory", "componentType": "cache", "label": "Redis Inventory Gate", "description": "Atomic candidate counters and short-lived admission hints.", "position": {"x": 1890, "y": 80}, "properties": {"componentName": "Redis Inventory Gate", "purpose": "Atomically gate against mirrored quota buckets and reduce duplicate work. Reconcile from committed ledger state; require a durable conditional stock transaction before issuing a voucher.", "engine": "redis", "inMemory": true}, "highlightReason": "Redis handles concurrent candidate decrements quickly, while the ledger remains authoritative across failover."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "burger_17_queue", "stepNumber": 17, "phase": "Protect and spread the burst",
+      "title": "Buffer accepted claims in durable order", "type": "add_component",
+      "content": "Use a durable FIFO queue carrying campaign, verified principal reference, idempotency key, and immutable acceptance sequence. Keep secrets and voucher material out of messages. Partitioning the campaign ordering domain changes fairness and needs an explicit merge policy.",
+      "component": {"nodeId": "claim_queue", "componentType": "queue", "label": "Campaign FIFO Claim Queue", "description": "Durable ordered buffer for authenticated claim intents.", "position": {"x": 1890, "y": 360}, "properties": {"componentName": "Campaign FIFO Claim Queue", "purpose": "Persist admitted claims and acceptance order through bursts or worker outages. Preserve one campaign ordering domain for strict FCFS; size capacity and retention from burst tests.", "durable": true, "backoff": "exponential"}, "highlightReason": "The queue absorbs the launch spike and defines server-observed order."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "burger_18_worker", "stepNumber": 18, "phase": "Protect and spread the burst",
+      "title": "Allocate stock in accepted order", "type": "add_component",
+      "content": "Workers check prior outcomes, consult the Redis gate, and commit the final stock decision durably. Parallelize safe validation, not allocation order, if strict FCFS is promised.",
+      "component": {"nodeId": "claim_worker", "componentType": "processing-worker", "label": "Ordered Claim Workers", "description": "Idempotent reservation and voucher creation from queued claims.", "position": {"x": 2160, "y": 360}, "properties": {"componentName": "Ordered Claim Workers", "purpose": "Process campaign intents in accepted order, check prior idempotent outcomes, use Redis only as a candidate gate, and commit quota, unique claim, voucher, and outbox atomically.", "tasks": "Data Processing", "autoscale": true}, "highlightReason": "Async workers smooth the burst but must not reorder claim allocation."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "burger_19_ledger", "stepNumber": 19, "phase": "Protect and spread the burst",
+      "title": "Make a durable conditional transaction the stock boundary", "type": "add_component",
+      "content": "Persist quota buckets, claims, idempotency outcomes, vouchers, and transactional outbox. Bucket capacities sum to exactly 6 million. In one transaction conditionally decrement a positive bucket and insert the unique principal claim, voucher, and outbox; a Redis reset must not allow a second voucher.",
+      "component": {"nodeId": "claim_ledger", "componentType": "database", "label": "Claims and Inventory Ledger", "description": "Durable cap, idempotency, voucher, and outbox transaction boundary.", "position": {"x": 2430, "y": 250}, "properties": {"componentName": "Claims and Inventory Ledger", "purpose": "Authoritative OLTP records for campaign quota buckets, claims, idempotency, vouchers, and outbox. Bucket capacities sum to 6 million for one burger per voucher. Conditionally decrement positive stock and insert unique claim, voucher, and outbox in one transaction; rebuild Redis from committed rows.", "type": "RDBMS", "engine": "postgresql", "workload": "OLTP", "sharding": "Hash-based", "encryption": true, "multiAZ": true, "backups": true, "pitr": true, "rbac": true, "auditLog": true}, "highlightReason": "Only this durable transaction can guarantee accurate inventory and no overselling after retries or cache failover."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "burger_20_voucher_events", "stepNumber": 20, "phase": "Protect and spread the burst",
+      "title": "Publish only committed voucher outcomes", "type": "add_component",
+      "content": "A separate durable event queue carries voucher-created events from the outbox after the claim commits. Consumer retries use stable event IDs; a queued intent or Redis reservation is not a voucher-created event.",
+      "component": {"nodeId": "voucher_queue", "componentType": "queue", "label": "Committed Voucher Events", "description": "Durable asynchronous delivery of committed claim outcomes.", "position": {"x": 2700, "y": 400}, "properties": {"componentName": "Committed Voucher Events", "purpose": "Carry only committed outbox events with stable IDs so notification can retry without changing claim outcome.", "durable": true, "backoff": "exponential"}, "highlightReason": "Notification retries must not delay or undo stock allocation."},
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "burger_21_notifier", "stepNumber": 21, "phase": "Protect and spread the burst",
+      "title": "Deliver the committed result asynchronously", "type": "add_component",
+      "content": "Notify only after commit and deduplicate by event and claim ID. Delivery channel is a product choice not supplied in this brief; status lookup remains the recovery path.",
+      "component": {"nodeId": "voucher_delivery", "componentType": "notification-service", "label": "Voucher Notification Service", "description": "Asynchronous notification of durable claim outcomes.", "position": {"x": 2970, "y": 400}, "properties": {"componentName": "Voucher Notification Service", "purpose": "Notify the claim owner after ledger commit. Deduplicate repeated events, avoid logging voucher secrets, and direct users to authenticated status when delayed."}, "highlightReason": "A notification is a convenience; durable claim state remains the source of truth."},
+      "requirementIds": ["legacy-requirement:5"]
+    },
+    {
+      "id": "burger_22_secrets", "stepNumber": 22, "phase": "Protect and spread the burst",
+      "title": "Protect voucher signing credentials", "type": "add_component",
+      "content": "Use the existing secrets manager for signing-key references and service credentials. Grant least-privilege retrieval, rotate with a verification overlap policy, and never put raw keys in messages, database logs, or telemetry.",
+      "component": {"nodeId": "signing_secrets", "componentType": "secrets-manager", "label": "Voucher Signing Secrets", "description": "Access-controlled signing keys and service credentials.", "position": {"x": 1620, "y": 620}, "properties": {"componentName": "Voucher Signing Secrets", "purpose": "Store and rotate signing keys and service credentials; grant least-privilege access only to trusted issuance and verification paths.", "rotation": true, "encryption": true, "audit": true}, "highlightReason": "Voucher authenticity depends on protecting signing material and auditing its use."},
+      "requirementIds": ["legacy-requirement:5"]
+    },
+    {
+      "id": "burger_23_monitoring", "stepNumber": 23, "phase": "Protect and spread the burst",
+      "title": "Measure business invariants as well as CPU", "type": "add_component",
+      "content": "Track queue age/depth, accepted sequence lag, durable remaining stock, committed claims, duplicate retries, sold-out outcomes, Redis-to-ledger drift, bot blocks, errors, and status latency. Never put principal IDs or voucher codes in metric labels.",
+      "component": {"nodeId": "claim_observability", "componentType": "monitoring", "label": "Campaign Operations", "description": "Queue, stock, abuse, latency, and availability telemetry.", "position": {"x": 2160, "y": 680}, "properties": {"componentName": "Campaign Operations", "purpose": "Measure order lag, queue age/depth, durable remaining stock, commits, duplicate outcomes, sold-out results, Redis drift, abuse blocks, and status latency; alert on invariant violations.", "metrics": true, "alerts": true}, "highlightReason": "Healthy API CPU can hide a queue that is missing the one-hour objective."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "burger_24_client_cdn", "stepNumber": 24, "phase": "Connect claim and recovery flows",
+      "title": "Serve public assets independently", "type": "add_connection",
+      "content": "The browser loads versioned public content at the edge; personalized claim responses are not shared-cacheable.",
+      "connection": {"edgeId": "burger_client_cdn", "sourceNodeId": "burger_client", "targetNodeId": "campaign_cdn", "connectionType": "http", "label": "Static campaign assets", "description": "Edge-cache public content and bypass shared cache for authenticated claim/status data."},
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:1"]
+    },
+    {
+      "id": "burger_25_cdn_waf", "stepNumber": 25, "phase": "Connect claim and recovery flows",
+      "title": "Protect dynamic traffic before origin", "type": "add_connection",
+      "content": "Uncached claim and status requests pass through WAF policy; cache misses cannot bypass API protections.",
+      "connection": {"edgeId": "burger_cdn_waf", "sourceNodeId": "campaign_cdn", "targetNodeId": "edge_waf", "connectionType": "http", "label": "Dynamic API requests", "description": "The CDN forwards API traffic through WAF and does not cache user claim outcomes."},
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "burger_26_waf_lb", "stepNumber": 26, "phase": "Connect claim and recovery flows",
+      "title": "Keep abusive traffic off origin", "type": "add_connection",
+      "content": "Only inspected traffic reaches healthy API routing; tune blocks/challenges against bot and false-positive tests.",
+      "connection": {"edgeId": "burger_waf_lb", "sourceNodeId": "edge_waf", "targetNodeId": "traffic_lb", "connectionType": "http", "label": "Filtered origin traffic", "description": "WAF protections reduce abusive pressure before load balancing."},
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "burger_27_lb_gateway", "stepNumber": 27, "phase": "Connect claim and recovery flows",
+      "title": "Route to ready gateway instances", "type": "add_connection",
+      "content": "Health checks represent readiness to accept requests, not merely a live process.",
+      "connection": {"edgeId": "burger_lb_gateway", "sourceNodeId": "traffic_lb", "targetNodeId": "claim_gateway", "connectionType": "http", "label": "Healthy API route", "description": "Health-checked distribution avoids unavailable gateway instances during the spike."},
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "burger_28_gateway_auth", "stepNumber": 28, "phase": "Connect claim and recovery flows",
+      "title": "Validate trusted identity early", "type": "add_connection",
+      "content": "Reject unauthenticated claims before consuming scarce queue capacity.",
+      "connection": {"edgeId": "burger_gateway_auth", "sourceNodeId": "claim_gateway", "targetNodeId": "identity_service", "connectionType": "api-call", "label": "Verify signed identity", "description": "Authentication yields a trusted principal; caller-supplied owner IDs are ignored."},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "burger_29_gateway_limiter", "stepNumber": 29, "phase": "Connect claim and recovery flows",
+      "title": "Apply distributed request limits", "type": "add_connection",
+      "content": "Apply principal and complementary risk limits without converting one shared IP into one assumed person.",
+      "connection": {"edgeId": "burger_gateway_limiter", "sourceNodeId": "claim_gateway", "targetNodeId": "anti_abuse_limit", "connectionType": "api-call", "label": "Principal and risk limits", "description": "Distributed throttling protects queue capacity and retains reviewable false-positive handling."},
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "burger_30_auth_api", "stepNumber": 30, "phase": "Connect claim and recovery flows",
+      "title": "Pass verified principal context", "type": "add_connection",
+      "content": "The claim service rechecks campaign state but consumes only trusted identity context.",
+      "connection": {"edgeId": "burger_auth_api", "sourceNodeId": "identity_service", "targetNodeId": "claim_api", "connectionType": "http", "label": "Verified principal", "description": "Stable authenticated identity is used for eligibility, deduplication, and ownership."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8"]
+    },
+    {
+      "id": "burger_31_limiter_api", "stepNumber": 31, "phase": "Connect claim and recovery flows",
+      "title": "Forward an admitted attempt", "type": "add_connection",
+      "content": "Throttled callers receive an explicit safe retry response; admitted requests proceed to claim submission.",
+      "connection": {"edgeId": "burger_limiter_api", "sourceNodeId": "anti_abuse_limit", "targetNodeId": "claim_api", "connectionType": "api-call", "label": "Allowed claim attempt", "description": "Only policy-checked traffic consumes claim queue and origin resources."},
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "burger_32_api_redis", "stepNumber": 32, "phase": "Connect claim and recovery flows",
+      "title": "Use atomic scripts to gate candidate work", "type": "add_connection",
+      "content": "Redis Lua makes concurrent candidate decrements atomic against mirrored bucket counts; it does not replace the durable quota transaction.",
+      "connection": {"edgeId": "burger_api_redis", "sourceNodeId": "claim_api", "targetNodeId": "redis_inventory", "connectionType": "api-call", "label": "Atomic candidate gate", "description": "Redis reduces futile concurrent work while the ledger remains final stock authority."},
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "burger_33_redis_api", "stepNumber": 33, "phase": "Connect claim and recovery flows",
+      "title": "Treat a cache result as provisional", "type": "add_connection",
+      "content": "A cache zero is not sold out; verify durable remaining stock. On cache uncertainty, fail closed or rebuild from committed ledger rows.",
+      "connection": {"edgeId": "burger_redis_api", "sourceNodeId": "redis_inventory", "targetNodeId": "claim_api", "connectionType": "data-flow", "label": "Provisional gate result", "description": "Candidate result never authorizes voucher creation or overrides the database."},
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "burger_34_api_queue", "stepNumber": 34, "phase": "Connect claim and recovery flows",
+      "title": "Acknowledge only durable admission", "type": "add_connection",
+      "content": "On timeout the caller retries with the same idempotency key; a lost acknowledgement is an unknown outcome, not permission to create a new claim.",
+      "connection": {"edgeId": "burger_api_queue", "sourceNodeId": "claim_api", "targetNodeId": "claim_queue", "connectionType": "message-queue", "label": "Durable ordered intent", "description": "Queue acknowledgement absorbs bursts and fixes server-observed acceptance order."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "burger_35_queue_worker", "stepNumber": 35, "phase": "Connect claim and recovery flows",
+      "title": "Preserve order through consumption", "type": "add_connection",
+      "content": "If the queue is partitioned, specify a global merge rule; independently ordered partitions do not prove campaign-wide FCFS.",
+      "connection": {"edgeId": "burger_queue_worker", "sourceNodeId": "claim_queue", "targetNodeId": "claim_worker", "connectionType": "message-queue", "label": "Acceptance sequence", "description": "Workers allocate in accepted order rather than completion race order."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "burger_36_worker_ledger", "stepNumber": 36, "phase": "Connect claim and recovery flows",
+      "title": "Commit cap, uniqueness, voucher, and outbox together", "type": "add_connection",
+      "content": "Read the idempotency outcome first, then atomically conditionally decrement positive stock, enforce unique claim keys, write the voucher, and append its outbox event.",
+      "connection": {"edgeId": "burger_worker_ledger", "sourceNodeId": "claim_worker", "targetNodeId": "claim_ledger", "connectionType": "database-connection", "label": "Atomic claim transaction", "description": "Durable conditional write enforces the stock cap and uniqueness before a voucher exists."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "burger_37_ledger_worker", "stepNumber": 37, "phase": "Connect claim and recovery flows",
+      "title": "Resolve uncertain commits by idempotency key", "type": "add_connection",
+      "content": "If the database response is lost after commit, read and return the existing outcome instead of decrementing stock again.",
+      "connection": {"edgeId": "burger_ledger_worker", "sourceNodeId": "claim_ledger", "targetNodeId": "claim_worker", "connectionType": "data-flow", "label": "Committed or existing outcome", "description": "Durable read resolves retry ambiguity without creating another voucher."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "burger_38_status", "stepNumber": 38, "phase": "Connect claim and recovery flows",
+      "title": "Read status from the ledger", "type": "add_connection",
+      "content": "Authorize each status read to the claim owner. A valid accepted receipt without a completed row is pending, not success.",
+      "connection": {"edgeId": "burger_api_ledger", "sourceNodeId": "claim_api", "targetNodeId": "claim_ledger", "connectionType": "database-connection", "label": "Authorized status lookup", "description": "Committed state is read from durable records and scoped to verified identity."},
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8"]
+    },
+    {
+      "id": "burger_39_outbox", "stepNumber": 39, "phase": "Connect claim and recovery flows",
+      "title": "Relay committed events with stable IDs", "type": "add_connection",
+      "content": "An outbox relay retries publication after commit. A crash between publish and marking can redeliver, so consumers deduplicate instead of assuming exactly-once delivery.",
+      "connection": {"edgeId": "burger_worker_voucher_queue", "sourceNodeId": "claim_worker", "targetNodeId": "voucher_queue", "connectionType": "event-stream", "label": "Committed outbox event", "description": "Only durable claim outcomes are published and retried with stable event identifiers."},
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "burger_40_delivery", "stepNumber": 40, "phase": "Connect claim and recovery flows",
+      "title": "Deliver notifications independently", "type": "add_connection",
+      "content": "The consumer notifies after commit; the status endpoint recovers a voucher if delivery is delayed.",
+      "connection": {"edgeId": "burger_voucher_delivery", "sourceNodeId": "voucher_queue", "targetNodeId": "voucher_delivery", "connectionType": "message-queue", "label": "Committed voucher event", "description": "Delivery retries independently from stock reservation and claim state."},
+      "requirementIds": ["legacy-requirement:5"]
+    },
+    {
+      "id": "burger_41_api_secrets", "stepNumber": 41, "phase": "Connect claim and recovery flows",
+      "title": "Give services scoped credential access", "type": "add_connection",
+      "content": "Keep signing material out of user responses, queue messages, and logs.",
+      "connection": {"edgeId": "burger_secrets_api", "sourceNodeId": "signing_secrets", "targetNodeId": "claim_api", "connectionType": "data-flow", "label": "Scoped service credential", "description": "API receives only the credential access it needs."},
+      "requirementIds": ["legacy-requirement:5"]
+    },
+    {
+      "id": "burger_42_worker_secrets", "stepNumber": 42, "phase": "Connect claim and recovery flows",
+      "title": "Sign vouchers only in trusted issuance", "type": "add_connection",
+      "content": "Use a versioned key after the claim's stock transaction succeeds; persist the voucher as part of the recoverable workflow.",
+      "connection": {"edgeId": "burger_secrets_worker", "sourceNodeId": "signing_secrets", "targetNodeId": "claim_worker", "connectionType": "data-flow", "label": "Versioned signing key", "description": "Only trusted issuance code can request signing capability."},
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "burger_43_delivery_secrets", "stepNumber": 43, "phase": "Connect claim and recovery flows",
+      "title": "Define safe voucher verification", "type": "add_connection",
+      "content": "Redemption protocol and pickup policy are unspecified; verify signatures with scoped key access and reveal only policy-required data.",
+      "connection": {"edgeId": "burger_secrets_delivery", "sourceNodeId": "signing_secrets", "targetNodeId": "voucher_delivery", "connectionType": "data-flow", "label": "Verification key reference", "description": "Verification never exposes signing secrets to the recipient."},
+      "requirementIds": ["legacy-requirement:5"]
+    },
+    {
+      "id": "burger_44_api_metrics", "stepNumber": 44, "phase": "Connect claim and recovery flows",
+      "title": "Measure the request experience safely", "type": "add_connection",
+      "content": "Aggregate request rate, status latency, auth failures, and limit decisions without using user IDs or voucher codes as metric labels.",
+      "connection": {"edgeId": "burger_api_metrics", "sourceNodeId": "claim_api", "targetNodeId": "claim_observability", "connectionType": "event-stream", "label": "Claim path telemetry", "description": "Aggregated metrics expose overload without leaking identity or voucher secrets."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "burger_45_queue_metrics", "stepNumber": 45, "phase": "Connect claim and recovery flows",
+      "title": "Treat queue lag as a user-facing risk", "type": "add_connection",
+      "content": "Watch queue age/depth, consumer rate, retries, and dead-letter growth; healthy API CPU does not mean claims finish within the hour.",
+      "connection": {"edgeId": "burger_queue_metrics", "sourceNodeId": "claim_queue", "targetNodeId": "claim_observability", "connectionType": "event-stream", "label": "Backlog and order lag", "description": "Queue metrics guide backpressure and reveal delayed accepted requests."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "burger_46_ledger_metrics", "stepNumber": 46, "phase": "Connect claim and recovery flows",
+      "title": "Alert on authoritative inventory drift", "type": "add_connection",
+      "content": "Compare Redis mirrors with committed stock and pause issuance if durable invariants cannot be confirmed.",
+      "connection": {"edgeId": "burger_ledger_metrics", "sourceNodeId": "claim_ledger", "targetNodeId": "claim_observability", "connectionType": "event-stream", "label": "Durable stock metrics", "description": "Ledger values are authoritative and cache drift is visible."},
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "burger_47_fairness", "stepNumber": 47, "phase": "Make fairness and failure policy explicit",
+      "title": "Define first arrival at a trusted boundary", "type": "decision_point",
+      "content": "Client clocks and worker completion times are not fair global order. Use durable queue acceptance sequence after authentication and abuse checks; ties and cross-region arrival need a published rule.",
+      "decision": {"question": "What defines first-come-first-served?", "chosen": "Durable FIFO acceptance order for the campaign after trusted admission", "chosenReason": "It is server-observed and carried through allocation rather than inferred from client time or worker races.", "alternatives": [{"option": "Client timestamps", "tradeoff": "Can be skewed or manipulated and do not establish a trusted total order."}, {"option": "Request completion order", "tradeoff": "Reflects network and worker scheduling variance, not arrival."}, {"option": "Random selection", "tradeoff": "May be another valid policy but is not first-come-first-served."}]},
+      "componentUpdate": {"nodeId": "claim_queue", "properties": {"purpose": "Persist immutable server acceptance sequence and preserve one ordered campaign domain for strict FCFS. Any partitioning requires an explicit tested global merge rule."}},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:1"]
+    },
+    {
+      "id": "burger_48_stock_authority", "stepNumber": 48, "phase": "Make fairness and failure policy explicit",
+      "title": "Keep Redis fast but non-authoritative", "type": "decision_point",
+      "content": "Redis scripts atomically gate candidate buckets, but failover may lose memory state. Only the durable conditional decrement and unique claim commit can issue a voucher; rebuild cache state before resuming after uncertainty.",
+      "decision": {"question": "Which store decides that a burger is claimed?", "chosen": "Durable conditional ledger transaction; Redis is a provisional atomic gate", "chosenReason": "The ledger enforces the stock cap and unique claim across retries, cache loss, and restarts.", "alternatives": [{"option": "Redis counter alone", "tradeoff": "Fast, but a rolled-back counter can allow duplicate stock issuance."}, {"option": "One unpartitioned hot row", "tradeoff": "Simple semantics, but may bottleneck a concentrated campaign."}, {"option": "Cache result plus unconditional insert", "tradeoff": "Stale cache state can exceed stock unless the database enforces the cap."}]},
+      "componentUpdate": {"nodeId": "redis_inventory", "properties": {"purpose": "Atomically gate against mirrored buckets, then reconcile from committed ledger state. Redis can be lost and never authorizes a voucher; the durable conditional decrement is final."}},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "burger_49_idempotency", "stepNumber": 49, "phase": "Make fairness and failure policy explicit",
+      "title": "Enforce duplicate prevention after retries", "type": "decision_point",
+      "content": "A timeout cannot tell the caller whether enqueue or database commit succeeded. Retry the same idempotency key, check the durable outcome first, and return the original voucher.",
+      "decision": {"question": "Where is duplicate-claim correctness enforced?", "chosen": "Durable unique campaign/principal and idempotency constraints", "chosenReason": "Queue redelivery, process restarts, and Redis loss cannot erase the committed result.", "alternatives": [{"option": "Disable the browser button", "tradeoff": "UX only; multiple devices and retries still race."}, {"option": "Short-lived Redis key only", "tradeoff": "Expiry or failover can forget a prior claim."}]},
+      "componentUpdate": {"nodeId": "claim_ledger", "properties": {"purpose": "Enforce unique campaign/principal and idempotency keys; on retry read and return the stored claim and voucher without decrementing stock again."}},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "burger_50_outage", "stepNumber": 50, "phase": "Make fairness and failure policy explicit",
+      "title": "Fail closed and recover in order", "type": "explanation",
+      "content": "If the database is unavailable, pause consumers and retain accepted work in the durable queue; never issue from Redis. If queue persistence is unavailable, stop acknowledging claims and return retryable errors with the same-key instruction. Bound retries, use backoff and a dead-letter path, replay in original sequence, and reconcile Redis from committed rows before resuming.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "burger_51_sold_out", "stepNumber": 51, "phase": "Make fairness and failure policy explicit",
+      "title": "Declare sold out from durable state", "type": "explanation",
+      "content": "A Redis zero is not final. Check durable remaining buckets and resolve earlier accepted work first. The final unit is claimed through the same conditional transaction; later ordered requests receive sold_out. A delayed cache refresh must never reopen inventory.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "burger_52_abuse_backpressure", "stepNumber": 52, "phase": "Make fairness and failure policy explicit",
+      "title": "Protect both availability and legitimate access", "type": "explanation",
+      "content": "Combine WAF rules, authenticated per-user limits, network/device risk signals, and step-up challenges; monitor false positives and avoid silent score-based queue reordering. Scale stateless intake and tested worker capacity from queue lag, but pause admission at a tested storage/age threshold rather than accepting work the system cannot retain.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "burger_53_scale", "stepNumber": 53, "phase": "Validate the one-hour campaign",
+      "title": "Scale against queue lag and remaining time", "type": "scale_trigger",
+      "content": "The average successful-claim rate is about 1,666.67 per second (100,000 per minute) only under the one-burger-per-voucher assumption; it is not the burst rate. Queue acceptance, retries, and peak arrival are unknown.",
+      "scaleTrigger": {"metric": "Queue oldest-message age, enqueue/commit rates, backlog, and time remaining in the campaign", "action": "Scale safe stateless intake and worker capacity; preserve ordered commits and apply admission backpressure if the measured ledger limit is reached.", "impact": "Makes the one-hour objective measurable without bypassing inventory correctness."},
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "burger_54_latency", "stepNumber": 54, "phase": "Validate the one-hour campaign",
+      "title": "Measure acceptance separately from voucher completion", "type": "explanation",
+      "content": "Submission latency ends at durable queue acknowledgement; queue wait, claim commit, and notification are separate. Agree an SLO and say whether it measures acceptance or voucher availability. The brief gives no numeric latency target, so do not invent one.",
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "burger_55_tests", "stepNumber": 55, "phase": "Validate the one-hour campaign",
+      "title": "Test the races that can break user trust", "type": "explanation",
+      "content": "Load-test the agreed burst shape, backlog recovery, same-account concurrent retries, Redis restart/failover, database conflicts, lost response after commit, notification redelivery, and a final-unit race. Verify the service remains healthy under the test load, committed vouchers never exceed 6 million, and every accepted request reaches one terminal state in the promised order.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "burger_56_tradeoff", "stepNumber": 56, "phase": "Validate the one-hour campaign",
+      "title": "Name the strict-FCFS scaling cost", "type": "explanation",
+      "content": "A single globally ordered stream gives a defensible FCFS rule but constrains parallel allocation at its commit point, which can pressure the low-latency claim goal during a burst. Partitioning may improve throughput but weakens global fairness unless a sequencer or deterministic merge preserves order. Benchmark against the agreed burst and latency target and choose explicitly; do not claim both without evidence.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "burger_57_recap", "stepNumber": 57, "phase": "Validate the one-hour campaign",
+      "title": "Recap the promise the architecture can prove", "type": "explanation",
+      "content": "The campaign target is 6 million burgers in one hour—1,666.67 burgers per second on average, not a peak request rate. That is also the average successful-claim rate only if one voucher redeems one burger. The brief also calls for an extreme millions-in-minutes spike, but supplies no arrival curve or numeric latency or availability SLO; agree those targets and load-test without promising an unmeasured capacity or uptime. Authenticated, rate-checked requests enter durable FCFS order; retries preserve identity; Redis provides atomic provisional gating; and a durable conditional transaction creates each voucher without overselling. Queued means pending, committed means claimed, and sold out comes from authoritative stock after earlier work resolves. Test abuse controls, low-latency behavior, inventory accuracy, and overload recovery against the agreed campaign profile.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

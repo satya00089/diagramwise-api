@@ -1,0 +1,583 @@
+{
+  "problem_id": "cloud_gcp_007",
+  "version": "1.0-review-draft",
+  "totalSteps": 40,
+  "phases": [
+    {
+      "name": "Frame the media workload",
+      "stepRange": [1, 4],
+      "description": "Separate the supplied daily video-volume and processing targets from workload details and media policies that still need owner decisions."
+    },
+    {
+      "name": "Accept and durably identify uploads",
+      "stepRange": [5, 12],
+      "description": "Keep large video bytes on a resumable direct-to-GCS path and derive processing work from durable object identity."
+    },
+    {
+      "name": "Orchestrate independent processing jobs",
+      "stepRange": [13, 20],
+      "description": "Use Cloud Functions for bounded event orchestration and separate custom processing from managed transcoding."
+    },
+    {
+      "name": "Track outputs and recover from failures",
+      "stepRange": [21, 28],
+      "description": "Persist job state, handle duplicate and delayed events safely, and keep retries from losing or duplicating media work."
+    },
+    {
+      "name": "Protect and deliver playback assets",
+      "stepRange": [29, 34],
+      "description": "Keep DRM and CDN policy choices visible while ensuring only approved playback objects reach delivery."
+    },
+    {
+      "name": "Measure targets and validate operations",
+      "stepRange": [35, 40],
+      "description": "Measure stage-level throughput, elapsed processing time, failures, and cost against the supplied targets without inventing thresholds."
+    }
+  ],
+  "steps": [
+    {
+      "id": "video_scope",
+      "stepNumber": 1,
+      "phase": "Frame the media workload",
+      "title": "Carry the exact video brief into the design",
+      "type": "explanation",
+      "content": "Problem: Design a Video Processing and Transcoding Pipeline. Description: Design a video transcoding and processing pipeline that uploads videos, transcodes to multiple formats, generates thumbnails, and delivers content via CDN. Functional requirements: Upload videos at scale; Transcode to multiple formats; Generate thumbnails; Extract metadata; Implement DRM protection; Optimize for adaptive streaming; Handle processing failures; Monitor transcoding jobs. Constraints: Process 1000+ hours of video daily; Transcoding time under 2x real-time; Support 4K and HDR content; Cost-effective processing; Handle large file uploads (100GB+). Hints: Cloud Storage for video storage; Transcoder API for encoding; Cloud Run for custom processing; Pub/Sub for event notifications; Cloud CDN for delivery; Cloud Functions for orchestration. Listed companies: Google, YouTube, Netflix. These are problem inputs and candidate services, not evidence that a design already meets the targets.",
+      "requirementIds": []
+    },
+    {
+      "id": "video_slo_questions",
+      "stepNumber": 2,
+      "phase": "Frame the media workload",
+      "title": "Clarify the daily workload shape before sizing",
+      "type": "decision_point",
+      "content": "The brief sets a workload floor of 1000+ source-video hours per day. It does not specify the arrival curve, number of output renditions, whether retries count toward the processing target, or a package-completion deadline. Treat that daily volume as a supplied workload target—not a measured throughput or latency result. Do not derive requests per second, jobs per second, worker concurrency, or an upload-to-playback latency SLO from it.",
+      "decision": {
+        "question": "What evidence should determine the initial processing capacity?",
+        "chosen": "Keep 1000+ hours/day as the stated workload floor and size from measured arrival distributions, source duration, output ladder, retry rate, and completion deadline agreed with the owner.",
+        "chosenReason": "Aggregate source duration alone does not reveal peak concurrency or total encoding work across multiple formats.",
+        "alternatives": [
+          {"option": "Assume uploads are uniform across the day", "tradeoff": "A bursty ingest pattern could create a large backlog even when the daily average appears sufficient."},
+          {"option": "Multiply video hours by a guessed number of output formats", "tradeoff": "The required format and rendition ladder is not specified and would produce unsupported capacity claims."}
+        ]
+      },
+      "requirementIds": ["legacy-constraint:1"]
+    },
+    {
+      "id": "video_realtime_definition",
+      "stepNumber": 3,
+      "phase": "Frame the media workload",
+      "title": "Define what under 2× real-time measures",
+      "type": "decision_point",
+      "content": "Treat “transcoding time under 2x real-time” as a supplied target, not a verified result; its measurement boundary still needs agreement. Ask whether it is per source asset, per rendition, or end-to-end package time, and whether queue wait, retries, thumbnail generation, and DRM packaging are included. Record media duration and wall-clock stage durations separately. This is not an API-response-latency target, and the brief supplies no numeric queue-wait or end-to-end latency SLO.",
+      "decision": {
+        "question": "Which elapsed-time metric should demonstrate the under-2× target?",
+        "chosen": "Have the product owner define the numerator, denominator, workload sample, and aggregation; expose queue wait and processing time separately until then.",
+        "chosenReason": "An ambiguous metric cannot support a trustworthy claim that the target is met.",
+        "alternatives": [
+          {"option": "Measure only encoder execution time", "tradeoff": "It may hide long queue waits or post-processing that users experience."},
+          {"option": "Measure upload-to-playback time without a defined denominator", "tradeoff": "That does not establish what “2x real-time” means for different source durations."}
+        ]
+      },
+      "requirementIds": ["legacy-constraint:2", "legacy-requirement:8"]
+    },
+    {
+      "id": "video_profile_questions",
+      "stepNumber": 4,
+      "phase": "Frame the media workload",
+      "title": "Leave codec, HDR, and adaptive-bitrate policy open",
+      "type": "decision_point",
+      "content": "The brief says “multiple formats” and separately requires 4K/HDR plus adaptive streaming, but it does not say whether “formats” means alternate containers/codecs, adaptive renditions, or both. Input containers/codecs, output video/audio codecs, HDR transfer functions and metadata handling, playback devices, resolution/bitrate ladder, and manifest/packaging protocol remain unspecified. Capture representative sources and target devices; have the media owner approve a compatibility matrix and validation tests before claiming support.",
+      "decision": {
+        "question": "What should be fixed before configuring the transcoder job template?",
+        "chosen": "Obtain the supported-input matrix, HDR preservation/tone-mapping behavior, playback targets, and adaptive rendition/packaging requirements from the owner.",
+        "chosenReason": "A 4K/HDR label alone does not define a technically compatible stream ladder or prove playback quality.",
+        "alternatives": [
+          {"option": "Choose a familiar codec and fixed rendition ladder now", "tradeoff": "It could fail device compatibility, bitrate, HDR, or product quality requirements."},
+          {"option": "Treat successful job submission as 4K/HDR support", "tradeoff": "The output still needs media validation and playback testing on the agreed targets."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "video_clients",
+      "stepNumber": 5,
+      "phase": "Accept and durably identify uploads",
+      "title": "Represent creator and playback clients",
+      "type": "add_component",
+      "content": "Show the upload client and playback client as the user boundary. Large source bytes should travel directly to object storage through a resumable upload session rather than being proxied through an application request body. Playback consumes only the approved adaptive package and thumbnail/metadata references.",
+      "component": {
+        "nodeId": "video_clients",
+        "componentType": "web-app",
+        "label": "Creator Upload & Playback Clients",
+        "description": "Client surfaces for resumable source upload and playback of approved media outputs.",
+        "position": {"x": 0, "y": 220},
+        "properties": {"componentName": "Creator Upload & Playback Clients", "purpose": "Request an upload session, send large source bytes directly to GCS with resumable transfer, show processing state, and play only approved adaptive outputs."},
+        "highlightReason": "Separating the client from the media data path avoids routing 100GB+ source files through the control API."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "video_upload_api",
+      "stepNumber": 6,
+      "phase": "Accept and durably identify uploads",
+      "title": "Add a small upload-session control API",
+      "type": "add_component",
+      "content": "Use an API boundary to validate upload metadata and create a resumable GCS upload session. Return a scoped session reference to the client; do not stream the video through this control path. Authentication method, tenant quotas, maximum source duration, and abuse/scanning policy are not supplied and remain owner decisions.",
+      "component": {
+        "nodeId": "video_upload_api",
+        "componentType": "api-gateway",
+        "label": "Upload Session API (GCP implementation TBD)",
+        "description": "Control-plane endpoint for validating upload intent and issuing a resumable storage session.",
+        "position": {"x": 340, "y": 220},
+        "properties": {"componentName": "Upload Session API (GCP implementation TBD)", "purpose": "Validate upload intent and metadata, create a resumable GCS upload session, and return a scoped session reference; keep large media bytes off the control API path.", "inputValidation": true},
+        "highlightReason": "The API handles small control requests while the client transfers large objects directly to GCS."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "video_raw_storage",
+      "stepNumber": 7,
+      "phase": "Accept and durably identify uploads",
+      "title": "Store original video objects in GCS",
+      "type": "add_component",
+      "content": "Use Google Cloud Storage for original media and retain a stable object generation in the upload record. Validate the completed upload and checksum before treating it as an accepted source. Lifecycle/retention duration, regional placement, encryption/key ownership, and deletion rules are not in the brief; do not assign values until owners decide them.",
+      "component": {
+        "nodeId": "video_raw_storage",
+        "componentType": "object-storage",
+        "label": "Google Cloud Storage: Source Videos",
+        "description": "Durable source-object boundary for large resumable uploads and reprocessing.",
+        "position": {"x": 700, "y": 220},
+        "properties": {"componentName": "Google Cloud Storage: Source Videos", "purpose": "Accept resumable source uploads directly from clients, validate object completion and checksum, and identify each immutable processing input by object generation.", "provider": "GCS", "versioning": true, "checksumValidation": true},
+        "highlightReason": "GCS is named in the brief and provides the object boundary needed for large uploads and repeatable processing."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "video_client_api_edge",
+      "stepNumber": 8,
+      "phase": "Accept and durably identify uploads",
+      "title": "Request a resumable upload session",
+      "type": "add_connection",
+      "content": "The client sends upload metadata and receives a scoped resumable-session reference. This edge carries control data, not the video file.",
+      "connection": {"edgeId": "video_client_api", "sourceNodeId": "video_clients", "targetNodeId": "video_upload_api", "connectionType": "sync-api", "label": "Upload intent + session request", "description": "Small control-plane request; authentication and quota rules remain to be selected."},
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "video_api_storage_edge",
+      "stepNumber": 9,
+      "phase": "Accept and durably identify uploads",
+      "title": "Send media bytes directly to GCS",
+      "type": "add_connection",
+      "content": "After session creation, the client uploads in resumable chunks to GCS and can recover from an interrupted transfer using the session state. Confirm supported client/network behavior with tests for very large files.",
+      "connection": {"edgeId": "video_api_storage", "sourceNodeId": "video_clients", "targetNodeId": "video_raw_storage", "connectionType": "data-flow", "label": "Resumable source video bytes", "description": "Direct client-to-GCS media path; the control API is not a large-file proxy."},
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "video_manifest_store",
+      "stepNumber": 10,
+      "phase": "Accept and durably identify uploads",
+      "title": "Persist asset and job state separately from media bytes",
+      "type": "add_component",
+      "content": "Keep an asset/job manifest with object name and generation, accepted source metadata, requested profile version, job/run identifiers, stage state, timestamps, output references, and error summary. Choose Firestore, Spanner, or another store only after consistency, query, tenancy, and write-contention requirements are known; the schema does not imply a retention duration.",
+      "component": {
+        "nodeId": "video_manifest_store",
+        "componentType": "database",
+        "label": "Asset & Transcoding Job Manifest",
+        "description": "Queryable control-plane state and references; not a store for video payloads.",
+        "position": {"x": 700, "y": 500},
+        "properties": {"componentName": "Asset & Transcoding Job Manifest", "purpose": "Track source object generation, profile version, idempotent job identity, per-stage status, timestamps, output references, and failure details; select the GCP datastore after access-pattern and consistency review.", "type": "NoSQL"},
+        "highlightReason": "A durable manifest supports progress, retries, job monitoring, and recovery without copying video bytes into a database."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "video_pubsub",
+      "stepNumber": 11,
+      "phase": "Accept and durably identify uploads",
+      "title": "Add Pub/Sub for object and processing events",
+      "type": "add_component",
+      "content": "Use the existing Pub/Sub boundary as the asynchronous queue for validated source-ready work and stage-completion/failure events. A subscription invokes the bounded orchestrator; the orchestrator claims the manifest job before submitting custom or Transcoder API work. Keep object generation, event ID, profile version, and job identity in messages—not raw media or unnecessary personal data. Design for redelivery and out-of-order events; the manifest is canonical job state, not an exactly-once guarantee. Separate topics/subscriptions are an optional isolation choice if stages need independent backlogs, not a fact supplied by the brief.",
+      "component": {
+        "nodeId": "video_events",
+        "componentType": "pubsub",
+        "label": "Google Cloud Pub/Sub: Media Events",
+        "description": "Event boundary for source acceptance and processing-stage outcomes.",
+        "position": {"x": 1040, "y": 500},
+        "properties": {"componentName": "Google Cloud Pub/Sub: Media Events", "purpose": "Carry compact source-generation and job-stage events with stable event/job IDs; consumers deduplicate redelivery and validate current manifest state.", "fanout": true, "durable": true},
+        "highlightReason": "Pub/Sub is named in the brief and separates upload arrival from asynchronous encoding and processing."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "video_object_event",
+      "stepNumber": 12,
+      "phase": "Accept and durably identify uploads",
+      "title": "Publish a source-ready event after object finalization",
+      "type": "add_connection",
+      "content": "Only emit work after the object is finalized and validated. Include the exact object generation so a later overwrite cannot silently change the bytes being processed.",
+      "connection": {"edgeId": "video_object_event", "sourceNodeId": "video_raw_storage", "targetNodeId": "video_events", "connectionType": "async-event", "label": "Validated object generation", "description": "Compact reference and event identity; never enqueue the 100GB+ payload itself."},
+      "requirementIds": ["legacy-requirement:1"]
+    },
+    {
+      "id": "video_functions",
+      "stepNumber": 13,
+      "phase": "Orchestrate independent processing jobs",
+      "title": "Use Cloud Functions for bounded orchestration",
+      "type": "add_component",
+      "content": "Use Cloud Functions to validate events, create or resume an idempotent job, update manifest state, and submit work to the selected processing services. Keep orchestration bounded: do not run long media jobs or move object bytes through a function invocation. Configure retry behavior only after distinguishing transient errors from permanent invalid inputs.",
+      "component": {
+        "nodeId": "video_orchestrator",
+        "componentType": "serverless-function",
+        "label": "Google Cloud Functions: Job Orchestrator",
+        "description": "Bounded event handler for job creation, state transitions, and work submission.",
+        "position": {"x": 1380, "y": 500},
+        "properties": {"componentName": "Google Cloud Functions: Job Orchestrator", "purpose": "Validate event identity, create or resume an idempotent manifest job, submit bounded work to Transcoder API and Cloud Run, and record stage transitions without carrying video payloads."},
+        "highlightReason": "Cloud Functions is a supplied hint for orchestration, while long-running work remains in processing services."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "video_events_function_edge",
+      "stepNumber": 14,
+      "phase": "Orchestrate independent processing jobs",
+      "title": "Trigger orchestration from Pub/Sub events",
+      "type": "add_connection",
+      "content": "Treat Pub/Sub delivery as queued work, not a synchronous upload response. The subscription handler verifies source generation, profile version, and stable job identity, then claims or resumes the manifest record before submitting a stage. Duplicate deliveries consult that state rather than blindly starting another encode. Persist accepted submission/job references and reconcile uncertain submissions or delayed callbacks; do not assume exactly-once delivery.",
+      "connection": {"edgeId": "video_events_function", "sourceNodeId": "video_events", "targetNodeId": "video_orchestrator", "connectionType": "async-event", "label": "Queued source-ready / stage-result delivery", "description": "The subscription handler verifies object generation and job identity, claims or resumes manifest state, and dispatches only eligible work."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "video_cloud_run",
+      "stepNumber": 15,
+      "phase": "Orchestrate independent processing jobs",
+      "title": "Add Cloud Run for custom media processing",
+      "type": "add_component",
+      "content": "Use Cloud Run for custom bounded processing such as input validation, metadata extraction, thumbnail coordination, or post-transcode checks that are not expressed by the selected transcoder template. Pass GCS references, make tasks retry-safe, and validate memory, runtime, and concurrency against representative 4K/HDR samples; no sizing is implied here.",
+      "component": {
+        "nodeId": "video_custom_worker",
+        "componentType": "processing-worker",
+        "label": "Google Cloud Run: Metadata & Thumbnail Worker",
+        "description": "Custom media tasks that complement managed encoding and operate on object references.",
+        "position": {"x": 1720, "y": 220},
+        "properties": {"componentName": "Google Cloud Run: Metadata & Thumbnail Worker", "purpose": "Run custom validation, metadata extraction, thumbnail generation/coordination, and output checks using GCS object references; profile resource limits and retry safety with representative media.", "tasks": "Data Processing", "autoscale": true},
+        "highlightReason": "Cloud Run is explicitly suggested for custom processing; the worker does not replace managed transcoding."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:3"]
+    },
+    {
+      "id": "video_submit_custom_edge",
+      "stepNumber": 16,
+      "phase": "Orchestrate independent processing jobs",
+      "title": "Submit custom processing as a reference-based task",
+      "type": "add_connection",
+      "content": "The orchestrator submits the source generation and job/profile identity to Cloud Run. The worker reads the source from GCS and writes derived metadata or thumbnail objects to the output boundary.",
+      "connection": {"edgeId": "video_submit_custom", "sourceNodeId": "video_orchestrator", "targetNodeId": "video_custom_worker", "connectionType": "async-job", "label": "Custom processing job reference", "description": "Pass object and job references, not source bytes; retries reuse the same stable job identity."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7"]
+    },
+    {
+      "id": "video_transcoder",
+      "stepNumber": 17,
+      "phase": "Orchestrate independent processing jobs",
+      "title": "Use the GCP Transcoder API for encoding",
+      "type": "add_component",
+      "content": "Submit a versioned Transcoder API job for the owner-approved output profile, with source generation and destination GCS references. Make requested containers/codecs and adaptive renditions explicit in that profile; validate the complete output set, adaptive manifest, and required 4K/HDR behavior against representative inputs and playback devices. A successful submission is not proof that multiple formats encoded or playback works. Do not claim codec, rendition, packaging, or DRM support until the selected template is tested.",
+      "component": {
+        "nodeId": "video_transcoder",
+        "componentType": "processing-worker",
+        "label": "Google Cloud Transcoder API",
+        "description": "Managed media-encoding job boundary using an owner-approved, versioned output profile.",
+        "position": {"x": 1720, "y": 500},
+        "properties": {"componentName": "Google Cloud Transcoder API", "purpose": "Encode source object generations into the approved multi-format adaptive profile; validate actual 4K/HDR input and output behavior, completion time, and destination layout before asserting support.", "tasks": "Media Encoding", "autoscale": true},
+        "highlightReason": "The GCP Transcoder API is the supplied encoding hint and keeps media encoding separate from custom orchestration."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "video_submit_transcode_edge",
+      "stepNumber": 18,
+      "phase": "Orchestrate independent processing jobs",
+      "title": "Submit managed encoding with a profile version",
+      "type": "add_connection",
+      "content": "Translate queued work into a Transcoder API request containing source generation, approved profile version, stable job identity, and destination prefix. Persist the returned service-job reference before treating dispatch as complete, then use it to correlate callbacks and reconciliation with the same manifest record. The brief gives no queue-drain rate, job-submission throughput, or numeric dispatch-latency target.",
+      "connection": {"edgeId": "video_submit_transcode", "sourceNodeId": "video_orchestrator", "targetNodeId": "video_transcoder", "connectionType": "async-job", "label": "Transcoder job + profile version", "description": "The queued profile-versioned request is associated with the source generation and durable manifest job."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:7"]
+    },
+    {
+      "id": "video_record_job_edge",
+      "stepNumber": 19,
+      "phase": "Orchestrate independent processing jobs",
+      "title": "Record job transitions in the manifest",
+      "type": "add_connection",
+      "content": "Write accepted, submitted, running, succeeded, and failed stage transitions with event/job identity and timestamps. Define conditional transition semantics after datastore choice so duplicate notifications cannot move a terminal job backward.",
+      "connection": {"edgeId": "video_record_job", "sourceNodeId": "video_orchestrator", "targetNodeId": "video_manifest_store", "connectionType": "data-flow", "label": "Idempotent stage state + service job IDs", "description": "Durable control state and object references only; no video payloads or assumed retention window."},
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "video_output_storage",
+      "stepNumber": 20,
+      "phase": "Orchestrate independent processing jobs",
+      "title": "Store derived metadata, thumbnails, and approved renditions",
+      "type": "add_component",
+      "content": "Use a GCS output boundary for derived metadata, thumbnails, and approved playback objects. Separate prefixes or access boundaries by asset and stage, and publish an output manifest only after required stages finish. Confirm lifecycle, source/output retention, regionality, and deletion policy with the owner rather than choosing durations here.",
+      "component": {
+        "nodeId": "video_output_storage",
+        "componentType": "object-storage",
+        "label": "Google Cloud Storage: Derived Media",
+        "description": "GCS destination for metadata, thumbnails, and approved encoded/package objects.",
+        "position": {"x": 2080, "y": 360},
+        "properties": {"componentName": "Google Cloud Storage: Derived Media", "purpose": "Store stage outputs and approved playback objects with stable asset/profile references; apply access and lifecycle policies only after ownership and retention decisions.", "provider": "GCS", "versioning": true, "checksumValidation": true},
+        "highlightReason": "Derived artifacts remain durable and addressable independently of worker lifetimes."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6"]
+    },
+    {
+      "id": "video_custom_output_edge",
+      "stepNumber": 21,
+      "phase": "Track outputs and recover from failures",
+      "title": "Write metadata and thumbnails as derived objects",
+      "type": "add_connection",
+      "content": "Cloud Run writes derived metadata and thumbnail references into GCS. Make writes deterministic for a source generation and profile so a retry can safely verify or replace an incomplete stage output.",
+      "connection": {"edgeId": "video_custom_output", "sourceNodeId": "video_custom_worker", "targetNodeId": "video_output_storage", "connectionType": "data-flow", "label": "Metadata + thumbnail objects", "description": "Derived outputs are tied to the source generation and processing profile."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7"]
+    },
+    {
+      "id": "video_transcode_output_edge",
+      "stepNumber": 22,
+      "phase": "Track outputs and recover from failures",
+      "title": "Write encoded renditions to the approved destination",
+      "type": "add_connection",
+      "content": "The transcoder writes encoded outputs under the job's destination reference. Validate that the expected rendition set is complete before marking the encode stage successful or exposing outputs to playback.",
+      "connection": {"edgeId": "video_transcode_output", "sourceNodeId": "video_transcoder", "targetNodeId": "video_output_storage", "connectionType": "data-flow", "label": "Encoded renditions + job result", "description": "The output manifest is committed only after expected artifacts and validation evidence are present."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:7"]
+    },
+    {
+      "id": "video_custom_completion_edge",
+      "stepNumber": 23,
+      "phase": "Track outputs and recover from failures",
+      "title": "Publish custom-worker completion events",
+      "type": "add_connection",
+      "content": "Publish stage result events with stable event ID, job ID, source generation, output references, and a bounded error classification. Avoid placing signed URLs or sensitive source metadata into broadly consumed messages.",
+      "connection": {"edgeId": "video_custom_completion", "sourceNodeId": "video_custom_worker", "targetNodeId": "video_events", "connectionType": "async-event", "label": "Metadata/thumbnail stage result", "description": "Event consumers deduplicate and reconcile against durable manifest state."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7"]
+    },
+    {
+      "id": "video_transcode_completion_edge",
+      "stepNumber": 24,
+      "phase": "Track outputs and recover from failures",
+      "title": "Publish or reconcile transcoder job outcomes",
+      "type": "add_connection",
+      "content": "Use the configured service completion notification path and a reconciler for missed or delayed callbacks. A job is not complete merely because submission succeeded; verify terminal service state and expected outputs.",
+      "connection": {"edgeId": "video_transcode_completion", "sourceNodeId": "video_transcoder", "targetNodeId": "video_events", "connectionType": "async-event", "label": "Encoding completion / failure reference", "description": "Use the supported notification integration and reconciliation path selected during GCP service configuration."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "video_completion_handler_edge",
+      "stepNumber": 25,
+      "phase": "Track outputs and recover from failures",
+      "title": "Feed stage outcomes back through orchestration",
+      "type": "add_connection",
+      "content": "The same orchestrator validates each result against the current job state, updates the manifest, and schedules the next stage only when its prerequisites are satisfied. Treat duplicate, delayed, and out-of-order callbacks as normal distributed-system cases.",
+      "connection": {"edgeId": "video_completion_handler", "sourceNodeId": "video_events", "targetNodeId": "video_orchestrator", "connectionType": "async-event", "label": "Stage outcome for state transition", "description": "Compare event identity and source generation before applying a conditional manifest transition."},
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "video_retry_decision",
+      "stepNumber": 26,
+      "phase": "Track outputs and recover from failures",
+      "title": "Separate transient failures from permanent media errors",
+      "type": "decision_point",
+      "content": "Retry transient service or infrastructure failures with bounded, owner-approved policy and the same job identity. Quarantine or mark permanent input/profile failures for review instead of retrying indefinitely. Define retry limits, backoff, dead-letter handling, operator replay, and partial-output cleanup with service owners; none are specified by the brief.",
+      "decision": {
+        "question": "How should a failed media stage be resumed?",
+        "chosen": "Classify the stage result, preserve source and manifest evidence, and retry only transient failures with an idempotent stage key; require an explicit recovery path for permanent failures.",
+        "chosenReason": "Blind retries can consume expensive encoding capacity or expose partial outputs without making progress.",
+        "alternatives": [
+          {"option": "Retry every failure forever", "tradeoff": "Invalid media or unsupported profiles can create a poison-job loop and runaway cost."},
+          {"option": "Delete source and job state after a failure", "tradeoff": "It removes the evidence and input needed for safe diagnosis or reprocessing."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:7"]
+    },
+    {
+      "id": "video_failure_state_edge",
+      "stepNumber": 27,
+      "phase": "Track outputs and recover from failures",
+      "title": "Persist failure and recovery state",
+      "type": "add_connection",
+      "content": "Record the failed stage, service job reference, retryability classification, attempt identity, and operator-facing diagnostic without losing the original source reference. Do not mark the asset ready while required stages remain failed or incomplete.",
+      "connection": {"edgeId": "video_failure_state", "sourceNodeId": "video_orchestrator", "targetNodeId": "video_manifest_store", "connectionType": "data-flow", "label": "Failure classification + recovery state", "description": "Durable stage state supports job monitoring, controlled replay, and safe suppression of incomplete outputs."},
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "video_publish_decision",
+      "stepNumber": 28,
+      "phase": "Track outputs and recover from failures",
+      "title": "Gate publication on a complete validated output set",
+      "type": "decision_point",
+      "content": "Define which stages are required for an asset to become playable: encoding profile, required renditions, thumbnails, metadata, and DRM packaging if policy requires it. Store a versioned output manifest and publish only after those checks pass; the owner must decide whether any outputs are optional.",
+      "decision": {
+        "question": "When may a processed video become discoverable and playable?",
+        "chosen": "Publish atomically from a validated, versioned output manifest after every owner-designated required stage has succeeded.",
+        "chosenReason": "A single readiness decision prevents clients from seeing partial or mismatched renditions during retries.",
+        "alternatives": [
+          {"option": "Expose each rendition as soon as it appears", "tradeoff": "Clients can observe an incomplete adaptive set or unprotected intermediate output."},
+          {"option": "Treat every sidecar as mandatory without owner review", "tradeoff": "It may block playback on an output the product considers optional."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6"]
+    },
+    {
+      "id": "video_drm_boundary",
+      "stepNumber": 29,
+      "phase": "Protect and deliver playback assets",
+      "title": "Represent DRM as an explicit integration boundary",
+      "type": "add_component",
+      "content": "The catalog has no GCP-specific DRM packaging/license component, so use a clearly labeled custom boundary rather than pretending a generic service choice is already made. The media/security owner must select DRM systems, packaging/encryption modes, license provider, key custody/rotation, entitlement checks, device support, and failure behavior. This draft asserts none of those details.",
+      "component": {
+        "nodeId": "video_drm",
+        "componentType": "custom-component",
+        "label": "DRM Packaging & License Integration (TBD)",
+        "description": "Unselected provider/policy boundary for protected packaging and playback licenses.",
+        "position": {"x": 2440, "y": 220},
+        "properties": {"componentName": "DRM Packaging & License Integration (TBD)", "purpose": "Apply only the owner-approved DRM packaging and license flow; keep encryption/key/entitlement policy unresolved until the media and security owners decide it.", "componentType": "DRM packaging and license integration (catalog gap)", "technology": "Provider and policy TBD", "notes": "No DRM scheme, vendor, key policy, license SLA, or device matrix is assumed."},
+        "highlightReason": "DRM is required by the brief, but no compatible GCP-specific DRM component or policy appears in the catalog or problem statement."
+      },
+      "requirementIds": ["legacy-requirement:5"]
+    },
+    {
+      "id": "video_transcoder_drm_edge",
+      "stepNumber": 30,
+      "phase": "Protect and deliver playback assets",
+      "title": "Protect encoded outputs before they are published",
+      "type": "add_connection",
+      "content": "Route encoded renditions through the selected DRM packaging integration when policy requires protected playback. Verify packaging, license acquisition, and device playback end to end before marking the package ready.",
+      "connection": {"edgeId": "video_transcoder_drm", "sourceNodeId": "video_transcoder", "targetNodeId": "video_drm", "connectionType": "data-flow", "label": "Encoded profile for approved DRM packaging", "description": "Exact encryption mode and packaging behavior remain dependent on owner-selected DRM requirements."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6"]
+    },
+    {
+      "id": "video_cdn_boundary",
+      "stepNumber": 31,
+      "phase": "Protect and deliver playback assets",
+      "title": "Add Google Cloud CDN from the existing CDN catalog",
+      "type": "add_component",
+      "content": "Use the existing CDN component with its Google Cloud CDN provider option. Define origin access, cacheability, invalidation, signed delivery/entitlement behavior, and cache policy with the owner before release; the provider choice does not make those policies preconfigured.",
+      "component": {
+        "nodeId": "video_cdn",
+        "componentType": "cdn",
+        "label": "Google Cloud CDN",
+        "description": "GCP delivery edge for approved media objects; access and caching policy remain to be configured.",
+        "position": {"x": 2800, "y": 220},
+        "properties": {"componentName": "Google Cloud CDN", "purpose": "Deliver only approved output objects from the selected GCS origin; set cache, invalidation, origin access, and entitlement behavior after owner review.", "provider": "Google Cloud CDN"},
+        "highlightReason": "The existing CDN component now exposes the exact GCP provider, preserving its editable cache and delivery properties."
+      },
+      "requirementIds": ["legacy-requirement:6"]
+    },
+    {
+      "id": "video_drm_output_edge",
+      "stepNumber": 32,
+      "phase": "Protect and deliver playback assets",
+      "title": "Persist protected, approved playback objects",
+      "type": "add_connection",
+      "content": "Write protected package artifacts to the derived-media destination and update the output manifest only after validation. Keep intermediate or unapproved objects inaccessible to playback paths; concrete bucket policy and retention remain owner decisions.",
+      "connection": {"edgeId": "video_drm_output", "sourceNodeId": "video_drm", "targetNodeId": "video_output_storage", "connectionType": "data-flow", "label": "Validated protected playback package", "description": "Only the owner-approved package is referenced by the ready manifest; policy details are not invented here."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6"]
+    },
+    {
+      "id": "video_cdn_origin_edge",
+      "stepNumber": 33,
+      "phase": "Protect and deliver playback assets",
+      "title": "Serve approved objects through the CDN",
+      "type": "add_connection",
+      "content": "Configure Cloud CDN against the selected output origin and expose only objects referenced by a ready manifest. Validate cache keys and authorization behavior for protected content before relying on edge caching.",
+      "connection": {"edgeId": "video_cdn_origin", "sourceNodeId": "video_output_storage", "targetNodeId": "video_cdn", "connectionType": "data-flow", "label": "Approved GCS playback origin", "description": "Origin access and cache policy must not expose intermediate or unauthorized media."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6"]
+    },
+    {
+      "id": "video_playback_edge",
+      "stepNumber": 34,
+      "phase": "Protect and deliver playback assets",
+      "title": "Deliver adaptive media and license requests to clients",
+      "type": "add_connection",
+      "content": "Clients fetch the selected adaptive package through Cloud CDN and obtain licenses through the owner-approved DRM flow. The playback protocol, license endpoint contract, token/session policy, and device matrix must be specified and tested; do not infer them from the word DRM.",
+      "connection": {"edgeId": "video_playback_delivery", "sourceNodeId": "video_cdn", "targetNodeId": "video_clients", "connectionType": "data-flow", "label": "Adaptive playback objects", "description": "Playback is available only for a ready output manifest and selected access policy."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6"]
+    },
+    {
+      "id": "video_monitoring_boundary",
+      "stepNumber": 35,
+      "phase": "Measure targets and validate operations",
+      "title": "Add Google Cloud Monitoring from the existing catalog",
+      "type": "add_component",
+      "content": "Use the existing Monitoring component with Google Cloud Monitoring selected. Instrument job lifecycle, stage durations, backlog, and completed source-video hours; finalize alert thresholds and telemetry retention with operators. Avoid treating submission count as successful processing throughput. The numeric cost target is unspecified and remains an owner decision.",
+      "component": {
+        "nodeId": "video_monitoring",
+        "componentType": "monitoring",
+        "label": "Google Cloud Monitoring",
+        "description": "Observability boundary for ingest, job stages, target attainment, failures, and cost signals.",
+        "position": {"x": 2080, "y": 700},
+        "properties": {"componentName": "Google Cloud Monitoring", "purpose": "Collect stage-level job, duration, backlog, failure, output-validation, and cost telemetry; tune alert conditions and retention with the service owner.", "stack": "Google Cloud Monitoring"},
+        "highlightReason": "The existing Monitoring component exposes Google Cloud Monitoring as a selectable stack."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "video_monitoring_workers_edge",
+      "stepNumber": 36,
+      "phase": "Measure targets and validate operations",
+      "title": "Measure each asynchronous processing stage",
+      "type": "add_connection",
+      "content": "Emit metrics and structured job events from orchestration, custom processing, and transcoder submissions/completions. Correlate signals by asset/job/profile identifiers while keeping sensitive media data out of logs.",
+      "connection": {"edgeId": "video_workers_monitoring", "sourceNodeId": "video_orchestrator", "targetNodeId": "video_monitoring", "connectionType": "telemetry", "label": "Stage lifecycle + job outcome metrics", "description": "Correlate accepted, queued, running, succeeded, failed, and retried stages without logging media payloads."},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "video_worker_monitoring_edge",
+      "stepNumber": 37,
+      "phase": "Measure targets and validate operations",
+      "title": "Observe worker saturation and output validity",
+      "type": "add_connection",
+      "content": "Record Cloud Run resource saturation, task outcomes, thumbnail/metadata validation, and Transcoder API job duration/state. Dimensions should permit stage and profile comparisons without high-cardinality raw object paths.",
+      "connection": {"edgeId": "video_processors_monitoring", "sourceNodeId": "video_custom_worker", "targetNodeId": "video_monitoring", "connectionType": "telemetry", "label": "Custom-processing health + validation", "description": "Measure worker saturation and stage outcomes separately from managed encoding."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "video_transcoder_monitoring_edge",
+      "stepNumber": 38,
+      "phase": "Measure targets and validate operations",
+      "title": "Track the under-2× target with owner-defined math",
+      "type": "add_connection",
+      "content": "Measure source duration, queue wait, encoder elapsed time, post-processing time, retries, and end-to-end readiness. Once owners define the target boundary, compute its ratio on representative source classes and report sample size and percentiles; this walkthrough assigns no threshold beyond the supplied under-2× goal.",
+      "connection": {"edgeId": "video_transcoder_monitoring", "sourceNodeId": "video_transcoder", "targetNodeId": "video_monitoring", "connectionType": "telemetry", "label": "Encoding elapsed time + source duration", "description": "Metric definition and aggregation must be agreed before claiming the under-2× real-time target."},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "video_capacity_trigger",
+      "stepNumber": 39,
+      "phase": "Measure targets and validate operations",
+      "title": "Scale from backlog and measured processing capacity",
+      "type": "scale_trigger",
+      "content": "Use the age and volume of queued video work, active processing duration, stage-specific saturation, and completion ratio as capacity signals. Determine thresholds from the agreed completion objective and representative benchmarks; do not set a numeric queue-age target from the brief alone.",
+      "scaleTrigger": {"metric": "Queued source-video duration and oldest job age, segmented by processing stage", "action": "Adjust eligible processing capacity or admission policy after load tests establish safe service quotas and cost behavior.", "impact": "Targets burst backlogs while preserving the supplied 1000+ source-hours/day and under-2× objectives without guessing a fixed concurrency."},
+      "componentUpdate": {"nodeId": "video_transcoder", "properties": {"autoscale": true}},
+      "requirementIds": ["legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "video_cost_decision",
+      "stepNumber": 40,
+      "phase": "Measure targets and validate operations",
+      "title": "Validate cost together with successful media throughput",
+      "type": "decision_point",
+      "content": "Benchmark representative duration, resolution, HDR, codec, and output-profile classes. Compare cost per successfully validated source hour and rendition set, including failed/retried jobs, storage, delivery, and DRM integration. The brief gives no budget, region, retention, or egress assumptions, so the cost target needs an owner-defined acceptance bound.",
+      "decision": {
+        "question": "How should cost-effectiveness be accepted without a supplied budget?",
+        "chosen": "Establish an owner-approved cost unit and budget bound, then benchmark successful complete packages by media class including retries and delivery/storage effects.",
+        "chosenReason": "A cost per submitted job hides failed work and can compare unlike media profiles incorrectly.",
+        "alternatives": [
+          {"option": "Optimize only the Transcoder API line item", "tradeoff": "It omits custom processing, storage, CDN egress, DRM, and retry costs."},
+          {"option": "Choose a target cost without product input", "tradeoff": "It invents a business constraint absent from the brief."}
+        ]
+      },
+      "requirementIds": ["legacy-constraint:4"]
+    }
+  ]
+}

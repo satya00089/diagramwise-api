@@ -1,0 +1,906 @@
+{
+  "problem_id": "6901ef1b9420d83630aca86f",
+  "version": "1.0.0-review-draft",
+  "requirementRevision": null,
+  "totalSteps": 45,
+  "phases": [
+    {
+      "name": "Establish the request path and abuse boundary",
+      "stepRange": [1, 12],
+      "description": "Route browser and mobile sign-in through shared edge controls, a distributed limiter, and the authentication service."
+    },
+    {
+      "name": "Place identity and security stores",
+      "stepRange": [13, 18],
+      "description": "Separate account credentials, server-side session state, recovery delivery, key management, security audit events, and operational metrics."
+    },
+    {
+      "name": "Connect identity, recovery, and audit flows",
+      "stepRange": [19, 32],
+      "description": "Make every dependency explicit, keep security events out of the authentication response path, and observe health without collecting secrets."
+    },
+    {
+      "name": "Harden credentials, recovery, and federation",
+      "stepRange": [33, 43],
+      "description": "Specify password verifiers, revocable sessions, MFA recovery, and the OAuth callback trust checks; document privacy controls as design work, not a compliance claim."
+    },
+    {
+      "name": "Scale from measured behavior and review open policies",
+      "stepRange": [44, 45],
+      "description": "Plan capacity for the stated user scale using measured traffic and latency, then confirm policies that the brief leaves open."
+    }
+  ],
+  "steps": [
+    {
+      "id": "auth_01_brief",
+      "stepNumber": 1,
+      "phase": "Establish the request path and abuse boundary",
+      "type": "explanation",
+      "title": "Keep the frozen brief and open policies visible",
+      "content": "The frozen problem asks for registration and login, secure password storage, session management, MFA, password reset, OAuth/social login, login-attempt rate limiting, and support for millions of users. Its constraints are secure password storage, brute-force resistance, session-hijacking prevention, GDPR and privacy compliance, and low authentication latency. Treat the hints as design prompts, not extra requirements. The brief does not choose MFA enrollment policy, account identifier normalization, regional residency, retention periods, latency objectives, or numeric rate thresholds. This review draft proposes privacy controls for later legal and product review; it does not claim GDPR compliance.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "auth_02_web_client",
+      "stepNumber": 2,
+      "phase": "Establish the request path and abuse boundary",
+      "type": "add_component",
+      "title": "Add the web client",
+      "content": "The web client collects credentials and MFA responses only for submission over TLS. Keep session bearer material in a Secure, HttpOnly cookie with an explicit SameSite policy; do not put credentials, recovery tokens, or provider tokens in browser storage or URLs.",
+      "component": {
+        "nodeId": "auth_web_client",
+        "componentType": "web-app",
+        "label": "Web Client",
+        "description": "Browser registration and authentication flows",
+        "position": {"x": 0, "y": 180},
+        "properties": {
+          "componentName": "Web Client",
+          "purpose": "Submit registration, login, MFA, reset, and OAuth-start requests over TLS; protect cookie-based sessions with CSRF defenses and never persist passwords, session tokens, or recovery secrets in browser storage."
+        },
+        "highlightReason": "A browser client makes the cookie, CSRF, and credential-handling boundary explicit."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "auth_03_mobile_client",
+      "stepNumber": 3,
+      "phase": "Establish the request path and abuse boundary",
+      "type": "add_component",
+      "title": "Add the mobile client",
+      "content": "The mobile client uses the same authentication contract and MFA policy. Keep refresh and session credentials in the platform secure credential store, send them only over TLS, and clear local credentials after logout or a server-directed revocation.",
+      "component": {
+        "nodeId": "auth_mobile_client",
+        "componentType": "mobile-app",
+        "label": "Mobile Client",
+        "description": "Mobile registration and authentication flows",
+        "position": {"x": 0, "y": 500},
+        "properties": {
+          "componentName": "Mobile Client",
+          "purpose": "Submit registration, login, MFA, reset, and OAuth-start requests over TLS; keep session credentials in the platform secure credential store and clear them when the server revokes the session."
+        },
+        "highlightReason": "Mobile secure storage and the same server-side session lifecycle are part of the client trust boundary."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:3"]
+    },
+    {
+      "id": "auth_04_load_balancer",
+      "stepNumber": 4,
+      "phase": "Establish the request path and abuse boundary",
+      "type": "add_component",
+      "title": "Distribute requests across healthy authentication instances",
+      "content": "Use a layer-seven load balancer to route both clients to healthy gateway instances. Terminate public TLS only at a controlled boundary and protect every internal hop with authenticated encryption; avoid session affinity so application instances can scale and fail over independently.",
+      "component": {
+        "nodeId": "auth_load_balancer",
+        "componentType": "loadbalancer",
+        "label": "Authentication Load Balancer",
+        "description": "TLS edge and healthy request distribution",
+        "position": {"x": 280, "y": 340},
+        "properties": {
+          "componentName": "Authentication Load Balancer",
+          "purpose": "Route web and mobile authentication traffic to healthy gateway instances, protect the public TLS boundary, and avoid affinity to any one stateless application instance.",
+          "type": "Layer 7 (Application)",
+          "sslTermination": true,
+          "stickiness": false,
+          "healthCheck": true,
+          "multiAZ": true
+        },
+        "highlightReason": "The shared entry point supports availability and horizontal scaling without binding a user session to one host."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "auth_05_gateway",
+      "stepNumber": 5,
+      "phase": "Establish the request path and abuse boundary",
+      "type": "add_component",
+      "title": "Validate and route authentication requests",
+      "content": "The gateway validates request shape, enforces transport and origin policy, applies coarse abuse controls, and routes to the authentication service. It must not log passwords, cookies, MFA values, OAuth codes, or reset links. Keep detailed per-IP and per-account decisions in the dedicated distributed limiter.",
+      "component": {
+        "nodeId": "auth_api_gateway",
+        "componentType": "api-gateway",
+        "label": "Authentication API Gateway",
+        "description": "Validated entry point for identity operations",
+        "position": {"x": 560, "y": 340},
+        "properties": {
+          "componentName": "Authentication API Gateway",
+          "purpose": "Validate request shape and origin, route authentication APIs, enforce transport policy, and redact credentials and bearer material from access logs.",
+          "inputValidation": true,
+          "rateLimiting": true
+        },
+        "highlightReason": "The gateway is the common enforcement point before login, registration, and recovery reach identity state."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "auth_06_rate_limiter",
+      "stepNumber": 6,
+      "phase": "Establish the request path and abuse boundary",
+      "type": "add_component",
+      "title": "Limit abusive login and recovery attempts",
+      "content": "Apply distributed sliding-window controls using both source IP and a normalized account identifier, with separate treatment for login, MFA, registration, and reset endpoints. Use progressive friction and generic responses to resist brute force without creating a permanent account-lockout denial of service or an account-enumeration oracle. The brief supplies no numeric thresholds; derive and review them from abuse and capacity evidence.",
+      "component": {
+        "nodeId": "auth_rate_limiter",
+        "componentType": "rate-limiter",
+        "label": "Authentication Rate Limiter",
+        "description": "Distributed per-IP and per-account abuse controls",
+        "position": {"x": 830, "y": 340},
+        "properties": {
+          "componentName": "Authentication Rate Limiter",
+          "purpose": "Share per-IP and normalized-account counters across instances for login, MFA, registration, and reset; apply reviewed progressive friction without exposing whether an account exists or permanently locking it after attacker-controlled failures.",
+          "algorithm": "Sliding Window",
+          "distributed": true,
+          "backend": "Redis"
+        },
+        "highlightReason": "A shared limiter protects all authentication instances and applies the brief's per-IP/user hint without inventing a numeric limit."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:2"]
+    },
+    {
+      "id": "auth_07_auth_service",
+      "stepNumber": 7,
+      "phase": "Establish the request path and abuse boundary",
+      "type": "add_component",
+      "title": "Centralize identity and session decisions",
+      "content": "Keep registration, password verification, MFA challenge and recovery, password reset, OAuth exchange, and session issuance in one authentication service boundary. Require MFA according to the product's enrollment and access policy; this draft enables the catalog's MFA capability and does not define a risk policy the brief omits.",
+      "component": {
+        "nodeId": "auth_service",
+        "componentType": "auth-service",
+        "label": "Identity and Authentication Service",
+        "description": "Credential, MFA, federation, and session orchestration",
+        "position": {"x": 1090, "y": 340},
+        "properties": {
+          "componentName": "Identity and Authentication Service",
+          "purpose": "Orchestrate verified registration, password checks, MFA and recovery, OAuth/OIDC callbacks, password reset, and server-side session issue and revocation; keep instances stateless and never log credential or bearer values.",
+          "oauth": true,
+          "sessions": "redis",
+          "mfa": true
+        },
+        "highlightReason": "The catalog's Auth Service directly represents the system's core identity and session boundary."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6"]
+    },
+    {
+      "id": "auth_08_web_to_edge",
+      "stepNumber": 8,
+      "phase": "Establish the request path and abuse boundary",
+      "type": "add_connection",
+      "title": "Route web traffic through the shared edge",
+      "content": "Send browser authentication requests over TLS to the common load balancer; cookie policy and CSRF defenses remain part of the web contract.",
+      "connection": {
+        "edgeId": "edge_auth_web_lb",
+        "sourceNodeId": "auth_web_client",
+        "targetNodeId": "auth_load_balancer",
+        "connectionType": "http",
+        "label": "Web authentication over TLS",
+        "description": "Browser requests enter through the shared encrypted edge."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-constraint:3"]
+    },
+    {
+      "id": "auth_09_mobile_to_edge",
+      "stepNumber": 9,
+      "phase": "Establish the request path and abuse boundary",
+      "type": "add_connection",
+      "title": "Route mobile traffic through the same edge",
+      "content": "Use the same public authentication boundary for mobile clients so rate limiting, transport policy, and service health checks cannot be bypassed through a separate route.",
+      "connection": {
+        "edgeId": "edge_auth_mobile_lb",
+        "sourceNodeId": "auth_mobile_client",
+        "targetNodeId": "auth_load_balancer",
+        "connectionType": "http",
+        "label": "Mobile authentication over TLS",
+        "description": "Mobile requests share the protected authentication entry path."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:2"]
+    },
+    {
+      "id": "auth_10_edge_to_gateway",
+      "stepNumber": 10,
+      "phase": "Establish the request path and abuse boundary",
+      "type": "add_connection",
+      "title": "Forward only to healthy gateway instances",
+      "content": "Preserve encrypted service-to-service transport and a non-secret correlation identifier across the load-balancer hop; do not forward session affinity as an authorization decision.",
+      "connection": {
+        "edgeId": "edge_auth_lb_gateway",
+        "sourceNodeId": "auth_load_balancer",
+        "targetNodeId": "auth_api_gateway",
+        "connectionType": "http",
+        "label": "Health-routed gateway traffic",
+        "description": "The load balancer sends requests to healthy gateway instances over a protected internal hop."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "auth_11_gateway_to_limiter",
+      "stepNumber": 11,
+      "phase": "Establish the request path and abuse boundary",
+      "type": "add_connection",
+      "title": "Check abuse state before identity work",
+      "content": "Pass the endpoint class, trusted source address, and normalized account key to the limiter using a protected internal call. Do not trust a client-supplied forwarding header as the source IP.",
+      "connection": {
+        "edgeId": "edge_auth_gateway_limiter",
+        "sourceNodeId": "auth_api_gateway",
+        "targetNodeId": "auth_rate_limiter",
+        "connectionType": "api-call",
+        "label": "Endpoint and abuse context",
+        "description": "The gateway asks the distributed limiter to evaluate trusted IP and account keys."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:2"]
+    },
+    {
+      "id": "auth_12_limiter_to_service",
+      "stepNumber": 12,
+      "phase": "Establish the request path and abuse boundary",
+      "type": "add_connection",
+      "title": "Forward permitted requests to authentication",
+      "content": "Only requests allowed by the current abuse policy proceed to credential verification, MFA, or recovery. Record the limiter outcome as a security event without recording the submitted password, factor, or reset token.",
+      "connection": {
+        "edgeId": "edge_auth_limiter_service",
+        "sourceNodeId": "auth_rate_limiter",
+        "targetNodeId": "auth_service",
+        "connectionType": "api-call",
+        "label": "Policy-checked identity request",
+        "description": "The authentication service receives the request after shared abuse controls."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:2"]
+    },
+    {
+      "id": "auth_13_identity_store",
+      "stepNumber": 13,
+      "phase": "Place identity and security stores",
+      "type": "add_component",
+      "title": "Store account identity and password verifiers",
+      "content": "Persist a unique account key, verified contact state, linked provider subject, MFA enrollment metadata, and password verifier. Store no plaintext or reversibly encrypted password. Keep reset and verification token digests rather than usable bearer tokens, and enforce uniqueness transactionally for the selected normalized identifier.",
+      "component": {
+        "nodeId": "auth_identity_store",
+        "componentType": "database",
+        "label": "Identity and Credential Store",
+        "description": "Account records, password verifiers, and recovery-token digests",
+        "position": {"x": 1370, "y": 100},
+        "properties": {
+          "componentName": "Identity and Credential Store",
+          "purpose": "Persist account identity, verified contact state, linked OAuth subject, MFA enrollment metadata, and only salted password verifiers such as Argon2id or legacy bcrypt; store only digests of single-use verification and reset tokens, never plaintext or reversibly encrypted passwords or usable recovery tokens.",
+          "type": "RDBMS",
+          "engine": "postgresql",
+          "encryption": true,
+          "rbac": true
+        },
+        "highlightReason": "The catalog Database is the persistent account boundary; its purpose records verifier and recovery-token handling explicitly."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "auth_14_session_cache",
+      "stepNumber": 14,
+      "phase": "Place identity and security stores",
+      "type": "add_component",
+      "title": "Keep revocable session state in Redis",
+      "content": "Use Redis as the session lookup and revocation store. Keep session state server-side, isolate session keys from rate-limit and OAuth transaction keys, use policy-defined expiry, and ensure a revoked or expired identifier can never authenticate from a stale replica or client cache.",
+      "component": {
+        "nodeId": "auth_session_cache",
+        "componentType": "cache",
+        "label": "Redis Session and Auth State",
+        "description": "Server-side sessions and isolated short-lived auth state",
+        "position": {"x": 1370, "y": 360},
+        "properties": {
+          "componentName": "Redis Session and Auth State",
+          "purpose": "Resolve opaque session-token digests for immediate revocation; isolate session records, rate-limit counters, and one-time OAuth state by namespace and access policy, and never let expired or revoked state authenticate.",
+          "engine": "redis",
+          "inMemory": true
+        },
+        "highlightReason": "The existing Redis-backed Cache concept directly supports the brief's session-storage hint and shared authentication state."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "auth_15_email_service",
+      "stepNumber": 15,
+      "phase": "Place identity and security stores",
+      "type": "add_component",
+      "title": "Deliver verification and recovery messages",
+      "content": "Use transactional email for email verification during registration and for password-reset links. Generate single-use high-entropy tokens, persist only their digests, apply a policy-defined expiry, use generic public responses to limit account enumeration, and never enable link tracking that could expose bearer material.",
+      "component": {
+        "nodeId": "auth_email_service",
+        "componentType": "email-service",
+        "label": "Verification and Recovery Email",
+        "description": "Registration verification and password reset delivery",
+        "position": {"x": 1370, "y": 620},
+        "properties": {
+          "componentName": "Verification and Recovery Email",
+          "purpose": "Deliver registration verification and password-reset messages containing single-use links; do not persist usable tokens, expose account existence in public responses, or put bearer links in analytics.",
+          "templates": true,
+          "tracking": false
+        },
+        "highlightReason": "The catalog Email Service supports the required verification and password-recovery delivery path."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "auth_16_secrets_manager",
+      "stepNumber": 16,
+      "phase": "Place identity and security stores",
+      "type": "add_component",
+      "title": "Protect provider credentials and cryptographic keys",
+      "content": "Keep OAuth client credentials, session-signing or encryption keys, and the key-encryption material for stored MFA seeds in a dedicated secrets manager. Use least-privilege access, audited retrieval, and rotation; do not place these values in source, logs, or the account database as plaintext.",
+      "component": {
+        "nodeId": "auth_secrets_manager",
+        "componentType": "secrets-manager",
+        "label": "Authentication Secrets and Key Manager",
+        "description": "Protected provider credentials and key-encryption material",
+        "position": {"x": 1370, "y": 880},
+        "properties": {
+          "componentName": "Authentication Secrets and Key Manager",
+          "purpose": "Protect OAuth client credentials and key-encryption material for MFA seeds and session infrastructure; enforce least privilege, audited retrieval, and rotation without logging secret values.",
+          "rotation": true,
+          "encryption": true,
+          "audit": true
+        },
+        "highlightReason": "The catalog Secrets Manager fits provider secrets and key management; per-user MFA records remain in the identity store encrypted under managed keys."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "auth_17_audit_store",
+      "stepNumber": 17,
+      "phase": "Place identity and security stores",
+      "type": "add_component",
+      "title": "Persist a protected security audit trail",
+      "content": "Store append-only security events separately from credentials and operational metrics. Record event category, outcome, time, correlation, and a minimized or pseudonymous subject reference. Exclude passwords, MFA values and seeds, cookies, session identifiers, reset and verification tokens, OAuth codes, and provider tokens.",
+      "component": {
+        "nodeId": "auth_audit_store",
+        "componentType": "database",
+        "label": "Security Audit Store",
+        "description": "Access-controlled security event history",
+        "position": {"x": 1650, "y": 360},
+        "properties": {
+          "componentName": "Security Audit Store",
+          "purpose": "Keep append-only, access-controlled security events with minimized or pseudonymous subject references, event category, outcome, time, and correlation; exclude credentials and bearer secrets, and apply an approved retention and deletion policy.",
+          "type": "RDBMS",
+          "engine": "postgresql",
+          "encryption": true,
+          "rbac": true,
+          "auditLog": true
+        },
+        "highlightReason": "A dedicated catalog Database makes durable, access-controlled audit records distinct from identity data and telemetry."
+      },
+      "requirementIds": ["legacy-constraint:4"]
+    },
+    {
+      "id": "auth_18_monitoring",
+      "stepNumber": 18,
+      "phase": "Place identity and security stores",
+      "type": "add_component",
+      "title": "Observe availability and authentication latency",
+      "content": "Measure request latency and outcomes by operation, limiter pressure, session-store availability, email delivery, and audit-write health. Keep metric dimensions low-cardinality and free of passwords, tokens, raw account identifiers, and unnecessary IP data; choose alert thresholds only after service objectives are agreed.",
+      "component": {
+        "nodeId": "auth_monitoring",
+        "componentType": "monitoring",
+        "label": "Authentication Monitoring",
+        "description": "Latency, availability, abuse, and dependency signals",
+        "position": {"x": 1930, "y": 360},
+        "properties": {
+          "componentName": "Authentication Monitoring",
+          "purpose": "Measure authentication latency and dependency health, limiter pressure, session revocation outcomes, and audit delivery without credentials, bearer tokens, raw account identifiers, or unnecessary IP data.",
+          "metrics": true,
+          "alerts": true
+        },
+        "highlightReason": "The existing Monitoring catalog component observes the low-latency and reliability constraint without becoming the sensitive audit store."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "auth_19_service_to_identity_store",
+      "stepNumber": 19,
+      "phase": "Connect identity, recovery, and audit flows",
+      "type": "add_connection",
+      "title": "Read and write account state transactionally",
+      "content": "The authentication service verifies a supplied password against the stored verifier, updates verification and MFA metadata, links external subjects safely, and atomically consumes recovery-token digests. Never return stored verifier or token-digest material to a client.",
+      "connection": {
+        "edgeId": "edge_auth_service_identity_store",
+        "sourceNodeId": "auth_service",
+        "targetNodeId": "auth_identity_store",
+        "connectionType": "database-connection",
+        "label": "Account and verifier operations",
+        "description": "The service performs transactional identity, verifier, provider-link, and recovery-state operations."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:1"]
+    },
+    {
+      "id": "auth_20_service_to_sessions",
+      "stepNumber": 20,
+      "phase": "Connect identity, recovery, and audit flows",
+      "type": "add_connection",
+      "title": "Resolve and revoke sessions in shared state",
+      "content": "Every authentication instance checks the shared session record on protected requests and removes or invalidates it on logout, password reset or change, MFA recovery, and account security action. Replication and failover must not resurrect revoked credentials.",
+      "connection": {
+        "edgeId": "edge_auth_service_session_cache",
+        "sourceNodeId": "auth_service",
+        "targetNodeId": "auth_session_cache",
+        "connectionType": "database-connection",
+        "label": "Session lookup and revocation",
+        "description": "Shared session state supports immediate revocation across service instances."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:3"]
+    },
+    {
+      "id": "auth_21_limiter_to_redis",
+      "stepNumber": 21,
+      "phase": "Connect identity, recovery, and audit flows",
+      "type": "add_connection",
+      "title": "Share abuse counters across service instances",
+      "content": "The distributed limiter stores counters in a separately namespaced Redis keyspace with access restricted to limiter operations. Define recovery behavior if shared limiter state is unavailable instead of silently bypassing brute-force controls.",
+      "connection": {
+        "edgeId": "edge_auth_limiter_session_cache",
+        "sourceNodeId": "auth_rate_limiter",
+        "targetNodeId": "auth_session_cache",
+        "connectionType": "database-connection",
+        "label": "Distributed limiter state",
+        "description": "Redis shares per-IP and per-account counters while keeping them isolated from session records."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:2"]
+    },
+    {
+      "id": "auth_22_service_to_email",
+      "stepNumber": 22,
+      "phase": "Connect identity, recovery, and audit flows",
+      "type": "add_connection",
+      "title": "Send verification and reset messages",
+      "content": "The service requests delivery after creating a single-use token and storing only its digest. Responses remain generic whether or not an account exists; only a successful token check changes account state.",
+      "connection": {
+        "edgeId": "edge_auth_service_email",
+        "sourceNodeId": "auth_service",
+        "targetNodeId": "auth_email_service",
+        "connectionType": "api-call",
+        "label": "Verification and recovery delivery",
+        "description": "The service asks the email provider to deliver account-verification and reset links."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "auth_23_service_to_secrets",
+      "stepNumber": 23,
+      "phase": "Connect identity, recovery, and audit flows",
+      "type": "add_connection",
+      "title": "Fetch narrowly scoped cryptographic material",
+      "content": "Use a workload identity and least-privilege secret access. Retrieve only the key or provider credential needed for the operation, keep it in protected process memory, and prevent secret values from entering logs, traces, crash reports, or audit payloads.",
+      "connection": {
+        "edgeId": "edge_auth_service_secrets",
+        "sourceNodeId": "auth_service",
+        "targetNodeId": "auth_secrets_manager",
+        "connectionType": "api-call",
+        "label": "Least-privilege key access",
+        "description": "The service retrieves managed cryptographic material without persisting it in account records."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "auth_24_service_to_audit",
+      "stepNumber": 24,
+      "phase": "Connect identity, recovery, and audit flows",
+      "type": "add_connection",
+      "title": "Record security-relevant identity events",
+      "content": "Emit registration, verification, login outcome, MFA enrollment and challenge, password reset, OAuth linking, session creation and revocation, and recovery events. Keep audit writes off the credential response path where safely buffered, but make loss, delay, and replay detectable.",
+      "connection": {
+        "edgeId": "edge_auth_service_audit",
+        "sourceNodeId": "auth_service",
+        "targetNodeId": "auth_audit_store",
+        "connectionType": "data-flow",
+        "label": "Minimized identity security events",
+        "description": "The service records security outcomes without credentials, factor values, or bearer tokens."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "auth_25_gateway_to_audit",
+      "stepNumber": 25,
+      "phase": "Connect identity, recovery, and audit flows",
+      "type": "add_connection",
+      "title": "Retain protected edge-security outcomes",
+      "content": "Record request class, allow or deny outcome, and a minimized correlation reference for origin violations and gateway policy blocks. Redact headers, cookies, authorization fields, request bodies, and full URLs containing recovery material.",
+      "connection": {
+        "edgeId": "edge_auth_gateway_audit",
+        "sourceNodeId": "auth_api_gateway",
+        "targetNodeId": "auth_audit_store",
+        "connectionType": "data-flow",
+        "label": "Redacted gateway security events",
+        "description": "The gateway sends policy outcomes without request secrets or full bearer-bearing URLs."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "auth_26_limiter_to_audit",
+      "stepNumber": 26,
+      "phase": "Connect identity, recovery, and audit flows",
+      "type": "add_connection",
+      "title": "Audit limiter decisions without exposing account keys",
+      "content": "Persist policy version, operation class, outcome, and a minimized or pseudonymous subject reference. Restrict access to the original IP and account key, retain them only when justified by the approved security purpose, and never record submitted credentials.",
+      "connection": {
+        "edgeId": "edge_auth_limiter_audit",
+        "sourceNodeId": "auth_rate_limiter",
+        "targetNodeId": "auth_audit_store",
+        "connectionType": "data-flow",
+        "label": "Rate-limit decisions",
+        "description": "The audit trail records abuse-control outcomes with minimized identifiers."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "auth_27_identity_store_to_audit",
+      "stepNumber": 27,
+      "phase": "Connect identity, recovery, and audit flows",
+      "type": "add_connection",
+      "title": "Audit privileged identity-data access",
+      "content": "Capture administrative access, permission changes, and security-relevant data mutations in the protected audit trail. Keep the audit event separate from the credential row and do not copy password verifiers, recovery digests, or MFA secrets into the event.",
+      "connection": {
+        "edgeId": "edge_auth_identity_audit",
+        "sourceNodeId": "auth_identity_store",
+        "targetNodeId": "auth_audit_store",
+        "connectionType": "data-flow",
+        "label": "Identity-store access events",
+        "description": "Security-relevant store access is audited without copying credential material."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "auth_28_secrets_to_audit",
+      "stepNumber": 28,
+      "phase": "Connect identity, recovery, and audit flows",
+      "type": "add_connection",
+      "title": "Audit key access while excluding secret values",
+      "content": "Record the calling workload, key or credential reference, operation category, outcome, and time. The audit event must not contain the returned secret or cryptographic key material.",
+      "connection": {
+        "edgeId": "edge_auth_secrets_audit",
+        "sourceNodeId": "auth_secrets_manager",
+        "targetNodeId": "auth_audit_store",
+        "connectionType": "data-flow",
+        "label": "Secret-access metadata",
+        "description": "Audited key access records metadata only and never the secret value."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "auth_29_email_to_audit",
+      "stepNumber": 29,
+      "phase": "Connect identity, recovery, and audit flows",
+      "type": "add_connection",
+      "title": "Observe recovery-message outcomes safely",
+      "content": "Record delivery status and template category for verification and reset messages. Never copy a message body, address where unnecessary, verification link, or reset token into security logs.",
+      "connection": {
+        "edgeId": "edge_auth_email_audit",
+        "sourceNodeId": "auth_email_service",
+        "targetNodeId": "auth_audit_store",
+        "connectionType": "data-flow",
+        "label": "Redacted delivery outcomes",
+        "description": "Email delivery failures are reviewable without retaining bearer links or message contents."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "auth_30_audit_to_monitoring",
+      "stepNumber": 30,
+      "phase": "Connect identity, recovery, and audit flows",
+      "type": "add_connection",
+      "title": "Monitor audit delivery and integrity signals",
+      "content": "Export event counts, write failures, processing delay, and integrity-check outcomes to monitoring. The metrics path carries no audit payload, account identifier, IP address, credential, or token.",
+      "connection": {
+        "edgeId": "edge_auth_audit_monitor",
+        "sourceNodeId": "auth_audit_store",
+        "targetNodeId": "auth_monitoring",
+        "connectionType": "data-flow",
+        "label": "Audit health metrics",
+        "description": "Monitoring receives aggregate health signals, not sensitive audit records."
+      },
+      "requirementIds": ["legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "auth_31_service_to_monitoring",
+      "stepNumber": 31,
+      "phase": "Connect identity, recovery, and audit flows",
+      "type": "add_connection",
+      "title": "Measure authentication service behavior",
+      "content": "Report operation latency and outcome categories, dependency errors, and session-revocation results. Avoid user-level metric labels and never use raw account identifiers or bearer values as dimensions.",
+      "connection": {
+        "edgeId": "edge_auth_service_monitor",
+        "sourceNodeId": "auth_service",
+        "targetNodeId": "auth_monitoring",
+        "connectionType": "data-flow",
+        "label": "Authentication health metrics",
+        "description": "Service-level latency and outcome metrics support low-latency operation without sensitive labels."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "auth_32_cache_to_monitoring",
+      "stepNumber": 32,
+      "phase": "Connect identity, recovery, and audit flows",
+      "type": "add_connection",
+      "title": "Observe Redis health without exposing session keys",
+      "content": "Measure Redis availability, saturation, replication health, and operation latency. Do not attach session identifiers, OAuth state, MFA values, or rate-limit account keys to traces or metrics.",
+      "connection": {
+        "edgeId": "edge_auth_cache_monitor",
+        "sourceNodeId": "auth_session_cache",
+        "targetNodeId": "auth_monitoring",
+        "connectionType": "data-flow",
+        "label": "Auth-state store health",
+        "description": "Aggregate session-store health signals help protect revocation correctness and latency."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "auth_33_oauth_provider",
+      "stepNumber": 33,
+      "phase": "Harden credentials, recovery, and federation",
+      "type": "add_component",
+      "title": "Represent the external OAuth identity provider",
+      "content": "Federated login crosses a trust boundary. The local catalog has no component for an external OAuth or OpenID Connect identity provider, so this single external actor uses the generic custom component; the authentication service and all internal infrastructure continue to use catalog components.",
+      "component": {
+        "nodeId": "auth_external_identity_provider",
+        "componentType": "custom-component",
+        "label": "External OAuth/OIDC Identity Provider",
+        "description": "Third-party identity and authorization endpoint",
+        "position": {"x": 1370, "y": 1120},
+        "properties": {
+          "componentName": "External OAuth/OIDC Identity Provider",
+          "subtitle": "External trust boundary",
+          "purpose": "Authenticate the user at an external provider and return an authorization response to the registered callback; provider tokens and authorization codes remain secret and are never logged.",
+          "componentType": "External identity provider",
+          "technology": "OAuth 2.0 / OpenID Connect"
+        },
+        "data": {"originalComponentId": "custom-component", "semanticRole": "external-api"},
+        "highlightReason": "No catalog concept models an external OAuth/OIDC identity provider; custom-component is used only for this external actor."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "auth_34_oauth_redirect",
+      "stepNumber": 34,
+      "phase": "Harden credentials, recovery, and federation",
+      "type": "add_connection",
+      "title": "Start an allow-listed OAuth authorization flow",
+      "content": "The authentication service redirects only to a configured provider authorization endpoint and an exact registered callback URI. Use authorization code flow with PKCE and bind a random one-time state value and OIDC nonce to the initiating browser transaction.",
+      "connection": {
+        "edgeId": "edge_auth_service_oauth_provider",
+        "sourceNodeId": "auth_service",
+        "targetNodeId": "auth_external_identity_provider",
+        "connectionType": "api-call",
+        "label": "Authorization request with PKCE",
+        "description": "The service starts a provider flow using exact redirect allow-lists and transaction-bound state."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "auth_35_oauth_callback",
+      "stepNumber": 35,
+      "phase": "Harden credentials, recovery, and federation",
+      "type": "add_connection",
+      "title": "Validate the provider callback before linking identity",
+      "content": "Accept the callback only for the outstanding state, exact redirect, expected issuer and audience, valid nonce, and PKCE verifier. Reject replay, mismatch, or unsolicited callbacks; exchange the authorization code server-side and keep codes and provider tokens out of URLs, referrers, logs, and client-visible errors.",
+      "connection": {
+        "edgeId": "edge_auth_oauth_provider_callback",
+        "sourceNodeId": "auth_external_identity_provider",
+        "targetNodeId": "auth_service",
+        "connectionType": "api-call",
+        "label": "Validated authorization callback",
+        "description": "The provider returns to the service, which validates transaction state before server-side code exchange."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "auth_36_password_hash_decision",
+      "stepNumber": 36,
+      "phase": "Harden credentials, recovery, and federation",
+      "type": "decision_point",
+      "title": "Choose a one-way password verifier",
+      "content": "Make password verification a deliberate storage contract rather than a reversible field in the account record.",
+      "decision": {
+        "question": "How should passwords be stored and upgraded?",
+        "chosen": "Use Argon2id with a unique salt for new credentials; verify supported legacy bcrypt hashes and upgrade after successful authentication.",
+        "chosenReason": "A password verifier is one-way and cost-tunable; successful verification provides a safe migration point without storing or recovering the original password. Keep cost parameters configurable and benchmarked rather than inventing values here.",
+        "alternatives": [
+          {"option": "Encrypt passwords so the service can recover them", "tradeoff": "Recoverable passwords expose users if encryption keys or privileged access are compromised."},
+          {"option": "Keep every legacy bcrypt verifier indefinitely", "tradeoff": "It avoids migration work but prevents a measured upgrade of old verifier settings and algorithms."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "auth_identity_store",
+        "properties": {
+          "purpose": "Persist account identity and only one-way password verifiers: use Argon2id with a unique salt for new credentials, verify supported bcrypt records and upgrade after successful login, and never store plaintext or reversibly encrypted passwords. Store only digests of single-use verification and reset tokens."
+        }
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:1"]
+    },
+    {
+      "id": "auth_37_session_decision",
+      "stepNumber": 37,
+      "phase": "Harden credentials, recovery, and federation",
+      "type": "decision_point",
+      "title": "Prefer centrally revocable opaque sessions",
+      "content": "Use an unguessable opaque bearer value whose digest resolves to server-side session state. For browsers, issue it only in a Secure, HttpOnly cookie with a SameSite policy and CSRF protection; rotate it after authentication or privilege changes and revoke it on logout and account recovery.",
+      "decision": {
+        "question": "Should protected requests rely on self-contained JWTs or revocable server-side sessions?",
+        "chosen": "Use opaque server-side sessions in Redis and retain only a token digest in session state.",
+        "chosenReason": "Central lookup makes logout, password reset, MFA recovery, and security-driven revocation effective across instances without waiting for a self-contained token to expire.",
+        "alternatives": [
+          {"option": "Use self-contained JWTs without a revocation lookup", "tradeoff": "Validation can be local, but a stolen token can remain usable until its expiry unless a revocation mechanism is added."},
+          {"option": "Keep session state only in one application process", "tradeoff": "It breaks horizontal scaling and fails over poorly when an instance restarts."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "auth_service",
+        "properties": {
+          "sessions": "redis",
+          "purpose": "Issue random opaque session credentials and resolve only their digests in shared Redis state; use Secure, HttpOnly, SameSite cookies and CSRF defenses for browsers, rotate after authentication or privilege change, and revoke across instances on logout, password reset or change, MFA recovery, and security action."
+        }
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:3"]
+    },
+    {
+      "id": "auth_38_mfa_and_recovery",
+      "stepNumber": 38,
+      "phase": "Harden credentials, recovery, and federation",
+      "type": "update_component",
+      "title": "Make MFA enrollment and recovery resistant to takeover",
+      "content": "Support phishing-resistant WebAuthn/passkeys and a policy-approved TOTP option. Encrypt stored MFA seeds with managed key material; display recovery codes once and store only their hashes for single use. Require a separately reviewed, audited recovery proof to replace a factor; a password-reset email alone must not silently disable MFA. Revoke existing sessions after factor recovery.",
+      "componentUpdate": {
+        "nodeId": "auth_service",
+        "properties": {
+          "mfa": true,
+          "purpose": "Support WebAuthn/passkeys and policy-approved TOTP; encrypt stored MFA seeds with managed keys, show recovery codes once and retain only one-time code hashes, require audited step-up proof for factor replacement, and revoke sessions after MFA recovery."
+        }
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:3", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "auth_39_oauth_validation_update",
+      "stepNumber": 39,
+      "phase": "Harden credentials, recovery, and federation",
+      "type": "update_component",
+      "title": "Reject OAuth redirect and callback confusion",
+      "content": "Compare redirect URIs against an exact allow-list; bind one-time state, OIDC nonce, and PKCE verifier to the initiating session; validate issuer and audience; reject callback replay and account-link collisions. Do not accept arbitrary return URLs or link an external identity based only on a matching unverified email address.",
+      "componentUpdate": {
+        "nodeId": "auth_service",
+        "properties": {
+          "purpose": "Orchestrate registration, password verification, MFA, reset, OAuth/OIDC, and sessions. Support WebAuthn/passkeys and policy-approved TOTP, protect recovery codes as one-time hashes, issue random opaque session credentials resolved by digest in Redis, use Secure/HttpOnly/SameSite browser cookies with CSRF defenses, rotate after authentication or privilege change, and revoke sessions on logout, reset, factor recovery, and security action. Validate exact allow-listed redirects, one-time session-bound state, OIDC nonce, PKCE verifier, issuer, and audience; reject replay and unsafe account linking, exchange authorization codes server-side, and never log codes, credentials, or provider tokens."
+        }
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "auth_40_oauth_state_update",
+      "stepNumber": 40,
+      "phase": "Harden credentials, recovery, and federation",
+      "type": "update_component",
+      "title": "Expire and consume OAuth transaction state once",
+      "content": "Keep state, nonce, and PKCE transaction material in a dedicated Redis namespace bound to the initiating browser context. Give it a policy-defined expiry, consume it atomically on callback, and reject missing, expired, mismatched, or already-consumed state.",
+      "componentUpdate": {
+        "nodeId": "auth_session_cache",
+        "properties": {
+          "purpose": "Resolve opaque session-token digests for immediate revocation and keep one-time OAuth state, nonce, and PKCE transaction records in a separate namespace bound to the initiating browser; consume each transaction atomically and reject expired, mismatched, or replayed state."
+        }
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "auth_41_password_reset_update",
+      "stepNumber": 41,
+      "phase": "Harden credentials, recovery, and federation",
+      "type": "update_component",
+      "title": "Complete reset without creating an account oracle",
+      "content": "Return the same public reset response for known and unknown addresses. Bind a random single-use token to the account, store only its digest, enforce a policy-defined expiry, and atomically consume it. After a successful reset, upgrade the verifier, revoke active sessions, preserve MFA unless a separate recovery proof succeeds, and notify the account through a redacted event.",
+      "componentUpdate": {
+        "nodeId": "auth_email_service",
+        "properties": {
+          "purpose": "Deliver verification and password-reset links using single-use high-entropy tokens whose digests alone are stored; use generic public responses, policy-defined expiry, no link tracking, and notify the user after a successful reset without including secrets in logs."
+        }
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "auth_42_identity_privacy_update",
+      "stepNumber": 42,
+      "phase": "Harden credentials, recovery, and federation",
+      "type": "update_component",
+      "title": "Define privacy and lifecycle controls for identity data",
+      "content": "Minimize collected profile and security data, document purpose and access, support reviewed access/correction/deletion workflows, and define retention for accounts, recovery state, backups, and security records. Reconcile deletion requests with legally reviewed security-retention obligations and pseudonymize where appropriate; obtain privacy/legal review for GDPR obligations rather than claiming this design is compliant.",
+      "componentUpdate": {
+        "nodeId": "auth_identity_store",
+        "properties": {
+          "purpose": "Persist minimized account identity, verified contact state, linked provider subject, and MFA enrollment metadata; store only one-way password verifiers such as Argon2id with a unique salt, verify supported bcrypt hashes and upgrade after successful login, and never store plaintext or reversibly encrypted passwords. Keep only digests of single-use verification and reset tokens; restrict and audit access, support reviewed access/correction/deletion workflows, and define retention for account, recovery, backup, and security data with legal review rather than claiming GDPR compliance."
+        }
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "auth_43_audit_privacy_update",
+      "stepNumber": 43,
+      "phase": "Harden credentials, recovery, and federation",
+      "type": "update_component",
+      "title": "Review audit access, minimization, and retention",
+      "content": "Separate audit writers from readers, protect the append-only trail, audit access to the trail, and use minimized or pseudonymous subject references. Set retention and deletion handling only after security, privacy, and legal review; a durable audit log is not permission to retain every identifier indefinitely.",
+      "componentUpdate": {
+        "nodeId": "auth_audit_store",
+        "properties": {
+          "purpose": "Keep an append-only, access-controlled, encrypted security event trail with audited reader access and minimized or pseudonymous subject references; exclude credentials and bearer secrets, and implement only the retention and deletion policy approved by security, privacy, and legal review."
+        }
+      },
+      "requirementIds": ["legacy-constraint:4"]
+    },
+    {
+      "id": "auth_44_scale_trigger",
+      "stepNumber": 44,
+      "phase": "Scale from measured behavior and review open policies",
+      "type": "scale_trigger",
+      "title": "Scale from measured load and latency",
+      "content": "The brief requires support for millions of users but gives no arrival rate or latency objective. Load-test expected peak and failure traffic; scale stateless gateway and authentication instances horizontally, measure account-store contention before selecting partitioning, and cluster Redis with revocation correctness preserved. Do not infer a numeric capacity guarantee from this architecture sketch.",
+      "scaleTrigger": {
+        "metric": "Authentication latency and error rates, limiter pressure, account-store contention, and Redis availability under representative peak and failure traffic",
+        "action": "Horizontally scale stateless services and tune or partition shared stores only from measured workload and agreed service objectives",
+        "impact": "Supports growth while keeping session revocation, abuse controls, and low-latency behavior observable"
+      },
+      "componentUpdate": {
+        "nodeId": "auth_monitoring",
+        "properties": {
+          "purpose": "Measure authentication latency and dependency health, limiter pressure, session revocation outcomes, audit delivery, account-store contention, and Redis availability without credentials, bearer tokens, raw account identifiers, or unsupported numeric service targets."
+        }
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "auth_45_review",
+      "stepNumber": 45,
+      "phase": "Scale from measured behavior and review open policies",
+      "type": "explanation",
+      "title": "Review the complete authentication lifecycle",
+      "content": "Registration verifies contact ownership before activating the account; login checks a one-way password verifier, applies MFA and distributed abuse controls, then issues a revocable opaque session. Reset consumes a one-time token digest, updates the verifier, and revokes sessions. OAuth uses exact redirect allow-lists, PKCE, one-time state, and nonce validation before linking an external identity. Security events flow to a minimized protected audit store while aggregate health metrics flow to monitoring. Before treating this review draft as a product contract, decide MFA enrollment and recovery policy, identifier normalization, regional and retention rules, and measured authentication latency and abuse thresholds.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    }
+  ]
+}

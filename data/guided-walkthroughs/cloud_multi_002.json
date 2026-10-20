@@ -1,0 +1,565 @@
+{
+  "problem_id": "cloud_multi_002",
+  "version": "1.0.0-review-draft",
+  "totalSteps": 46,
+  "requirementRevision": null,
+  "phases": [
+    {
+      "name": "1. Establish the fleet control plane and trust boundaries",
+      "stepRange": [1, 9],
+      "description": "Keep user access, desired state, provider credentials, and cluster-local execution as separate responsibilities."
+    },
+    {
+      "name": "2. Roll out workloads and policy consistently",
+      "stepRange": [10, 21],
+      "description": "Use GitOps and provider adapters to translate a common intent into safe, observable rollouts without erasing cloud-specific capabilities."
+    },
+    {
+      "name": "3. Connect clusters and observe fleet health",
+      "stepRange": [22, 29],
+      "description": "Choose explicit network boundaries and correlate cluster-level signals in one fleet view while keeping latency-sensitive paths local."
+    },
+    {
+      "name": "4. Prove scale, compliance, cost, and recovery",
+      "stepRange": [30, 46],
+      "description": "Treat 100+ clusters, sub-100ms latency, compliance, cost, and disaster recovery as measurable objectives with explicit operational tests."
+    }
+  ],
+  "steps": [
+    {
+      "id": "mc2_01_brief",
+      "stepNumber": 1,
+      "phase": "1. Establish the fleet control plane and trust boundaries",
+      "title": "Freeze the problem brief before making assumptions",
+      "type": "explanation",
+      "content": "Problem: Build a Multi-Cloud Kubernetes Orchestration Platform. Slug: build-a-multi-cloud-kubernetes-orchestration-platform. Description: Design a unified Kubernetes management solution that orchestrates workloads across multiple cloud providers with centralized monitoring, consistent policies, and disaster recovery. Requirements: Manage clusters across clouds; Deploy applications uniformly; Implement centralized monitoring; Handle cross-cluster networking; Enforce consistent policies; Implement disaster recovery; Optimize costs across clouds; Provide unified access control. Constraints: Support 100+ Kubernetes clusters; Unified management interface; Network latency under 100ms; Maintain security compliance; Handle cloud-specific features. Hints: Use Rancher or Anthos for multi-cluster management; Implement GitOps with Flux or ArgoCD; Use service mesh (Istio) for networking; Centralized logging (ELK, Loki); Prometheus for unified monitoring; Terraform for infrastructure as code. These are the supplied facts. The brief does not define cluster count distribution, workload criticality, latency measurement boundary, compliance regime, recovery objectives, or provider mix; clarify these before claiming an SLO or a compliant deployment.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "mc2_02_console",
+      "stepNumber": 2,
+      "phase": "1. Establish the fleet control plane and trust boundaries",
+      "title": "Give operators one fleet-wide management interface",
+      "type": "add_component",
+      "content": "The interface presents clusters, workload rollouts, policy status, cost, and recovery posture in one place. It is a unified view, not a promise that every provider feature has identical semantics.",
+      "component": {
+        "nodeId": "mc2_console", "componentType": "web-app", "label": "Fleet Operations Console", "description": "Unified operator view for multi-cloud cluster and workload lifecycle", "position": {"x": 0, "y": 280},
+        "properties": {"componentName": "Fleet Operations Console", "purpose": "Provide one authenticated view for cluster inventory, deployment status, policy compliance, monitoring, cost attribution, and disaster-recovery readiness while exposing provider-specific capabilities and drift.", "ssl": true},
+        "highlightReason": "The unified management interface is an explicit constraint; the console makes the control plane discoverable without hiding provider differences."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:2"]
+    },
+    {
+      "id": "mc2_03_api",
+      "stepNumber": 3,
+      "phase": "1. Establish the fleet control plane and trust boundaries",
+      "title": "Validate and rate-limit fleet management commands",
+      "type": "add_component",
+      "content": "Expose versioned APIs for cluster registration, desired-state changes, rollout requests, and recovery actions. Validate tenant scope and idempotency before accepting long-running work.",
+      "component": {
+        "nodeId": "mc2_api", "componentType": "api-gateway", "label": "Fleet Management API", "description": "Authenticated, validated control-plane API", "position": {"x": 300, "y": 280},
+        "properties": {"componentName": "Fleet Management API", "purpose": "Validate tenant-scoped cluster and workload commands, apply quotas and idempotency, and route accepted changes to the control plane without putting synchronous provider calls on every user request.", "inputValidation": true, "authentication": "OAuth 2.0", "rateLimiting": true, "tlsTermination": true, "deduplication": true, "throttling": true},
+        "highlightReason": "A bounded API protects a multi-tenant fleet control plane from duplicate or unbounded fan-out operations."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:1"]
+    },
+    {
+      "id": "mc2_04_identity",
+      "stepNumber": 4,
+      "phase": "1. Establish the fleet control plane and trust boundaries",
+      "title": "Authorize operators and workloads independently",
+      "type": "add_component",
+      "content": "Authenticate human operators through the organization IdP, then authorize tenant- and cluster-scoped actions with Kubernetes RBAC. Workload identity is a separate path: each provider adapter federates into its native identity system (AWS IAM, Microsoft Entra ID, or Google Cloud IAM) and maps the resulting principal to cluster permissions. These trust, token, and role-mapping semantics are not interchangeable; keep credentials short-lived, audit privileged changes, and never place cloud credentials in Git manifests or job payloads.",
+      "component": {
+        "nodeId": "mc2_identity", "componentType": "auth-service", "label": "Federated Identity & RBAC", "description": "Human SSO, tenant roles, and scoped workload authorization", "position": {"x": 600, "y": 280},
+        "properties": {"componentName": "Federated Identity & RBAC", "purpose": "Authenticate operators with SSO, authorize tenant and cluster scoped actions with RBAC, and separate human sessions from short-lived federated workload identities; audit privileged changes.", "oauth": true, "sessions": "database", "tokenTTL": 15, "mfa": true},
+        "highlightReason": "Unified access control must enforce least privilege across both the management plane and provider-specific cluster APIs."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:4"]
+    },
+    {
+      "id": "mc2_05_control",
+      "stepNumber": 5,
+      "phase": "1. Establish the fleet control plane and trust boundaries",
+      "title": "Separate desired state from provider reconciliation",
+      "type": "add_component",
+      "content": "The fleet control plane stores provider-neutral desired intent, schedules bounded reconciliation, and reports observed state and drift. A provider adapter translates that contract into EKS, AKS, GKE, or other provider APIs while preserving native cluster control-plane lifecycle, capabilities, and errors. The fleet manager is not a replacement for those provider control planes and does not make their features identical; reconciliation is asynchronous and idempotent.",
+      "component": {
+        "nodeId": "mc2_control", "componentType": "backend-server", "label": "Fleet Control Plane", "description": "Desired-state API, reconciliation, and provider adapter orchestration", "position": {"x": 900, "y": 280},
+        "properties": {"componentName": "Fleet Control Plane", "purpose": "Persist desired state and reconcile it asynchronously through provider adapters using idempotent operations, bounded concurrency, backoff, explicit drift status, and tenant-scoped authorization.", "architecture": "Microservices", "instances": 5, "caching": false, "retry": true, "bulkOps": true},
+        "highlightReason": "A provider-neutral control plane coordinates the fleet while leaving data-plane traffic and provider-native details with the clusters and adapters."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "mc2_06_state",
+      "stepNumber": 6,
+      "phase": "1. Establish the fleet control plane and trust boundaries",
+      "title": "Persist inventory, policy versions, and rollout state",
+      "type": "add_component",
+      "content": "Store cluster identity and capabilities, desired and observed revisions, policy bindings, rollout status, and recovery metadata. Use conditional updates or transactions for control-plane state; do not treat the database as a replacement for workload backups.",
+      "component": {
+        "nodeId": "mc2_state", "componentType": "database", "label": "Fleet Metadata Store", "description": "Durable inventory, desired state, policy, and operation metadata", "position": {"x": 1200, "y": 280},
+        "properties": {"componentName": "Fleet Metadata Store", "purpose": "Persist tenant-scoped cluster inventory and capabilities, desired and observed revisions, policy versions, rollout state, audit references, and recovery metadata with encrypted storage and point-in-time recovery.", "type": "RDBMS", "engine": "postgresql", "workload": "OLTP", "storageGB": 500, "replication": 3, "replicationMode": "Sync", "multiAZ": true, "backups": true, "pitr": true, "encryption": true, "rbac": true, "auditLog": true},
+        "highlightReason": "The control plane needs durable, auditable state so it can resume reconciliation after failures."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:4"]
+    },
+    {
+      "id": "mc2_07_secrets",
+      "stepNumber": 7,
+      "phase": "1. Establish the fleet control plane and trust boundaries",
+      "title": "Keep provider credentials short-lived and out of deployment state",
+      "type": "add_component",
+      "content": "Use workload identity federation or narrowly scoped secret references for provider-specific operations, rotate credentials, and audit access. Never distribute a shared administrator key to every cluster.",
+      "component": {
+        "nodeId": "mc2_secrets", "componentType": "secrets-manager", "label": "Federated Credentials & Key Store", "description": "Rotation and audit for scoped provider credentials", "position": {"x": 600, "y": 560},
+        "properties": {"componentName": "Federated Credentials & Key Store", "purpose": "Broker short-lived federated provider identities and store only required secret references; rotate credentials and audit access without embedding long-lived keys in manifests or logs.", "provider": "HashiCorp Vault", "rotation": true, "encryption": true, "audit": true},
+        "highlightReason": "Provider diversity makes credential scope and rotation a first-class security boundary."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "mc2_08_identity_api",
+      "stepNumber": 8,
+      "phase": "1. Establish the fleet control plane and trust boundaries",
+      "title": "Gate API operations on tenant identity and policy",
+      "type": "add_connection",
+      "content": "Reject unauthorized cluster registration, deployment, policy changes, and recovery actions before any provider adapter is invoked.",
+      "connection": {"edgeId": "mc2_identity_api", "sourceNodeId": "mc2_identity", "targetNodeId": "mc2_api", "connectionType": "api-call", "label": "SSO claims and tenant-scoped authorization", "description": "Authenticate operators and enforce tenant, cluster, and action-level RBAC at the management API."},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:4"]
+    },
+    {
+      "id": "mc2_api_control",
+      "stepNumber": 9,
+      "phase": "1. Establish the fleet control plane and trust boundaries",
+      "title": "Send idempotent control requests to the reconciler",
+      "type": "add_connection",
+      "content": "Return an operation identifier after durable acceptance; clients poll or subscribe for observed completion rather than holding a request open while every cluster responds.",
+      "connection": {"edgeId": "mc2_api_control", "sourceNodeId": "mc2_api", "targetNodeId": "mc2_control", "connectionType": "api-call", "label": "Validated desired-state operations", "description": "Pass idempotent, tenant-scoped commands to asynchronous fleet reconciliation."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:2", "legacy-constraint:1"]
+    },
+    {
+      "id": "mc2_10_state_edge",
+      "stepNumber": 10,
+      "phase": "2. Roll out workloads and policy consistently",
+      "title": "Persist versioned desired state before fan-out",
+      "type": "add_connection",
+      "content": "Commit the desired revision and an operation record before dispatch. Retries can then resume from a known revision and report partial success by cluster.",
+      "connection": {"edgeId": "mc2_control_state", "sourceNodeId": "mc2_control", "targetNodeId": "mc2_state", "connectionType": "database-connection", "label": "Versioned inventory and reconciliation status", "description": "Durably store desired and observed revisions, capabilities, operation state, and audit references."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "mc2_11_gitops",
+      "stepNumber": 11,
+      "phase": "2. Roll out workloads and policy consistently",
+      "title": "Make Git the reviewable source for workload intent",
+      "type": "add_component",
+      "content": "Use Flux or ArgoCD-style GitOps reconciliation to promote versioned manifests through environments. Uniform means a shared application contract and rollout policy, not identical low-level manifests where providers differ.",
+      "component": {
+        "nodeId": "mc2_gitops", "componentType": "deployment-pipeline", "label": "GitOps Deployment Pipeline", "description": "Reviewed, versioned rollout and rollback workflow", "position": {"x": 0, "y": 0},
+        "properties": {"componentName": "GitOps Deployment Pipeline", "purpose": "Use Flux or ArgoCD-style reconciliation to apply reviewed, versioned application manifests and policy bundles to selected clusters, report per-cluster rollout health, and support rollback to a known-good revision.", "strategy": "Rolling Update", "environments": "dev, staging, production", "rollbackEnabled": true},
+        "highlightReason": "GitOps gives uniform, auditable deployment intent with explicit rollout status and rollback."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "mc2_12_policy",
+      "stepNumber": 12,
+      "phase": "2. Roll out workloads and policy consistently",
+      "title": "Version common policy and allow reviewed provider extensions",
+      "type": "add_component",
+      "content": "Represent baseline policy as versioned configuration: admission controls, workload security, resource budgets, and approved regions. Add provider-specific policy modules only when a native feature has no safe common abstraction.",
+      "component": {
+        "nodeId": "mc2_policy", "componentType": "configuration-management", "label": "Policy & Configuration Registry", "description": "Versioned fleet policies and provider-specific overlays", "position": {"x": 300, "y": 0},
+        "properties": {"componentName": "Policy & Configuration Registry", "purpose": "Store version-controlled baseline admission, security, resource, and placement policy with tested, reviewed provider-specific overlays and an explicit policy owner.", "tool": "Custom", "secretsManagement": true, "versionControl": true},
+        "highlightReason": "Consistent policies need a shared baseline while acknowledging provider-specific enforcement surfaces."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "mc2_13_fleet_manager",
+      "stepNumber": 13,
+      "phase": "2. Roll out workloads and policy consistently",
+      "title": "Choose a multi-cluster manager with explicit capability mapping",
+      "type": "add_component",
+      "content": "Use Rancher or Anthos-style fleet management for cluster registration and lifecycle, while provider adapters continue to call each cloud's native cluster control plane. Validate capability and identity mappings for the actual provider mix. Workload placement is a separate policy decision: select eligible clusters by residency/compliance, required capabilities, capacity, data locality, latency, and cost; a fleet manager does not make one Kubernetes scheduler place pods across clouds.",
+      "component": {
+        "nodeId": "mc2_fleet", "componentType": "kubernetes", "label": "Multi-Cluster Fleet Manager", "description": "Rancher-style registration and lifecycle management for heterogeneous clusters", "position": {"x": 600, "y": 0},
+        "properties": {"componentName": "Multi-Cluster Fleet Manager", "purpose": "Register and manage a heterogeneous fleet through a Rancher-style management plane; surface each cluster's provider capabilities and delegate provider-native lifecycle operations to least-privilege adapters.", "version": "1.30+", "distribution": "Rancher", "nodes": 3, "managed": true},
+        "highlightReason": "The brief explicitly suggests Rancher or Anthos; this catalog Kubernetes component models the fleet manager without inventing a new node type."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "mc2_14_eks",
+      "stepNumber": 14,
+      "phase": "2. Roll out workloads and policy consistently",
+      "title": "Model an AWS-managed Kubernetes capability adapter",
+      "type": "add_component",
+      "content": "The AWS adapter maps common cluster-lifecycle intent to the native EKS control plane while preserving AWS IAM integration, VPC/CNI and route behavior, load balancers, storage classes, and provider error details. These capabilities are exposed explicitly rather than assumed portable. This representative cluster is not a claim that the fleet contains only one AWS cluster.",
+      "component": {
+        "nodeId": "mc2_eks", "componentType": "kubernetes", "label": "AWS EKS Cluster Adapter", "description": "Provider-managed Kubernetes capability and lifecycle endpoint", "position": {"x": 900, "y": -120},
+        "properties": {"componentName": "AWS EKS Cluster Adapter", "purpose": "Represent EKS lifecycle and capability mapping for the fleet; preserve provider-native IAM, networking, storage, and upgrade behavior behind a versioned adapter contract.", "version": "provider-supported", "distribution": "EKS", "nodes": 3, "managed": true},
+        "highlightReason": "Provider adapters preserve cloud-specific features instead of flattening them into a lowest-common-denominator API."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "mc2_15_aks",
+      "stepNumber": 15,
+      "phase": "2. Roll out workloads and policy consistently",
+      "title": "Model an Azure-managed Kubernetes capability adapter",
+      "type": "add_component",
+      "content": "Map common lifecycle intent to the native AKS control plane while retaining Microsoft Entra/workload-identity integration, Azure CNI and network-policy behavior, load balancers, storage classes, and provider-specific errors as explicit capabilities. Do not treat these identity or network semantics as interchangeable with EKS or GKE.",
+      "component": {
+        "nodeId": "mc2_aks", "componentType": "kubernetes", "label": "Azure AKS Cluster Adapter", "description": "Azure-managed Kubernetes lifecycle and capability endpoint", "position": {"x": 900, "y": 120},
+        "properties": {"componentName": "Azure AKS Cluster Adapter", "purpose": "Represent AKS lifecycle and capability mapping; expose Azure-specific identity, network, storage, and policy integration through a versioned adapter while supporting uniform application intent.", "version": "provider-supported", "distribution": "AKS", "nodes": 3, "managed": true},
+        "highlightReason": "The capability contract makes Azure-specific features visible and testable."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "mc2_16_gke",
+      "stepNumber": 16,
+      "phase": "2. Roll out workloads and policy consistently",
+      "title": "Model a Google Cloud-managed Kubernetes capability adapter",
+      "type": "add_component",
+      "content": "Map common lifecycle intent to the native GKE control plane while retaining Google Cloud IAM/workload-identity integration, VPC-native networking and firewall behavior, load balancers, storage classes, and provider-specific errors in the adapter capability set. Do not infer feature parity from a shared Kubernetes API.",
+      "component": {
+        "nodeId": "mc2_gke", "componentType": "kubernetes", "label": "Google Cloud GKE Cluster Adapter", "description": "GKE lifecycle and provider capability endpoint", "position": {"x": 900, "y": 360},
+        "properties": {"componentName": "Google Cloud GKE Cluster Adapter", "purpose": "Represent GKE lifecycle and capability mapping; expose Google Cloud identity, networking, storage, and policy integrations through a versioned adapter contract.", "version": "provider-supported", "distribution": "GKE", "nodes": 3, "managed": true},
+        "highlightReason": "A third provider demonstrates that shared orchestration coexists with provider-native capabilities."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "mc2_17_gitops_policy",
+      "stepNumber": 17,
+      "phase": "2. Roll out workloads and policy consistently",
+      "title": "Promote reviewed workload and policy revisions together",
+      "type": "add_connection",
+      "content": "Reference immutable Git revisions and signatures, validate policy before promotion, and record which clusters received each revision. Stop or roll back unhealthy cohorts rather than reporting a fleet-wide success prematurely.",
+      "connection": {"edgeId": "mc2_gitops_policy", "sourceNodeId": "mc2_gitops", "targetNodeId": "mc2_policy", "connectionType": "data-flow", "label": "Signed manifests and versioned policy bundles", "description": "Promote reviewed Git revisions through policy checks with reproducible provenance."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "mc2_policy_fleet",
+      "stepNumber": 18,
+      "phase": "2. Roll out workloads and policy consistently",
+      "title": "Apply the baseline through the fleet manager",
+      "type": "add_connection",
+      "content": "Distribute policy references and report per-cluster enforcement status. A policy marked applied is not proof of compliance until admission and runtime evidence is collected.",
+      "connection": {"edgeId": "mc2_policy_fleet", "sourceNodeId": "mc2_policy", "targetNodeId": "mc2_fleet", "connectionType": "api-call", "label": "Policy revisions and rollout intent", "description": "Associate each cluster with a desired policy revision and report observed enforcement status."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "mc2_fleet_eks",
+      "stepNumber": 19,
+      "phase": "2. Roll out workloads and policy consistently",
+      "title": "Reconcile the fleet through provider adapters",
+      "type": "add_connection",
+      "content": "The fleet manager fans out bounded, idempotent operations to provider-specific cluster endpoints. Track independent outcomes and retry only failed, safe-to-repeat actions.",
+      "connection": {"edgeId": "mc2_fleet_eks", "sourceNodeId": "mc2_fleet", "targetNodeId": "mc2_eks", "connectionType": "api-call", "label": "Capability-aware EKS reconciliation", "description": "Translate shared intent to supported AWS operations and retain provider-specific results."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "mc2_fleet_aks",
+      "stepNumber": 20,
+      "phase": "2. Roll out workloads and policy consistently",
+      "title": "Reconcile Azure clusters without hiding native behavior",
+      "type": "add_connection",
+      "content": "The adapter reports Azure-specific errors and capabilities in a normalized envelope while retaining provider codes for diagnosis and remediation.",
+      "connection": {"edgeId": "mc2_fleet_aks", "sourceNodeId": "mc2_fleet", "targetNodeId": "mc2_aks", "connectionType": "api-call", "label": "Capability-aware AKS reconciliation", "description": "Map common intent to Azure operations and preserve native capability and failure detail."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "mc2_fleet_gke",
+      "stepNumber": 21,
+      "phase": "2. Roll out workloads and policy consistently",
+      "title": "Reconcile Google Cloud clusters through their own adapter",
+      "type": "add_connection",
+      "content": "Keep provider-specific capability discovery and operation results attached to the target cluster, so a uniform rollout can still branch safely when a cloud feature differs.",
+      "connection": {"edgeId": "mc2_fleet_gke", "sourceNodeId": "mc2_fleet", "targetNodeId": "mc2_gke", "connectionType": "api-call", "label": "Capability-aware GKE reconciliation", "description": "Map shared intent to Google Cloud operations while surfacing native feature support and errors."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "mc2_22_mesh",
+      "stepNumber": 22,
+      "phase": "3. Connect clusters and observe fleet health",
+      "title": "Define service-to-service identity and traffic policy",
+      "type": "add_component",
+      "content": "Use an Istio-style service mesh for workload identity, mTLS, service discovery, and controlled retries where supported. Do not assume a mesh automatically creates routable cross-cloud networks.",
+      "component": {
+        "nodeId": "mc2_mesh", "componentType": "service-mesh", "label": "Cross-Cluster Service Mesh", "description": "Istio-style workload identity and service traffic policy", "position": {"x": 1200, "y": 0},
+        "properties": {"componentName": "Cross-Cluster Service Mesh", "purpose": "Apply workload identity, mTLS, service discovery, and explicit traffic policy across participating clusters; require a separate routable network path and test supported federation boundaries.", "provider": "Istio", "mtls": true, "tracing": true, "circuitBreaker": true, "retryPolicy": true, "trafficSplitting": true},
+        "highlightReason": "The brief suggests Istio, but correct guidance separates mesh policy from underlying cross-cloud connectivity."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "mc2_23_network",
+      "stepNumber": 23,
+      "phase": "3. Connect clusters and observe fleet health",
+      "title": "Provide private, encrypted inter-cloud routes",
+      "type": "add_component",
+      "content": "Use redundant provider-native private links or encrypted tunnels, but model each cloud's route propagation, CIDR/IP allocation, firewall or security-group rules, DNS, MTU, and egress controls explicitly. Plan non-overlapping address space and test real workload paths. The service mesh supplies service identity and traffic policy; it does not create network reachability. The catalog VPN gateway is a conceptual existing component; actual connectivity may use native transit or interconnect services.",
+      "component": {
+        "nodeId": "mc2_network", "componentType": "vpn-gateway", "label": "Private Inter-Cloud Connectivity", "description": "Encrypted routed links between approved cluster networks", "position": {"x": 1200, "y": 240},
+        "properties": {"componentName": "Private Inter-Cloud Connectivity", "purpose": "Represent encrypted, redundant inter-cloud routing with overlapping-CIDR prevention, restricted route advertisement, health checks, and provider-native private connectivity options where available.", "protocol": "IPSec", "encryption": "AES-256", "tunnels": 4},
+        "highlightReason": "The cross-cluster path needs a network-layer design beneath the service mesh."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "mc2_24_mesh_network",
+      "stepNumber": 24,
+      "phase": "3. Connect clusters and observe fleet health",
+      "title": "Bind mesh routing to real network reachability",
+      "type": "add_connection",
+      "content": "Mesh endpoints use only approved routable paths; validate MTU, DNS, identity, failure detection, and egress controls. Avoid routing latency-sensitive calls through the central control plane.",
+      "connection": {"edgeId": "mc2_mesh_network", "sourceNodeId": "mc2_mesh", "targetNodeId": "mc2_network", "connectionType": "tcp", "label": "Service-mesh traffic over private routes", "description": "Carry authorized inter-cluster service traffic over encrypted, monitored network paths."},
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "mc2_25_monitor",
+      "stepNumber": 25,
+      "phase": "3. Connect clusters and observe fleet health",
+      "title": "Collect common fleet metrics and SLO evidence",
+      "type": "add_component",
+      "content": "Use Prometheus-compatible collection and a central fleet view for cluster health, rollout progress, policy status, network latency, control-plane reconciliation lag, and recovery readiness. Preserve source cluster and provider labels with cardinality controls.",
+      "component": {
+        "nodeId": "mc2_monitor", "componentType": "monitoring", "label": "Unified Prometheus Monitoring", "description": "Fleet-wide metrics, alerts, and latency SLO evidence", "position": {"x": 1500, "y": 0},
+        "properties": {"componentName": "Unified Prometheus Monitoring", "purpose": "Aggregate Prometheus-compatible cluster, workload, rollout, policy, network, and reconciler metrics with provider/cluster labels and bounded cardinality; alert on SLO burn and stale telemetry.", "stack": "Prometheus + Grafana", "metrics": true, "alerts": true, "retention": 30},
+        "highlightReason": "Centralized monitoring is an explicit requirement and supplies evidence for the sub-100ms target."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "mc2_26_logs",
+      "stepNumber": 26,
+      "phase": "3. Connect clusters and observe fleet health",
+      "title": "Centralize redacted logs without centralizing secrets",
+      "type": "add_component",
+      "content": "Forward Kubernetes audit, workload, and control-plane logs to a searchable ELK-style pipeline. Redact tokens and sensitive payloads, partition by tenant and cluster, and set retention based on the selected compliance regime.",
+      "component": {
+        "nodeId": "mc2_logs", "componentType": "log-processing", "label": "Centralized Fleet Logging", "description": "ELK-style aggregation for audit and operational logs", "position": {"x": 1500, "y": 240},
+        "properties": {"componentName": "Centralized Fleet Logging", "purpose": "Aggregate redacted Kubernetes audit, workload, provider-adapter, and control-plane logs by tenant and cluster with access controls, integrity protection, and retention configured to the confirmed compliance regime.", "pipeline": "ELK Stack", "retentionDays": 90, "indexing": true},
+        "highlightReason": "Centralized logging provides operational and audit evidence, while retention remains a requirement to clarify."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "mc2_27_cluster_monitoring",
+      "stepNumber": 27,
+      "phase": "3. Connect clusters and observe fleet health",
+      "title": "Aggregate health from each provider cluster",
+      "type": "add_connection",
+      "content": "Scrape or receive normalized metrics per cluster and preserve provider-native diagnostics as linked detail. Track scrape gaps so missing telemetry cannot appear healthy.",
+      "connection": {"edgeId": "mc2_eks_monitor", "sourceNodeId": "mc2_eks", "targetNodeId": "mc2_monitor", "connectionType": "data-flow", "label": "Cluster and workload metrics", "description": "Export health, latency, resource, rollout, and policy signals from registered clusters."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "mc2_28_gke_logs",
+      "stepNumber": 28,
+      "phase": "3. Connect clusters and observe fleet health",
+      "title": "Route cluster audit and workload logs centrally",
+      "type": "add_connection",
+      "content": "Apply the same redaction and tenant boundary to every provider source, and retain provider event identifiers for traceability.",
+      "connection": {"edgeId": "mc2_gke_logs", "sourceNodeId": "mc2_gke", "targetNodeId": "mc2_logs", "connectionType": "data-flow", "label": "Audit and workload logs", "description": "Forward security-filtered cluster logs to the central searchable pipeline."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "mc2_29_api_monitor",
+      "stepNumber": 29,
+      "phase": "3. Connect clusters and observe fleet health",
+      "title": "Make control-plane lag visible to operators",
+      "type": "add_connection",
+      "content": "Correlate accepted operations, per-cluster reconciliation outcomes, API errors, and alert state using stable operation IDs without high-cardinality secrets or raw manifests as metric labels.",
+      "connection": {"edgeId": "mc2_control_monitor", "sourceNodeId": "mc2_control", "targetNodeId": "mc2_monitor", "connectionType": "data-flow", "label": "Reconciliation, drift, and rollout metrics", "description": "Expose operation age, provider errors, partial completion, and stale desired-versus-observed state."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1"]
+    },
+    {
+      "id": "mc2_30_scale",
+      "stepNumber": 30,
+      "phase": "4. Prove scale, compliance, cost, and recovery",
+      "title": "Scale reconciliation for a fleet of 100+ clusters",
+      "type": "scale_trigger",
+      "content": "The target is 100+ Kubernetes clusters; do not model this by pretending the worker-node count equals the cluster count. Partition reconciliation by tenant/provider/region and cap API concurrency to provider quotas. Separately choose eligible workload clusters from residency/compliance, provider capabilities, capacity, data locality, measured latency, and cost constraints; report placement and partial rollout by cluster. This is fleet-level placement policy, not a single cross-cloud Kubernetes scheduler.",
+      "scaleTrigger": {"metric": "Registered cluster count, oldest reconciliation age, provider API throttling, queue depth and age, and per-cluster operation error rate", "action": "When the 100+ cluster target or reconciliation-lag SLO is approached, shard work by stable cluster key, autoscale stateless workers within provider quotas, and apply fairness limits per tenant and provider.", "impact": "Maintains bounded blast radius and predictable fleet progress without claiming a capacity result before load testing."},
+      "componentUpdate": {"nodeId": "mc2_control", "properties": {"purpose": "Persist desired state and reconcile it asynchronously through provider adapters using idempotent operations, bounded concurrency, tenant/provider/region sharding for 100+ clusters, fairness limits, backoff, explicit drift status, and tenant-scoped authorization."}},
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:1"]
+    },
+    {
+      "id": "mc2_31_latency",
+      "stepNumber": 31,
+      "phase": "4. Prove scale, compliance, cost, and recovery",
+      "title": "Define what the under-100ms network target measures",
+      "type": "decision_point",
+      "content": "The brief states network latency under 100ms but does not specify path, percentile, geography, or whether this is intra-region or cross-cloud. Measure the actual workload-to-workload path and keep service traffic local where possible; a global control-plane round trip must not sit on the data path.",
+      "decision": {"question": "How should the platform handle the under-100ms network-latency constraint?", "chosen": "Use local data-plane routing for latency-sensitive calls, private cross-cluster paths only for workloads that need them, and a clearly agreed end-to-end percentile/measurement boundary validated from distributed probes.", "chosenReason": "A target without a path and measurement definition cannot be honestly guaranteed; decoupling the user-data path from the global control plane reduces avoidable latency.", "alternatives": [{"option": "Route every service call through the central management plane", "tradeoff": "Simplifies policy enforcement but adds a cross-region control-plane dependency and latency to the data path."}, {"option": "Assume service mesh alone ensures sub-100ms latency", "tradeoff": "A mesh does not remove geographic distance, congested links, DNS delays, or provider network variability."}]},
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3"]
+    },
+    {
+      "id": "mc2_32_compliance",
+      "stepNumber": 32,
+      "phase": "4. Prove scale, compliance, cost, and recovery",
+      "title": "Turn security compliance into an evidence-backed control set",
+      "type": "add_component",
+      "content": "The brief names no regulatory framework. Confirm applicable standards, residency, retention, and evidence requirements; then map controls to admission, image and infrastructure scanning, identity, encryption, audit, and exception expiry.",
+      "component": {
+        "nodeId": "mc2_compliance", "componentType": "security-scanning", "label": "Policy & Image Compliance Checks", "description": "Admission and supply-chain checks with auditable findings", "position": {"x": 0, "y": 560},
+        "properties": {"componentName": "Policy & Image Compliance Checks", "purpose": "Scan images, dependencies, and infrastructure policy; fail promotion on configured high-severity violations and retain signed evidence linked to the confirmed compliance control mapping.", "scanType": "Container", "tool": "Trivy", "failOnVulnerabilities": true},
+        "highlightReason": "Maintaining security compliance requires defined controls and auditable evidence, not only a security component in the diagram."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:4"]
+    },
+    {
+      "id": "mc2_33_backup",
+      "stepNumber": 33,
+      "phase": "4. Prove scale, compliance, cost, and recovery",
+      "title": "Retain versioned recovery artifacts outside the failed cluster",
+      "type": "add_component",
+      "content": "Back up control-plane metadata, GitOps sources, required cluster configuration, and application data according to their recovery needs. Encrypt, version, restrict deletion, and test restores into an isolated recovery environment.",
+      "component": {
+        "nodeId": "mc2_backup", "componentType": "object-storage", "label": "Cross-Cloud Recovery Archive", "description": "Encrypted versioned backups and recovery manifests", "position": {"x": 300, "y": 560},
+        "properties": {"componentName": "Cross-Cloud Recovery Archive", "purpose": "Store encrypted, versioned control-plane recovery exports, signed deployment manifests, and backup catalogs in an independently recoverable destination with retention and restore verification.", "provider": "S3", "versioning": true, "checksumValidation": true, "storageGB": 1000},
+        "highlightReason": "Disaster recovery needs recoverable copies beyond the cluster and failure domain being restored."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "mc2_34_cost",
+      "stepNumber": 34,
+      "phase": "4. Prove scale, compliance, cost, and recovery",
+      "title": "Attribute shared-platform and workload costs by tenant",
+      "type": "add_component",
+      "content": "Aggregate provider billing exports, cluster labels, idle capacity, network egress, and shared control-plane costs. Show allocation method and uncertainty; use rightsizing and schedules only where workload availability and recovery policies permit.",
+      "component": {
+        "nodeId": "mc2_cost", "componentType": "analytics", "label": "Multi-Cloud Cost Attribution", "description": "Provider and tenant cost, utilization, and egress analysis", "position": {"x": 600, "y": 560},
+        "properties": {"componentName": "Multi-Cloud Cost Attribution", "purpose": "Correlate provider billing exports, tenant and cluster allocation labels, utilization, idle capacity, and cross-cloud egress; report estimates separately from finalized charges and recommend safe rightsizing.", "retentionDays": 90, "samplingRate": 100, "realTime": false, "storage": "s3"},
+        "highlightReason": "Cost optimization needs comparable per-provider attribution and visibility into cross-cloud network charges."
+      },
+      "requirementIds": ["legacy-requirement:7"]
+    },
+    {
+      "id": "mc2_35_backup_edge",
+      "stepNumber": 35,
+      "phase": "4. Prove scale, compliance, cost, and recovery",
+      "title": "Publish encrypted recovery points and test restoration",
+      "type": "add_connection",
+      "content": "Record backup consistency boundaries, restore ordering, and immutable point identifiers. Measure restore time and data loss against stakeholder-approved RTO/RPO; the prompt does not supply either target.",
+      "connection": {"edgeId": "mc2_state_backup", "sourceNodeId": "mc2_state", "targetNodeId": "mc2_backup", "connectionType": "data-flow", "label": "Encrypted, versioned recovery snapshots", "description": "Export recoverable control-plane state and verify checksums and restore procedures outside the primary failure domain."},
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "mc2_36_cost_edge",
+      "stepNumber": 36,
+      "phase": "4. Prove scale, compliance, cost, and recovery",
+      "title": "Close the review with measurable acceptance and open decisions",
+      "type": "explanation",
+      "content": "Review acceptance tests before calling the design successful: register and reconcile a representative 100+ cluster fleet under provider quotas; deploy and roll back the same signed release across EKS, AKS, and GKE; prove baseline policy and provider overlays with auditable evidence; measure the agreed network path and percentile against the under-100ms target; verify centralized metrics and redacted logs; exercise provider outage, partial rollout, credential rotation, and restore drills; and compare per-tenant cost including egress. Confirm compliance regime, cluster/provider distribution, latency boundary, workload placement, RTO/RPO, retention, tenancy model, and provider-specific feature requirements. This walkthrough is a local unpublished review draft; it does not change the live problem record or establish browser, AI-assessment, or production verification.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "mc2_37_console_api",
+      "stepNumber": 37,
+      "phase": "4. Prove scale, compliance, cost, and recovery",
+      "title": "Connect the unified operator interface to the control API",
+      "type": "add_connection",
+      "content": "The browser uses the same authenticated, tenant-scoped API as automation clients and displays operation status rather than implying synchronous fleet completion.",
+      "connection": {"edgeId": "mc2_console_api", "sourceNodeId": "mc2_console", "targetNodeId": "mc2_api", "connectionType": "http", "label": "Operator commands and fleet status", "description": "Submit authenticated requests and render per-cluster progress from the unified management interface."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:8", "legacy-constraint:2"]
+    },
+    {
+      "id": "mc2_38_control_secrets",
+      "stepNumber": 38,
+      "phase": "4. Prove scale, compliance, cost, and recovery",
+      "title": "Retrieve scoped provider identity only for reconciliation",
+      "type": "add_connection",
+      "content": "The adapter obtains short-lived, audience-bound credentials when needed and emits auditable access events; credentials never enter manifests, metrics, or general-purpose queues.",
+      "connection": {"edgeId": "mc2_control_secrets", "sourceNodeId": "mc2_control", "targetNodeId": "mc2_secrets", "connectionType": "api-call", "label": "Short-lived federated provider credentials", "description": "Resolve scoped identities on demand and audit use by tenant, cluster, and operation."},
+      "requirementIds": ["legacy-requirement:8", "legacy-requirement:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "mc2_39_compliance_gitops",
+      "stepNumber": 39,
+      "phase": "4. Prove scale, compliance, cost, and recovery",
+      "title": "Block promotion when required security checks fail",
+      "type": "add_connection",
+      "content": "Attach scan results and policy evidence to the immutable release revision. Define an expiring, approved exception process rather than silently bypassing failed checks.",
+      "connection": {"edgeId": "mc2_compliance_gitops", "sourceNodeId": "mc2_compliance", "targetNodeId": "mc2_gitops", "connectionType": "data-flow", "label": "Signed scan evidence and promotion gate", "description": "Require configured security evidence before workload and policy revisions are promoted."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "mc2_40_control_cost",
+      "stepNumber": 40,
+      "phase": "4. Prove scale, compliance, cost, and recovery",
+      "title": "Feed provider usage and allocation data into cost analysis",
+      "type": "add_connection",
+      "content": "Join billing exports to tenant, cluster, and operation labels; distinguish directly measured cost from shared-cost allocation estimates.",
+      "connection": {"edgeId": "mc2_control_cost", "sourceNodeId": "mc2_control", "targetNodeId": "mc2_cost", "connectionType": "data-flow", "label": "Provider usage, cluster tags, and allocation data", "description": "Attribute shared orchestration and provider usage to tenants while retaining the allocation method."},
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:1", "legacy-constraint:1"]
+    },
+    {
+      "id": "mc2_41_eks_mesh",
+      "stepNumber": 41,
+      "phase": "4. Prove scale, compliance, cost, and recovery",
+      "title": "Connect workload traffic through mesh policy, not the control API",
+      "type": "add_connection",
+      "content": "Workload service calls follow the configured private network and mesh identity path. The management plane distributes policy and observes health but does not proxy request traffic.",
+      "connection": {"edgeId": "mc2_eks_mesh", "sourceNodeId": "mc2_eks", "targetNodeId": "mc2_mesh", "connectionType": "tcp", "label": "Cluster workload identity and service traffic", "description": "Apply mesh policy to cross-cluster data-plane traffic over the private routed network."},
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "mc2_42_aks_monitor",
+      "stepNumber": 42,
+      "phase": "4. Prove scale, compliance, cost, and recovery",
+      "title": "Include Azure clusters in the same monitoring view",
+      "type": "add_connection",
+      "content": "Normalize common metrics while retaining Azure-native diagnostics and source identifiers for investigation.",
+      "connection": {"edgeId": "mc2_aks_monitor", "sourceNodeId": "mc2_aks", "targetNodeId": "mc2_monitor", "connectionType": "data-flow", "label": "AKS health, latency, and rollout signals", "description": "Add Azure cluster telemetry to centralized fleet SLOs and alerts."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "mc2_43_gke_monitor",
+      "stepNumber": 43,
+      "phase": "4. Prove scale, compliance, cost, and recovery",
+      "title": "Include Google Cloud clusters in the same monitoring view",
+      "type": "add_connection",
+      "content": "Track collection gaps and retain native provider context so normalized dashboards do not mask provider-specific failures.",
+      "connection": {"edgeId": "mc2_gke_monitor", "sourceNodeId": "mc2_gke", "targetNodeId": "mc2_monitor", "connectionType": "data-flow", "label": "GKE health, latency, and rollout signals", "description": "Add Google Cloud cluster telemetry to centralized fleet SLOs and alerts."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "mc2_44_eks_logs",
+      "stepNumber": 44,
+      "phase": "4. Prove scale, compliance, cost, and recovery",
+      "title": "Apply the same redaction and audit path to AWS logs",
+      "type": "add_connection",
+      "content": "Keep cluster-specific access controls and provider event identifiers attached as logs enter the centralized pipeline.",
+      "connection": {"edgeId": "mc2_eks_logs", "sourceNodeId": "mc2_eks", "targetNodeId": "mc2_logs", "connectionType": "data-flow", "label": "EKS audit and workload logs", "description": "Forward redacted AWS cluster events into the tenant-scoped central log pipeline."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "mc2_45_cluster_backup",
+      "stepNumber": 45,
+      "phase": "4. Prove scale, compliance, cost, and recovery",
+      "title": "Capture cluster and workload recovery data",
+      "type": "add_connection",
+      "content": "Use provider-supported volume/database backup mechanisms and Kubernetes resource exports, then copy encrypted, versioned recovery artifacts to an independently protected archive. Validate application consistency and restore dependencies; a control-plane snapshot alone is not a workload recovery plan.",
+      "connection": {"edgeId": "mc2_cluster_backup", "sourceNodeId": "mc2_eks", "targetNodeId": "mc2_backup", "connectionType": "data-flow", "label": "Application data and cluster recovery artifacts", "description": "Export consistent workload backups and cluster configuration to a protected, versioned recovery destination."},
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "mc2_46_restore",
+      "stepNumber": 46,
+      "phase": "4. Prove scale, compliance, cost, and recovery",
+      "title": "Restore into a healthy registered cluster after a failure",
+      "type": "add_connection",
+      "content": "The brief asks for disaster recovery but does not define automatic failover, RTO, or RPO. Use an explicit operator-approved recovery contract: detect and declare the failure, fence or otherwise prevent the old writer from serving conflicting state, select a compatible healthy cluster, recreate infrastructure and baseline policy, then restore stateless workloads from the approved Git revision and recover stateful data from an application-consistent replica or backup. Validate data integrity and service readiness before routing traffic; record the cutover and keep failback a separate tested operation. This describes recovery, not transparent active-active cross-cloud failover, and promises no recovery time or data-loss bound until owners set RTO/RPO.",
+      "connection": {"edgeId": "mc2_backup_restore", "sourceNodeId": "mc2_backup", "targetNodeId": "mc2_fleet", "connectionType": "data-flow", "label": "Verified recovery artifacts and restore intent", "description": "Rebuild a workload in an eligible healthy cluster and verify service and data before failover is complete."},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

@@ -1,0 +1,727 @@
+{
+  "problem_id": "cloud_azure_002",
+  "version": "1.0.0-review-draft",
+  "totalSteps": 42,
+  "phases": [
+    {
+      "name": "Define the API contract and latency boundary",
+      "stepRange": [1, 8],
+      "description": "Separate the supplied requirements from unknown workload and SLO details, then place Azure API Management at the public REST boundary."
+    },
+    {
+      "name": "Secure ingress and implement synchronous CRUD",
+      "stepRange": [9, 17],
+      "description": "Validate JWTs, route to Azure Functions, and use Cosmos DB plus an explicitly scoped Redis cache for the synchronous request path."
+    },
+    {
+      "name": "Cache safely and make failures observable",
+      "stepRange": [18, 27],
+      "description": "Define client-visible errors, resource authorization, and end-to-end telemetry, including dependency-specific failure behavior."
+    },
+    {
+      "name": "Scale, protect availability, and prove the targets",
+      "stepRange": [28, 42],
+      "description": "Treat 10k requests per second, sub-200ms response time, variable-load cost, and 99.9% availability as measured acceptance targets rather than catalog defaults."
+    }
+  ],
+  "steps": [
+    {
+      "id": "api_01",
+      "stepNumber": 1,
+      "phase": "Define the API contract and latency boundary",
+      "title": "Separate the brief from the workload assumptions",
+      "type": "explanation",
+      "content": "The supplied brief asks for REST HTTP requests, CRUD, authentication and authorization, consumer rate limits, cached responses, performance monitoring, graceful errors, and demand scaling. Its constraints are response time under 200ms, 10k requests per second, cost effectiveness under variable load, JWT authentication, and 99.9% availability. It does not state the read/write mix, payload sizes, tenant distribution, geographic footprint, freshness rules, or which latency percentile and measurement boundary define 200ms. Treat those as design questions; none of the numeric constraints is proven by this draft.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "api_02",
+      "stepNumber": 2,
+      "phase": "Define the API contract and latency boundary",
+      "title": "Make the 200ms target measurable",
+      "type": "decision_point",
+      "content": "Measure from receipt at the public API endpoint through authentication, policy evaluation, Function execution, and the required cache or database work to the response leaving the endpoint. The brief does not name p50, p95, or p99, nor say whether client network time is included. Agree on the percentile and request mix before accepting the target; report the percentiles separately rather than silently treating an average as the requirement.",
+      "decision": {
+        "question": "What does response time under 200ms mean operationally?",
+        "chosen": "Use an end-to-end server-side timer and publish p50, p95, and p99 for the agreed request mix; ask the product owner which percentile is the contractual threshold.",
+        "chosenReason": "The measurement includes gateway policies and downstream calls while keeping client-network delay separate. Capturing all three percentiles exposes tail latency without inventing a percentile the brief did not specify.",
+        "alternatives": [
+          {"option": "Gate only on average latency", "tradeoff": "Averages can hide slow tail requests and do not resolve the missing percentile in the brief."},
+          {"option": "Measure only Function execution time", "tradeoff": "Excludes gateway, identity, cache, and database delays users experience on the API path."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "api_03",
+      "stepNumber": 3,
+      "phase": "Define the API contract and latency boundary",
+      "title": "Add Azure API Management as the REST edge",
+      "type": "add_component",
+      "content": "Use the catalog API Gateway component to represent Azure API Management (APIM). External callers are outside this service-boundary diagram and send HTTPS REST requests here. APIM owns route/version selection, request-size and schema policies, JWT validation, consumer-specific rate-limit policies, and consistent gateway errors; the actual APIM tier and regional capacity remain to be selected from measured load.",
+      "component": {
+        "nodeId": "apim",
+        "componentType": "api-gateway",
+        "label": "Azure API Management",
+        "description": "Public REST ingress, JWT policy, and per-consumer throttling",
+        "position": {"x": 430, "y": 300},
+        "properties": {
+          "componentName": "Azure API Management",
+          "purpose": "Terminate HTTPS and expose versioned REST routes; validate request shape and JWT policy, apply consumer-specific rate limits, forward accepted calls to Azure Functions, and return stable error responses. Choose APIM capacity and policy scope from representative 10k-RPS tests; that target is not a provisioned guarantee."
+        },
+        "highlightReason": "APIM is the named Azure gateway hint and the single public policy boundary for REST routing, JWT checks, and consumer throttling."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "api_04",
+      "stepNumber": 4,
+      "phase": "Define the API contract and latency boundary",
+      "title": "Add Azure AD as the JWT issuer",
+      "type": "add_component",
+      "content": "Represent Azure AD (now Microsoft Entra ID) with the existing Auth Service catalog type. It issues tokens to authorized API consumers; APIM checks issuer, audience, signature, expiry, and key rotation metadata before routing. The guide uses the brief's Azure AD name and does not assume a tenant layout, identity flow, or token lifetime.",
+      "component": {
+        "nodeId": "entra",
+        "componentType": "auth-service",
+        "label": "Azure AD / Microsoft Entra ID",
+        "description": "OAuth identity provider and JWT signing-key source",
+        "position": {"x": 60, "y": 80},
+        "properties": {
+          "componentName": "Azure AD / Microsoft Entra ID",
+          "purpose": "Issue OAuth access tokens for approved API consumers and publish issuer and signing-key metadata used by APIM JWT validation. Keep tenant, audience, scopes, token lifetime, and user-versus-service identity policy explicit deployment decisions.",
+          "oauth": true
+        },
+        "highlightReason": "JWT authentication is an explicit constraint, and the supplied hint names Azure AD; the catalog Auth Service supports OAuth without inventing tenant-specific settings."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "api_05",
+      "stepNumber": 5,
+      "phase": "Define the API contract and latency boundary",
+      "title": "Connect the token issuer to gateway validation",
+      "type": "add_connection",
+      "content": "APIM obtains trusted issuer and signing-key metadata for token validation. API clients acquire a token from Azure AD out of band and send it as a bearer credential on the REST request; the client-to-identity-provider exchange is outside this backend graph.",
+      "connection": {
+        "edgeId": "entra_apim_jwt_metadata",
+        "sourceNodeId": "entra",
+        "targetNodeId": "apim",
+        "connectionType": "authentication",
+        "label": "Issuer + JWT signing-key metadata",
+        "description": "APIM trusts the configured issuer and validates bearer-token claims and signatures before routing."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "api_06",
+      "stepNumber": 6,
+      "phase": "Define the API contract and latency boundary",
+      "title": "Apply JWT, input, and consumer-limit policies",
+      "type": "decision_point",
+      "content": "Configure gateway validation for issuer, audience, signature, expiry, and required scopes or roles. Key the rate-limit policy to a stable consumer identity such as a subscription or client identity, not an untrusted header or source IP alone. Define the policy window, quota scope, and 429 response with the API owner; the brief specifies rate limiting but supplies no per-consumer quota value.",
+      "decision": {
+        "question": "Where should authentication and per-consumer rate limits be enforced?",
+        "chosen": "Apply JWT validation, request validation, TLS, and consumer-keyed throttling at APIM; repeat resource-level authorization in the Function before reading or mutating data.",
+        "chosenReason": "Gateway policies reject invalid traffic before compute, while authorization in the business handler prevents route or cache behavior from becoming the only data-isolation control.",
+        "alternatives": [
+          {"option": "Trust the caller's tenant or user header", "tradeoff": "A caller can forge identity context unless the value is derived from a validated token claim."},
+          {"option": "Enforce one global request cap only", "tradeoff": "Does not isolate noisy consumers or provide the consumer-level limits requested in the brief."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "apim",
+        "properties": {"authentication": "JWT", "inputValidation": true, "rateLimiting": true, "throttling": true, "tlsTermination": true}
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:4"]
+    },
+    {
+      "id": "api_07",
+      "stepNumber": 7,
+      "phase": "Define the API contract and latency boundary",
+      "title": "Add Azure Functions for request handling",
+      "type": "add_component",
+      "content": "Use the existing Serverless Function catalog component for Azure Functions; its catalog tags include Azure Functions. Keep handlers stateless between invocations, validate the APIM-derived identity context, enforce authorization for the requested resource, and make CRUD operations explicit. Runtime, hosting mode, concurrency, and warm capacity are workload-dependent and are not inferred from the brief.",
+      "component": {
+        "nodeId": "functions",
+        "componentType": "serverless-function",
+        "label": "Azure Functions — REST Handlers",
+        "description": "Stateless CRUD handlers and resource authorization",
+        "position": {"x": 850, "y": 300},
+        "properties": {
+          "componentName": "Azure Functions — REST Handlers",
+          "purpose": "Handle accepted REST operations, validate business invariants, enforce tenant/resource authorization from verified claims, and access Cosmos DB and Redis using managed identity where supported. Keep request state out of the process so instances can scale independently; select runtime, plan, concurrency, and warm capacity only after load and cold-start measurements."
+        },
+        "highlightReason": "Azure Functions is the hinted serverless compute for CRUD business logic; its scale and cold-start behavior must be measured against the response target."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:8"]
+    },
+    {
+      "id": "api_08",
+      "stepNumber": 8,
+      "phase": "Define the API contract and latency boundary",
+      "title": "Route accepted REST calls to Functions",
+      "type": "add_connection",
+      "content": "APIM forwards only requests that pass route, request-shape, JWT, and consumer-limit policies. Carry a correlation identifier and validated identity context to the handler; do not pass an unverified caller-supplied authorization claim as trusted state.",
+      "connection": {
+        "edgeId": "apim_to_functions",
+        "sourceNodeId": "apim",
+        "targetNodeId": "functions",
+        "connectionType": "http",
+        "label": "Validated HTTPS REST request",
+        "description": "Route authorized, schema-checked requests with correlation context to the matching Function handler."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:4"]
+    },
+    {
+      "id": "api_09",
+      "stepNumber": 9,
+      "phase": "Secure ingress and implement synchronous CRUD",
+      "title": "Add Cosmos DB for durable resource state",
+      "type": "add_component",
+      "content": "Use the catalog Database component with its NoSQL type to represent Azure Cosmos DB. The component catalog has no Cosmos-specific engine option, so the provider is named in the component label and purpose rather than written into an unsupported property. Persist canonical resource state here; cache contents remain disposable and are never the source of truth.",
+      "component": {
+        "nodeId": "cosmos",
+        "componentType": "database",
+        "label": "Azure Cosmos DB",
+        "description": "Durable NoSQL resource records for REST CRUD",
+        "position": {"x": 1330, "y": 160},
+        "properties": {
+          "componentName": "Azure Cosmos DB",
+          "purpose": "Store canonical resource documents and their partition key, version/ETag, and ownership metadata. Select partitioning, indexing, consistency, backup, and throughput settings from the access pattern and recovery requirements; the generic catalog has no Azure Cosmos engine selector."
+        },
+        "highlightReason": "Cosmos DB is the supplied durable-store hint; the generic catalog Database component accurately represents NoSQL storage without claiming an unsupported provider setting."
+      },
+      "requirementIds": ["legacy-requirement:2"]
+    },
+    {
+      "id": "api_10",
+      "stepNumber": 10,
+      "phase": "Secure ingress and implement synchronous CRUD",
+      "title": "Send authorized CRUD operations to Cosmos DB",
+      "type": "add_connection",
+      "content": "The Function reads or writes the canonical document using a partition-aware query and a least-privilege data identity. Restrict point reads and writes to the authenticated tenant/resource scope; reject cross-tenant keys before issuing the database request.",
+      "connection": {
+        "edgeId": "functions_to_cosmos",
+        "sourceNodeId": "functions",
+        "targetNodeId": "cosmos",
+        "connectionType": "database-connection",
+        "label": "Authorized CRUD + conditional writes",
+        "description": "Functions issue partition-aware reads and writes using restricted data-plane identity."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3"]
+    },
+    {
+      "id": "api_11",
+      "stepNumber": 11,
+      "phase": "Secure ingress and implement synchronous CRUD",
+      "title": "Return canonical records and concurrency tokens",
+      "type": "add_connection",
+      "content": "Return the requested resource and its version/ETag to the Function, which shapes the public REST response. Use conditional writes when a client supplies If-Match so concurrent updates produce an explicit conflict instead of silently overwriting newer state.",
+      "connection": {
+        "edgeId": "cosmos_to_functions",
+        "sourceNodeId": "cosmos",
+        "targetNodeId": "functions",
+        "connectionType": "data-flow",
+        "label": "Document result + version/ETag",
+        "description": "Return persisted state and concurrency metadata for response shaping and conditional updates."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7"]
+    },
+    {
+      "id": "api_12",
+      "stepNumber": 12,
+      "phase": "Secure ingress and implement synchronous CRUD",
+      "title": "Choose NoSQL, access control, and consistency deliberately",
+      "type": "decision_point",
+      "content": "For the initial design, use Cosmos DB as a NoSQL document store with data-plane role-based access and encryption enabled. Choose a partition key from observed access patterns—often a tenant or resource key, but only if it distributes load and supports the dominant reads. Decide consistency from the API's read-after-write needs; 10k requests per second alone cannot determine RU/s, partition count, or a consistency level.",
+      "decision": {
+        "question": "Which database characteristics are safe baseline choices, and which need workload evidence?",
+        "chosen": "Use NoSQL documents, data-plane RBAC, and encryption; defer partition key, indexing, consistency, and throughput values until representative operations and tenant skew are measured.",
+        "chosenReason": "The brief and Cosmos hint support a document store and secure access, but do not provide the read/write profile needed to size or tune a Cosmos account responsibly.",
+        "alternatives": [
+          {"option": "Choose a tenant partition key without checking tenant skew", "tradeoff": "A few large tenants can create hot partitions and throttle otherwise healthy traffic."},
+          {"option": "Use strongest consistency everywhere by default", "tradeoff": "Can increase latency and cost without a stated read-after-write requirement for every operation."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "cosmos",
+        "properties": {"type": "NoSQL", "encryption": true, "rbac": true}
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:2"]
+    },
+    {
+      "id": "api_13",
+      "stepNumber": 13,
+      "phase": "Secure ingress and implement synchronous CRUD",
+      "title": "Define CRUD contracts and concurrency behavior",
+      "type": "decision_point",
+      "content": "Specify resource-oriented POST/GET/PUT-or-PATCH/DELETE routes, validation, pagination where collections exist, and whether deletion is hard or soft. Return an ETag on reads and honor If-Match on updates/deletes if the product needs lost-update protection. Make POST retry behavior explicit with an idempotency key or a documented non-idempotent contract; do not promise exactly-once execution across HTTP retries.",
+      "decision": {
+        "question": "How should concurrent edits and retried mutations behave?",
+        "chosen": "Use conditional updates with version/ETag checks and define an idempotency policy for create operations before clients retry ambiguous timeouts.",
+        "chosenReason": "Optimistic concurrency prevents silent lost updates, while explicit idempotency semantics keep a retry from creating duplicate resources without claiming an exactly-once transport.",
+        "alternatives": [
+          {"option": "Last write wins for every update", "tradeoff": "A later request can erase another client's changes without an observable conflict."},
+          {"option": "Retry every POST automatically", "tradeoff": "A timeout after commit can cause duplicate creates unless the operation has a deduplication key."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7"]
+    },
+    {
+      "id": "api_14",
+      "stepNumber": 14,
+      "phase": "Secure ingress and implement synchronous CRUD",
+      "title": "Add Redis for disposable response-cache entries",
+      "type": "add_component",
+      "content": "Use the catalog Cache component to represent the hinted Redis Cache. It accelerates eligible reads; Cosmos DB remains canonical. Keep cache entries scoped by resource version and any authorization/tenant dimensions that affect the response. The freshness requirement and TTL are unspecified, so choose them per endpoint and never cache a response before its isolation rules are understood.",
+      "component": {
+        "nodeId": "redis",
+        "componentType": "cache",
+        "label": "Azure Cache for Redis",
+        "description": "Cache-aside response data for eligible REST reads",
+        "position": {"x": 1330, "y": 500},
+        "properties": {
+          "componentName": "Azure Cache for Redis",
+          "purpose": "Hold disposable, versioned representations for eligible read routes. Scope keys by resource and any tenant/authorization dimensions, use cache-aside behavior, and invalidate after successful mutations. Set expiration and capacity from freshness, hit-rate, and cost measurements; never treat Redis as durable source of truth."
+        },
+        "highlightReason": "Redis Cache is a supplied hint; the existing Cache catalog component supports Redis and cache-aside semantics without inventing a TTL."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:1"]
+    },
+    {
+      "id": "api_15",
+      "stepNumber": 15,
+      "phase": "Secure ingress and implement synchronous CRUD",
+      "title": "Read or populate Redis from the Function",
+      "type": "add_connection",
+      "content": "On an eligible GET, Functions first check the cache using the complete response identity. On a miss, load the authorized document from Cosmos DB, shape the response, then populate Redis with a bounded expiration chosen for that resource's freshness contract.",
+      "connection": {
+        "edgeId": "functions_to_redis",
+        "sourceNodeId": "functions",
+        "targetNodeId": "redis",
+        "connectionType": "cache-read",
+        "label": "GET lookup, populate + mutation invalidation",
+        "description": "Function handlers perform cache-aside reads and invalidate affected keys only after a durable write succeeds."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:1"]
+    },
+    {
+      "id": "api_16",
+      "stepNumber": 16,
+      "phase": "Secure ingress and implement synchronous CRUD",
+      "title": "Return a cache hit to the authorized handler",
+      "type": "add_connection",
+      "content": "Redis returns a cached representation to the Function, not directly to an unvalidated caller. The handler still applies current authorization and response shaping; if access rights can change independently of the resource version, include the relevant authorization version in the cache key or avoid caching that response.",
+      "connection": {
+        "edgeId": "redis_to_functions",
+        "sourceNodeId": "redis",
+        "targetNodeId": "functions",
+        "connectionType": "cache-response",
+        "label": "Cached representation on eligible read",
+        "description": "Return a cache hit to the handler, which preserves response authorization and format."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5"]
+    },
+    {
+      "id": "api_17",
+      "stepNumber": 17,
+      "phase": "Secure ingress and implement synchronous CRUD",
+      "title": "Keep cache freshness and tenant isolation explicit",
+      "type": "decision_point",
+      "content": "Use cache-aside for response data only where staleness is acceptable. Cache GETs, not mutation outcomes or authorization decisions by default. After a committed create/update/delete, invalidate or version the affected representation; if invalidation fails, rely on a bounded stale window only when the product explicitly permits it. A cache key must not let one tenant receive another tenant's document.",
+      "decision": {
+        "question": "What may be cached, and how is stale or cross-tenant data prevented?",
+        "chosen": "Cache only approved reads under tenant/resource-scoped keys, choose expiration from an agreed freshness rule, and invalidate or version entries after committed writes.",
+        "chosenReason": "This improves repeat-read latency without changing the canonical write path or sharing a response across authorization boundaries.",
+        "alternatives": [
+          {"option": "Cache every response under the URL alone", "tradeoff": "Personalized or tenant-scoped responses can leak across callers and writes can leave stale results."},
+          {"option": "Use Redis as the only copy of a resource", "tradeoff": "Eviction or cache failure would become data loss rather than a performance degradation."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "redis",
+        "properties": {"engine": "redis", "cacheStrategy": "cache-aside", "inMemory": true}
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5"]
+    },
+    {
+      "id": "api_18",
+      "stepNumber": 18,
+      "phase": "Cache safely and make failures observable",
+      "title": "Return stable errors clients can act on",
+      "type": "decision_point",
+      "content": "Use a consistent error envelope with a safe code, request/correlation ID, and retry guidance. Map malformed input to 400, missing resources to 404, invalid credentials to 401, insufficient permissions to 403, ETag conflicts to 409 or 412 according to the API contract, and consumer throttling to 429 with Retry-After where available. Return 503 for exhausted transient dependencies; never expose stack traces or secrets.",
+      "decision": {
+        "question": "Where should errors be translated into the public API contract?",
+        "chosen": "Let APIM standardize gateway-policy failures and let Functions map domain and dependency failures to the same documented envelope, preserving a correlation ID.",
+        "chosenReason": "The gateway can reject invalid traffic early, while the handler understands resource and persistence failures; a shared contract makes both paths usable by clients.",
+        "alternatives": [
+          {"option": "Return raw dependency error bodies", "tradeoff": "Leaks implementation details and couples clients to vendor-specific messages."},
+          {"option": "Convert every failure to 200 with an error field", "tradeoff": "Breaks HTTP client retry behavior, monitoring, and intermediary semantics."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:4"]
+    },
+    {
+      "id": "api_19",
+      "stepNumber": 19,
+      "phase": "Cache safely and make failures observable",
+      "title": "Authorize each resource, not just each token",
+      "type": "explanation",
+      "content": "A valid JWT proves an authenticated principal, not permission to every document. Derive tenant and scope from validated claims, enforce ownership or role rules in the Function for each operation, and use managed identity with least-privilege data-plane access to Cosmos and Redis. Reject cross-tenant access on cache hits and misses alike; do not log bearer tokens, secrets, or sensitive document bodies.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "api_20",
+      "stepNumber": 20,
+      "phase": "Cache safely and make failures observable",
+      "title": "Add Application Insights for service telemetry",
+      "type": "add_component",
+      "content": "Use the existing generic Monitoring component to represent Azure Application Insights. The component catalog has no Azure-specific monitoring selector, so this node deliberately leaves the stack field unset and names Application Insights in its label and purpose. Collect correlated request traces and dependency metrics without logging credentials or full sensitive payloads.",
+      "component": {
+        "nodeId": "insights",
+        "componentType": "monitoring",
+        "label": "Azure Application Insights",
+        "description": "Correlated API, Function, and dependency telemetry",
+        "position": {"x": 1770, "y": 320},
+        "properties": {
+          "componentName": "Azure Application Insights",
+          "purpose": "Collect correlated request traces, dependency timings, exceptions, and service metrics for APIM and Azure Functions. The generic catalog has no Azure Application Insights stack option; provider identity is represented by this component name and purpose, not by an unsupported stack value. Redact tokens and sensitive payload fields."
+        },
+        "highlightReason": "Application Insights is a named hint; the generic Monitoring catalog component covers metrics and alerts without asserting an unsupported provider enum."
+      },
+      "requirementIds": ["legacy-requirement:6"]
+    },
+    {
+      "id": "api_21",
+      "stepNumber": 21,
+      "phase": "Cache safely and make failures observable",
+      "title": "Send gateway policy and request telemetry",
+      "type": "add_connection",
+      "content": "Export APIM request duration, route, response status, throttling decisions, and backend time with the same correlation identity used by the Function. Apply sampling only after confirming it retains enough error and tail-latency evidence.",
+      "connection": {
+        "edgeId": "apim_to_insights",
+        "sourceNodeId": "apim",
+        "targetNodeId": "insights",
+        "connectionType": "telemetry",
+        "label": "Route, status, throttle + gateway duration",
+        "description": "Gateway diagnostics feed correlated service-level latency and error views."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "api_22",
+      "stepNumber": 22,
+      "phase": "Cache safely and make failures observable",
+      "title": "Trace Function execution and dependency spans",
+      "type": "add_connection",
+      "content": "Instrument handler duration, cold starts, exceptions, authorization denials, cache outcome, and Cosmos/Redis dependency spans. Preserve a shared operation ID from APIM so a slow request can be decomposed into gateway, compute, and dependency time.",
+      "connection": {
+        "edgeId": "functions_to_insights",
+        "sourceNodeId": "functions",
+        "targetNodeId": "insights",
+        "connectionType": "telemetry",
+        "label": "Handler, cold-start + dependency spans",
+        "description": "Correlate Function execution and downstream timings with the originating API request."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "api_23",
+      "stepNumber": 23,
+      "phase": "Cache safely and make failures observable",
+      "title": "Observe Cosmos latency, throttling, and partition pressure",
+      "type": "add_connection",
+      "content": "Include database operation latency, request-unit consumption, 429 throttles, availability errors, and partition-key skew in dashboards. Alert on sustained throttling or a growing latency contribution before the API's end-to-end budget is exhausted.",
+      "connection": {
+        "edgeId": "cosmos_to_insights",
+        "sourceNodeId": "cosmos",
+        "targetNodeId": "insights",
+        "connectionType": "metrics",
+        "label": "RU usage, 429s + database latency",
+        "description": "Database signals reveal capacity pressure and hot partitions behind slow API calls."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "api_24",
+      "stepNumber": 24,
+      "phase": "Cache safely and make failures observable",
+      "title": "Measure Redis effectiveness and health",
+      "type": "add_connection",
+      "content": "Track cache hit/miss ratio, operation latency, evictions, connection failures, and memory pressure. A rising hit rate is useful only when responses remain correct and tenant-safe; compare saved database work and tail latency against the Redis capacity cost.",
+      "connection": {
+        "edgeId": "redis_to_insights",
+        "sourceNodeId": "redis",
+        "targetNodeId": "insights",
+        "connectionType": "metrics",
+        "label": "Hit rate, latency + memory pressure",
+        "description": "Cache signals show whether Redis improves the measured request path without masking stale-data risk."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "api_25",
+      "stepNumber": 25,
+      "phase": "Cache safely and make failures observable",
+      "title": "Alert on user-visible latency and error signals",
+      "type": "scale_trigger",
+      "content": "Build alerts around end-to-end latency percentiles, 5xx and 429 rates, dependency failures, cold-start contribution, and sustained capacity saturation. Set thresholds from the agreed SLO and baseline tests; do not treat an isolated request or an unmeasured default as an availability breach.",
+      "scaleTrigger": {
+        "metric": "End-to-end latency percentiles, HTTP status rates, dependency availability, throttles, and capacity saturation",
+        "action": "Page on sustained user-impacting SLO burn; route lower-severity capacity trends to the service owner with the correlated request and dependency breakdown.",
+        "impact": "Without correlated signals, operators cannot tell whether APIM, Functions, Cosmos DB, or Redis is consuming the latency or availability budget."
+      },
+      "componentUpdate": {
+        "nodeId": "insights",
+        "properties": {"metrics": true, "alerts": true}
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "api_26",
+      "stepNumber": 26,
+      "phase": "Cache safely and make failures observable",
+      "title": "Separate cache degradation from database failure",
+      "type": "decision_point",
+      "content": "If Redis is unavailable, bypass it only when Cosmos can safely serve the request and the resulting load will not overwhelm the database; otherwise shed load deliberately. If Cosmos is unavailable or a write outcome is uncertain, return a retryable failure rather than a success-shaped response. Use bounded timeouts, circuit breaking in the Function dependency code, and controlled recovery so a returning cache does not stampede Cosmos.",
+      "decision": {
+        "question": "What should the REST API do when a data dependency fails?",
+        "chosen": "Treat Redis as optional only within a tested fallback envelope; treat Cosmos as the durable dependency, fail clearly on uncertain writes, and bound retries and concurrent recovery work.",
+        "chosenReason": "The cache can be rebuilt, but falling through every request during a cache outage can overload the database; durable-write uncertainty must not be hidden from clients.",
+        "alternatives": [
+          {"option": "Retry all failures without a limit", "tradeoff": "Amplifies an outage and consumes the remaining latency budget."},
+          {"option": "Serve stale cache entries for every route", "tradeoff": "Can violate freshness, authorization, or mutation semantics that the brief has not declared safe."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "api_27",
+      "stepNumber": 27,
+      "phase": "Cache safely and make failures observable",
+      "title": "Keep diagnostics useful without collecting secrets",
+      "type": "explanation",
+      "content": "Attach route template, status, operation ID, consumer class, and dependency timings to telemetry. Avoid raw JWTs, authorization headers, full document bodies, and unbounded high-cardinality identifiers. Apply retention and access controls to traces under the organization's data policy, and test that error messages do not echo submitted secrets.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "api_28",
+      "stepNumber": 28,
+      "phase": "Scale, protect availability, and prove the targets",
+      "title": "Scale Functions against concurrency and duration",
+      "type": "scale_trigger",
+      "content": "Observe active executions, request duration, cold starts, throttled invocations, and outbound connection pressure. Scale-out must not exhaust Cosmos or Redis connections, and scale-in must not terminate work before the platform's graceful completion boundary. The 10k-RPS goal is an aggregate acceptance target, not a per-instance setting.",
+      "scaleTrigger": {
+        "metric": "Function concurrency, execution duration, cold-start share, invocation throttles, and dependency connection pressure",
+        "action": "Tune instance concurrency and hosting capacity under the production request mix; cap scale-out where downstream limits require backpressure.",
+        "impact": "Compute can scale faster than stateful dependencies, shifting the bottleneck into connection exhaustion, Cosmos throttling, or Redis saturation."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "api_29",
+      "stepNumber": 29,
+      "phase": "Scale, protect availability, and prove the targets",
+      "title": "Balance cold-start latency and elastic compute cost",
+      "type": "decision_point",
+      "content": "Compare the Functions hosting choices with cold and warm requests, burst duration, scale-out lag, concurrency, and idle-period cost. A pre-warmed floor may help a strict tail-latency target but adds baseline spend; a fully elastic configuration can be cheaper at idle and slower on a cold burst. Select the operating point only after testing the 10k-RPS traffic shape and confirming service quotas.",
+      "decision": {
+        "question": "How much compute should remain warm when traffic varies?",
+        "chosen": "Benchmark elastic scale-out first, then keep only the warm capacity needed to meet the agreed latency percentile and burst objective; record its idle cost as part of the decision.",
+        "chosenReason": "This makes the latency-versus-cost tradeoff explicit instead of promising both minimum idle spend and instant 10k-RPS scale without evidence.",
+        "alternatives": [
+          {"option": "Keep a large fixed warm pool at all times", "tradeoff": "Reduces some cold-start risk but may defeat cost effectiveness during long low-traffic periods."},
+          {"option": "Assume platform autoscale meets the target automatically", "tradeoff": "Ignores scale-out delay, concurrency, quotas, and downstream capacity limits."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "functions",
+        "properties": {"coldStart": true}
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "api_30",
+      "stepNumber": 30,
+      "phase": "Scale, protect availability, and prove the targets",
+      "title": "Scale Cosmos from measured request-unit pressure",
+      "type": "scale_trigger",
+      "content": "Measure request-unit consumption by operation, throttled requests, latency, storage, and partition skew. Evaluate autoscale or provisioned throughput against the actual burst and idle pattern. Ten thousand HTTP requests per second does not determine Cosmos capacity: reads, writes, document size, indexing, point-versus-cross-partition access, and cache-hit rate all change the work per request.",
+      "scaleTrigger": {
+        "metric": "RU consumption, 429 responses, operation latency, storage growth, and hottest-partition utilization",
+        "action": "Load-test the access pattern, set a reviewed throughput ceiling and alert threshold, then tune indexing and partition strategy before raising capacity blindly.",
+        "impact": "Insufficient or skewed capacity throttles CRUD and can violate latency; overprovisioning raises variable-load cost without proving a better user outcome."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "api_31",
+      "stepNumber": 31,
+      "phase": "Scale, protect availability, and prove the targets",
+      "title": "Test partition-key distribution before committing it",
+      "type": "decision_point",
+      "content": "Model the largest tenants, hottest resources, and common list queries using representative data. A tenant key can simplify isolation and scoped reads, but one dominant tenant may become a hot partition; a resource key can spread writes but make tenant-wide queries more expensive. Keep cross-partition work explicit and measure before fixing the partition key in production data.",
+      "decision": {
+        "question": "Which partition key supports both the access pattern and the 10k-RPS target?",
+        "chosen": "Choose an immutable, sufficiently distributed key from measured tenant/resource access patterns and validate the hottest-key case under load before migration.",
+        "chosenReason": "A key must balance point access, tenant isolation, and write distribution; the problem statement does not contain enough workload data to select it by name.",
+        "alternatives": [
+          {"option": "Partition all records on one constant", "tradeoff": "Concentrates throughput and storage into a hot partition."},
+          {"option": "Hash every request independently", "tradeoff": "Can spread writes but removes useful locality for resource and tenant queries."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:8", "legacy-constraint:2"]
+    },
+    {
+      "id": "api_32",
+      "stepNumber": 32,
+      "phase": "Scale, protect availability, and prove the targets",
+      "title": "Benchmark APIM policies at the required request rate",
+      "type": "scale_trigger",
+      "content": "Measure gateway latency, policy execution, backend saturation, throttles, and regional capacity as traffic rises. Test the complete APIM tier and policy set at 10k requests per second, including token validation and consumer rate limits; do not set the API Management requests-per-second field to the target as if that proved capacity.",
+      "scaleTrigger": {
+        "metric": "APIM throughput, gateway policy duration, backend latency, 429/5xx rates, and capacity utilization",
+        "action": "Select and scale the APIM tier/configuration using a representative end-to-end load test; define the consumer quota separately from the system-wide capacity target.",
+        "impact": "A gateway bottleneck or expensive policy can break the response-time and throughput targets even when Functions have spare compute."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "api_33",
+      "stepNumber": 33,
+      "phase": "Scale, protect availability, and prove the targets",
+      "title": "Keep cache spend proportional to saved work",
+      "type": "decision_point",
+      "content": "Measure cache hit rate by endpoint, Redis memory/eviction pressure, database work avoided, and end-to-end tail-latency change. Redis may have a baseline cost even while Functions and Cosmos scale down. If traffic is sparse or the response is rarely reused, caching can cost more and add another failure mode; retain it where measured reuse and freshness make the trade worthwhile.",
+      "decision": {
+        "question": "When does the Redis response cache earn its cost?",
+        "chosen": "Keep Redis for routes whose measured reuse reduces database load or latency enough to justify its baseline and operational cost; revisit TTL and capacity as demand changes.",
+        "chosenReason": "Variable-load economics differ by component: serverless compute and database throughput can scale with activity, while a cache may retain a minimum footprint.",
+        "alternatives": [
+          {"option": "Cache every endpoint because Redis is available", "tradeoff": "Adds cost and invalidation complexity to low-reuse or freshness-sensitive routes."},
+          {"option": "Remove the cache without testing peak database load", "tradeoff": "Could move all repeated reads to Cosmos and worsen the tail-latency or throughput envelope."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "api_34",
+      "stepNumber": 34,
+      "phase": "Scale, protect availability, and prove the targets",
+      "title": "Turn 99.9% availability into a failure and recovery design",
+      "type": "decision_point",
+      "content": "The brief gives a 99.9% availability target but no region count, RTO, RPO, or write-conflict policy. Treat a zone-resilient regional deployment as a baseline candidate only where the selected service tiers support it, then decide whether regional failover is needed to meet the error budget. Multi-region writes add consistency, conflict-resolution, and cost decisions; do not claim 99.9% until the full dependency path and recovery behavior are tested.",
+      "decision": {
+        "question": "What failure scope and recovery objectives must the 99.9% target cover?",
+        "chosen": "Define the API availability measurement, RTO, RPO, and permitted data-loss/conflict behavior first; select the least-cost zone or region topology that passes those objectives and a failover exercise.",
+        "chosenReason": "A numeric uptime target alone does not determine whether regional redundancy is required, and adding regions without consistency and recovery rules can make CRUD behavior less predictable.",
+        "alternatives": [
+          {"option": "Assume one region automatically meets 99.9%", "tradeoff": "A regional outage may consume the entire availability budget, depending on the measurement period and recovery time."},
+          {"option": "Enable active-active writes immediately", "tradeoff": "Adds replication and conflict costs before the brief defines multi-region demand or write semantics."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "api_35",
+      "stepNumber": 35,
+      "phase": "Scale, protect availability, and prove the targets",
+      "title": "Retry only failures that are safe to retry",
+      "type": "decision_point",
+      "content": "Use bounded exponential backoff with jitter for transient dependency throttles and honor Retry-After where supplied. Do not retry validation, authentication, or authorization failures. For writes, distinguish a definite rejection from an unknown outcome after timeout; use idempotency records or conditional writes before replaying a mutation. Cap retry time inside the request budget, then return a correlated retryable error.",
+      "decision": {
+        "question": "How can the API recover from transient failures without amplifying them?",
+        "chosen": "Apply a small bounded retry budget to safe transient operations, honor server retry hints, use idempotency/ETag checks for mutations, and fail clearly when the end-to-end deadline is reached.",
+        "chosenReason": "Unbounded retries multiply traffic during an outage, while replaying an uncertain write can duplicate or overwrite state.",
+        "alternatives": [
+          {"option": "Retry every 429 and 5xx indefinitely", "tradeoff": "Creates retry storms and pushes otherwise healthy requests beyond the latency budget."},
+          {"option": "Never retry a transient dependency failure", "tradeoff": "A short recoverable throttle can become an avoidable client-visible failure."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "api_36",
+      "stepNumber": 36,
+      "phase": "Scale, protect availability, and prove the targets",
+      "title": "Rotate signing keys and test JWT rejection paths",
+      "type": "explanation",
+      "content": "Exercise valid, expired, wrong-audience, wrong-issuer, missing-scope, malformed, and rotated-key tokens. Ensure a key refresh does not create an avoidable outage and an unknown key fails closed. Define separate consumer identities and permissions for service-to-service clients; never use a shared static API key as a substitute for the JWT requirement.",
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "api_37",
+      "stepNumber": 37,
+      "phase": "Scale, protect availability, and prove the targets",
+      "title": "Validate inputs before expensive work",
+      "type": "explanation",
+      "content": "Set request-size and schema limits at the gateway, then enforce domain validation in Functions before cache or database calls. Use parameterized SDK operations, avoid client-selected partition scans, and return field-level errors without echoing secrets. Rate limits should protect both each consumer and shared downstream capacity, with documented 429 behavior.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:7"]
+    },
+    {
+      "id": "api_38",
+      "stepNumber": 38,
+      "phase": "Scale, protect availability, and prove the targets",
+      "title": "Define the availability SLI and error budget",
+      "type": "explanation",
+      "content": "Agree which successful API responses count, how planned maintenance and client errors are treated, the reporting window, and which operations are in scope. Derive the error budget from the 99.9% target using that window; alert on sustained budget burn and test the runbook for APIM, Functions, Cosmos, Redis, identity metadata, and regional failure. A healthy process alone is not end-to-end availability.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "api_39",
+      "stepNumber": 39,
+      "phase": "Scale, protect availability, and prove the targets",
+      "title": "Load-test the complete 10k-RPS request path",
+      "type": "scale_trigger",
+      "content": "Generate the expected mix of reads, creates, updates, deletes, invalid tokens, cross-tenant authorization attempts, and throttled consumers at the required 10k requests per second, including burst ramp-up and low-to-high transitions. Test cold and warm Functions, cache hits and misses, realistic payloads, hot tenants, and dependency throttling. Record end-to-end p50/p95/p99 and confirm the product owner’s chosen percentile stays under 200ms; repeat with a dependency or region failure for availability evidence.",
+      "scaleTrigger": {
+        "metric": "Sustained and burst request rate, end-to-end latency percentiles, 429/5xx rate, concurrency, RU consumption, and cache-hit ratio",
+        "action": "Run an instrumented end-to-end load test at 10k requests per second, tune the measured bottleneck, and rerun until the agreed latency percentile and recovery criteria pass.",
+        "impact": "Component-level sizing cannot prove the combined APIM, identity, Functions, Redis, and Cosmos request path meets throughput or response-time targets."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "api_40",
+      "stepNumber": 40,
+      "phase": "Scale, protect availability, and prove the targets",
+      "title": "Model cost across quiet periods and bursts",
+      "type": "scale_trigger",
+      "content": "Track compute execution and warm capacity, APIM tier/capacity, Cosmos request units and storage, Redis baseline/capacity, and telemetry ingestion/retention. Compare a representative low-load period with the 10k-RPS peak and burst recovery. State the tested workload behind each estimate; there is no request, storage, or regional mix in the brief from which to promise a monthly cost.",
+      "scaleTrigger": {
+        "metric": "Cost per request and per workload interval, idle compute floor, APIM capacity, Cosmos RU/storage, Redis footprint, and telemetry volume",
+        "action": "Set budgets and scale ceilings per service, review idle and burst costs together, and right-size only after correctness and latency gates still pass.",
+        "impact": "Cost controls that ignore minimum cache/gateway capacity or scale-out headroom can either waste spend or cause throttling during bursts."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "api_41",
+      "stepNumber": 41,
+      "phase": "Scale, protect availability, and prove the targets",
+      "title": "Use explicit acceptance evidence before calling targets met",
+      "type": "decision_point",
+      "content": "A review-ready design should have repeatable tests for each requirement: REST CRUD and concurrent-update cases; JWT and authorization negatives; per-consumer 429 behavior; cache hit, invalidation, and tenant isolation; dependency timeout/recovery; correlated performance monitoring; low-to-burst load and cost-per-request measurements; 10k-RPS load; the agreed sub-200ms percentile; and the 99.9% failure/recovery objective. This walkthrough itself is a proposal, not load-test, availability, or AI-assessment evidence.",
+      "decision": {
+        "question": "What evidence is sufficient to claim the design meets the brief?",
+        "chosen": "Require functional, security, cache-correctness, load, and failover evidence from the same measured configuration, and report each target as unverified until its test passes.",
+        "chosenReason": "A component list or AI score cannot demonstrate end-to-end performance, availability, or correct tenant isolation.",
+        "alternatives": [
+          {"option": "Accept a diagram or configuration defaults as proof", "tradeoff": "Neither establishes the workload capacity nor validates actual error and recovery behavior."},
+          {"option": "Test only the happy-path GET", "tradeoff": "Misses writes, authorization boundaries, throttling, invalidation, and dependency outages."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "api_42",
+      "stepNumber": 42,
+      "phase": "Scale, protect availability, and prove the targets",
+      "title": "Review the request path and open decisions",
+      "type": "explanation",
+      "content": "The proposed path is external REST caller -> Azure API Management -> Azure Functions -> Redis for eligible cache-aside reads and Cosmos DB for canonical CRUD state, with Azure AD issuing JWTs and Application Insights receiving correlated telemetry. Before implementation, confirm the latency percentile, per-consumer quotas, resource and tenant model, freshness policy, partition key, read/write mix, hosting capacity, cost envelope, and recovery objectives. The 200ms, 10k-RPS, and 99.9% values remain acceptance targets—not measured guarantees from this guide.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

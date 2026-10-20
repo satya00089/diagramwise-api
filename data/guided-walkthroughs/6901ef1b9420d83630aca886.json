@@ -1,0 +1,585 @@
+{
+  "problem_id": "6901ef1b9420d83630aca886",
+  "version": "1.0.0-review-draft",
+  "requirementRevision": null,
+  "totalSteps": 32,
+  "phases": [
+    {
+      "name": "Define the typed container and registration model",
+      "stepRange": [1, 14],
+      "description": "Model the framework as an in-process library with an explicit typed resolve contract, a single binding model for code and file configuration, and cached dependency plans."
+    },
+    {
+      "name": "Connect resolution, lifecycle, and diagnostics",
+      "stepRange": [15, 30],
+      "description": "Trace registrations into immutable lookup state, plan constructor/property injection, detect eager cycles, create instances under the requested lifecycle, and return precise errors or typed deferred providers."
+    },
+    {
+      "name": "Review runtime and language assumptions",
+      "stepRange": [31, 32],
+      "description": "Keep performance targets, reflection strategy, scope boundaries, generic type representation, and configuration format open until a target language and runtime are chosen."
+    }
+  ],
+  "steps": [
+    {
+      "id": "di_01",
+      "stepNumber": 1,
+      "phase": "Define the typed container and registration model",
+      "type": "explanation",
+      "title": "Frame this as a library, not a distributed service",
+      "content": "The brief describes an inversion-of-control/dependency-injection framework: callers register and resolve dependencies, choose singleton/transient/scoped lifetimes, inject constructors and properties, detect cycles, support interfaces/abstract types and auto-wiring, configure from code/files, and operate safely across threads. It requires generic-type support and scoped lifetimes but leaves their detailed type model and scope ownership open; it also specifies no target language, runtime, numeric performance budget, or file format. The architecture is therefore a language-neutral in-process library; reflection and generated/explicit metadata remain alternatives rather than assumed requirements.",
+      "requirementIds": []
+    },
+    {
+      "id": "di_02",
+      "stepNumber": 2,
+      "phase": "Define the typed container and registration model",
+      "type": "add_component",
+      "title": "Show a consumer resolving a service",
+      "content": "A consumer asks for a typed service contract rather than an unvalidated string key. Keep framework internals behind one resolver surface so applications can substitute a test container or adapter without depending on registry implementation details.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:2"],
+      "component": {
+        "nodeId": "di_consumer",
+        "componentType": "uml-class",
+        "label": "Consumer Application",
+        "description": "Application code that registers and resolves typed dependencies.",
+        "position": {"x": 0, "y": 320},
+        "properties": {
+          "componentName": "Consumer Application",
+          "purpose": "Register application services against typed contracts, request dependencies through the framework's public generic resolver, and receive either a type-safe instance or a structured resolution error without accessing the internal registry."
+        },
+        "highlightReason": "The existing UML Class catalog is the right semantic component for an in-process software module."
+      }
+    },
+    {
+      "id": "di_03",
+      "stepNumber": 3,
+      "phase": "Define the typed container and registration model",
+      "type": "add_component",
+      "title": "Define a typed resolution contract",
+      "content": "Expose generic operations such as Resolve<T>, TryResolve<T>, and optionally ResolveAll<T>, with qualifiers only when the type contract needs more than one binding. Preserve constructed generic identity so Service<Order> and Service<Customer> cannot collide. Avoid reflection-shaped object casts in the public API.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "di_resolver_api",
+        "componentType": "uml-interface",
+        "label": "Resolver<T> Contract",
+        "description": "Generic public API for typed dependency resolution.",
+        "position": {"x": 280, "y": 320},
+        "properties": {
+          "componentName": "Resolver<T> Contract",
+          "purpose": "Define language-native generic resolve/try-resolve operations keyed by the requested service type and optional qualifier. Preserve closed generic type identity and return type-safe values; document missing, ambiguous, and invalid binding outcomes as distinct errors."
+        },
+        "highlightReason": "The canonical UML Interface node captures the public abstraction without inventing framework-specific infrastructure."
+      }
+    },
+    {
+      "id": "di_04",
+      "stepNumber": 4,
+      "phase": "Define the typed container and registration model",
+      "type": "add_component",
+      "title": "Make the container own resolution policy",
+      "content": "The container composes registration lookup, plan resolution, lifecycle, and diagnostics. Support concurrent calls and safe registration publication; do not hold one global lock while invoking user constructors, since application code may re-enter the framework or block.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2"],
+      "component": {
+        "nodeId": "di_container",
+        "componentType": "uml-class",
+        "label": "Dependency Container",
+        "description": "Composition root for binding lookup, plan selection, and instance creation.",
+        "position": {"x": 560, "y": 320},
+        "properties": {
+          "componentName": "Dependency Container",
+          "purpose": "Implement the resolver contract and coordinate registration snapshots, activation plans, lifecycle scopes, and structured failures. Permit concurrent resolution; publish registration changes atomically and avoid holding a global registry lock while user constructors or property setters execute."
+        },
+        "highlightReason": "The canonical UML Class models the framework's central in-process object and keeps the design language-neutral."
+      }
+    },
+    {
+      "id": "di_05",
+      "stepNumber": 5,
+      "phase": "Define the typed container and registration model",
+      "type": "add_component",
+      "title": "Support explicit registration in code",
+      "content": "A registration builder binds a service contract, including an interface or abstract class, to an assignable concrete implementation, factory, or instance and declares its lifecycle and optional qualifier. Validate assignability, generic constraints, duplicate policy, and lifetime compatibility before publishing the binding.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "di_code_registration",
+        "componentType": "uml-class",
+        "label": "Code Registration Builder",
+        "description": "Fluent or declarative programmatic binding registration.",
+        "position": {"x": 0, "y": 650},
+        "properties": {
+          "componentName": "Code Registration Builder",
+          "purpose": "Create typed bindings from an interface or abstract service contract to an assignable concrete implementation, factory, or instance, with qualifier and lifecycle metadata. Validate assignability and generic constraints up front, and feed the same normalized descriptor path used by file configuration."
+        },
+        "highlightReason": "The existing UML Class component represents a library module; its purpose carries the registration semantics."
+      }
+    },
+    {
+      "id": "di_06",
+      "stepNumber": 6,
+      "phase": "Define the typed container and registration model",
+      "type": "add_component",
+      "title": "Parse files into the same validated descriptors",
+      "content": "File-based setup must converge on the same typed registration representation as code-based setup, including bindings from interface or abstract service contracts to concrete implementations. Parse and validate before activation, reject unknown types or invalid lifetimes with actionable field paths, and do not execute arbitrary code from a configuration file.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3"],
+      "component": {
+        "nodeId": "di_file_config",
+        "componentType": "uml-class",
+        "label": "File Configuration Loader",
+        "description": "Validates file declarations into normalized binding descriptors.",
+        "position": {"x": 280, "y": 650},
+        "properties": {
+          "componentName": "File Configuration Loader",
+          "purpose": "Read a documented declarative file format, validate interface or abstract service contracts against concrete implementation references along with generic constraints, qualifiers, and lifecycle values, then emit the same normalized binding descriptors as code registration. Report file path and field in each validation error; never evaluate arbitrary configuration code."
+        },
+        "highlightReason": "A canonical UML Class is more accurate for this framework module than a cloud configuration service."
+      }
+    },
+    {
+      "id": "di_07",
+      "stepNumber": 7,
+      "phase": "Define the typed container and registration model",
+      "type": "add_component",
+      "title": "Store bindings by typed identity",
+      "content": "Index bindings by service type, closed generic arguments, and optional qualifier. Publish immutable snapshots or an equivalently atomic structure so concurrent readers do not observe half-updated registration state; define whether runtime registration changes are allowed after resolution begins.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "di_binding_registry",
+        "componentType": "uml-class",
+        "label": "Typed Binding Registry",
+        "description": "Concurrent registry of validated service-to-implementation bindings.",
+        "position": {"x": 560, "y": 650},
+        "properties": {
+          "componentName": "Typed Binding Registry",
+          "purpose": "Index normalized bindings by service type, constructed generic arguments, and qualifier. Publish a complete immutable registry snapshot or equivalent atomic view so concurrent resolvers never observe a partially applied code/file configuration update."
+        },
+        "highlightReason": "A UML Class represents the registry inside a library; no database or distributed registry is implied."
+      }
+    },
+    {
+      "id": "di_08",
+      "stepNumber": 8,
+      "phase": "Define the typed container and registration model",
+      "type": "add_component",
+      "title": "Plan constructor and property injection",
+      "content": "Auto-wiring inspects or consumes generated metadata to select a constructor, resolve its typed parameters, and apply only explicitly opted-in properties after construction. Prefer compile-time/generated plans where the target runtime supports them; otherwise isolate reflection so it is not repeated on every resolution. Validate ambiguous constructors and property mutability clearly.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2"],
+      "component": {
+        "nodeId": "di_autowire_planner",
+        "componentType": "uml-class",
+        "label": "Auto-Wiring Planner",
+        "description": "Produces typed activation plans for constructors and opted-in properties.",
+        "position": {"x": 840, "y": 650},
+        "properties": {
+          "componentName": "Auto-Wiring Planner",
+          "purpose": "Select and validate a constructor, map typed parameters to bindings, and prepare explicitly opted-in property injection after construction. Use generated metadata or cached reflection plans according to the chosen runtime; report ambiguous or unsupported injection points before repeated resolution."
+        },
+        "highlightReason": "The existing UML Class models a framework algorithm without assuming a specific reflection technology."
+      }
+    },
+    {
+      "id": "di_09",
+      "stepNumber": 9,
+      "phase": "Define the typed container and registration model",
+      "type": "add_component",
+      "title": "Detect eager dependency cycles with a useful path",
+      "content": "During graph planning, track the current resolution path and detect a repeated service/binding before constructing an eager cycle. Include the chain and injection sites in the error. A typed deferred Provider<T> may break an intentional lazy edge, but should not conceal an accidental cycle.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:3"],
+      "component": {
+        "nodeId": "di_cycle_detector",
+        "componentType": "uml-class",
+        "label": "Dependency Cycle Detector",
+        "description": "Validates planned dependency paths and identifies eager cycles.",
+        "position": {"x": 1120, "y": 650},
+        "properties": {
+          "componentName": "Dependency Cycle Detector",
+          "purpose": "Track typed binding and injection-site ancestry while building a dependency plan, detect eager cycles before uncontrolled recursive construction, and provide the exact cycle chain for diagnostics. Treat explicitly deferred provider edges as lazy boundaries, not as a reason to ignore other cycles."
+        },
+        "highlightReason": "The UML Class catalog item accurately represents a graph-validation module within the library."
+      }
+    },
+    {
+      "id": "di_10",
+      "stepNumber": 10,
+      "phase": "Define the typed container and registration model",
+      "type": "add_component",
+      "title": "Cache activation metadata, not every resolved object",
+      "content": "Cache validated activation plans by registry version and closed service type so reflection/planning does not recur on every resolve. Keep instance lifetime ownership in the lifecycle manager. Invalidate plan entries when registration snapshots change, and choose a bound/eviction policy after measuring type cardinality.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "di_plan_cache",
+        "componentType": "uml-class",
+        "label": "Activation Plan Cache",
+        "description": "Versioned cache of validated construction metadata.",
+        "position": {"x": 1400, "y": 650},
+        "properties": {
+          "componentName": "Activation Plan Cache",
+          "purpose": "Cache compact validated activation metadata by registry version and closed generic service type; do not turn transient instances into accidental singletons. Invalidate plans when bindings change and release entries according to a policy informed by the number of distinct resolved types."
+        },
+        "highlightReason": "A canonical UML Class models the metadata cache without incorrectly depicting this as a separate distributed cache service."
+      }
+    },
+    {
+      "id": "di_11",
+      "stepNumber": 11,
+      "phase": "Define the typed container and registration model",
+      "type": "add_component",
+      "title": "Own singleton, transient, and scoped instances",
+      "content": "Create transient instances per resolution, singleton instances once per binding/container, and scoped instances once per explicitly defined scope. Dispose scoped resources when that scope ends. Avoid retaining scoped objects in global plan metadata, and synchronize concurrent singleton construction without holding a global lock through user code.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "di_lifecycle_manager",
+        "componentType": "uml-class",
+        "label": "Lifecycle and Scope Manager",
+        "description": "Creates and releases instances according to registered lifetime policy.",
+        "position": {"x": 1680, "y": 650},
+        "properties": {
+          "componentName": "Lifecycle and Scope Manager",
+          "purpose": "Apply singleton, transient, and consumer-defined scoped lifetimes; coordinate single creation for shared singleton bindings, isolate scoped caches, and dispose scoped instances when their owner scope ends. Keep instance storage separate from activation-plan metadata and define concurrency behavior for shared scopes."
+        },
+        "highlightReason": "The existing UML Class representation fits an in-process lifetime manager better than an infrastructure cache node."
+      }
+    },
+    {
+      "id": "di_12",
+      "stepNumber": 12,
+      "phase": "Define the typed container and registration model",
+      "type": "add_component",
+      "title": "Represent intentional deferred and generic dependencies",
+      "content": "A typed Provider<T> resolves a dependency only when the consumer asks for it, preserving generic type identity and allowing an intentional lazy edge. Its resolution must still use the active scope and report disposed-scope or missing-binding errors; it is not a way to return an object outside its lifetime.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "di_provider_api",
+        "componentType": "uml-interface",
+        "label": "Provider<T> Contract",
+        "description": "Typed deferred-resolution abstraction for generic and intentionally lazy dependencies.",
+        "position": {"x": 1400, "y": 320},
+        "properties": {
+          "componentName": "Provider<T> Contract",
+          "purpose": "Expose a type-safe deferred Get/Resolve operation for a specific T and optional qualifier. Preserve the originating scope and generic arguments; fail clearly if the scope is disposed or the binding is missing, rather than leaking a longer-lived instance."
+        },
+        "highlightReason": "The catalog UML Interface expresses the generic provider contract directly."
+      }
+    },
+    {
+      "id": "di_13",
+      "stepNumber": 13,
+      "phase": "Define the typed container and registration model",
+      "type": "add_component",
+      "title": "Return actionable resolution diagnostics",
+      "content": "Differentiate missing binding, ambiguous binding, invalid generic closure, constructor failure, property injection failure, disposed scope, and cycle. Include service type, qualifier, constructor/property location, and dependency chain, while preserving the original exception as a cause and avoiding secret values from configuration.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:3"],
+      "component": {
+        "nodeId": "di_diagnostics",
+        "componentType": "uml-class",
+        "label": "Resolution Diagnostics",
+        "description": "Structured error creation for registration and activation failures.",
+        "position": {"x": 1120, "y": 320},
+        "properties": {
+          "componentName": "Resolution Diagnostics",
+          "purpose": "Create structured, actionable errors for missing or ambiguous bindings, generic constraint failures, injection-site problems, construction exceptions, cycles, and disposed scopes. Include the resolution chain and source location where available, retain causal exceptions, and redact sensitive configuration values."
+        },
+        "highlightReason": "The UML Class catalog item models a framework-level diagnostics module, not a separate logging service."
+      }
+    },
+    {
+      "id": "di_14",
+      "stepNumber": 14,
+      "phase": "Define the typed container and registration model",
+      "type": "explanation",
+      "title": "Separate planning from instance lifetime",
+      "content": "Planning answers how a typed service can be constructed and whether the dependency graph is valid. Lifecycle management answers whether the resulting object is new, shared, or owned by a scope. Keeping these caches separate prevents a performance optimization from silently changing transient/scoped semantics or retaining disposed objects.",
+      "requirementIds": []
+    },
+    {
+      "id": "di_15",
+      "stepNumber": 15,
+      "phase": "Connect resolution, lifecycle, and diagnostics",
+      "type": "add_connection",
+      "title": "Request typed resolution from the public contract",
+      "content": "Consumer code depends on the generic interface and can be tested with another implementation. The service type and generic arguments remain part of the request identity.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "di_consumer_resolver",
+        "sourceNodeId": "di_consumer",
+        "targetNodeId": "di_resolver_api",
+        "connectionType": "api-call",
+        "label": "Resolve<T> by typed service contract",
+        "description": "Application code uses the stable generic resolver abstraction."
+      }
+    },
+    {
+      "id": "di_16",
+      "stepNumber": 16,
+      "phase": "Connect resolution, lifecycle, and diagnostics",
+      "type": "add_connection",
+      "title": "Implement the contract with the container",
+      "content": "The container implements the public resolution operations, applying validation and ownership rules before returning an instance or structured failure.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:2"],
+      "connection": {
+        "edgeId": "di_resolver_container",
+        "sourceNodeId": "di_resolver_api",
+        "targetNodeId": "di_container",
+        "connectionType": "data-flow",
+        "label": "Container implements typed resolution",
+        "description": "The resolver contract is backed by the container's composition policy."
+      }
+    },
+    {
+      "id": "di_17",
+      "stepNumber": 17,
+      "phase": "Connect resolution, lifecycle, and diagnostics",
+      "type": "add_connection",
+      "title": "Publish programmatic bindings",
+      "content": "Code registration produces normalized descriptors, allowing validation and duplicate handling to remain consistent with configuration-file registration.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:7"],
+      "connection": {
+        "edgeId": "di_code_registry",
+        "sourceNodeId": "di_code_registration",
+        "targetNodeId": "di_binding_registry",
+        "connectionType": "data-flow",
+        "label": "Validated code binding descriptors",
+        "description": "Programmatic declarations enter the shared typed registry."
+      }
+    },
+    {
+      "id": "di_18",
+      "stepNumber": 18,
+      "phase": "Connect resolution, lifecycle, and diagnostics",
+      "type": "add_connection",
+      "title": "Publish file-based bindings through the same path",
+      "content": "The loader validates external declarations before emitting normalized descriptors; invalid files fail with field-level diagnostics and do not partially mutate the live registry.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "di_config_registry",
+        "sourceNodeId": "di_file_config",
+        "targetNodeId": "di_binding_registry",
+        "connectionType": "data-flow",
+        "label": "Validated file binding descriptors",
+        "description": "Configuration and code share validation and atomic publication semantics."
+      }
+    },
+    {
+      "id": "di_19",
+      "stepNumber": 19,
+      "phase": "Connect resolution, lifecycle, and diagnostics",
+      "type": "add_connection",
+      "title": "Resolve bindings from a consistent registry view",
+      "content": "Each resolve observes one complete registration snapshot and resolves by service type, closed generic identity, qualifier, and lifetime metadata.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "di_container_registry",
+        "sourceNodeId": "di_container",
+        "targetNodeId": "di_binding_registry",
+        "connectionType": "data-flow",
+        "label": "Typed lookup against atomic snapshot",
+        "description": "The container never observes partially applied registration changes."
+      }
+    },
+    {
+      "id": "di_20",
+      "stepNumber": 20,
+      "phase": "Connect resolution, lifecycle, and diagnostics",
+      "type": "add_connection",
+      "title": "Build an activation plan for each binding",
+      "content": "The container delegates constructor selection, generic closure, and opted-in property injection to the planner. The plan is metadata; it is not the instance and does not determine instance lifetime.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2"],
+      "connection": {
+        "edgeId": "di_container_planner",
+        "sourceNodeId": "di_container",
+        "targetNodeId": "di_autowire_planner",
+        "connectionType": "data-flow",
+        "label": "Plan typed constructor and property injection",
+        "description": "Auto-wiring is validated before the lifecycle manager creates objects."
+      }
+    },
+    {
+      "id": "di_21",
+      "stepNumber": 21,
+      "phase": "Connect resolution, lifecycle, and diagnostics",
+      "type": "add_connection",
+      "title": "Reject eager cycles with the dependency chain",
+      "content": "The planner asks the cycle detector to validate the eager dependency path. A Provider<T> edge is marked as intentionally deferred and resolved later within its original scope.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "di_planner_cycles",
+        "sourceNodeId": "di_autowire_planner",
+        "targetNodeId": "di_cycle_detector",
+        "connectionType": "data-flow",
+        "label": "Validate eager dependency graph",
+        "description": "Cycle validation returns the repeated bindings and injection sites."
+      }
+    },
+    {
+      "id": "di_22",
+      "stepNumber": 22,
+      "phase": "Connect resolution, lifecycle, and diagnostics",
+      "type": "add_connection",
+      "title": "Reuse validated plans by registry version",
+      "content": "A plan-cache hit skips repeated metadata analysis but never skips lifetime checks or instance creation policy. Registry version and constructed generic arguments prevent accidental reuse of an incompatible plan.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "di_planner_cache",
+        "sourceNodeId": "di_autowire_planner",
+        "targetNodeId": "di_plan_cache",
+        "connectionType": "data-flow",
+        "label": "Versioned typed activation metadata",
+        "description": "Plans are keyed by registry version and closed service type, not by instance."
+      }
+    },
+    {
+      "id": "di_23",
+      "stepNumber": 23,
+      "phase": "Connect resolution, lifecycle, and diagnostics",
+      "type": "add_connection",
+      "title": "Hand a validated plan to lifecycle creation",
+      "content": "The lifecycle manager consumes a plan to create, reuse, or scope instances according to the binding. The plan cache does not own singleton or scoped objects.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "di_cache_lifecycle",
+        "sourceNodeId": "di_plan_cache",
+        "targetNodeId": "di_lifecycle_manager",
+        "connectionType": "data-flow",
+        "label": "Validated construction plan",
+        "description": "The lifecycle manager applies lifetime semantics to plan execution."
+      }
+    },
+    {
+      "id": "di_24",
+      "stepNumber": 24,
+      "phase": "Connect resolution, lifecycle, and diagnostics",
+      "type": "add_connection",
+      "title": "Apply lifetime and concurrency policy",
+      "content": "The container supplies binding and scope context; lifecycle code guarantees singleton uniqueness and scoped ownership under the documented concurrency model, without retaining transient objects in metadata caches.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "di_container_lifecycle",
+        "sourceNodeId": "di_container",
+        "targetNodeId": "di_lifecycle_manager",
+        "connectionType": "data-flow",
+        "label": "Binding lifetime and active scope",
+        "description": "All object sharing, creation, and disposal is governed by the registered lifetime."
+      }
+    },
+    {
+      "id": "di_25",
+      "stepNumber": 25,
+      "phase": "Connect resolution, lifecycle, and diagnostics",
+      "type": "add_connection",
+      "title": "Create a typed deferred provider",
+      "content": "When a binding deliberately declares lazy resolution, the container creates a Provider<T> that retains the typed key and originating scope rather than eagerly constructing the dependency.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "di_container_provider",
+        "sourceNodeId": "di_container",
+        "targetNodeId": "di_provider_api",
+        "connectionType": "data-flow",
+        "label": "Typed provider factory",
+        "description": "Deferred handles preserve generic type and lifecycle context."
+      }
+    },
+    {
+      "id": "di_26",
+      "stepNumber": 26,
+      "phase": "Connect resolution, lifecycle, and diagnostics",
+      "type": "add_connection",
+      "title": "Resolve the provider only when requested",
+      "content": "A provider call returns to the same container with its original typed key and scope. This is an explicit lazy edge; missing registrations, cycles in the remaining eager graph, and disposed scopes still produce errors.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "di_provider_container",
+        "sourceNodeId": "di_provider_api",
+        "targetNodeId": "di_container",
+        "connectionType": "data-flow",
+        "label": "Deferred typed resolution in originating scope",
+        "description": "Provider<T> delegates on demand without losing scope or generic identity."
+      }
+    },
+    {
+      "id": "di_27",
+      "stepNumber": 27,
+      "phase": "Connect resolution, lifecycle, and diagnostics",
+      "type": "add_connection",
+      "title": "Turn cycle failures into structured diagnostics",
+      "content": "The detector supplies the full binding path and injection sites. Diagnostics preserve this context and distinguish a true eager cycle from a deliberate deferred provider edge.",
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "di_cycles_diagnostics",
+        "sourceNodeId": "di_cycle_detector",
+        "targetNodeId": "di_diagnostics",
+        "connectionType": "data-flow",
+        "label": "Cycle chain and injection-site evidence",
+        "description": "Cycle detection details are converted into actionable errors."
+      }
+    },
+    {
+      "id": "di_28",
+      "stepNumber": 28,
+      "phase": "Connect resolution, lifecycle, and diagnostics",
+      "type": "add_connection",
+      "title": "Return errors through the public resolver contract",
+      "content": "The public API exposes a stable error type or try-resolve result, while implementation-specific causes remain attached for debugging. File and code registration validation use the same diagnostic vocabulary.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "di_diagnostics_resolver",
+        "sourceNodeId": "di_diagnostics",
+        "targetNodeId": "di_resolver_api",
+        "connectionType": "data-flow",
+        "label": "Typed failure and resolution context",
+        "description": "Callers receive actionable errors without depending on internal modules."
+      }
+    },
+    {
+      "id": "di_29",
+      "stepNumber": 29,
+      "phase": "Connect resolution, lifecycle, and diagnostics",
+      "type": "add_connection",
+      "title": "Return an instance with its ownership intact",
+      "content": "A resolved singleton, transient, or scoped object returns to the consumer with its documented lifetime. Disposing a scope releases scoped dependencies and makes any provider tied to that scope fail clearly.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "di_lifecycle_consumer",
+        "sourceNodeId": "di_lifecycle_manager",
+        "targetNodeId": "di_consumer",
+        "connectionType": "data-flow",
+        "label": "Resolved instance under declared lifetime",
+        "description": "The caller receives an object whose creation and disposal semantics match its binding."
+      }
+    },
+    {
+      "id": "di_30",
+      "stepNumber": 30,
+      "phase": "Connect resolution, lifecycle, and diagnostics",
+      "type": "add_connection",
+      "title": "Inject deferred providers only where declared",
+      "content": "The consumer receives a typed provider only for a registration that explicitly opts into deferred resolution; this preserves type safety and makes lazy lifetime behavior reviewable.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "di_provider_consumer",
+        "sourceNodeId": "di_provider_api",
+        "targetNodeId": "di_consumer",
+        "connectionType": "data-flow",
+        "label": "Opt-in Provider<T> injection",
+        "description": "Consumers receive a type-safe deferred handle only when intentionally registered."
+      }
+    },
+    {
+      "id": "di_31",
+      "stepNumber": 31,
+      "phase": "Review runtime and language assumptions",
+      "type": "explanation",
+      "title": "Choose reflection or generated metadata for the target runtime",
+      "content": "The brief asks for auto-wiring but does not require runtime reflection. Compare explicit registration, compile-time source generation, and cached reflection against the chosen language's type system, startup model, trimming/AOT constraints, and measured resolution overhead. Keep the public typed contract independent of that implementation choice.",
+      "requirementIds": []
+    },
+    {
+      "id": "di_32",
+      "stepNumber": 32,
+      "phase": "Review runtime and language assumptions",
+      "type": "explanation",
+      "title": "Set contracts for scope and thread safety explicitly",
+      "content": "Before treating this as production-ready, choose what scoped means (for example request, transaction, or an application-defined operation), whether a scope may be shared across threads, how runtime registration updates interact with active resolutions, and how generic constraints are reported. Benchmark cold plan creation and warm resolution, test constructor/property failures and cycles, and verify scope disposal releases instances. The brief supplies no numeric performance budget, so none is invented here.",
+      "requirementIds": []
+    }
+  ]
+}

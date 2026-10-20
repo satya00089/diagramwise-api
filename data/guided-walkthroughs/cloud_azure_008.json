@@ -1,0 +1,868 @@
+{
+  "problem_id": "cloud_azure_008",
+  "version": "1.0.0",
+  "totalSteps": 51,
+  "phases": [
+    {
+      "name": "Set the event contract and ingest boundary",
+      "stepRange": [1, 11],
+      "description": "Agree on latency and throughput assumptions, normalize heterogeneous producers, and make Event Hubs the durable partitioned ingress log."
+    },
+    {
+      "name": "Build event-time SQL analytics",
+      "stepRange": [12, 21],
+      "description": "Use Azure Stream Analytics for SQL-like windows and anomaly rules while explicitly balancing late-data tolerance, correctness, and the five-second target."
+    },
+    {
+      "name": "Persist results and route actions safely",
+      "stepRange": [22, 35],
+      "description": "Upsert deterministic analytics results to Cosmos DB and route actionable events through Functions and Event Grid with idempotent side effects."
+    },
+    {
+      "name": "Scale, observe, and prove the service levels",
+      "stepRange": [36, 51],
+      "description": "Instrument the complete stream, scale each bottleneck independently, and validate throughput, latency, replay, and duplicate handling under failure."
+    }
+  ],
+  "steps": [
+    {
+      "id": "ra_01",
+      "stepNumber": 1,
+      "phase": "Set the event contract and ingest boundary",
+      "title": "Separate stated targets from sizing assumptions",
+      "type": "explanation",
+      "content": "The brief requires multiple sources, SQL-like stream queries, pattern/anomaly detection, durable results, event-triggered actions, late-data handling, dynamic throughput, and job monitoring. Its constraints are processing latency under 5 seconds, 1M+ events/second, exactly-once processing, out-of-order events, and autoscaling. Event size, burst shape, key cardinality, region count, retention, and the meaning of exactly-once for external side effects are unspecified. Treat one region and a representative event-size distribution as initial test assumptions, not promised capacity; a measured end-to-end load test must prove the 1M/s and latency targets.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "ra_02",
+      "stepNumber": 2,
+      "phase": "Set the event contract and ingest boundary",
+      "title": "Give every source the same replayable event envelope",
+      "type": "decision_point",
+      "content": "Normalize each input before publishing: eventId, sourceId, schemaVersion, entityKey, eventTime in UTC, ingestTime, and payload. Keep producer identity and schema version so query changes and replay can be audited. Require a stable eventId for deduplication and a high-cardinality entityKey for partitioning; never use a random key if per-entity order matters.",
+      "decision": {
+        "question": "What is the minimum contract every producer must satisfy?",
+        "chosen": "Publish a versioned envelope with a unique eventId, sourceId, eventTime, ingestTime, and stable entityKey; validate schema before accepting the event.",
+        "chosenReason": "A common envelope lets one query process heterogeneous sources, distinguish event time from arrival time, and replay or deduplicate records consistently.",
+        "alternatives": [
+          {"option": "Let each source publish an unrelated payload", "tradeoff": "Moves schema branching into every query and makes cross-source windows and replay brittle."},
+          {"option": "Use only the broker arrival timestamp", "tradeoff": "Loses business event-time ordering when producer clocks or networks delay events."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ra_03",
+      "stepNumber": 3,
+      "phase": "Set the event contract and ingest boundary",
+      "title": "Add application-service event producers",
+      "type": "add_component",
+      "content": "Represent web and backend services publishing business events. Give each producer its own managed identity and sourceId; validate the versioned envelope and batch sends where doing so does not violate the latency budget. Producers publish events only—they do not run analytics or invoke downstream actions synchronously.",
+      "component": {
+        "nodeId": "app_event_sources",
+        "componentType": "backend-server",
+        "label": "Application Service Producers",
+        "description": "Business events from web and backend applications",
+        "position": {"x": 0, "y": 90},
+        "properties": {
+          "componentName": "Application Service Producers",
+          "purpose": "Publish validated, versioned business events with stable eventId, sourceId, eventTime, and entityKey; authenticate with a producer-specific managed identity."
+        },
+        "highlightReason": "Multiple independently deployed application sources must feed a common contract without coupling their request paths to analytics."
+      },
+      "requirementIds": ["legacy-requirement:1"]
+    },
+    {
+      "id": "ra_04",
+      "stepNumber": 4,
+      "phase": "Set the event contract and ingest boundary",
+      "title": "Add device and telemetry producers",
+      "type": "add_component",
+      "content": "Represent IoT gateways and device fleets as a second independent producer family. Include event time from the device plus broker ingest time, and plan for clock skew and intermittent connectivity. The producer identity is separate from application producers so one source cannot impersonate another.",
+      "component": {
+        "nodeId": "device_event_sources",
+        "componentType": "mobile-app",
+        "label": "IoT and Device Event Sources",
+        "description": "Telemetry from gateways and connected devices",
+        "position": {"x": 0, "y": 330},
+        "properties": {
+          "componentName": "IoT and Device Event Sources",
+          "purpose": "Emit device telemetry using the shared versioned event envelope; preserve source event time and a stable entity key while tolerating reconnects and bursty uploads."
+        },
+        "highlightReason": "A distinct device source makes multi-source ingestion and clock-skew handling concrete rather than assuming one producer."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "ra_05",
+      "stepNumber": 5,
+      "phase": "Set the event contract and ingest boundary",
+      "title": "Include operational change-data events",
+      "type": "add_component",
+      "content": "Represent an operational database change feed as a third source, such as order or inventory updates that must be correlated with application and device events. Publish the change identifier and source sequence in the shared envelope so replay and deduplication do not depend on arrival order.",
+      "component": {
+        "nodeId": "operational_cdc",
+        "componentType": "database",
+        "label": "Operational Database CDC Source",
+        "description": "Change events from operational data stores",
+        "position": {"x": 0, "y": 570},
+        "properties": {
+          "componentName": "Operational Database CDC Source",
+          "purpose": "Publish database change events with stable source sequence and event identity; do not make the analytics query poll the operational database."
+        },
+        "highlightReason": "The architecture now handles independent application, device, and operational-data streams through one ingestion boundary."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6"]
+    },
+    {
+      "id": "ra_06",
+      "stepNumber": 6,
+      "phase": "Set the event contract and ingest boundary",
+      "title": "Add partitioned Azure Event Hubs ingress",
+      "type": "add_component",
+      "content": "Use Azure Event Hubs as the durable append-only ingress log. The 32 partitions shown here are an initial design point for parallelism, not proof of 1M events/second and not a final tier choice. Select the namespace tier, partition count, and capacity from event size, throughput, regional limits, and representative benchmarks; use distinct producer identities and retain enough data for the agreed replay window.",
+      "component": {
+        "nodeId": "analytics_event_hubs",
+        "componentType": "message-broker",
+        "label": "Azure Event Hubs",
+        "description": "Partitioned durable event ingress",
+        "position": {"x": 430, "y": 330},
+        "properties": {
+          "componentName": "Azure Event Hubs",
+          "purpose": "Buffer versioned events from independent producers, preserve per-partition order, and decouple ingestion bursts from stream processing. Partition count 32 is only a benchmark starting point; choose the tier and final capacity from measured event size, rate, limits, and replay needs.",
+          "partitions": 32,
+          "replication": 3,
+          "durable": true
+        },
+        "highlightReason": "A partitioned durable log absorbs bursts and supports replay while giving the stream job parallel input partitions."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "ra_07",
+      "stepNumber": 7,
+      "phase": "Set the event contract and ingest boundary",
+      "title": "Connect application events to Event Hubs",
+      "type": "add_connection",
+      "content": "Send validated application events to the shared ingress log using the stable entityKey as the partition key. Apply bounded producer retries and client-side backpressure; do not silently discard throttled sends.",
+      "connection": {
+        "edgeId": "app_sources_to_hubs",
+        "sourceNodeId": "app_event_sources",
+        "targetNodeId": "analytics_event_hubs",
+        "connectionType": "event-publish",
+        "label": "Versioned business events",
+        "description": "Publish authenticated application events keyed by entityKey."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "ra_08",
+      "stepNumber": 8,
+      "phase": "Set the event contract and ingest boundary",
+      "title": "Connect device telemetry to Event Hubs",
+      "type": "add_connection",
+      "content": "Device and gateway events use the same envelope but retain their own sourceId. Keep entityKey stable across retries so related events can be processed in order within a partition.",
+      "connection": {
+        "edgeId": "device_sources_to_hubs",
+        "sourceNodeId": "device_event_sources",
+        "targetNodeId": "analytics_event_hubs",
+        "connectionType": "event-publish",
+        "label": "Device telemetry",
+        "description": "Publish normalized device events while preserving event time and per-entity ordering."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "ra_09",
+      "stepNumber": 9,
+      "phase": "Set the event contract and ingest boundary",
+      "title": "Connect database changes to Event Hubs",
+      "type": "add_connection",
+      "content": "Publish CDC records through the same broker rather than letting the stream job query the source database. Preserve the upstream change sequence because the broker only guarantees order within a partition, not a global order across all sources.",
+      "connection": {
+        "edgeId": "cdc_to_hubs",
+        "sourceNodeId": "operational_cdc",
+        "targetNodeId": "analytics_event_hubs",
+        "connectionType": "change-event-publish",
+        "label": "Operational change events",
+        "description": "Deliver replayable CDC events into the same versioned ingestion contract."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "ra_10",
+      "stepNumber": 10,
+      "phase": "Set the event contract and ingest boundary",
+      "title": "Partition for parallelism without losing entity order",
+      "type": "decision_point",
+      "content": "Choose a high-cardinality entityKey as the partition key when per-entity ordering is required. Event Hubs orders records within a partition, not across partitions. Load-test skew: a popular entity can create a hot partition, while a random key spreads load but breaks that entity's order. Make the partition count large enough for the stream job's tested parallelism and stay within the selected Event Hubs tier limits.",
+      "decision": {
+        "question": "How should the ingestion stream be partitioned?",
+        "chosen": "Partition by a stable, high-cardinality entityKey and validate hot-key distribution and parallelism under representative load.",
+        "chosenReason": "The key preserves useful per-entity order while allowing unrelated entities to be processed in parallel; the benchmark determines whether the chosen partition count and tier can meet the throughput target.",
+        "alternatives": [
+          {"option": "Use one partition for all events", "tradeoff": "Creates a throughput ceiling and a single ordered bottleneck."},
+          {"option": "Use a random partition key", "tradeoff": "Spreads traffic but makes per-entity ordering and stateful windows harder to guarantee."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "ra_11",
+      "stepNumber": 11,
+      "phase": "Set the event contract and ingest boundary",
+      "title": "Scale broker capacity against burst ingress",
+      "type": "scale_trigger",
+      "content": "Use a capacity ceiling derived from measured ingress bytes/second and events/second, not event count alone. On the Standard tier, Event Hubs Auto-inflate scales throughput units up but does not automatically scale them down; for other tiers use their supported capacity controls. Alert before throttling, budget for the configured maximum, and use an explicit safe scale-down policy after sustained low load.",
+      "scaleTrigger": {
+        "metric": "Ingress and egress utilization, throttled sends, partition skew, and broker backlog",
+        "action": "Set tier-appropriate autoscale or capacity controls with a tested maximum; alert on throttles and define a separate reviewed scale-down policy.",
+        "impact": "Broker saturation raises queueing delay and can violate both the 1M+ events/second benchmark and the under-5-second processing target."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "ra_12",
+      "stepNumber": 12,
+      "phase": "Build event-time SQL analytics",
+      "title": "Add the Azure Stream Analytics job",
+      "type": "add_component",
+      "content": "Use the existing stream-processor component to represent Azure Stream Analytics; the component catalog has no provider-specific Azure Analytics node. The job reads broker partitions, runs SQL-like streaming queries, and emits window aggregates and anomaly candidates. Keep event-time logic, output identity, and checkpoint/restart behavior explicit in the job configuration.",
+      "component": {
+        "nodeId": "analytics_stream_job",
+        "componentType": "stream-processor",
+        "label": "Azure Stream Analytics Job",
+        "description": "SQL-like event-time windows and anomaly rules",
+        "position": {"x": 880, "y": 270},
+        "properties": {
+          "componentName": "Azure Stream Analytics Job",
+          "purpose": "Run partition-parallel SQL-like filters, joins, window aggregates, and threshold/pattern rules over versioned source events. The 1,000,000 events/second value is an acceptance benchmark, not a guaranteed provisioned rate.",
+          "throughput": 1000000,
+          "windowing": true,
+          "stateful": true
+        },
+        "highlightReason": "This is the SQL-like computation boundary where time windows, anomaly rules, and streaming-job state are applied."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ra_13",
+      "stepNumber": 13,
+      "phase": "Build event-time SQL analytics",
+      "title": "Feed broker partitions into the stream job",
+      "type": "add_connection",
+      "content": "Configure Event Hubs as a streaming input and preserve the partition key so the query can parallelize where semantics allow. Keep input and query partitioning aligned; a global cross-partition operation can limit scale-out.",
+      "connection": {
+        "edgeId": "hubs_to_stream_job",
+        "sourceNodeId": "analytics_event_hubs",
+        "targetNodeId": "analytics_stream_job",
+        "connectionType": "partitioned-stream-input",
+        "label": "Partitioned event stream",
+        "description": "Read durable broker events with the key and partition metadata needed for parallel processing."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "ra_14",
+      "stepNumber": 14,
+      "phase": "Build event-time SQL analytics",
+      "title": "Express patterns and anomalies as bounded SQL queries",
+      "type": "decision_point",
+      "content": "Use SQL-like filters and windowed aggregates for patterns such as a sudden rate increase, an unusual value relative to a rolling baseline, or a sequence of related events. Partition state by the business key, constrain joins with time bounds, and define thresholds as versioned reference data when operators need to tune them. A deterministic rule is not the same as an ML anomaly model; add a separately validated model only if the product requires it.",
+      "decision": {
+        "question": "How should an anomaly candidate be produced?",
+        "chosen": "Use explicit, bounded event-time windows and versioned thresholds, and emit a stable ruleId and window boundary with every candidate.",
+        "chosenReason": "Bounded state supports predictable scaling, explainable alerts, and deterministic replay; a stable rule/window identity enables idempotent storage.",
+        "alternatives": [
+          {"option": "Run unbounded joins and retain all event state", "tradeoff": "State grows without a useful bound and makes recovery and scale cost unpredictable."},
+          {"option": "Call an external model synchronously for every event", "tradeoff": "Adds an uncontrolled latency and availability dependency to the sub-five-second stream path."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "ra_15",
+      "stepNumber": 15,
+      "phase": "Build event-time SQL analytics",
+      "title": "Use event time and watermarks for out-of-order input",
+      "type": "explanation",
+      "content": "Use the Stream Analytics TIMESTAMP BY clause on the envelope's eventTime when business windows must follow when an event occurred. Configure the late-arrival and out-of-order policies to adjust or drop records outside bounded tolerances; preserve eventTime and ingestTime in output so adjustments are visible. Watermarks wait for input progress, and an idle or slow partition can delay output. Every millisecond spent waiting for event-time completeness consumes part of the five-second budget.",
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "ra_16",
+      "stepNumber": 16,
+      "phase": "Build event-time SQL analytics",
+      "title": "Choose a lateness policy that fits the latency contract",
+      "type": "decision_point",
+      "content": "A larger late-arrival or out-of-order tolerance improves event-time completeness but can delay watermarks and outputs. Set an explicit bounded tolerance from observed producer clock skew and network delay, and reserve the remaining time for query, storage, and action delivery. Keep the raw event available for later correction when the accepted online tolerance is exceeded; do not silently describe dropped data as exactly-once.",
+      "decision": {
+        "question": "What should happen to events outside the online ordering window?",
+        "chosen": "Use a short, measured event-time tolerance within the latency budget; preserve raw records for controlled replay and make any adjusted or excluded events observable.",
+        "chosenReason": "This protects the normal path's latency while allowing later reconciliation instead of pretending that an arbitrarily late event can be both complete and immediate.",
+        "alternatives": [
+          {"option": "Wait indefinitely for every late partition", "tradeoff": "Destroys the bounded-latency objective and can stall windows behind an idle partition."},
+          {"option": "Drop every event that is not in order", "tradeoff": "Keeps the path fast but loses valid business events and hides data-quality problems."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "ra_17",
+      "stepNumber": 17,
+      "phase": "Build event-time SQL analytics",
+      "title": "Distinguish exactly-once computation from delivery",
+      "type": "explanation",
+      "content": "Azure Stream Analytics provides exactly-once processing semantics for a given input and repeatable job state, but a sink can still receive duplicate output depending on its adapter. Cosmos DB is a supported exactly-once delivery sink because the adapter uses upsert; use a deterministic output id and partition key so a replay replaces the same logical result. This does not make a later Event Grid notification or external action exactly once.",
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3"]
+    },
+    {
+      "id": "ra_18",
+      "stepNumber": 18,
+      "phase": "Build event-time SQL analytics",
+      "title": "Give every window result a deterministic identity",
+      "type": "decision_point",
+      "content": "Build output identity from the ruleId, event-time window end, and grouping key (or a stable eventId for pass-through results). Preserve source event IDs when the query emits individual events. Use this same identity for Cosmos upsert, action idempotency, replay reconciliation, and duplicate-rate measurement.",
+      "decision": {
+        "question": "What identifies one logical analytics result across a retry or replay?",
+        "chosen": "Use a deterministic composite identity based on ruleId, windowEnd, and business grouping key, plus a stable partition key.",
+        "chosenReason": "A deterministic key lets the Cosmos upsert converge after restart and gives downstream consumers a dedupe key that does not depend on delivery order.",
+        "alternatives": [
+          {"option": "Generate a fresh random output id for each attempt", "tradeoff": "A replay becomes a second record rather than replacing the same logical result."},
+          {"option": "Use only the current processing timestamp", "tradeoff": "Retries can create different keys and merge unrelated windows."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:3"]
+    },
+    {
+      "id": "ra_19",
+      "stepNumber": 19,
+      "phase": "Build event-time SQL analytics",
+      "title": "Autoscale query compute without hiding a serial bottleneck",
+      "type": "scale_trigger",
+      "content": "Use partition-parallel query topology and Stream Analytics custom autoscale with tested minimum and maximum streaming units. Scale on the job's supported utilization metrics and alert on input backlog, watermark delay, and output throttling; those symptoms can also point to an upstream partition or downstream sink bottleneck. Avoid aggressive scale-in that causes repeated cold capacity changes or state recovery.",
+      "scaleTrigger": {
+        "metric": "Stream Analytics SU utilization, input backlog, watermark delay, and output throttling",
+        "action": "Configure custom autoscale on supported SU-utilization rules with load-tested bounds; alert and investigate backlog, skew, and sink saturation separately.",
+        "impact": "Partition-aligned scale-out can absorb dynamic load, but a serial query stage or underprovisioned sink still prevents the 1M/s target."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "ra_20",
+      "stepNumber": 20,
+      "phase": "Build event-time SQL analytics",
+      "title": "Treat one million events per second as a benchmark gate",
+      "type": "explanation",
+      "content": "Prove throughput with production-shaped event sizes, source mix, key skew, query state, late-data settings, and output fan-out. Increase Event Hubs partitions and tier capacity, Stream Analytics streaming units, and sink throughput together; do not call the system scalable because only the broker accepted a short burst. Record sustained rate, peak rate, queue growth, recovery time, and end-to-end p95 latency.",
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "ra_21",
+      "stepNumber": 21,
+      "phase": "Build event-time SQL analytics",
+      "title": "Keep expensive work and corrections off the hot path",
+      "type": "explanation",
+      "content": "Keep bounded filtering, window aggregation, and actionable anomaly detection on the streaming path. Put historical backfills, expensive cross-window corrections, and operator investigation on a replay path from captured raw events. If the query requires a global sort, unbounded state, or large cross-partition join, measure it separately because it can defeat partition-level parallelism and the latency budget.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "ra_22",
+      "stepNumber": 22,
+      "phase": "Persist results and route actions safely",
+      "title": "Add Cosmos DB for query results and replay state",
+      "type": "add_component",
+      "content": "Use Azure Cosmos DB as the durable query-result sink. Store aggregate/anomaly documents with deterministic ids, a partition key selected for the dominant read and write pattern, event-time window boundaries, rule version, and late-data adjustment metadata. Size request units and autoscale limits against the measured write fan-out; a fast query cannot meet its SLO if the output sink throttles.",
+      "component": {
+        "nodeId": "analytics_cosmos",
+        "componentType": "database",
+        "label": "Azure Cosmos DB",
+        "description": "Durable, idempotent analytics result store",
+        "position": {"x": 1320, "y": 90},
+        "properties": {
+          "componentName": "Azure Cosmos DB",
+          "purpose": "Persist window aggregates, anomaly results, and action-idempotency records using deterministic ids and a workload-appropriate partition key; size autoscale request units from measured write rate and read patterns.",
+          "type": "NoSQL",
+          "sharding": true,
+          "encryption": true,
+          "rbac": true
+        },
+        "highlightReason": "A durable NoSQL sink makes processed results queryable and provides an idempotent upsert boundary for stream retries."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "ra_23",
+      "stepNumber": 23,
+      "phase": "Persist results and route actions safely",
+      "title": "Write every processed result to Cosmos DB",
+      "type": "add_connection",
+      "content": "Configure Cosmos DB as the primary durable result output. Stream Analytics uses upsert for this sink; deterministic ids and partition keys ensure a retried window result updates the same logical document rather than creating another one.",
+      "connection": {
+        "edgeId": "stream_job_to_cosmos",
+        "sourceNodeId": "analytics_stream_job",
+        "targetNodeId": "analytics_cosmos",
+        "connectionType": "idempotent-stream-output",
+        "label": "Window and anomaly results",
+        "description": "Upsert query output by deterministic result identity and workload-appropriate partition key."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3"]
+    },
+    {
+      "id": "ra_24",
+      "stepNumber": 24,
+      "phase": "Persist results and route actions safely",
+      "title": "Choose a Cosmos partition key from access patterns",
+      "type": "decision_point",
+      "content": "Keep the key high-cardinality enough to avoid hot partitions, but choose one that supports the dominant query and action lookup. A tenant/entity key can work when event volume is distributed; a single global tenant or time-only key may hotspot. Set retention and analytical-history policy from product requirements, which the prompt does not specify.",
+      "decision": {
+        "question": "How should processed results be partitioned in Cosmos DB?",
+        "chosen": "Choose a high-cardinality partition key from measured write distribution and the dominant query path, and keep the deterministic result id stable across retries.",
+        "chosenReason": "Partitioning must support the 1M/s output shape without concentrating writes, while deterministic identity preserves replay idempotency.",
+        "alternatives": [
+          {"option": "Partition every result under one fixed key", "tradeoff": "Makes reads simple but creates a write hotspot at scale."},
+          {"option": "Choose a key only for today's dashboard query", "tradeoff": "Can make ingestion unscalable or force expensive cross-partition reads later."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "ra_25",
+      "stepNumber": 25,
+      "phase": "Persist results and route actions safely",
+      "title": "Add a bounded anomaly-event publisher",
+      "type": "add_component",
+      "content": "Use an Azure Function as a Stream Analytics output adapter for only actionable anomaly candidates, not every raw event. Keep each invocation bounded, batch-aware, authenticated, and idempotent by the stable result key; return success only after the publish is accepted so Stream Analytics retries remain safe.",
+      "component": {
+        "nodeId": "analytics_action_publisher",
+        "componentType": "serverless-function",
+        "label": "Azure Function — Action Event Publisher",
+        "description": "Batch-aware adapter for actionable query results",
+        "position": {"x": 1320, "y": 340},
+        "properties": {
+          "componentName": "Azure Function — Action Event Publisher",
+          "purpose": "Accept only actionable anomaly output batches from Stream Analytics, validate the stable result identity, and publish a compact action event; remain bounded and idempotent across adapter retries.",
+          "runtime": ".NET"
+        },
+        "highlightReason": "The function adapter converts selected query results into routable business events without blocking the raw ingestion request path."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "ra_26",
+      "stepNumber": 26,
+      "phase": "Persist results and route actions safely",
+      "title": "Send only actionable query output to the publisher",
+      "type": "add_connection",
+      "content": "Configure the Function as a Stream Analytics output for anomaly candidates that cross the explicit rule threshold. The query result is persisted separately to Cosmos DB; the publisher branch is asynchronous and can retry, so it must not be treated as the authoritative analytics record.",
+      "connection": {
+        "edgeId": "stream_job_to_action_publisher",
+        "sourceNodeId": "analytics_stream_job",
+        "targetNodeId": "analytics_action_publisher",
+        "connectionType": "anomaly-action-output",
+        "label": "Actionable anomaly batches",
+        "description": "Invoke a bounded Azure Function output only for records eligible to trigger downstream actions."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "ra_27",
+      "stepNumber": 27,
+      "phase": "Persist results and route actions safely",
+      "title": "Add Event Grid for action-event routing",
+      "type": "add_component",
+      "content": "Use Event Grid to route compact domain events such as anomaly-detected to the matching subscribers. Publish stable eventId, subject/entity key, rule version, and result reference; avoid putting sensitive or large event payloads in the notification. Event Grid is an at-least-once, unordered delivery boundary, not the exactly-once processor.",
+      "component": {
+        "nodeId": "analytics_event_grid",
+        "componentType": "pubsub",
+        "label": "Azure Event Grid",
+        "description": "Fan-out and filter actionable domain events",
+        "position": {"x": 1740, "y": 340},
+        "properties": {
+          "componentName": "Azure Event Grid",
+          "purpose": "Route compact, versioned action events to matching subscribers with bounded retry and configured dead-letter handling; consumers must tolerate duplicate and out-of-order delivery.",
+          "topics": 1,
+          "fanout": true,
+          "ordering": false,
+          "durable": true
+        },
+        "highlightReason": "Event Grid decouples anomaly publication from the set of downstream action subscribers."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ra_28",
+      "stepNumber": 28,
+      "phase": "Persist results and route actions safely",
+      "title": "Publish anomaly events to Event Grid",
+      "type": "add_connection",
+      "content": "The publisher emits a small domain event after validating the candidate. Include the stable event identity and a reference to the Cosmos result so consumers can fetch authoritative details instead of relying on the notification body.",
+      "connection": {
+        "edgeId": "action_publisher_to_event_grid",
+        "sourceNodeId": "analytics_action_publisher",
+        "targetNodeId": "analytics_event_grid",
+        "connectionType": "domain-event-publish",
+        "label": "Anomaly-detected event",
+        "description": "Publish a compact idempotency-keyed action event for Event Grid filtering and fan-out."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "ra_29",
+      "stepNumber": 29,
+      "phase": "Persist results and route actions safely",
+      "title": "Add an idempotent action handler",
+      "type": "add_component",
+      "content": "Use a separate Azure Function subscriber for external actions, notifications, or automated responses. Validate the event schema and authorization, enforce deadlines and rate limits, and use the result identity as an idempotency key. Keep this subscriber isolated so an unhealthy action target cannot stop the analytics query.",
+      "component": {
+        "nodeId": "analytics_action_handler",
+        "componentType": "serverless-function",
+        "label": "Azure Function — Idempotent Action Handler",
+        "description": "Authorized downstream action consumer",
+        "position": {"x": 2160, "y": 340},
+        "properties": {
+          "componentName": "Azure Function — Idempotent Action Handler",
+          "purpose": "Validate and authorize anomaly events, deduplicate by stable result identity, execute bounded idempotent actions, and record outcome for retry and reconciliation.",
+          "runtime": ".NET"
+        },
+        "highlightReason": "External side effects need an explicit consumer boundary with retries, authorization, and duplicate protection."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ra_30",
+      "stepNumber": 30,
+      "phase": "Persist results and route actions safely",
+      "title": "Subscribe the action handler to Event Grid",
+      "type": "add_connection",
+      "content": "Filter the subscription to the action types this Function owns. Event Grid retries failed delivery and does not guarantee event ordering, so the consumer acknowledges only after it has safely recorded or performed the action and can resume after a retry.",
+      "connection": {
+        "edgeId": "event_grid_to_action_handler",
+        "sourceNodeId": "analytics_event_grid",
+        "targetNodeId": "analytics_action_handler",
+        "connectionType": "filtered-event-subscription",
+        "label": "Filtered action subscription",
+        "description": "Deliver matching anomaly events with retry and dead-letter policy to the action Function."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ra_31",
+      "stepNumber": 31,
+      "phase": "Persist results and route actions safely",
+      "title": "Record action deduplication and outcome",
+      "type": "add_connection",
+      "content": "Use a dedicated container or logical record in Cosmos DB for action idempotency and outcome state. Claim the stable key with a conditional write, record pending/completed status, and make retries query that state. If an external system cannot accept an idempotency key, exactly-once side effects cannot be guaranteed across a crash between the side effect and the status write; use an outbox/reconciliation workflow and state that limitation.",
+      "connection": {
+        "edgeId": "action_handler_to_cosmos_ledger",
+        "sourceNodeId": "analytics_action_handler",
+        "targetNodeId": "analytics_cosmos",
+        "connectionType": "idempotency-state-write",
+        "label": "Action key and outcome ledger",
+        "description": "Persist conditional deduplication claims and action outcome for retries and reconciliation."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "ra_32",
+      "stepNumber": 32,
+      "phase": "Persist results and route actions safely",
+      "title": "Make retry semantics explicit at each boundary",
+      "type": "decision_point",
+      "content": "Stream Analytics processing, Cosmos result upserts, the Function output adapter, Event Grid delivery, and the external action do not all share one distributed transaction. Use deterministic result ids for Cosmos and idempotency keys/conditional writes for action consumers. Configure Event Grid retry and dead-letter behavior; monitor and reconcile dead-lettered events rather than asserting that broker retries alone produce exactly-once effects.",
+      "decision": {
+        "question": "What delivery contract should downstream action consumers implement?",
+        "chosen": "Assume at-least-once, unordered notifications; deduplicate with a stable action key, persist state, and make the external operation idempotent or reconcilable.",
+        "chosenReason": "The stream job and Cosmos sink can provide strong processing/result semantics, but a notification broker and arbitrary external side effect are separate failure domains.",
+        "alternatives": [
+          {"option": "Treat every notification as exactly once", "tradeoff": "Retries or redelivery can execute duplicate actions."},
+          {"option": "Disable retries to avoid duplicates", "tradeoff": "Transient failures can lose actions even when the durable analytics result exists."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ra_33",
+      "stepNumber": 33,
+      "phase": "Persist results and route actions safely",
+      "title": "Keep action failures from blocking analytics",
+      "type": "explanation",
+      "content": "A failed or rate-limited action subscriber should accumulate bounded retries and then use configured dead-letter storage. Alert on oldest-event age and dead-letter growth; replay only after the handler is corrected and deduplication state is checked. Analytics results remain queryable in Cosmos even while an action integration is degraded.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "ra_34",
+      "stepNumber": 34,
+      "phase": "Persist results and route actions safely",
+      "title": "Define how corrections update existing results",
+      "type": "decision_point",
+      "content": "A replay may revise a window after late data is reconciled. Keep ruleVersion, original event-time boundaries, and correction/version metadata in the stored result. Consumers should distinguish a new anomaly from a correction to an existing result and use the same deterministic result identity when the business meaning is the same.",
+      "decision": {
+        "question": "How should a late-data replay represent a corrected window?",
+        "chosen": "Upsert the same logical window result with an explicit correction/version marker and publish a separate correction event only when downstream actions need to react.",
+        "chosenReason": "This avoids counting a corrected aggregate as an unrelated new result while preserving an audit trail of the recomputation.",
+        "alternatives": [
+          {"option": "Append an unrelated result for each replay", "tradeoff": "Readers can count both the old and corrected value as current truth."},
+          {"option": "Silently overwrite with no version or event-time metadata", "tradeoff": "Operators cannot explain why a dashboard or action changed after replay."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ra_35",
+      "stepNumber": 35,
+      "phase": "Persist results and route actions safely",
+      "title": "Protect the analytics and action trust boundaries",
+      "type": "explanation",
+      "content": "Use managed identities and least-privilege roles between Event Hubs, Stream Analytics, Functions, Event Grid, Cosmos DB, and archive storage. Keep secrets out of event payloads, validate source and schema, encrypt data in transit and at rest, and avoid storing unnecessary raw personal data in analytics output. The prompt does not specify data residency, privacy, or retention policy; confirm them before choosing regions and archive duration.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5"]
+    },
+    {
+      "id": "ra_36",
+      "stepNumber": 36,
+      "phase": "Scale, observe, and prove the service levels",
+      "title": "Add Application Insights job and dependency telemetry",
+      "type": "add_component",
+      "content": "Use Application Insights with Azure Monitor metrics/logs to observe the stream job, broker, outputs, archive replay, and Functions. Carry a correlation id from the producer event through the result and action where practical, but keep high-cardinality event ids in logs/traces rather than unbounded metric dimensions.",
+      "component": {
+        "nodeId": "analytics_application_insights",
+        "componentType": "monitoring",
+        "label": "Application Insights + Azure Monitor",
+        "description": "Streaming SLOs, job health, dependencies, and alerts",
+        "position": {"x": 1740, "y": 760},
+        "properties": {
+          "componentName": "Application Insights + Azure Monitor",
+          "purpose": "Collect job and dependency metrics, structured logs, traces, dashboards, and alerts for source-to-result latency, backlog, watermarks, throttles, retries, and dead letters.",
+          "metrics": true,
+          "alerts": true
+        },
+        "highlightReason": "The design needs to detect lag and partial failure across the whole streaming pipeline, not only whether the job process is running."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "ra_37",
+      "stepNumber": 37,
+      "phase": "Scale, observe, and prove the service levels",
+      "title": "Observe ingress and partition health",
+      "type": "add_connection",
+      "content": "Track Event Hubs ingress/egress bytes and events, throttles, per-partition skew, active capacity, and oldest queued-event age. Alarm on sustained imbalance rather than only aggregate average throughput.",
+      "connection": {
+        "edgeId": "hubs_to_monitoring",
+        "sourceNodeId": "analytics_event_hubs",
+        "targetNodeId": "analytics_application_insights",
+        "connectionType": "telemetry",
+        "label": "Ingress, throttling, partition skew",
+        "description": "Export broker metrics and alert signals for utilization, capacity, and consumer lag."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "ra_38",
+      "stepNumber": 38,
+      "phase": "Scale, observe, and prove the service levels",
+      "title": "Observe query progress and event-time health",
+      "type": "add_connection",
+      "content": "Monitor Stream Analytics SU utilization, input/output events, failed conversions, late and out-of-order event counts, watermark delay, and job restarts. Alert on growing watermark delay even when CPU utilization appears healthy; an idle partition or output bottleneck can still stall results.",
+      "connection": {
+        "edgeId": "stream_job_to_monitoring",
+        "sourceNodeId": "analytics_stream_job",
+        "targetNodeId": "analytics_application_insights",
+        "connectionType": "telemetry",
+        "label": "SU use, watermark, late events, job health",
+        "description": "Observe processing capacity, time-policy effects, query errors, and restart behavior."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "ra_39",
+      "stepNumber": 39,
+      "phase": "Scale, observe, and prove the service levels",
+      "title": "Observe result-store capacity and write latency",
+      "type": "add_connection",
+      "content": "Track Cosmos DB request-unit consumption, throttles, normalized utilization, write latency, hot partitions, and autoscale ceiling. Compare output rows with processed logical result keys so sink throttling or duplicate behavior cannot hide behind job health.",
+      "connection": {
+        "edgeId": "cosmos_to_monitoring",
+        "sourceNodeId": "analytics_cosmos",
+        "targetNodeId": "analytics_application_insights",
+        "connectionType": "telemetry",
+        "label": "RU use, write latency, hot partitions",
+        "description": "Observe result and idempotency-store capacity, throttling, and data-plane health."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "ra_40",
+      "stepNumber": 40,
+      "phase": "Scale, observe, and prove the service levels",
+      "title": "Observe capture and replay health",
+      "type": "explanation",
+      "content": "Measure archive capture lag, write failures, retention consumption, replay range, and replay throughput using the broker and storage metrics. Historical correction is a separate asynchronous service level and must not be confused with the normal under-five-second online path.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1"]
+    },
+    {
+      "id": "ra_41",
+      "stepNumber": 41,
+      "phase": "Scale, observe, and prove the service levels",
+      "title": "Observe event routing and subscriber retries",
+      "type": "add_connection",
+      "content": "Measure Event Grid publish and delivery success, oldest-event age, retry count, throttling, and dead-letter count. A rising retry age means the action path is degraded even if analytics storage remains healthy.",
+      "connection": {
+        "edgeId": "event_grid_to_monitoring",
+        "sourceNodeId": "analytics_event_grid",
+        "targetNodeId": "analytics_application_insights",
+        "connectionType": "telemetry",
+        "label": "Delivery age, retries, dead letters",
+        "description": "Observe asynchronous routing health and configured retry/dead-letter behavior."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "ra_42",
+      "stepNumber": 42,
+      "phase": "Scale, observe, and prove the service levels",
+      "title": "Observe the publisher adapter",
+      "type": "add_connection",
+      "content": "Track Function batch size, invocation latency, failures, retries, throttling, and duplicate publish attempts. Bound batch size and concurrency from downstream capacity; do not acknowledge partially processed batches as if the whole batch succeeded.",
+      "connection": {
+        "edgeId": "publisher_to_monitoring",
+        "sourceNodeId": "analytics_action_publisher",
+        "targetNodeId": "analytics_application_insights",
+        "connectionType": "telemetry",
+        "label": "Publisher batch and retry health",
+        "description": "Observe the Stream Analytics output adapter and its Event Grid publish dependency."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "ra_43",
+      "stepNumber": 43,
+      "phase": "Scale, observe, and prove the service levels",
+      "title": "Observe action outcomes, not only invocation success",
+      "type": "add_connection",
+      "content": "Track handler duration, retries, authorization failures, idempotency hits, pending actions, completed actions, and reconciliation backlog. A successful HTTP acknowledgement is not proof that the business action completed correctly; verify outcome state and alert on stuck pending records.",
+      "connection": {
+        "edgeId": "handler_to_monitoring",
+        "sourceNodeId": "analytics_action_handler",
+        "targetNodeId": "analytics_application_insights",
+        "connectionType": "telemetry",
+        "label": "Action completion and dedupe health",
+        "description": "Observe business-action outcome, retries, duplicate suppression, and unresolved work."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "ra_44",
+      "stepNumber": 44,
+      "phase": "Scale, observe, and prove the service levels",
+      "title": "Measure the five-second objective end to end",
+      "type": "decision_point",
+      "content": "Define the clock from producer event creation or broker acceptance to the required result/action, and publish p50/p95/p99 separately. The prompt says processing latency under five seconds but does not define the percentile or whether asynchronous action retries are included. Measure normal online results and action delivery as separate paths; late-data waits, a retry, or a dead-letter replay can exceed five seconds and should be visible rather than hidden in an average.",
+      "decision": {
+        "question": "What exactly does the under-five-second target measure?",
+        "chosen": "Publish end-to-end p95 from broker acceptance to durable result, and a separate p95 from result to successful action; confirm the percentile and start point with stakeholders.",
+        "chosenReason": "Separating the durable analytics path from retryable side effects exposes the real bottleneck and makes the unspecified SLA choice reviewable.",
+        "alternatives": [
+          {"option": "Measure only Stream Analytics compute time", "tradeoff": "Ignores broker queueing, output throttling, and action delivery."},
+          {"option": "Use one average across all outcomes", "tradeoff": "Hides slow tails and retry/replay behavior that users experience."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "ra_45",
+      "stepNumber": 45,
+      "phase": "Scale, observe, and prove the service levels",
+      "title": "Scale the full pipeline and control scale-in risk",
+      "type": "explanation",
+      "content": "Capacity is a chain: producers must publish, Event Hubs must accept and retain partitions, Stream Analytics must process them, Cosmos must absorb writes, and Functions/Event Grid must drain action output. Scale each tier independently from its own saturation signals. Event Hubs Standard Auto-inflate is scale-up only; its upper limit affects cost when reached. Stream Analytics custom autoscale has topology and partition limits. Test scale-out delay and safe scale-in rather than assuming autoscale reacts instantly to a spike.",
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "ra_46",
+      "stepNumber": 46,
+      "phase": "Scale, observe, and prove the service levels",
+      "title": "Exercise realistic disorder and partial failures",
+      "type": "explanation",
+      "content": "Load-test 1M+ events/second using the real event-size distribution, burst pattern, source mix, and hot-key profile. Inject clock skew, delayed and out-of-order records, an idle Event Hubs partition, Stream Analytics restart, Cosmos throttling, duplicate function batches, Event Grid redelivery, and a failed external action. Verify replay and deduplication converge to one logical Cosmos result, late-data decisions are observable, and no user action is silently lost.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "ra_47",
+      "stepNumber": 47,
+      "phase": "Scale, observe, and prove the service levels",
+      "title": "Set acceptance criteria from the supplied brief",
+      "type": "explanation",
+      "content": "Accept only after representative sustained and burst tests demonstrate at least 1M events/second at the agreed event size, the agreed under-five-second end-to-end percentile for the durable result path, query and sink recovery without missing logical results, correct configured handling of late/out-of-order events, safe autoscaling, and zero duplicate logical Cosmos results after retry/replay. Separately test Event Grid and action retries with duplicate delivery; do not label arbitrary external side effects exactly once unless their idempotency/reconciliation contract proves it.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "ra_48",
+      "stepNumber": 48,
+      "phase": "Scale, observe, and prove the service levels",
+      "title": "Add a raw-event capture archive for controlled replay",
+      "type": "add_component",
+      "content": "Use Event Hubs Capture to retain raw events in Azure Blob-compatible storage for the agreed replay horizon. This is an asynchronous archive lane, not part of the normal five-second result path. It gives operators a source for correcting windows when events arrive beyond the online lateness tolerance; apply access controls, retention, and storage-cost limits from the confirmed data policy.",
+      "component": {
+        "nodeId": "analytics_raw_archive",
+        "componentType": "object-storage",
+        "label": "Azure Blob / Data Lake Capture Archive",
+        "description": "Raw-event retention for controlled late-data replay",
+        "position": {"x": 880, "y": 620},
+        "properties": {
+          "componentName": "Azure Blob / Data Lake Capture Archive",
+          "purpose": "Retain immutable Event Hubs capture files for bounded audit and operator-controlled replay/backfill; keep this asynchronous path outside the online latency SLO and apply an explicit retention policy.",
+          "provider": "Azure Blob",
+          "versioning": true,
+          "checksumValidation": true
+        },
+        "highlightReason": "Raw capture preserves a recovery source for events that cannot be included within the low-latency online ordering window."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "ra_49",
+      "stepNumber": 49,
+      "phase": "Scale, observe, and prove the service levels",
+      "title": "Capture broker events off the hot path",
+      "type": "add_connection",
+      "content": "Configure Event Hubs Capture to write partitioned raw event files to the archive. Capture lag and file size are separate from online query latency; retain enough raw context and offsets to replay a bounded time range without duplicating current results.",
+      "connection": {
+        "edgeId": "hubs_to_raw_archive",
+        "sourceNodeId": "analytics_event_hubs",
+        "targetNodeId": "analytics_raw_archive",
+        "connectionType": "asynchronous-capture",
+        "label": "Partitioned raw-event capture",
+        "description": "Archive broker events for bounded retention, audit, and recovery replay."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1"]
+    },
+    {
+      "id": "ra_50",
+      "stepNumber": 50,
+      "phase": "Scale, observe, and prove the service levels",
+      "title": "Replay archived data through a controlled backfill",
+      "type": "add_connection",
+      "content": "Connect the archive to the analytics design as an operator-controlled replay input, typically through a separately configured backfill run with a bounded time range and the same versioned query logic. Do not feed the archive continuously into the online job or merge replay output without deterministic Cosmos result keys and correction metadata.",
+      "connection": {
+        "edgeId": "raw_archive_to_stream_replay",
+        "sourceNodeId": "analytics_raw_archive",
+        "targetNodeId": "analytics_stream_job",
+        "connectionType": "controlled-replay-input",
+        "label": "Operator-controlled replay / backfill",
+        "description": "Reprocess a bounded archived time range separately from the online hot path."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ra_51",
+      "stepNumber": 51,
+      "phase": "Scale, observe, and prove the service levels",
+      "title": "Record the unresolved product decisions",
+      "type": "conclusion",
+      "content": "Before production sizing, confirm average and peak event size/rate, number and geography of producers, required retention and replay horizon, tolerated lateness and clock skew, the exact latency percentile and start/end points, Cosmos read patterns, and which external actions must be idempotent. The architecture provides a testable path, not a claim that unmeasured Azure capacity already meets the numeric targets.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

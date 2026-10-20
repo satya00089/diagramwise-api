@@ -1,0 +1,1028 @@
+{
+  "problem_id": "cloud_azure_003",
+  "version": "1.0.0-review-draft",
+  "totalSteps": 53,
+  "phases": [
+    {
+      "name": "Frame the hybrid boundary and unknowns",
+      "stepRange": [1, 7],
+      "description": "Keep supplied requirements distinct from deployment assumptions, define what the 50ms target measures, and establish separate connected and air-gapped operating modes."
+    },
+    {
+      "name": "Build private connectivity with an explicit fallback",
+      "stepRange": [8, 20],
+      "description": "Place the on-premises and Azure network boundaries, represent ExpressRoute and its Azure gateway, and add a separately qualified VPN recovery path and Azure firewall."
+    },
+    {
+      "name": "Place workloads and establish hybrid management",
+      "stepRange": [21, 35],
+      "description": "Represent Azure Stack HCI and Azure Kubernetes workloads, local disconnected operations, Arc agents and control plane, and the identity boundary without conflating management traffic with application traffic."
+    },
+    {
+      "name": "Apply governance and unify security telemetry",
+      "stepRange": [36, 46],
+      "description": "Show Azure Policy assignments through Arc, Azure Monitor collection, optional Sentinel analysis, and delayed operator-approved export from isolated sites."
+    },
+    {
+      "name": "Define failure behavior, scale signals, and proof",
+      "stepRange": [47, 53],
+      "description": "Use measured signals rather than invented capacity numbers, preserve local operation during partitions, and define evidence needed before claiming the constraints are met."
+    }
+  ],
+  "steps": [
+    {
+      "id": "hybrid_01",
+      "stepNumber": 1,
+      "phase": "Frame the hybrid boundary and unknowns",
+      "title": "Separate the supplied brief from design assumptions",
+      "type": "explanation",
+      "content": "Supplied brief: manage on-premises and cloud resources; deploy services across both; apply consistent governance and monitoring; run Azure services on-premises; secure connectivity; and maintain compliance. The explicit constraints are network latency under 50ms, one management interface, air-gapped support, zero-trust security, and graceful network-failure handling. Assumptions for this draft—not facts in the brief—are that the deployment includes both Azure-connected and fully isolated site profiles and that Azure is the selected cloud control plane; confirm the actual site mix and permitted routes. No availability SLO is specified: uptime, RTO, RPO, failover/convergence time, and required service availability remain owner-approved assumptions, not consequences guaranteed by a second path or Azure product choice. Azure Arc, Azure Stack HCI, ExpressRoute, Azure Monitor, Azure Policy, and Sentinel are candidate provider-specific choices drawn from the hints. Their presence here does not guarantee service coverage, connectivity, latency, availability, policy enforcement, or feature parity; verify support and behavior for each resource type, region, configuration, and site profile. Confirm workload/data classification, regulatory regimes, traffic paths, and operating ownership before sizing or deployment.",
+      "requirementIds": []
+    },
+    {
+      "id": "hybrid_02",
+      "stepNumber": 2,
+      "phase": "Frame the hybrid boundary and unknowns",
+      "title": "Make the 50ms target measurable before choosing placement",
+      "type": "decision_point",
+      "content": "The only stated latency target is network latency under 50ms. The brief does not define the measurement endpoints, direction (one-way or round trip), workload mix, or whether application processing is included; these are acceptance assumptions to confirm with the owner. Measure representative local, on-premises-to-Azure, and control-plane paths, and record round-trip p50/p95/p99 as diagnostic distributions only. Those percentiles are not separate pass targets: keep the contractual measurement boundary and required percentile open until the owner confirms them. A single network ping does not prove that every application meets the stated target.",
+      "decision": {
+        "question": "What does network latency under 50ms mean for acceptance?",
+        "chosen": "Instrument representative network paths and report p50, p95, and p99 as diagnostics only; keep the acceptance boundary and required percentile open until the owner confirms them.",
+        "chosenReason": "Path, direction, workload, and tail behavior can differ across sites; the brief states only an under-50ms network-latency ceiling, so the measurement contract must be agreed without inventing another target.",
+        "alternatives": [
+          {"option": "Treat one ICMP round trip as the target", "tradeoff": "It omits application protocol, routing policy, and service processing and may not represent production traffic."},
+          {"option": "Assume the limit applies only to Azure-hosted workloads", "tradeoff": "That silently excludes the on-premises paths central to a hybrid design."}
+        ]
+      },
+      "requirementIds": ["legacy-constraint:1"]
+    },
+    {
+      "id": "hybrid_03",
+      "stepNumber": 3,
+      "phase": "Frame the hybrid boundary and unknowns",
+      "title": "Classify connected, intermittently connected, and air-gapped sites",
+      "type": "decision_point",
+      "content": "A site that can reach Azure intermittently is not the same operating mode as a site with no permitted external path. Use Arc-connected management only for sites that can satisfy its connectivity and security prerequisites. For a truly air-gapped site, plan local workload operations and a separately approved process for importing signed policy/configuration and exporting selected evidence. The brief requires air-gap support but does not say which workloads, controls, or data may cross that boundary.",
+      "decision": {
+        "question": "How should one architecture support both connected and air-gapped locations?",
+        "chosen": "Define explicit site profiles: connected sites use the Azure management plane; isolated sites keep execution and baseline enforcement local and use only an approved, auditable transfer process if policy permits.",
+        "chosenReason": "This preserves local service operation without claiming that a disconnected site can receive live cloud policy, identity, monitoring, or incident-response updates.",
+        "alternatives": [
+          {"option": "Require every site to maintain a live Azure connection", "tradeoff": "It fails the stated air-gapped constraint and makes local operation depend on an unavailable path."},
+          {"option": "Treat an intermittent VPN as equivalent to a fully isolated site", "tradeoff": "Intermittent connectivity can still leak data or violate a strict no-route policy."}
+        ]
+      },
+      "requirementIds": ["legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "hybrid_04",
+      "stepNumber": 4,
+      "phase": "Frame the hybrid boundary and unknowns",
+      "title": "Mark the on-premises restricted trust zone",
+      "type": "add_component",
+      "content": "Use the catalog Security Boundary type to show the on-premises trust zone, not as a substitute for host-level controls. Access to workloads and management endpoints must still be authenticated and authorized at the resource boundary. The exact security classification and segmentation rules depend on the organization's data and compliance inventory.",
+      "component": {
+        "nodeId": "onprem_zone",
+        "componentType": "security-boundary",
+        "label": "On-premises restricted site",
+        "description": "Locally controlled trust boundary for site networks and workloads",
+        "position": {"x": 40, "y": 210},
+        "properties": {
+          "componentName": "On-premises restricted site",
+          "purpose": "Represent a locally administered security zone. Apply least-privilege access, explicit ingress and egress rules, and site-specific compliance controls; the exact classification is an owner decision.",
+          "level": "Restricted"
+        },
+        "highlightReason": "A visible trust boundary helps distinguish local workload operation from cloud connectivity and is a starting point for zero-trust review."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "hybrid_05",
+      "stepNumber": 5,
+      "phase": "Frame the hybrid boundary and unknowns",
+      "title": "Add the on-premises network segment",
+      "type": "add_component",
+      "content": "Represent the site's routable network with the catalog VPC/Network component. The label is intentionally provider-neutral: the catalog shape is an organizational network boundary, while the real site may use existing datacenter routing and subnet constructs. Resolve overlapping address spaces, DNS ownership, route advertisements, and segmentation before connecting it to Azure.",
+      "component": {
+        "nodeId": "onprem_network",
+        "componentType": "vpc-network",
+        "label": "On-premises workload network",
+        "description": "Existing segmented network for local services and hybrid routing",
+        "position": {"x": 340, "y": 210},
+        "properties": {
+          "componentName": "On-premises workload network",
+          "purpose": "Represent the site-side routed network. Keep workload, management, and transfer paths segmented; confirm CIDRs, DNS, route ownership, and permitted egress from the actual environment."
+        },
+        "highlightReason": "Hybrid connectivity begins at a clearly scoped site network, not at an assumed flat datacenter."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6"]
+    },
+    {
+      "id": "hybrid_06",
+      "stepNumber": 6,
+      "phase": "Frame the hybrid boundary and unknowns",
+      "title": "Add the Azure virtual network boundary",
+      "type": "add_component",
+      "content": "Use the catalog network boundary for the Azure-side virtual network. The CIDR and subnet layout are deliberately left unset because the brief has no address plan. Separate workload, management, and shared-service subnets according to the final route and security design; do not let the drawing imply unrestricted transit between them.",
+      "component": {
+        "nodeId": "azure_network",
+        "componentType": "vpc-network",
+        "label": "Azure virtual network",
+        "description": "Azure-side private routing boundary for hybrid services",
+        "position": {"x": 1110, "y": 210},
+        "properties": {
+          "componentName": "Azure virtual network",
+          "purpose": "Represent the Azure-side private network boundary. Select non-overlapping address ranges and distinct workload, management, and shared-service subnets after the existing network inventory is reviewed."
+        },
+        "highlightReason": "A distinct cloud-side network boundary makes the private circuit, fallback route, and policy-controlled workload path reviewable."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6"]
+    },
+    {
+      "id": "hybrid_07",
+      "stepNumber": 7,
+      "phase": "Frame the hybrid boundary and unknowns",
+      "title": "Represent Azure services running on-premises",
+      "type": "add_component",
+      "content": "Use the catalog Container Orchestrator as the runtime analogy for workloads on Azure Stack HCI. This node represents the on-premises Kubernetes workload plane, not a claim that every Azure PaaS service runs locally. Confirm which services are supported for the selected Stack deployment and which dependencies must remain available inside the site. Operating assumption and acceptance objective: workloads designated for the fully air-gapped profile can perform their required local operations without a live cloud-control-plane call. Test that behavior for the selected workloads; neither this diagram nor the platform name proves it.",
+      "component": {
+        "nodeId": "stack_hci",
+        "componentType": "container-orchestrator",
+        "label": "Azure Stack HCI — on-premises workloads",
+        "description": "Local Kubernetes-compatible workload plane for supported Azure services",
+        "position": {"x": 360, "y": 510},
+        "properties": {
+          "componentName": "Azure Stack HCI — on-premises workloads",
+          "purpose": "Run only the Azure-connected or Kubernetes workloads confirmed as supported on the chosen on-premises platform. Keep required data and service dependencies local for isolated operation; platform version, node count, and workload eligibility remain deployment decisions.",
+          "platform": "Kubernetes"
+        },
+        "highlightReason": "The problem explicitly requires Azure services on-premises; the catalog orchestrator captures the workload runtime without inventing a vendor-specific node type."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "hybrid_08",
+      "stepNumber": 8,
+      "phase": "Build private connectivity with an explicit fallback",
+      "title": "Add a private ExpressRoute circuit",
+      "type": "add_component",
+      "content": "ExpressRoute is the hinted private connectivity option for the connected-site profile. Model the circuit as a custom component because the catalog has no ExpressRoute-specific component. Provider, peering location, bandwidth, routing filters, and resiliency design are intentionally not guessed; validate them against the measured path and the under-50ms acceptance definition.",
+      "component": {
+        "nodeId": "expressroute",
+        "componentType": "custom-component",
+        "label": "ExpressRoute private circuit",
+        "description": "Private site-to-Azure transport for approved connected sites",
+        "position": {"x": 650, "y": 100},
+        "properties": {
+          "componentName": "ExpressRoute private circuit",
+          "purpose": "Represent the proposed primary private transport path for connected sites. Select bandwidth, peering, routing filters, and circuit diversity only after site inventory, traffic measurements, and the latency acceptance boundary are agreed; this choice does not guarantee latency or availability.",
+          "componentType": "Private connectivity",
+          "technology": "Azure ExpressRoute",
+          "notes": "Not available to a fully air-gapped site; do not treat private transport as encryption or authorization by itself."
+        },
+        "highlightReason": "The supplied hint names ExpressRoute, and a custom catalog component is used because no dedicated catalog analog exists."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "hybrid_09",
+      "stepNumber": 9,
+      "phase": "Build private connectivity with an explicit fallback",
+      "title": "Place an Azure ExpressRoute gateway at the cloud edge",
+      "type": "add_component",
+      "content": "For this Azure-specific ExpressRoute option, represent a cloud-side gateway and reviewed route exchange as the candidate path into the Azure virtual network; confirm the exact gateway/service arrangement for the chosen ExpressRoute offering, peering, and network design. This provider choice does not itself guarantee reachability, under-50ms latency, or availability. Use a custom component because the catalog has no ExpressRoute gateway type. Confirm gateway SKU/capacity, route limits, active-active behavior, and regional design from measured demand rather than assuming this diagram provisions them.",
+      "component": {
+        "nodeId": "expressroute_gateway",
+        "componentType": "custom-component",
+        "label": "Azure ExpressRoute gateway",
+        "description": "Cloud-side termination and route exchange for the private circuit",
+        "position": {"x": 900, "y": 100},
+        "properties": {
+          "componentName": "Azure ExpressRoute gateway",
+          "purpose": "Terminate the connected-site private circuit into the Azure network through an explicitly reviewed gateway and route policy. Capacity, route propagation, and redundancy remain to be validated against workload measurements.",
+          "componentType": "Network gateway",
+          "technology": "Azure ExpressRoute virtual network gateway",
+          "notes": "Keep route advertisements scoped; private reachability does not imply workload authorization."
+        },
+        "highlightReason": "Separating the circuit from its cloud gateway makes the actual routing boundary explicit."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "hybrid_10",
+      "stepNumber": 10,
+      "phase": "Build private connectivity with an explicit fallback",
+      "title": "Add a separately routed VPN recovery path",
+      "type": "add_component",
+      "content": "Use Azure VPN Gateway as a candidate alternate route only where site policy permits. A second path does not guarantee an independent failure domain, equivalent capacity, acceptable latency, service availability, or automatic failover. Test throughput, route convergence, cryptographic configuration, shared dependencies, and recovery behavior under representative workload before describing it as a recovery path.",
+      "component": {
+        "nodeId": "vpn_backup",
+        "componentType": "vpn-gateway",
+        "label": "Azure VPN Gateway — recovery path",
+        "description": "Encrypted alternate route for eligible connected sites",
+        "position": {"x": 650, "y": 390},
+        "properties": {
+          "componentName": "Azure VPN Gateway — recovery path",
+          "purpose": "Represent a candidate monitored alternate route when the private circuit is unavailable, subject to site policy and measured capacity. Prove failure-domain independence, routing preference, failover detection, and recovery behavior; do not assume the VPN sustains primary-path traffic or guarantees availability.",
+          "protocol": "IPSec",
+          "encryption": "AES-256"
+        },
+        "highlightReason": "The catalog has a supported VPN Gateway analog for a qualified secondary path; no tunnel count or capacity is fabricated."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "hybrid_11",
+      "stepNumber": 11,
+      "phase": "Build private connectivity with an explicit fallback",
+      "title": "Choose failover policy by workload and site profile",
+      "type": "decision_point",
+      "content": "Keep ExpressRoute as the intended primary path only for connected sites where its measured route satisfies the agreed objective. Make VPN failover explicit, tested, and restricted to the same approved destinations. The isolated profile must have no hidden automatic route to either cloud path. Decide whether to fail over automatically or require operator approval based on the consequence of a route change and the VPN's tested capacity.",
+      "decision": {
+        "question": "Should a circuit failure automatically move traffic to VPN?",
+        "chosen": "Define per-site failover behavior from route policy, security approval, measured capacity, and application tolerance; never extend the cloud route into an air-gapped profile.",
+        "chosenReason": "Automatic failover improves continuity only when the alternate path can safely carry the permitted workload and does not violate isolation requirements.",
+        "alternatives": [
+          {"option": "Always fail over every route automatically", "tradeoff": "May overload the VPN, change latency, or create a path prohibited for sensitive workloads."},
+          {"option": "Never fail over", "tradeoff": "Leaves eligible connected workloads without an alternate path even when one is approved and tested."}
+        ]
+      },
+      "requirementIds": ["legacy-constraint:5"]
+    },
+    {
+      "id": "hybrid_12",
+      "stepNumber": 12,
+      "phase": "Build private connectivity with an explicit fallback",
+      "title": "Add a network firewall on the Azure workload path",
+      "type": "add_component",
+      "content": "Use the catalog Firewall component to represent Azure-side network filtering. Define allow-lists by workload and destination, log decisions, and reject implicit east-west access. Firewall rules should complement identity and host controls; they do not make a reachable service trusted. The precise rule set requires the application and compliance inventory.",
+      "component": {
+        "nodeId": "azure_firewall",
+        "componentType": "firewall",
+        "label": "Azure Firewall — scoped hybrid flows",
+        "description": "Network filtering for explicitly approved cloud workload paths",
+        "position": {"x": 1370, "y": 210},
+        "properties": {
+          "componentName": "Azure Firewall — scoped hybrid flows",
+          "purpose": "Filter only documented hybrid destinations and protocols, deny unapproved paths, and emit reviewable traffic decisions. Validate rules with application owners and security policy; the drawing is not a firewall rule export.",
+          "type": "Network Firewall",
+          "logging": true
+        },
+        "highlightReason": "The catalog Firewall analog represents one network enforcement point while zero-trust authorization remains an independent control."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "hybrid_13",
+      "stepNumber": 13,
+      "phase": "Build private connectivity with an explicit fallback",
+      "title": "Connect the restricted site boundary to its network",
+      "type": "add_connection",
+      "content": "This edge marks the network contained by the on-premises trust zone. Keep management endpoints and workload traffic separately governed, and document the boundary crossings needed by each service. The edge is not permission for every host in the site to reach every other component.",
+      "connection": {
+        "edgeId": "onprem_zone_to_network",
+        "sourceNodeId": "onprem_zone",
+        "targetNodeId": "onprem_network",
+        "connectionType": "network-boundary",
+        "label": "Site segmentation and routing",
+        "description": "The site network is inside a locally administered restricted zone with explicit ingress and egress controls."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "hybrid_14",
+      "stepNumber": 14,
+      "phase": "Build private connectivity with an explicit fallback",
+      "title": "Route approved site traffic to the ExpressRoute circuit",
+      "type": "add_connection",
+      "content": "Advertise only approved prefixes from the on-premises network toward the private circuit. Measure the real round trip for representative flows against the under-50ms limit and record the test endpoints and percentile; this edge alone cannot establish the target.",
+      "connection": {
+        "edgeId": "network_to_expressroute",
+        "sourceNodeId": "onprem_network",
+        "targetNodeId": "expressroute",
+        "connectionType": "private-routing",
+        "label": "Approved private routes",
+        "description": "Exchange only reviewed site prefixes over the primary private path; measure application-relevant RTT and route health."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "hybrid_15",
+      "stepNumber": 15,
+      "phase": "Build private connectivity with an explicit fallback",
+      "title": "Terminate the circuit at the Azure gateway",
+      "type": "add_connection",
+      "content": "The gateway is the cloud-side route boundary for the circuit. Validate route propagation in both directions, prevent accidental default-route import, and verify that the selected peering and gateway path reach only intended Azure address ranges.",
+      "connection": {
+        "edgeId": "expressroute_to_gateway",
+        "sourceNodeId": "expressroute",
+        "targetNodeId": "expressroute_gateway",
+        "connectionType": "private-circuit",
+        "label": "Private circuit termination",
+        "description": "The ExpressRoute circuit terminates through the reviewed Azure gateway and route policy."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "hybrid_16",
+      "stepNumber": 16,
+      "phase": "Build private connectivity with an explicit fallback",
+      "title": "Attach the ExpressRoute gateway to the Azure network",
+      "type": "add_connection",
+      "content": "Expose only the reviewed cloud subnets to the private path. Validate route symmetry and return paths; asymmetric routing can break stateful inspection and make measured latency misleading.",
+      "connection": {
+        "edgeId": "gateway_to_azure_network",
+        "sourceNodeId": "expressroute_gateway",
+        "targetNodeId": "azure_network",
+        "connectionType": "private-routing",
+        "label": "Scoped Azure prefixes",
+        "description": "The gateway exchanges only authorized Azure virtual-network routes with the connected site."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "hybrid_17",
+      "stepNumber": 17,
+      "phase": "Build private connectivity with an explicit fallback",
+      "title": "Connect the alternate VPN route from the site",
+      "type": "add_connection",
+      "content": "Keep VPN routes separately identifiable from the primary circuit. During an outage, monitor the active path and enforce a tested allow-list; an alternate route must not silently widen access or be represented as a guarantee of the same 50ms behavior.",
+      "connection": {
+        "edgeId": "network_to_vpn_backup",
+        "sourceNodeId": "onprem_network",
+        "targetNodeId": "vpn_backup",
+        "connectionType": "encrypted-tunnel",
+        "label": "Approved recovery tunnel",
+        "description": "An independently governed IPSec route is available only to connected sites that permit and test the fallback."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "hybrid_18",
+      "stepNumber": 18,
+      "phase": "Build private connectivity with an explicit fallback",
+      "title": "Terminate VPN recovery into the Azure network",
+      "type": "add_connection",
+      "content": "Route only approved prefixes through the VPN gateway. Test failover and failback under representative load, including firewall inspection, DNS resolution, and application retries; graceful network-failure behavior includes avoiding retry storms and duplicate side effects in clients.",
+      "connection": {
+        "edgeId": "vpn_backup_to_azure_network",
+        "sourceNodeId": "vpn_backup",
+        "targetNodeId": "azure_network",
+        "connectionType": "encrypted-tunnel",
+        "label": "Restricted failover routes",
+        "description": "The recovery tunnel terminates into the Azure network with a narrower, explicitly approved route set."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "hybrid_19",
+      "stepNumber": 19,
+      "phase": "Build private connectivity with an explicit fallback",
+      "title": "Pass cloud-bound workload routes through Azure Firewall",
+      "type": "add_connection",
+      "content": "Make the Azure-side inspection point visible between the virtual network and workload path. Confirm that route tables cannot bypass inspection where policy requires it, and separately validate identity, service authorization, and host protections.",
+      "connection": {
+        "edgeId": "azure_network_to_firewall",
+        "sourceNodeId": "azure_network",
+        "targetNodeId": "azure_firewall",
+        "connectionType": "network-inspection",
+        "label": "Policy-routed workload traffic",
+        "description": "Azure network routes direct approved workload traffic through the firewall for network-layer inspection."
+      },
+      "requirementIds": ["legacy-requirement:6"]
+    },
+    {
+      "id": "hybrid_20",
+      "stepNumber": 20,
+      "phase": "Build private connectivity with an explicit fallback",
+      "title": "Review the data-plane route and its failure domain",
+      "type": "decision_point",
+      "content": "Before adding services, verify the end-to-end route through site segmentation, circuit or VPN, Azure gateway, virtual network, and firewall. List which route failures are independent and which share carrier, facility, gateway, DNS, or power dependencies. A second logical path is not independent if it shares the same failure domain.",
+      "decision": {
+        "question": "What evidence makes the hybrid route resilient rather than merely duplicated?",
+        "chosen": "Document shared failure domains and run controlled circuit-loss, VPN failover, route-withdrawal, and recovery tests for each connected-site profile.",
+        "chosenReason": "Topology labels do not prove path independence, convergence time, or application recovery behavior.",
+        "alternatives": [
+          {"option": "Count two gateways as sufficient redundancy", "tradeoff": "They may share the same circuit, carrier, peering point, or site power."},
+          {"option": "Assume the network heals without application changes", "tradeoff": "Long-lived connections, retries, and duplicate writes can still fail during route changes."}
+        ]
+      },
+      "requirementIds": ["legacy-constraint:5"]
+    },
+    {
+      "id": "hybrid_21",
+      "stepNumber": 21,
+      "phase": "Place workloads and establish hybrid management",
+      "title": "Add an Azure-region Kubernetes workload plane",
+      "type": "add_component",
+      "content": "Use the catalog Container Orchestrator for the Azure-side Kubernetes workload plane. The catalog is a generic Kubernetes analog, not an Azure-specific managed-service assertion. Choose the actual service, cluster boundary, identity integration, availability design, and connectivity only after workload placement and operational ownership are agreed.",
+      "component": {
+        "nodeId": "azure_aks",
+        "componentType": "container-orchestrator",
+        "label": "Azure-region Kubernetes workloads",
+        "description": "Cloud workload plane for services selected for Azure deployment",
+        "position": {"x": 1600, "y": 210},
+        "properties": {
+          "componentName": "Azure-region Kubernetes workloads",
+          "purpose": "Host workloads assigned to Azure after data-residency, dependency, and recovery requirements are reviewed. Select the managed or self-managed Kubernetes service and capacity from measurements; this generic node does not assert an SKU.",
+          "platform": "Kubernetes"
+        },
+        "highlightReason": "A separate cloud workload node makes hybrid placement explicit instead of treating the Azure control plane as the workload itself."
+      },
+      "requirementIds": ["legacy-requirement:2"]
+    },
+    {
+      "id": "hybrid_22",
+      "stepNumber": 22,
+      "phase": "Place workloads and establish hybrid management",
+      "title": "Add local operations for fully disconnected sites",
+      "type": "add_component",
+      "content": "An air-gapped location needs an operational path that does not call Azure during routine workload execution. Use a custom component because the catalog has no offline governance or local operations analog. It represents site-local administration, staged signed configuration/policy baselines, and an auditable approval procedure; product selection, signing authority, and update cadence remain open decisions.",
+      "component": {
+        "nodeId": "offline_ops",
+        "componentType": "custom-component",
+        "label": "Air-gapped local operations and baseline cache",
+        "description": "Locally available workload operations and approved policy/configuration artifacts",
+        "position": {"x": 70, "y": 790},
+        "properties": {
+          "componentName": "Air-gapped local operations and baseline cache",
+          "purpose": "Keep workload lifecycle operations and the last approved signed policy/configuration baseline available inside a fully isolated site. Record local changes for later reconciliation; do not imply live Azure Arc, Entra, Policy, Monitor, or Sentinel access while the site is disconnected.",
+          "componentType": "Offline operations",
+          "technology": "Locally operated tooling; product choice open",
+          "notes": "Define signing, import/export, approval, rollback, and reconciliation procedures with security and compliance owners."
+        },
+        "highlightReason": "This is an explicit local design seam required to make air-gap support credible when cloud services cannot be reached."
+      },
+      "requirementIds": ["legacy-constraint:3", "legacy-constraint:5", "legacy-requirement:3"]
+    },
+    {
+      "id": "hybrid_23",
+      "stepNumber": 23,
+      "phase": "Place workloads and establish hybrid management",
+      "title": "Add a local telemetry spool for disconnected operation",
+      "type": "add_component",
+      "content": "Use a custom component for durable local buffering because the catalog has no site-local telemetry spool type. Set its retention, encryption, access control, and disk-pressure behavior from the applicable policy; the brief supplies no retention duration or telemetry volume. Fully isolated sites retain records locally unless a reviewed transfer is explicitly allowed.",
+      "component": {
+        "nodeId": "local_log_buffer",
+        "componentType": "custom-component",
+        "label": "On-premises telemetry spool",
+        "description": "Locally protected telemetry buffer for outages or approved delayed transfer",
+        "position": {"x": 400, "y": 820},
+        "properties": {
+          "componentName": "On-premises telemetry spool",
+          "purpose": "Buffer selected local logs and health events during network loss. Encrypt and access-control the spool, bound its storage by an owner-approved retention policy, and expose disk pressure before data is dropped.",
+          "componentType": "Telemetry buffer",
+          "technology": "Local log spool; implementation open",
+          "notes": "No automatic export from a fully air-gapped profile."
+        },
+        "highlightReason": "A disconnected site needs an explicit local telemetry behavior instead of a misleading always-on cloud monitoring edge."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "hybrid_24",
+      "stepNumber": 24,
+      "phase": "Place workloads and establish hybrid management",
+      "title": "Represent Azure Arc-connected resource agents",
+      "type": "add_component",
+      "content": "Use a custom component for Arc-enabled server and Kubernetes agents because the catalog has no Arc-specific component. Agents report inventory, health, and eligible governance state for connected resources over approved outbound paths. Confirm supported resource types, agent prerequisites, proxy rules, credentials, and upgrade ownership; fully isolated sites use their local operations profile instead.",
+      "component": {
+        "nodeId": "arc_agents",
+        "componentType": "custom-component",
+        "label": "Azure Arc-enabled resource agents",
+        "description": "Connected-site agents that expose eligible resources to the Azure management plane",
+        "position": {"x": 760, "y": 610},
+        "properties": {
+          "componentName": "Azure Arc-enabled resource agents",
+          "purpose": "Connect only eligible, approved resources at connected sites to Azure Arc for inventory, management, and policy workflows. Use outbound access and least-privilege identities; agent coverage and disconnected behavior must be validated per resource type.",
+          "componentType": "Hybrid management agent",
+          "technology": "Azure Arc-enabled servers and Kubernetes",
+          "notes": "Not a live cloud-management channel for fully air-gapped locations."
+        },
+        "highlightReason": "Arc is the supplied hybrid-management hint and a custom catalog component is necessary because no dedicated Arc type exists."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "hybrid_25",
+      "stepNumber": 25,
+      "phase": "Place workloads and establish hybrid management",
+      "title": "Add the Azure Arc management plane",
+      "type": "add_component",
+      "content": "Represent the Azure-hosted Arc control plane separately from site agents and workload paths. Treat Azure Arc as a provider-specific candidate integration: it can provide a shared management surface only for supported resource types after enrollment, permissions, and connectivity are configured. It does not guarantee complete unified management or service availability for every resource. The node is custom because the catalog has no Azure Arc component; it is not a replacement for local operations at isolated sites.",
+      "component": {
+        "nodeId": "arc_control_plane",
+        "componentType": "custom-component",
+        "label": "Azure Arc management control plane",
+        "description": "Azure-side inventory and management surface for approved connected resources",
+        "position": {"x": 1110, "y": 610},
+        "properties": {
+          "componentName": "Azure Arc management control plane",
+          "purpose": "Represent a candidate Azure management surface for connected, supported on-premises and cloud resources. Validate coverage and operations for each resource type; Arc does not guarantee one complete interface or availability for every resource. Keep authorization and management boundaries explicit; isolated-site operations remain local.",
+          "componentType": "Hybrid management control plane",
+          "technology": "Azure Arc",
+          "notes": "Connected-site service; do not claim continuous access from an air-gapped environment."
+        },
+        "highlightReason": "The Arc control plane is the core unified-management choice and remains distinct from workload data-plane traffic."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "hybrid_26",
+      "stepNumber": 26,
+      "phase": "Place workloads and establish hybrid management",
+      "title": "Add the identity authority for management access",
+      "type": "add_component",
+      "content": "The catalog has no Microsoft Entra identity-provider type, so use the supported custom component and keep the identity integration explicit. Require strong operator authentication, scoped roles, controlled workload identities, and auditable privilege elevation. Define how isolated-site identities and emergency access work without assuming cloud identity is reachable there.",
+      "component": {
+        "nodeId": "entra_identity",
+        "componentType": "custom-component",
+        "label": "Microsoft Entra ID and workload identity",
+        "description": "Identity authority for approved connected management and workload access",
+        "position": {"x": 760, "y": 900},
+        "properties": {
+          "componentName": "Microsoft Entra ID and workload identity",
+          "purpose": "Authenticate authorized operators and eligible workload identities for connected management flows. Scope roles to the minimum required resources and define local emergency access for isolated sites without depending on live cloud authentication.",
+          "componentType": "Identity provider",
+          "technology": "Microsoft Entra ID",
+          "notes": "Tenant boundaries, conditional access, privilege elevation, and isolated-site identity procedures require owner review."
+        },
+        "highlightReason": "Zero trust requires an explicit identity boundary; no identity-specific catalog component is available."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:4", "legacy-constraint:3"]
+    },
+    {
+      "id": "hybrid_27",
+      "stepNumber": 27,
+      "phase": "Place workloads and establish hybrid management",
+      "title": "Connect the Azure Stack HCI workload plane to its local network",
+      "type": "add_connection",
+      "content": "Keep the on-premises workload path local for site-resident services. For an air-gapped profile, local service dependencies and operator procedures must not require the ExpressRoute, VPN, or Arc links shown elsewhere in this connected-site view.",
+      "connection": {
+        "edgeId": "onprem_network_to_stack_hci",
+        "sourceNodeId": "onprem_network",
+        "targetNodeId": "stack_hci",
+        "connectionType": "local-workload-network",
+        "label": "Site-local service traffic",
+        "description": "On-premises workloads use the locally controlled network and keep required isolated-site dependencies inside the site."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "hybrid_28",
+      "stepNumber": 28,
+      "phase": "Place workloads and establish hybrid management",
+      "title": "Attach local operations to the on-premises workload plane",
+      "type": "add_connection",
+      "content": "Operators at an isolated site use the local procedure and signed baseline cache to manage supported workloads. Establish dual control for sensitive imports, audit every local change, and define reconciliation after a site is reconnected or an approved evidence transfer becomes possible.",
+      "connection": {
+        "edgeId": "offline_ops_to_stack_hci",
+        "sourceNodeId": "offline_ops",
+        "targetNodeId": "stack_hci",
+        "connectionType": "local-management",
+        "label": "Local operations and staged baseline",
+        "description": "Site-local procedures manage workloads without a live Azure dependency and record changes for controlled reconciliation."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "hybrid_29",
+      "stepNumber": 29,
+      "phase": "Place workloads and establish hybrid management",
+      "title": "Send local health records to the on-premises spool",
+      "type": "add_connection",
+      "content": "Keep logs and health events buffered inside the site during an outage or strict isolation. Define which events are security-sensitive, how they are encrypted and retained, and how an operator verifies completeness before any permitted export.",
+      "connection": {
+        "edgeId": "stack_hci_to_log_buffer",
+        "sourceNodeId": "stack_hci",
+        "targetNodeId": "local_log_buffer",
+        "connectionType": "local-telemetry",
+        "label": "Local logs and health events",
+        "description": "The site retains selected telemetry locally while external cloud services are unreachable or prohibited."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "hybrid_30",
+      "stepNumber": 30,
+      "phase": "Place workloads and establish hybrid management",
+      "title": "Connect cloud workloads to the Azure virtual network",
+      "type": "add_connection",
+      "content": "Place cloud workloads only on reviewed subnets and route them through the controls required by their classification. Keep service-to-service access explicit and avoid assuming that membership in one virtual network grants trust.",
+      "connection": {
+        "edgeId": "azure_network_to_aks",
+        "sourceNodeId": "azure_network",
+        "targetNodeId": "azure_aks",
+        "connectionType": "workload-network",
+        "label": "Scoped cloud workload subnet",
+        "description": "Azure-hosted workloads attach to reviewed subnets with explicit ingress, egress, and east-west policy."
+      },
+      "requirementIds": ["legacy-requirement:2"]
+    },
+    {
+      "id": "hybrid_31",
+      "stepNumber": 31,
+      "phase": "Place workloads and establish hybrid management",
+      "title": "Allow only reviewed Azure firewall paths to cloud workloads",
+      "type": "add_connection",
+      "content": "Route approved ingress and hybrid flows through the network firewall. Workload identity and application authorization remain mandatory behind this edge; a permitted network path is not an authorization decision.",
+      "connection": {
+        "edgeId": "firewall_to_aks",
+        "sourceNodeId": "azure_firewall",
+        "targetNodeId": "azure_aks",
+        "connectionType": "filtered-workload-traffic",
+        "label": "Inspected, allow-listed flows",
+        "description": "Only traffic matching reviewed network rules reaches cloud workloads; service identity still authorizes each operation."
+      },
+      "requirementIds": ["legacy-requirement:6"]
+    },
+    {
+      "id": "hybrid_32",
+      "stepNumber": 32,
+      "phase": "Place workloads and establish hybrid management",
+      "title": "Enroll eligible on-premises resources with Arc agents",
+      "type": "add_connection",
+      "content": "Connect supported Stack HCI resources to agents only for the Arc-enabled connected-site profile. Review which metadata and management operations leave the site, and do not install or configure a live cloud dependency in the fully air-gapped profile.",
+      "connection": {
+        "edgeId": "stack_hci_to_arc_agents",
+        "sourceNodeId": "stack_hci",
+        "targetNodeId": "arc_agents",
+        "connectionType": "hybrid-resource-management",
+        "label": "Eligible connected-site resources",
+        "description": "Arc agents expose only approved and supported on-premises resources to the cloud management plane."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "hybrid_33",
+      "stepNumber": 33,
+      "phase": "Place workloads and establish hybrid management",
+      "title": "Enroll eligible Azure workloads in the management view",
+      "type": "add_connection",
+      "content": "Use the same Arc inventory and governance view for Azure resources only where the selected resource type and operating model support it. Keep the canonical resource inventory and ownership tags consistent across both environments so the unified view is useful rather than merely visual.",
+      "connection": {
+        "edgeId": "azure_aks_to_arc_agents",
+        "sourceNodeId": "azure_aks",
+        "targetNodeId": "arc_agents",
+        "connectionType": "hybrid-resource-management",
+        "label": "Supported cloud resource inventory",
+        "description": "Eligible Azure resources join the same reviewed management and inventory conventions as connected on-premises resources."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "hybrid_34",
+      "stepNumber": 34,
+      "phase": "Place workloads and establish hybrid management",
+      "title": "Connect agents to the Azure Arc management plane",
+      "type": "add_connection",
+      "content": "For connected sites, agents use the approved outbound control-plane path and least-privilege identity. Validate required endpoints, proxy behavior, and update dependencies with the chosen Arc resource type. This management edge is not the application data path and must not bypass site egress policy.",
+      "connection": {
+        "edgeId": "arc_agents_to_control_plane",
+        "sourceNodeId": "arc_agents",
+        "targetNodeId": "arc_control_plane",
+        "connectionType": "outbound-management",
+        "label": "Approved outbound Arc management",
+        "description": "Connected-site agents exchange inventory and management state with Azure through reviewed outbound endpoints."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "hybrid_35",
+      "stepNumber": 35,
+      "phase": "Place workloads and establish hybrid management",
+      "title": "Authorize Arc administration through the identity authority",
+      "type": "add_connection",
+      "content": "Operators authenticate to the cloud management plane with scoped identities and privileged actions are audited. Define break-glass and local administrator procedures for isolated sites separately; do not make cloud identity availability a hidden prerequisite for site-local service recovery.",
+      "connection": {
+        "edgeId": "entra_to_arc_control_plane",
+        "sourceNodeId": "entra_identity",
+        "targetNodeId": "arc_control_plane",
+        "connectionType": "identity-and-authorization",
+        "label": "Scoped operator and workload identity",
+        "description": "Identity, role scope, and audited privilege elevation govern connected Azure management actions."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:4", "legacy-constraint:3"]
+    },
+    {
+      "id": "hybrid_36",
+      "stepNumber": 36,
+      "phase": "Apply governance and unify security telemetry",
+      "title": "Add Azure Policy as a governed baseline source",
+      "type": "add_component",
+      "content": "Use a custom component because the catalog has no policy-management type. Represent Azure Policy assignments and compliance evaluation for connected and supported resources. Actual coverage and enforcement depend on the resource provider, policy definition, permissions, assignment scope, and connectivity; the Azure Policy name alone guarantees none of them. For isolated sites, distribute only an approved signed baseline through the local process; do not imply that a live cloud assignment reaches a network with no connection.",
+      "component": {
+        "nodeId": "azure_policy",
+        "componentType": "custom-component",
+        "label": "Azure Policy assignments and compliance",
+        "description": "Policy definitions, scoped assignments, and compliance evidence for eligible resources",
+        "position": {"x": 1460, "y": 610},
+        "properties": {
+          "componentName": "Azure Policy assignments and compliance",
+          "purpose": "Define versioned policy baselines, scope assignments by environment and resource ownership, and record evaluation and remediation state for connected supported resources. Coordinate signed baseline releases for isolated sites through local operations.",
+          "componentType": "Governance and policy",
+          "technology": "Azure Policy",
+          "notes": "Start with review/audit effect where appropriate; enforcement and exemptions require owner approval."
+        },
+        "highlightReason": "Azure Policy is an explicit hint and core requirement; the generic catalog has no policy component analog."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:8"]
+    },
+    {
+      "id": "hybrid_37",
+      "stepNumber": 37,
+      "phase": "Apply governance and unify security telemetry",
+      "title": "Assign policy through the connected management plane",
+      "type": "add_connection",
+      "content": "Scope assignments to the intended resource inventory, use versioned definitions, and retain an auditable record of evaluation and exceptions. Map the requirement that policies apply everywhere to two explicit mechanisms: cloud assignments for supported connected resources and signed, locally applied baselines for isolated sites.",
+      "connection": {
+        "edgeId": "policy_to_arc_control_plane",
+        "sourceNodeId": "azure_policy",
+        "targetNodeId": "arc_control_plane",
+        "connectionType": "governance-assignment",
+        "label": "Versioned policy assignments",
+        "description": "Azure Policy definitions can be evaluated for supported connected resources after scope, permissions, and integration are configured; coverage and evaluation freshness are not guaranteed by this connection."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:8"]
+    },
+    {
+      "id": "hybrid_38",
+      "stepNumber": 38,
+      "phase": "Apply governance and unify security telemetry",
+      "title": "Distribute governed policy state to connected resources",
+      "type": "add_connection",
+      "content": "Policy evaluation and remediation reach only eligible resources enrolled through the management plane. Preserve resource ownership, exemptions, and remediation evidence across environments. For isolated sites, the edge is intentionally replaced by local signed release and reconciliation procedures rather than an impossible live cloud push.",
+      "connection": {
+        "edgeId": "arc_control_plane_to_agents",
+        "sourceNodeId": "arc_control_plane",
+        "targetNodeId": "arc_agents",
+        "connectionType": "policy-and-inventory-sync",
+        "label": "Policy state and compliance results",
+        "description": "Configured Arc agents can exchange eligible policy state and compliance evidence for supported connected resources under scoped authorization; propagation timing and coverage remain unverified."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "hybrid_39",
+      "stepNumber": 39,
+      "phase": "Apply governance and unify security telemetry",
+      "title": "Add Azure Monitor for the connected hybrid view",
+      "type": "add_component",
+      "content": "Use the catalog Monitoring type as a provider-neutral representation of the Azure Monitor workspace and alerting role. The catalog's selectable monitoring stacks do not include Azure Monitor, so only supported generic properties are set. Confirm source-specific integration, resource coverage, alert ownership, data location, retention, ingestion controls, and service availability with operations and compliance owners; none are guaranteed by this diagram or specified by the brief.",
+      "component": {
+        "nodeId": "azure_monitor",
+        "componentType": "monitoring",
+        "label": "Azure Monitor — hybrid workspace",
+        "description": "Central metrics, logs, and alerts for connected and approved telemetry sources",
+        "position": {"x": 1830, "y": 610},
+        "properties": {
+          "componentName": "Azure Monitor — hybrid workspace",
+          "purpose": "Collect and correlate approved metrics, logs, and health signals from connected Azure and on-premises resources. Define data residency, retention, access, alert ownership, and cost controls before enabling ingestion.",
+          "metrics": true,
+          "alerts": true
+        },
+        "highlightReason": "Azure Monitor is a supplied hint; the supported generic Monitoring catalog type is reused without claiming an unsupported Azure stack property."
+      },
+      "requirementIds": ["legacy-requirement:4"]
+    },
+    {
+      "id": "hybrid_40",
+      "stepNumber": 40,
+      "phase": "Apply governance and unify security telemetry",
+      "title": "Add Sentinel for security-event analysis where permitted",
+      "type": "add_component",
+      "content": "Azure Sentinel is named as a hint, but the catalog has no SIEM component, so represent it with the supported custom type. Decide which security events may leave each site, who can investigate them, and what local incident workflow applies to an air-gapped site. Do not send restricted telemetry across a boundary solely to create a single pane of glass.",
+      "component": {
+        "nodeId": "sentinel",
+        "componentType": "custom-component",
+        "label": "Microsoft Sentinel — approved security analytics",
+        "description": "Cloud security analytics for events permitted to leave connected sites",
+        "position": {"x": 2160, "y": 610},
+        "properties": {
+          "componentName": "Microsoft Sentinel — approved security analytics",
+          "purpose": "Correlate and investigate security events that are approved for cloud processing. Enforce data classification, access, retention, incident ownership, and a separate local response procedure for fully isolated sites.",
+          "componentType": "Security analytics",
+          "technology": "Microsoft Sentinel",
+          "notes": "Confirm service naming, licensing, residency, and permitted data flows during implementation review."
+        },
+        "highlightReason": "The supplied security hint has no catalog SIEM analog, so a named custom component avoids misrepresenting Monitoring as a SIEM."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "hybrid_41",
+      "stepNumber": 41,
+      "phase": "Apply governance and unify security telemetry",
+      "title": "Send connected-site agent telemetry to Azure Monitor",
+      "type": "add_connection",
+      "content": "The connected-site Arc agent path can report approved health and inventory signals to the unified monitoring plane. Define signal ownership and freshness objectives; a healthy cloud dashboard does not prove that an isolated site's local monitoring or alerting is available.",
+      "connection": {
+        "edgeId": "arc_agents_to_monitor",
+        "sourceNodeId": "arc_agents",
+        "targetNodeId": "azure_monitor",
+        "connectionType": "telemetry-ingestion",
+        "label": "Approved hybrid metrics and logs",
+        "description": "When supported and configured, connected-site agents can send approved resource telemetry to Azure Monitor; this topology does not guarantee complete coverage, freshness, or ingestion availability."
+      },
+      "requirementIds": ["legacy-requirement:4"]
+    },
+    {
+      "id": "hybrid_42",
+      "stepNumber": 42,
+      "phase": "Apply governance and unify security telemetry",
+      "title": "Export local telemetry only through an approved process",
+      "type": "add_connection",
+      "content": "This edge is conditional, not an always-on air-gap bypass. Connected or reconnected sites may transfer selected, classified evidence after review; a fully isolated site keeps the spool local and follows its local incident process. Reconcile sequence gaps and duplicates before using transferred events for compliance conclusions.",
+      "connection": {
+        "edgeId": "local_buffer_to_monitor",
+        "sourceNodeId": "local_log_buffer",
+        "targetNodeId": "azure_monitor",
+        "connectionType": "controlled-delayed-export",
+        "label": "Approved delayed telemetry export only",
+        "description": "Selected records may be exported after approval when policy permits; fully air-gapped profiles have no live connection and retain evidence locally."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "hybrid_43",
+      "stepNumber": 43,
+      "phase": "Apply governance and unify security telemetry",
+      "title": "Monitor Azure workload health in the same operations view",
+      "type": "add_connection",
+      "content": "Connect approved cloud workload telemetry to the same monitoring workflow and correlate it with hybrid network, identity, and policy events. Keep signal ownership and data classification consistent so the unified view does not conceal gaps between cloud and site-local sources.",
+      "connection": {
+        "edgeId": "azure_aks_to_monitor",
+        "sourceNodeId": "azure_aks",
+        "targetNodeId": "azure_monitor",
+        "connectionType": "telemetry-ingestion",
+        "label": "Cloud workload health and logs",
+        "description": "Approved Azure workload signals can join a shared monitoring workflow after source-specific integration and ingestion are configured; complete coverage and availability are not implied."
+      },
+      "requirementIds": ["legacy-requirement:4"]
+    },
+    {
+      "id": "hybrid_44",
+      "stepNumber": 44,
+      "phase": "Apply governance and unify security telemetry",
+      "title": "Route permitted monitoring events to Sentinel",
+      "type": "add_connection",
+      "content": "Send only events approved for security analytics, with access and retention aligned to their classification. Validate alert-to-incident ownership and test local response separately for sites that cannot reach Sentinel.",
+      "connection": {
+        "edgeId": "monitor_to_sentinel",
+        "sourceNodeId": "azure_monitor",
+        "targetNodeId": "sentinel",
+        "connectionType": "security-event-analysis",
+        "label": "Classified, permitted security events",
+        "description": "Configured, permitted events can be routed for investigation; source coverage and service availability are not guaranteed, and isolated-site response remains local until a reviewed evidence transfer is possible."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:8"]
+    },
+    {
+      "id": "hybrid_45",
+      "stepNumber": 45,
+      "phase": "Apply governance and unify security telemetry",
+      "title": "Roll policy out with observable impact and rollback",
+      "type": "decision_point",
+      "content": "Policy can prevent drift but an overly broad deny or remediation effect can interrupt workloads. Validate definitions against representative resources, start with a review/audit stage where appropriate, assign an owner to exemptions, and progress enforcement through controlled scopes with rollback evidence. For isolated sites, mirror the release version in the signed local baseline process.",
+      "decision": {
+        "question": "How should a common policy baseline be enforced across dissimilar environments?",
+        "chosen": "Version the baseline, test it against each resource class, record scoped exemptions, and promote enforcement in reviewed stages; provide the same versioned artifact to isolated sites through local approval.",
+        "chosenReason": "One policy intent can span environments, but evaluation and remediation mechanisms differ; staged rollout reduces the risk of a global outage or silent compliance gap.",
+        "alternatives": [
+          {"option": "Apply a broad deny policy to every resource immediately", "tradeoff": "Unsupported resource types or hidden dependencies can break production and make rollback difficult."},
+          {"option": "Keep all policy permanently in report-only mode", "tradeoff": "Findings may be visible without actually preventing prohibited configuration drift."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:8"]
+    },
+    {
+      "id": "hybrid_46",
+      "stepNumber": 46,
+      "phase": "Apply governance and unify security telemetry",
+      "title": "Keep zero-trust decisions separate from network reachability",
+      "type": "decision_point",
+      "content": "ExpressRoute and VPN provide routes, not trust. For each management and workload request, validate identity, target resource, action, device/workload context where available, and policy; use short-lived credentials and least privilege. Define how service-to-service authorization, emergency access, and local offline credentials are audited and rotated.",
+      "decision": {
+        "question": "What does zero trust mean on this hybrid path?",
+        "chosen": "Require explicit identity and authorization at each service boundary, segment network paths, log privileged actions, and define a controlled offline identity procedure for isolated operations.",
+        "chosenReason": "A private or encrypted link alone cannot prevent misuse of a compromised endpoint or over-privileged identity.",
+        "alternatives": [
+          {"option": "Trust every request originating from the datacenter CIDR", "tradeoff": "Network location becomes a substitute for identity and allows lateral movement after compromise."},
+          {"option": "Rely only on cloud identity for every local action", "tradeoff": "A site may be unable to recover or operate when it is required to remain air-gapped."}
+        ]
+      },
+      "requirementIds": ["legacy-constraint:4", "legacy-constraint:3"]
+    },
+    {
+      "id": "hybrid_47",
+      "stepNumber": 47,
+      "phase": "Define failure behavior, scale signals, and proof",
+      "title": "Use measured RTT and route health to protect the latency objective",
+      "type": "scale_trigger",
+      "content": "There is no traffic or path inventory in the brief from which to choose circuit capacity or a safe utilization threshold. Establish baselines by site, route, direction, and representative workload; alert before the agreed latency boundary is breached and investigate queueing, route changes, and service dependencies separately.",
+      "scaleTrigger": {
+        "metric": "Round-trip latency distributions, packet loss, route availability, and circuit utilization by site and workload path",
+        "action": "When measurements approach the under-50ms limit or approved path capacity, evaluate route placement, gateway/circuit capacity, and whether the workload belongs closer to its data; set alert thresholds from measured baseline and owner-approved percentile.",
+        "impact": "Averages can hide tail degradation, while unmeasured capacity changes can move traffic onto a path that no longer meets the objective."
+      },
+      "requirementIds": ["legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "hybrid_48",
+      "stepNumber": 48,
+      "phase": "Define failure behavior, scale signals, and proof",
+      "title": "Scale Arc management and policy evaluation from fleet evidence",
+      "type": "scale_trigger",
+      "content": "Do not infer a resource count or policy convergence deadline from the brief. Track enrollment success, agent health, evaluation backlog, policy-result freshness, and remediation failures by resource class and site profile. Expand the management plane only when observed fleet behavior or an agreed compliance objective requires it.",
+      "scaleTrigger": {
+        "metric": "Connected-resource inventory, agent health, policy evaluation backlog, compliance-result freshness, and remediation error rate",
+        "action": "If owners define a freshness or convergence objective and measurements miss it, identify the bottleneck by resource type, site connectivity, policy complexity, and control-plane limit before changing fleet partitioning or rollout scope.",
+        "impact": "Scaling only the cloud control plane cannot fix offline agents, unsupported resources, broken credentials, or policy definitions that fail locally."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "hybrid_49",
+      "stepNumber": 49,
+      "phase": "Define failure behavior, scale signals, and proof",
+      "title": "Scale workload capacity only after placement and saturation tests",
+      "type": "scale_trigger",
+      "content": "The problem states no request rate, cluster size, or compute availability target. Load-test representative hybrid workloads and observe saturation on each side independently. Set autoscaling thresholds and regional/on-premises headroom from workload behavior, while ensuring local dependencies remain available if a site loses its Azure route.",
+      "scaleTrigger": {
+        "metric": "Workload latency and error rate, CPU/memory saturation, pending work, storage/network pressure, and node capacity by environment",
+        "action": "When measured saturation threatens an owner-approved service objective (not specified in the brief), scale the affected cluster or move eligible stateless work after validating data locality, licensing, identity, and failure behavior; derive thresholds from tests rather than a generic node count.",
+        "impact": "Scaling one environment cannot compensate for a bottleneck in the other environment or for a cross-site dependency that is unavailable during partition."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "hybrid_50",
+      "stepNumber": 50,
+      "phase": "Define failure behavior, scale signals, and proof",
+      "title": "Protect telemetry capacity without inventing retention numbers",
+      "type": "scale_trigger",
+      "content": "Monitoring volume, retention, and permitted data classes are unspecified. Measure ingestion, dropped events, query delays, workspace cost, local spool occupancy, and transfer backlog. Define retention and alert thresholds with compliance owners; ensure a disconnected site can signal local spool pressure to its local operator.",
+      "scaleTrigger": {
+        "metric": "Telemetry ingestion and query delay, dropped-event count, local spool occupancy, export backlog, and approved retention usage",
+        "action": "When measured ingest or backlog approaches the policy-approved storage/retention boundary, reduce or prioritize signal volume only with owner approval, expand the relevant capacity, or shorten recovery intervals where permitted.",
+        "impact": "An unbounded spool can fill local storage, while premature deletion or unapproved cloud export can violate evidence and compliance requirements."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "hybrid_51",
+      "stepNumber": 51,
+      "phase": "Define failure behavior, scale signals, and proof",
+      "title": "Define what continues during each network failure",
+      "type": "decision_point",
+      "content": "Operating assumption to confirm: during an ExpressRoute or VPN outage, selected local workloads remain available for requests that do not require Azure dependencies. The brief requires graceful handling of network failures but gives no service-availability, RTO, RPO, failover, or convergence target and does not say which operations must remain available. Queue only operations with defined replay semantics, and use bounded retries with idempotency where writes can be repeated. A fully air-gapped site has no cloud fallback by definition. Document unavailable management, identity, policy, and monitoring functions and local operator actions for each profile; test each profile rather than implying an Azure product or alternate route guarantees availability.",
+      "decision": {
+        "question": "Which functions must remain available when connectivity to Azure is lost?",
+        "chosen": "Declare local workload and safety-critical operations explicitly, isolate cloud-dependent functions, bound retries/queues, and exercise circuit loss, prolonged partition, and isolated-site recovery procedures.",
+        "chosenReason": "Graceful failure is a behavior contract per workload; a backup network path cannot cover a deliberate air gap or a cloud service outage.",
+        "alternatives": [
+          {"option": "Fail every on-premises request closed when Azure is unreachable", "tradeoff": "Unnecessarily stops local services that could operate safely without cloud dependencies."},
+          {"option": "Queue every operation indefinitely", "tradeoff": "Creates unbounded storage and stale or duplicate work without replay and expiry rules."}
+        ]
+      },
+      "requirementIds": ["legacy-constraint:3", "legacy-constraint:5", "legacy-requirement:7"]
+    },
+    {
+      "id": "hybrid_52",
+      "stepNumber": 52,
+      "phase": "Define failure behavior, scale signals, and proof",
+      "title": "Reconcile policy and evidence after reconnection",
+      "type": "decision_point",
+      "content": "After a partition or approved offline transfer, compare local policy version, resource inventory, operator changes, and buffered telemetry with the authoritative connected-site records. Resolve conflicts through an auditable approval path; do not silently overwrite local configuration or mark a resource compliant based on stale results. Define precedence and incident escalation before the first disconnected operation.",
+      "decision": {
+        "question": "How should local state and cloud governance be reconciled after a long partition?",
+        "chosen": "Use versioned signed artifacts, immutable local change/audit records, explicit conflict ownership, and a reconciliation report before resuming automatic remediation.",
+        "chosenReason": "A disconnected site's last known cloud state can be stale, and silent synchronization may erase valid emergency changes or hide drift.",
+        "alternatives": [
+          {"option": "Automatically overwrite local state with the latest cloud policy", "tradeoff": "Can disrupt services or erase changes made under an approved emergency procedure."},
+          {"option": "Accept local state as permanently authoritative", "tradeoff": "Allows unmanaged drift and weakens consistent governance across connected environments."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "hybrid_53",
+      "stepNumber": 53,
+      "phase": "Define failure behavior, scale signals, and proof",
+      "title": "Close with testable acceptance evidence, not a score claim",
+      "type": "decision_point",
+      "content": "Before calling this design compliant, test resource inventory and deployment on both sides; policy evaluation and controlled remediation; monitoring coverage and alert ownership; identity denial cases; approved firewall routes; measured network paths against the agreed under-50ms percentile; ExpressRoute loss and VPN recovery; prolonged partition; and a truly isolated site with no cloud route. Verify local logs remain protected, approved transfers reconcile correctly, and local services behave as specified. This review draft is a proposal—not evidence that any target has passed.",
+      "decision": {
+        "question": "What evidence is sufficient to accept the hybrid design?",
+        "chosen": "Require repeatable connected-site and air-gap tests with recorded topology, workload, route, policy version, identity, failure injection, and measured outcomes; leave each target unverified until its evidence passes.",
+        "chosenReason": "A component diagram or AI assessment cannot prove path latency, policy coverage, zero-trust behavior, or offline operation.",
+        "alternatives": [
+          {"option": "Accept the architecture drawing as proof of compliance", "tradeoff": "The drawing does not show runtime reachability, policy results, isolation, or failure behavior."},
+          {"option": "Test only a connected happy path", "tradeoff": "Misses air-gap operation, route loss, identity denial, stale policy, and delayed evidence reconciliation."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

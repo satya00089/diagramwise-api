@@ -1,0 +1,1358 @@
+{
+  "problem_id": "68d7013f6f42e23bb16a2234",
+  "version": "1.0.0-review-draft",
+  "requirementRevision": null,
+  "totalSteps": 66,
+  "phases": [
+    {
+      "name": "1. Define clients, identity, and metadata authority",
+      "stepRange": [1, 17],
+      "description": "Keep file bytes, metadata, and authorization distinct; establish the authenticated API path before adding storage."
+    },
+    {
+      "name": "2. Transfer large files and build searchable versions",
+      "stepRange": [18, 40],
+      "description": "Make large transfers resumable, commit immutable version manifests, and process indexing asynchronously."
+    },
+    {
+      "name": "3. Share safely and synchronize devices",
+      "stepRange": [41, 54],
+      "description": "Publish durable change events, handle concurrent offline edits explicitly, and avoid leaking file data through notifications."
+    },
+    {
+      "name": "4. Recover data and validate scale",
+      "stepRange": [55, 66],
+      "description": "Back up metadata and objects as a consistent recoverable set, then test capacity and operating signals against the stated scope."
+    }
+  ],
+  "steps": [
+    {
+      "id": "dfs_01",
+      "stepNumber": 1,
+      "phase": "1. Define clients, identity, and metadata authority",
+      "title": "Separate the supplied scope from design assumptions",
+      "type": "explanation",
+      "content": "Problem: Distributed File Storage. Description: Design a distributed file storage system like Google Drive or Dropbox for storing and sharing files. The frozen legacy requirement labels are: Upload, download, and store files; File sharing with permissions; File versioning and history; Synchronization across devices; Search files by name and content; Handle large files (up to 1GB); Support billions of files; Offline access capabilities. The constraint labels are: Fast upload and download speeds; Handle concurrent file modifications; Efficient storage utilization; Data durability and backup; Support different file types. The hints are: Chunked file storage for large files; Metadata database for file information; CDN for fast file access; Conflict resolution for simultaneous edits; Deduplication to save storage space. These are requirements and hints, not measured targets. The brief supplies no traffic mix, latency percentile, availability objective, recovery-point objective, recovery-time objective, regions, retention policy, or exact supported-format list. Implementation assumptions for this draft are a single-cloud S3/CloudFront/Glacier content path, CockroachDB-compatible transactional metadata, and server-managed tenant-scoped deduplication; validate provider fit, policies, and capacity before treating this as a production design. The component choices below are a reviewable design, not guarantees.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "dfs_02",
+      "stepNumber": 2,
+      "phase": "1. Define clients, identity, and metadata authority",
+      "title": "Add the browser client",
+      "type": "add_component",
+      "content": "The browser presents folders, file metadata, sharing controls, version history, search, and transfer progress. It asks the service for upload sessions and scoped transfer URLs; it never chooses an object key or grants itself access. Its local offline queue is a convenience cache, not the source of truth.",
+      "component": {
+        "nodeId": "dfs_web",
+        "componentType": "web-app",
+        "label": "Web Client",
+        "description": "Browser interface for file operations and sharing",
+        "position": { "x": 80, "y": 180 },
+        "properties": {
+          "componentName": "Web Client",
+          "purpose": "Render file listings, sharing and version controls, search, and resumable transfer state; send metadata commands through the authenticated API and upload or download bytes only with scoped transfer authorization.",
+          "framework": "React",
+          "cdn": true,
+          "ssl": true,
+          "logic": "Queue offline edits with their base revision; reconcile on reconnect instead of silently replacing a newer server revision."
+        },
+        "highlightReason": "This is one of the explicit access clients and the user-visible boundary for offline and transfer behavior."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5"]
+    },
+    {
+      "id": "dfs_03",
+      "stepNumber": 3,
+      "phase": "1. Define clients, identity, and metadata authority",
+      "title": "Add the mobile client",
+      "type": "add_component",
+      "content": "Mobile devices keep an explicitly bounded, encrypted local cache and an ordered change journal for offline access. On reconnect they submit the base revision and pending operation IDs; the server rechecks current permissions before accepting work. Push is a wake-up signal only, never proof that the recipient still has access.",
+      "component": {
+        "nodeId": "dfs_mobile",
+        "componentType": "mobile-app",
+        "label": "Mobile Client",
+        "description": "iOS and Android file client with offline access",
+        "position": { "x": 80, "y": 390 },
+        "properties": {
+          "componentName": "Mobile Client",
+          "purpose": "Provide file browsing, resumable transfers, local encrypted offline copies, and a durable pending-change journal; reconcile each edit against its recorded base revision after reconnect.",
+          "stack": "React Native",
+          "offlineSupport": true,
+          "pushNotifications": true
+        },
+        "highlightReason": "Offline access and cross-device use are first-class requirements, not incidental cache behavior."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:2"]
+    },
+    {
+      "id": "dfs_04",
+      "stepNumber": 4,
+      "phase": "1. Define clients, identity, and metadata authority",
+      "title": "Add the desktop client",
+      "type": "add_component",
+      "content": "The desktop client can synchronize selected files and folders while offline. It must surface paused, stale, conflicted, and permission-revoked states rather than presenting a local copy as current. Platform key storage and cache eviction policy need validation for the supported operating systems.",
+      "component": {
+        "nodeId": "dfs_desktop",
+        "componentType": "desktop-app",
+        "label": "Desktop Sync Client",
+        "description": "Desktop file client with selected-folder synchronization",
+        "position": { "x": 80, "y": 600 },
+        "properties": {
+          "componentName": "Desktop Sync Client",
+          "purpose": "Synchronize selected files and folders, retain a protected local offline cache, and show server revision and conflict state; revalidate authorization and base revision on reconnect.",
+          "runtime": "Native",
+          "autoUpdate": true
+        },
+        "highlightReason": "A desktop sync client makes device synchronization and offline behavior concrete."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:2"]
+    },
+    {
+      "id": "dfs_05",
+      "stepNumber": 5,
+      "phase": "1. Define clients, identity, and metadata authority",
+      "title": "Add the authenticated API edge",
+      "type": "add_component",
+      "content": "The API edge validates request shape, authenticates a principal, applies abuse controls, and routes metadata commands. File bytes should not be buffered through this tier for the entire transfer; it creates and finalizes upload sessions while clients stream chunks to object storage.",
+      "component": {
+        "nodeId": "dfs_gateway",
+        "componentType": "api-gateway",
+        "label": "File API Gateway",
+        "description": "Authenticated control-plane entry for file and sharing APIs",
+        "position": { "x": 380, "y": 390 },
+        "properties": {
+          "componentName": "File API Gateway",
+          "purpose": "Validate and authenticate file, search, share, and sync requests; route metadata commands and issue narrowly scoped transfer capabilities without proxying whole-file bodies.",
+          "inputValidation": true,
+          "authentication": "OAuth 2.0",
+          "rateLimiting": true,
+          "tlsTermination": true,
+          "deduplication": true,
+          "throttling": true
+        },
+        "highlightReason": "This control-plane boundary separates authorization and metadata work from large byte streams."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:1"]
+    },
+    {
+      "id": "dfs_06",
+      "stepNumber": 6,
+      "phase": "1. Define clients, identity, and metadata authority",
+      "title": "Add identity and session validation",
+      "type": "add_component",
+      "content": "Authentication establishes the user or service principal. Authorization remains a separate decision: the file API checks ownership, inherited folder policy, explicit grants, and current revocation state for every sensitive operation and before minting a transfer capability.",
+      "component": {
+        "nodeId": "dfs_identity",
+        "componentType": "auth-service",
+        "label": "Identity and Session Service",
+        "description": "Authenticates users and validates sessions and tokens",
+        "position": { "x": 680, "y": 180 },
+        "properties": {
+          "componentName": "Identity and Session Service",
+          "purpose": "Authenticate users and service principals, validate sessions, and provide identity claims; file-level permissions are resolved by the file API against authoritative metadata rather than inferred from login alone.",
+          "oauth": true,
+          "sessions": "database"
+        },
+        "highlightReason": "A valid identity token is not itself permission to read or share a particular file."
+      },
+      "requirementIds": ["legacy-requirement:2"]
+    },
+    {
+      "id": "dfs_07",
+      "stepNumber": 7,
+      "phase": "1. Define clients, identity, and metadata authority",
+      "title": "Add the file and sharing API",
+      "type": "add_component",
+      "content": "Keep one logical service boundary for upload-session creation, manifest commit, download authorization, ACL changes, version listing, search authorization, and sync cursors. Implement idempotency keys for retried commands. Stateless service replicas can scale independently; do not encode a fixed replica count from this brief.",
+      "component": {
+        "nodeId": "dfs_file_api",
+        "componentType": "backend-server",
+        "label": "File and Sharing API",
+        "description": "Owns file metadata commands, ACL checks, and transfer authorization",
+        "position": { "x": 680, "y": 400 },
+        "properties": {
+          "componentName": "File and Sharing API",
+          "purpose": "Own authenticated file, version, sharing, search, and sync-cursor APIs; issue idempotent upload sessions and scoped byte-transfer capabilities, and commit metadata only after validated transfer completion.",
+          "architecture": "Microservices",
+          "caching": true,
+          "retry": true,
+          "bulkOps": true
+        },
+        "highlightReason": "This is the policy-enforcement and metadata-transaction boundary for the product."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4"]
+    },
+    {
+      "id": "dfs_08",
+      "stepNumber": 8,
+      "phase": "1. Define clients, identity, and metadata authority",
+      "title": "Route browser commands to the API",
+      "type": "add_connection",
+      "content": "The browser sends authenticated metadata commands and search requests over TLS. Upload and download bodies use separately authorized transfer paths so slow or large transfers do not occupy API request workers.",
+      "connection": {
+        "edgeId": "dfs_edge_web_gateway",
+        "sourceNodeId": "dfs_web",
+        "targetNodeId": "dfs_gateway",
+        "connectionType": "http",
+        "label": "Authenticated metadata and search",
+        "description": "Browser sends control-plane requests with the user's authenticated session."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:1"]
+    },
+    {
+      "id": "dfs_09",
+      "stepNumber": 9,
+      "phase": "1. Define clients, identity, and metadata authority",
+      "title": "Route mobile commands to the API",
+      "type": "add_connection",
+      "content": "A reconnecting mobile client submits pending operations with stable operation IDs and the revision on which each edit was based. The API can safely recognize retries and decide whether the change can be committed.",
+      "connection": {
+        "edgeId": "dfs_edge_mobile_gateway",
+        "sourceNodeId": "dfs_mobile",
+        "targetNodeId": "dfs_gateway",
+        "connectionType": "http",
+        "label": "Commands and reconnect journal",
+        "description": "Mobile control-plane traffic carries retry IDs and base-revision context."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:2"]
+    },
+    {
+      "id": "dfs_10",
+      "stepNumber": 10,
+      "phase": "1. Define clients, identity, and metadata authority",
+      "title": "Route desktop sync commands to the API",
+      "type": "add_connection",
+      "content": "Desktop sync uses the same server contract as web and mobile. Device-specific transport may differ, but permission checks, revision comparison, and idempotency semantics should not.",
+      "connection": {
+        "edgeId": "dfs_edge_desktop_gateway",
+        "sourceNodeId": "dfs_desktop",
+        "targetNodeId": "dfs_gateway",
+        "connectionType": "http",
+        "label": "Sync and file commands",
+        "description": "Desktop sends authenticated sync and metadata operations through the common API."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:2"]
+    },
+    {
+      "id": "dfs_11",
+      "stepNumber": 11,
+      "phase": "1. Define clients, identity, and metadata authority",
+      "title": "Validate the caller identity",
+      "type": "add_connection",
+      "content": "The gateway validates an identity token and forwards a stable principal identifier and relevant claims. Do not put file ACL decisions in a client-controlled token whose permissions can outlive a revocation.",
+      "connection": {
+        "edgeId": "dfs_edge_gateway_identity",
+        "sourceNodeId": "dfs_gateway",
+        "targetNodeId": "dfs_identity",
+        "connectionType": "api-call",
+        "label": "Authenticate principal",
+        "description": "The gateway validates session identity before dispatching file operations."
+      },
+      "requirementIds": ["legacy-requirement:2"]
+    },
+    {
+      "id": "dfs_12",
+      "stepNumber": 12,
+      "phase": "1. Define clients, identity, and metadata authority",
+      "title": "Send authorized commands to the file service",
+      "type": "add_connection",
+      "content": "The gateway routes validated metadata operations to the file API. The service still checks file-specific access because a well-formed authenticated request may name another user's file.",
+      "connection": {
+        "edgeId": "dfs_edge_gateway_file_api",
+        "sourceNodeId": "dfs_gateway",
+        "targetNodeId": "dfs_file_api",
+        "connectionType": "api-call",
+        "label": "File, ACL, version, and sync APIs",
+        "description": "Routes authenticated control-plane requests to the policy-enforcing service."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4"]
+    },
+    {
+      "id": "dfs_13",
+      "stepNumber": 13,
+      "phase": "1. Define clients, identity, and metadata authority",
+      "title": "Choose server-side permission enforcement",
+      "type": "decision_point",
+      "content": "Resolve owner, sharing grants, folder inheritance, and revocations on the server before listing, downloading, searching, or minting a transfer URL. A cached ACL may accelerate a decision only if its version is checked or invalidated; stale authorization must not silently grant access.",
+      "decision": {
+        "question": "Where is the authority for a file-sharing decision?",
+        "chosen": "The file service evaluates current policy against authoritative metadata for every protected operation.",
+        "chosenReason": "This keeps permission enforcement independent of client state and makes revocation behavior an explicit server responsibility.",
+        "alternatives": [
+          {
+            "option": "Trust client-supplied owner or permission flags",
+            "tradeoff": "A modified client can forge access and offline state can be stale."
+          },
+          {
+            "option": "Treat authentication as file authorization",
+            "tradeoff": "A valid user session does not imply access to every shared file."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "dfs_file_api",
+        "properties": {
+          "purpose": "Own authenticated file, version, sharing, search, and sync-cursor APIs; issue idempotent upload sessions and scoped byte-transfer capabilities, and commit metadata only after validated transfer completion. Resolve owner, inherited grants, explicit ACLs, and revocations server-side before reads, writes, search-result disclosure, or URL issuance."
+        }
+      },
+      "requirementIds": ["legacy-requirement:2"]
+    },
+    {
+      "id": "dfs_14",
+      "stepNumber": 14,
+      "phase": "1. Define clients, identity, and metadata authority",
+      "title": "Add the authoritative metadata store",
+      "type": "add_component",
+      "content": "Store stable file and folder identifiers, owner and ACL records, current head revision, immutable version manifests, upload-session state, sync cursors, and an outbox for committed changes. Partition and index around real access patterns such as tenant, folder, and file ID; billions of files is a scale goal, not evidence that any particular schema already handles it.",
+      "component": {
+        "nodeId": "dfs_metadata",
+        "componentType": "database",
+        "label": "File Metadata and Version Store",
+        "description": "Authoritative file records, ACLs, version manifests, and sync state",
+        "position": { "x": 980, "y": 300 },
+        "properties": {
+          "componentName": "File Metadata and Version Store",
+          "purpose": "Store tenant and file identity, folder membership, owner and sharing ACLs, current revision, immutable version manifests, upload-session state, sync cursors, and a transactional change outbox. Require conditional head updates and validate partition/index design under tenant skew.",
+          "type": "NewSQL",
+          "engine": "cockroachdb",
+          "workload": "OLTP",
+          "sharding": "Hash-based",
+          "replicationMode": "Sync",
+          "multiAZ": true,
+          "backups": true,
+          "pitr": true,
+          "encryption": true,
+          "rbac": true,
+          "auditLog": true
+        },
+        "highlightReason": "Metadata and permissions need transactional authority separate from large immutable file bytes."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:2"]
+    },
+    {
+      "id": "dfs_15",
+      "stepNumber": 15,
+      "phase": "1. Define clients, identity, and metadata authority",
+      "title": "Persist metadata and permission decisions",
+      "type": "add_connection",
+      "content": "The file API conditionally advances a file head from the caller's base revision, writes the immutable manifest and ACL changes, and records an outbox event in the same metadata transaction where supported. If the condition fails, it returns a conflict rather than overwriting another device's update.",
+      "connection": {
+        "edgeId": "dfs_edge_file_api_metadata",
+        "sourceNodeId": "dfs_file_api",
+        "targetNodeId": "dfs_metadata",
+        "connectionType": "database-connection",
+        "label": "Conditional metadata and ACL transactions",
+        "description": "Stores authoritative file heads, versions, grants, upload sessions, and change outbox."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:2"]
+    },
+    {
+      "id": "dfs_16",
+      "stepNumber": 16,
+      "phase": "1. Define clients, identity, and metadata authority",
+      "title": "Add a non-authoritative metadata cache",
+      "type": "add_component",
+      "content": "Cache hot file listings and immutable manifest lookups, but never make the cache the only copy of an ACL or current revision. Include tenant and revision in keys, invalidate on permission changes, and recheck authorization at the service boundary before returning protected data.",
+      "component": {
+        "nodeId": "dfs_cache",
+        "componentType": "cache",
+        "label": "Metadata Read Cache",
+        "description": "Accelerates hot listings and manifest reads without owning permissions",
+        "position": { "x": 980, "y": 520 },
+        "properties": {
+          "componentName": "Metadata Read Cache",
+          "purpose": "Cache tenant-scoped hot listings and immutable manifest reads; key by revision, invalidate permission-sensitive entries on ACL changes, and fall back to authoritative metadata when missing or stale.",
+          "engine": "redis",
+          "cacheStrategy": "cache-aside",
+          "inMemory": true,
+          "replication": true,
+          "clusterMode": true,
+          "encryption": true
+        },
+        "highlightReason": "A cache can improve hot reads but must not weaken sharing or revocation correctness."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:1"]
+    },
+    {
+      "id": "dfs_17",
+      "stepNumber": 17,
+      "phase": "1. Define clients, identity, and metadata authority",
+      "title": "Use the cache only as an accelerator",
+      "type": "add_connection",
+      "content": "The file API may read cache-aside for listings and immutable revision metadata. Cache misses, invalidations, and authorization-sensitive reads resolve through the metadata authority; cache availability is not required for correctness.",
+      "connection": {
+        "edgeId": "dfs_edge_file_api_cache",
+        "sourceNodeId": "dfs_file_api",
+        "targetNodeId": "dfs_cache",
+        "connectionType": "data-flow",
+        "label": "Cache-aside metadata reads",
+        "description": "Speeds repeated reads while metadata storage remains the source of truth."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:1"]
+    },
+    {
+      "id": "dfs_18",
+      "stepNumber": 18,
+      "phase": "2. Transfer large files and build searchable versions",
+      "title": "Keep control traffic separate from file bytes",
+      "type": "explanation",
+      "content": "The brief allows files up to 1GB and asks for fast transfer, but it does not state a bandwidth, latency, or concurrency target. Use a control-plane request to create an upload session, stream resumable chunks directly to object storage, and make a small conditional metadata commit after checksums and required validation succeed. Downloads resolve an authorized immutable version and stream or fetch its referenced chunks. This avoids routing a whole file through an API process.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "dfs_19",
+      "stepNumber": 19,
+      "phase": "2. Transfer large files and build searchable versions",
+      "title": "Add durable object storage",
+      "type": "add_component",
+      "content": "Store chunk bytes as immutable objects and keep file names, ACLs, folder relationships, and version heads in the metadata database. Validate checksums on transfer and use object versioning for recovery; do not infer a durability percentage or throughput from the component choice.",
+      "component": {
+        "nodeId": "dfs_objects",
+        "componentType": "object-storage",
+        "label": "Immutable File Object Store",
+        "description": "Stores resumable upload chunks and immutable version content",
+        "position": { "x": 1280, "y": 410 },
+        "properties": {
+          "componentName": "Immutable File Object Store",
+          "purpose": "Persist immutable, tenant-scoped file chunks referenced by metadata manifests; validate per-chunk checksums, support version-aware recovery, and expose only authorized transfer capabilities.",
+          "provider": "S3",
+          "versioning": true,
+          "checksumValidation": true
+        },
+        "highlightReason": "Object storage fits large opaque file content better than placing file bytes in metadata rows."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "dfs_20",
+      "stepNumber": 20,
+      "phase": "2. Transfer large files and build searchable versions",
+      "title": "Add a content delivery edge",
+      "type": "add_component",
+      "content": "Use the CDN for eligible immutable downloads close to clients, not as the authority for file access. Cache keys must include immutable object or version identity, and access must require a scoped signed capability or equivalent origin authorization. Define the acceptable revocation window and purge behavior before claiming that cached bytes disappear immediately.",
+      "component": {
+        "nodeId": "dfs_cdn",
+        "componentType": "cdn",
+        "label": "Private Download CDN",
+        "description": "Accelerates authorized immutable downloads without making objects public",
+        "position": { "x": 1580, "y": 190 },
+        "properties": {
+          "componentName": "Private Download CDN",
+          "purpose": "Cache only immutable version-addressed file objects after scoped authorization; never expose a public listing or shared cache key across tenants, and honor revocation through capability expiry, origin checks, and purge policy.",
+          "provider": "AWS CloudFront",
+          "cacheInvalidation": true
+        },
+        "highlightReason": "A CDN addresses the transfer hint while preserving the sharing-permission boundary."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:1"]
+    },
+    {
+      "id": "dfs_21",
+      "stepNumber": 21,
+      "phase": "2. Transfer large files and build searchable versions",
+      "title": "Create scoped object transfer sessions",
+      "type": "add_connection",
+      "content": "The file API creates an upload session, records the expected file and owner, and returns narrowly scoped chunk-write capabilities. At completion it verifies the expected chunk set and checksums before conditionally committing a new version manifest. A failed session remains uncommitted and can be retried or expired by a separately specified lifecycle policy.",
+      "connection": {
+        "edgeId": "dfs_edge_file_api_objects",
+        "sourceNodeId": "dfs_file_api",
+        "targetNodeId": "dfs_objects",
+        "connectionType": "api-call",
+        "label": "Issue and finalize scoped transfer sessions",
+        "description": "Control plane authorizes chunks and validates completion; it does not proxy entire files."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "dfs_22",
+      "stepNumber": 22,
+      "phase": "2. Transfer large files and build searchable versions",
+      "title": "Stream browser uploads and downloads",
+      "type": "add_connection",
+      "content": "The browser transfers chunk bodies directly to the object store using short-lived, upload-session-scoped capabilities, then asks the API to finalize. For a download, it first asks the API to authorize the selected version and receives a capability for that immutable content.",
+      "connection": {
+        "edgeId": "dfs_edge_web_objects",
+        "sourceNodeId": "dfs_web",
+        "targetNodeId": "dfs_objects",
+        "connectionType": "http",
+        "label": "Resumable browser chunk transfer",
+        "description": "Moves file bytes directly using narrowly scoped capabilities issued by the file API."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "dfs_23",
+      "stepNumber": 23,
+      "phase": "2. Transfer large files and build searchable versions",
+      "title": "Stream mobile transfers",
+      "type": "add_connection",
+      "content": "Mobile uploads resume only for chunks whose checksums and upload-session state are still valid. On network loss the client retains progress and retries idempotently; it never marks the remote version committed before the API confirms the manifest.",
+      "connection": {
+        "edgeId": "dfs_edge_mobile_objects",
+        "sourceNodeId": "dfs_mobile",
+        "targetNodeId": "dfs_objects",
+        "connectionType": "http",
+        "label": "Resumable mobile chunk transfer",
+        "description": "Transfers file chunks directly and resumes from server-confirmed session state."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "dfs_24",
+      "stepNumber": 24,
+      "phase": "2. Transfer large files and build searchable versions",
+      "title": "Stream desktop sync transfers",
+      "type": "add_connection",
+      "content": "Desktop sync can schedule chunk transfers and retry after sleep or connectivity loss. It must distinguish locally queued bytes from acknowledged remote chunks and preserve the local copy when the server reports a version conflict.",
+      "connection": {
+        "edgeId": "dfs_edge_desktop_objects",
+        "sourceNodeId": "dfs_desktop",
+        "targetNodeId": "dfs_objects",
+        "connectionType": "http",
+        "label": "Resumable desktop sync transfer",
+        "description": "Streams acknowledged chunks directly while the desktop client tracks offline state."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "dfs_25",
+      "stepNumber": 25,
+      "phase": "2. Transfer large files and build searchable versions",
+      "title": "Serve authorized immutable versions through the CDN",
+      "type": "add_connection",
+      "content": "The CDN reads a version-addressed object only when the request carries a valid scoped capability or the origin reauthorizes it. Do not key cached responses only by a mutable filename, and do not allow a shared cache entry to bypass a later ACL check.",
+      "connection": {
+        "edgeId": "dfs_edge_cdn_objects",
+        "sourceNodeId": "dfs_cdn",
+        "targetNodeId": "dfs_objects",
+        "connectionType": "data-flow",
+        "label": "Authorized immutable object origin",
+        "description": "The CDN fetches immutable chunks from object storage after validating the scoped request."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1"]
+    },
+    {
+      "id": "dfs_26",
+      "stepNumber": 26,
+      "phase": "2. Transfer large files and build searchable versions",
+      "title": "Deliver browser downloads from the edge",
+      "type": "add_connection",
+      "content": "The browser follows an authorized version URL through the CDN when policy permits. The CDN accelerates immutable content; metadata listing, ACL evaluation, and version selection still come from the API.",
+      "connection": {
+        "edgeId": "dfs_edge_web_cdn",
+        "sourceNodeId": "dfs_web",
+        "targetNodeId": "dfs_cdn",
+        "connectionType": "http",
+        "label": "Authorized edge downloads",
+        "description": "Browser retrieves signed, immutable versions through the delivery edge."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:1"]
+    },
+    {
+      "id": "dfs_27",
+      "stepNumber": 27,
+      "phase": "2. Transfer large files and build searchable versions",
+      "title": "Deliver mobile downloads from the edge",
+      "type": "add_connection",
+      "content": "The mobile client downloads only a version it was authorized to read and can resume a partial transfer. An offline copy remains a local snapshot; after reconnect, the client refreshes its cursor and permission state.",
+      "connection": {
+        "edgeId": "dfs_edge_mobile_cdn",
+        "sourceNodeId": "dfs_mobile",
+        "targetNodeId": "dfs_cdn",
+        "connectionType": "http",
+        "label": "Authorized mobile downloads",
+        "description": "Delivers immutable file versions close to mobile clients where policy allows."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:8", "legacy-constraint:1"]
+    },
+    {
+      "id": "dfs_28",
+      "stepNumber": 28,
+      "phase": "2. Transfer large files and build searchable versions",
+      "title": "Deliver desktop downloads from the edge",
+      "type": "add_connection",
+      "content": "The desktop client fetches the exact selected version, not a mutable path whose contents may change between authorization and download. If a capability expires, it requests a fresh authorization rather than reusing stale local credentials.",
+      "connection": {
+        "edgeId": "dfs_edge_desktop_cdn",
+        "sourceNodeId": "dfs_desktop",
+        "targetNodeId": "dfs_cdn",
+        "connectionType": "http",
+        "label": "Authorized desktop downloads",
+        "description": "Fetches a version-addressed object through the edge after permission is checked."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "dfs_29",
+      "stepNumber": 29,
+      "phase": "2. Transfer large files and build searchable versions",
+      "title": "Choose resumable chunking and manifest commit",
+      "type": "decision_point",
+      "content": "Chunking lets a client retry only missing or checksum-invalid parts of a file up to 1GB. Choose chunk boundaries and parallelism from measured network behavior rather than inventing fixed sizes here. Commit the version manifest only after all required chunks are durable and validated; unreferenced partial chunks are recoverable garbage, not a visible file version.",
+      "decision": {
+        "question": "How should large uploads tolerate interruption without exposing a partial file?",
+        "chosen": "Use resumable chunk sessions and atomically publish a manifest after validated completion.",
+        "chosenReason": "The version becomes visible only when its immutable chunk references are complete and the metadata head condition succeeds.",
+        "alternatives": [
+          {
+            "option": "Buffer the entire file in an API process",
+            "tradeoff": "Large or interrupted transfers consume service memory and tie transfer duration to API capacity."
+          },
+          {
+            "option": "Publish each chunk as a visible file update",
+            "tradeoff": "Readers can observe incomplete content and version history becomes ambiguous."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "dfs_objects",
+        "properties": {
+          "purpose": "Persist immutable, tenant-scoped file chunks referenced by metadata manifests; validate per-chunk checksums, support version-aware recovery, and expose only authorized transfer capabilities. Resumable sessions track acknowledged chunks; a complete immutable manifest is published only after validation and a conditional metadata-head update."
+        }
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "dfs_30",
+      "stepNumber": 30,
+      "phase": "2. Transfer large files and build searchable versions",
+      "title": "Add a durable asynchronous work queue",
+      "type": "add_component",
+      "content": "Object-finalized events enqueue validation, text extraction, and index work. The queue absorbs bursts and makes retry state visible; consumers must tolerate duplicate delivery and poison files without blocking unrelated work.",
+      "component": {
+        "nodeId": "dfs_ingest_queue",
+        "componentType": "queue",
+        "label": "File Processing Queue",
+        "description": "Durable work backlog for validation and indexing jobs",
+        "position": { "x": 1580, "y": 650 },
+        "properties": {
+          "componentName": "File Processing Queue",
+          "purpose": "Persist idempotent work references for finalized uploads, checksum verification, supported-format extraction, and search indexing; isolate repeatedly failing jobs for inspection.",
+          "durable": true,
+          "backoff": "exponential"
+        },
+        "highlightReason": "Search and content processing must not add unbounded work to an upload response."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "dfs_31",
+      "stepNumber": 31,
+      "phase": "2. Transfer large files and build searchable versions",
+      "title": "Add idempotent file processing",
+      "type": "add_component",
+      "content": "Workers validate stored chunk checksums, assemble or stream the manifest view, extract supported text, and publish index updates. Bound memory while reading large objects, verify MIME/type instead of trusting filename extensions, and keep processing state separate from the user's committed version.",
+      "component": {
+        "nodeId": "dfs_worker",
+        "componentType": "processing-worker",
+        "label": "Validation and Index Workers",
+        "description": "Asynchronous checksum, format-aware extraction, and index processing",
+        "position": { "x": 1880, "y": 650 },
+        "properties": {
+          "componentName": "Validation and Index Workers",
+          "purpose": "Process queue jobs idempotently; verify chunk checksums, inspect actual media type, stream supported content extractors, preserve original bytes, and record explicit success, unsupported-format, retry, or quarantine status.",
+          "tasks": "Data Processing",
+          "autoscale": true
+        },
+        "highlightReason": "This worker boundary handles multiple file types without blocking interactive upload and download paths."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "dfs_32",
+      "stepNumber": 32,
+      "phase": "2. Transfer large files and build searchable versions",
+      "title": "Enqueue finalized object events",
+      "type": "add_connection",
+      "content": "A finalized object event includes an opaque tenant-scoped object reference, upload-session identity, and checksum result, not a public download URL. The consumer looks up authoritative metadata before acting and deduplicates by stable job identity.",
+      "connection": {
+        "edgeId": "dfs_edge_objects_queue",
+        "sourceNodeId": "dfs_objects",
+        "targetNodeId": "dfs_ingest_queue",
+        "connectionType": "message-queue",
+        "label": "Finalized chunk and object events",
+        "description": "Durably queues idempotent post-upload validation and indexing work."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "dfs_33",
+      "stepNumber": 33,
+      "phase": "2. Transfer large files and build searchable versions",
+      "title": "Dispatch processing jobs",
+      "type": "add_connection",
+      "content": "Workers consume with bounded concurrency, acknowledge only after durable job progress, and use retry/backoff plus a dead-letter or quarantine path for poison content. Reprocessing the same event must not create duplicate versions or duplicate search documents.",
+      "connection": {
+        "edgeId": "dfs_edge_queue_worker",
+        "sourceNodeId": "dfs_ingest_queue",
+        "targetNodeId": "dfs_worker",
+        "connectionType": "message-queue",
+        "label": "At-least-once processing jobs",
+        "description": "Workers tolerate redelivery and isolate repeatedly failing files."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "dfs_34",
+      "stepNumber": 34,
+      "phase": "2. Transfer large files and build searchable versions",
+      "title": "Read immutable content for validation",
+      "type": "add_connection",
+      "content": "Workers fetch only manifest-referenced chunks and validate checksums before extraction. If an object is missing or corrupt, mark the affected version unavailable, alert, and attempt repair from a verified replica or backup; never silently index partial bytes.",
+      "connection": {
+        "edgeId": "dfs_edge_worker_objects",
+        "sourceNodeId": "dfs_worker",
+        "targetNodeId": "dfs_objects",
+        "connectionType": "data-flow",
+        "label": "Read and verify version chunks",
+        "description": "Workers stream immutable content and validate checksums before processing."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "dfs_35",
+      "stepNumber": 35,
+      "phase": "2. Transfer large files and build searchable versions",
+      "title": "Record processing and index state",
+      "type": "add_connection",
+      "content": "The worker records extraction status and index revision against the immutable file version. It does not change the current file head merely because extraction completed; retried writes are idempotent and stale jobs cannot overwrite a newer version's status.",
+      "connection": {
+        "edgeId": "dfs_edge_worker_metadata",
+        "sourceNodeId": "dfs_worker",
+        "targetNodeId": "dfs_metadata",
+        "connectionType": "database-connection",
+        "label": "Version-scoped processing state",
+        "description": "Persists extraction status and index revision without changing file-head semantics."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "dfs_36",
+      "stepNumber": 36,
+      "phase": "2. Transfer large files and build searchable versions",
+      "title": "Add a full-text search index",
+      "type": "add_component",
+      "content": "Index file names and extracted content asynchronously. Search indexes are derived data: a result must be reauthorized against current metadata before any title, snippet, or download link is returned, because indexing and ACL updates may arrive at different times.",
+      "component": {
+        "nodeId": "dfs_search",
+        "componentType": "search-engine",
+        "label": "Name and Content Search",
+        "description": "Derived index for file names and supported extracted text",
+        "position": { "x": 2180, "y": 380 },
+        "properties": {
+          "componentName": "Name and Content Search",
+          "purpose": "Index normalized file names, metadata, and extracted text for explicitly supported formats; retain file and version identity for reauthorization, and surface extraction coverage and freshness.",
+          "engine": "opensearch"
+        },
+        "highlightReason": "A dedicated derived index supports name and content queries without making it the permission authority."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "dfs_37",
+      "stepNumber": 37,
+      "phase": "2. Transfer large files and build searchable versions",
+      "title": "Index supported content asynchronously",
+      "type": "add_connection",
+      "content": "Workers write version-keyed search documents only after validating the manifest. Extraction failure or unsupported media type remains visible in processing status; it must not be represented as successful content indexing.",
+      "connection": {
+        "edgeId": "dfs_edge_worker_search",
+        "sourceNodeId": "dfs_worker",
+        "targetNodeId": "dfs_search",
+        "connectionType": "data-flow",
+        "label": "Versioned name and extracted-text documents",
+        "description": "Publishes derived searchable fields with explicit extraction status."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "dfs_38",
+      "stepNumber": 38,
+      "phase": "2. Transfer large files and build searchable versions",
+      "title": "Search through the permission-enforcing API",
+      "type": "add_connection",
+      "content": "The file API turns the caller's query into a search request, applies tenant and file authorization to candidates, and rechecks current ACLs before exposing names, snippets, or IDs. Bound result size and use cursors; do not return stale search-index permissions as if they were authoritative.",
+      "connection": {
+        "edgeId": "dfs_edge_file_api_search",
+        "sourceNodeId": "dfs_file_api",
+        "targetNodeId": "dfs_search",
+        "connectionType": "api-call",
+        "label": "Query names and supported content",
+        "description": "Search is mediated by the API and results are reauthorized from metadata."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5"]
+    },
+    {
+      "id": "dfs_39",
+      "stepNumber": 39,
+      "phase": "2. Transfer large files and build searchable versions",
+      "title": "Choose explicit format handling",
+      "type": "decision_point",
+      "content": "Preserve every accepted file as opaque original bytes, but parse only formats on an explicit, tested extractor allowlist. Verify actual type, cap extraction resources, isolate malformed or hostile content, and expose whether content indexing is complete. Until the product defines its supported-format matrix, do not promise full-text search over every possible binary format.",
+      "decision": {
+        "question": "How should a system support multiple file types without corrupting originals or overstating search coverage?",
+        "chosen": "Store original bytes unchanged and run isolated, format-specific extractors from an explicit allowlist.",
+        "chosenReason": "Storage remains format-agnostic while search coverage and parsing risk are observable and bounded.",
+        "alternatives": [
+          {
+            "option": "Treat filename extension as verified content type",
+            "tradeoff": "Extensions can be false and malformed payloads can reach unsafe parsers."
+          },
+          {
+            "option": "Claim every file is content-searchable",
+            "tradeoff": "Unsupported, encrypted, or malformed formats cannot be indexed reliably."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "dfs_worker",
+        "properties": {
+          "purpose": "Process queue jobs idempotently; verify chunk checksums, inspect actual media type, stream supported content extractors, preserve original bytes, and record explicit success, unsupported-format, retry, or quarantine status. Keep a tested format allowlist and report extraction coverage instead of claiming every binary file is searchable."
+        }
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "dfs_40",
+      "stepNumber": 40,
+      "phase": "2. Transfer large files and build searchable versions",
+      "title": "Deduplicate without creating a cross-tenant oracle",
+      "type": "decision_point",
+      "content": "Deduplication can reduce repeated chunk storage, but a global content hash can reveal whether another tenant already owns a secret file. Prefer tenant-scoped keyed content identities, verify bytes on the server, and maintain reference counts or a safe mark-and-sweep process so deleting one version cannot remove chunks still referenced by another. Garbage collection must recheck references before deleting objects.",
+      "decision": {
+        "question": "How can repeated chunks save storage without leaking equality across tenants?",
+        "chosen": "Use tenant-scoped deduplication identifiers and reference-aware garbage collection.",
+        "chosenReason": "It captures reuse within a security domain without exposing a global existence test, and keeps shared chunks alive while referenced.",
+        "alternatives": [
+          {
+            "option": "Global plaintext hashes visible to clients",
+            "tradeoff": "An attacker can test whether a guessed document exists in another tenant."
+          },
+          {
+            "option": "Delete a chunk when one file version is removed",
+            "tradeoff": "Other versions can lose data if they share that chunk."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "dfs_objects",
+        "properties": {
+          "purpose": "Persist immutable, tenant-scoped file chunks referenced by metadata manifests; validate per-chunk checksums, support version-aware recovery, and expose only authorized transfer capabilities. Resumable sessions publish complete manifests only after validation. Deduplicate with tenant-scoped keyed content identities, keep reference-aware chunk reclamation, and never expose hashes as a cross-tenant existence oracle."
+        }
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "dfs_41",
+      "stepNumber": 41,
+      "phase": "3. Share safely and synchronize devices",
+      "title": "Treat sync as a durable change feed",
+      "type": "explanation",
+      "content": "A device needs ordered change discovery, not a copy of the database. Commit a version or ACL change and its outbox record together; relay the outbox at least once; let clients advance a cursor and fetch current metadata through the authorized API. Events carry identifiers and revisions, not file bytes or permission grants.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:2"]
+    },
+    {
+      "id": "dfs_42",
+      "stepNumber": 42,
+      "phase": "3. Share safely and synchronize devices",
+      "title": "Resolve concurrent edits without silent last-write-wins",
+      "type": "decision_point",
+      "content": "Every write names its base revision. A conditional metadata-head update accepts only the expected current revision. If another device won, preserve the submitted content as a recoverable conflict version and show both versions; merge only when a format-aware merge is safe and explainable. Binary files should not be silently overwritten.",
+      "decision": {
+        "question": "What happens when two devices modify the same file from the same older revision?",
+        "chosen": "Use compare-and-swap on the head revision and preserve a losing edit as a conflict version for user resolution.",
+        "chosenReason": "The user can recover both edits, while the server never silently discards content or depends on synchronized client clocks.",
+        "alternatives": [
+          {
+            "option": "Last writer wins using client timestamps",
+            "tradeoff": "Clock skew can discard a valid edit without a reliable causal order."
+          },
+          {
+            "option": "Automatically merge all bytes",
+            "tradeoff": "Arbitrary binary formats have no safe generic merge operation."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "dfs_metadata",
+        "properties": {
+          "purpose": "Store tenant and file identity, folder membership, owner and sharing ACLs, current revision, immutable version manifests, upload-session state, sync cursors, and a transactional change outbox. Require conditional head updates and validate partition/index design under tenant skew. Compare each write with its base revision; retain both sides of a conflict instead of applying silent last-writer-wins."
+        }
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:2"]
+    },
+    {
+      "id": "dfs_43",
+      "stepNumber": 43,
+      "phase": "3. Share safely and synchronize devices",
+      "title": "Add a durable change-event broker",
+      "type": "add_component",
+      "content": "The broker distributes committed version, rename, move, delete-tombstone, and permission-change notifications. Events are at-least-once and may be delayed or reordered; include an authoritative revision and cursor so consumers can deduplicate and fetch current state.",
+      "component": {
+        "nodeId": "dfs_events",
+        "componentType": "message-broker",
+        "label": "File Change Event Bus",
+        "description": "Durable fan-out of metadata change notifications to workers and devices",
+        "position": { "x": 2180, "y": 650 },
+        "properties": {
+          "componentName": "File Change Event Bus",
+          "purpose": "Fan out durable, versioned metadata-change references for sync and share notifications; consumers deduplicate, tolerate replay, and fetch current permission-checked state from the API.",
+          "durable": true
+        },
+        "highlightReason": "A durable change feed decouples metadata commits from connected-device delivery."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4"]
+    },
+    {
+      "id": "dfs_44",
+      "stepNumber": 44,
+      "phase": "3. Share safely and synchronize devices",
+      "title": "Relay committed outbox changes",
+      "type": "add_connection",
+      "content": "A relay reads durable outbox records, publishes idempotently, and marks progress only after broker acknowledgement. Replay after a crash can duplicate an event; stable event IDs and consumer cursors make that safe. No broker event is emitted for a metadata write that rolled back.",
+      "connection": {
+        "edgeId": "dfs_edge_metadata_worker_outbox",
+        "sourceNodeId": "dfs_metadata",
+        "targetNodeId": "dfs_worker",
+        "connectionType": "data-flow",
+        "label": "Read transactional change outbox",
+        "description": "A relay worker publishes only committed metadata revisions and retries safely."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:2"]
+    },
+    {
+      "id": "dfs_45",
+      "stepNumber": 45,
+      "phase": "3. Share safely and synchronize devices",
+      "title": "Publish revision notifications",
+      "type": "add_connection",
+      "content": "The relay publishes a minimal event containing tenant-scoped file identity, revision, event ID, and sync cursor. Do not include file contents, snippets, bearer tokens, or a reusable download URL in the event payload.",
+      "connection": {
+        "edgeId": "dfs_edge_worker_events",
+        "sourceNodeId": "dfs_worker",
+        "targetNodeId": "dfs_events",
+        "connectionType": "event-stream",
+        "label": "Committed revision and ACL events",
+        "description": "Publishes minimal references after the metadata transaction commits."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4"]
+    },
+    {
+      "id": "dfs_46",
+      "stepNumber": 46,
+      "phase": "3. Share safely and synchronize devices",
+      "title": "Notify browser sync sessions",
+      "type": "add_connection",
+      "content": "A connected browser uses a notification to refresh its cursor, then fetches changed metadata through the authorized API. If it misses events while disconnected, cursor-based catch-up recovers; the broker is not the durable per-device state store.",
+      "connection": {
+        "edgeId": "dfs_edge_events_web",
+        "sourceNodeId": "dfs_events",
+        "targetNodeId": "dfs_web",
+        "connectionType": "event-stream",
+        "label": "Change wake-up and cursor",
+        "description": "Browser catches up through API reads after receiving a minimal change event."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4"]
+    },
+    {
+      "id": "dfs_47",
+      "stepNumber": 47,
+      "phase": "3. Share safely and synchronize devices",
+      "title": "Notify mobile sync sessions",
+      "type": "add_connection",
+      "content": "Mobile push or a live session wakes the client, which then authenticates and fetches current state and permission from the API. A delayed notification cannot restore a grant that has been revoked.",
+      "connection": {
+        "edgeId": "dfs_edge_events_mobile",
+        "sourceNodeId": "dfs_events",
+        "targetNodeId": "dfs_mobile",
+        "connectionType": "event-stream",
+        "label": "Mobile change wake-up",
+        "description": "Prompts authorized cursor-based sync without placing file data in push payloads."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4"]
+    },
+    {
+      "id": "dfs_48",
+      "stepNumber": 48,
+      "phase": "3. Share safely and synchronize devices",
+      "title": "Notify desktop sync sessions",
+      "type": "add_connection",
+      "content": "Desktop clients consume changes while connected and resume from their last durable cursor after sleep or restart. On cursor expiry, perform a permission-filtered rescan rather than assuming no changes occurred.",
+      "connection": {
+        "edgeId": "dfs_edge_events_desktop",
+        "sourceNodeId": "dfs_events",
+        "targetNodeId": "dfs_desktop",
+        "connectionType": "event-stream",
+        "label": "Desktop change wake-up and replay",
+        "description": "Desktop resumes sync from a cursor or falls back to an authorized rescan."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4"]
+    },
+    {
+      "id": "dfs_49",
+      "stepNumber": 49,
+      "phase": "3. Share safely and synchronize devices",
+      "title": "Add a share notification service",
+      "type": "add_component",
+      "content": "Sharing can notify recipients that access changed, but delivery is not the grant itself. Keep permission changes durable in metadata; send a minimal notification and require the recipient to authenticate and fetch the current file through the API.",
+      "component": {
+        "nodeId": "dfs_notifications",
+        "componentType": "notification-service",
+        "label": "Share and Sync Notifications",
+        "description": "Delivers minimal share invitations and change alerts",
+        "position": { "x": 2480, "y": 180 },
+        "properties": {
+          "componentName": "Share and Sync Notifications",
+          "purpose": "Deliver minimal share invitations and change alerts after metadata commits; link recipients to an authenticated API flow and never treat notification delivery as authorization.",
+          "channels": "Push + Email",
+          "fanout": true,
+          "batching": true
+        },
+        "highlightReason": "Separating notification delivery from ACL state prevents email or push from becoming an access-control mechanism."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4"]
+    },
+    {
+      "id": "dfs_50",
+      "stepNumber": 50,
+      "phase": "3. Share safely and synchronize devices",
+      "title": "Send notifications after a committed share change",
+      "type": "add_connection",
+      "content": "The file API enqueues a notification only after the share or revocation transaction commits. Retries are idempotent, and the message contains no file body or sensitive content excerpt.",
+      "connection": {
+        "edgeId": "dfs_edge_file_api_notifications",
+        "sourceNodeId": "dfs_file_api",
+        "targetNodeId": "dfs_notifications",
+        "connectionType": "api-call",
+        "label": "Committed share and revocation alerts",
+        "description": "Sends minimal recipient notifications after authoritative ACL changes."
+      },
+      "requirementIds": ["legacy-requirement:2"]
+    },
+    {
+      "id": "dfs_51",
+      "stepNumber": 51,
+      "phase": "3. Share safely and synchronize devices",
+      "title": "Notify browser users",
+      "type": "add_connection",
+      "content": "The browser receives a notification to open the authenticated product and retrieve current state. If access was revoked after the message was queued, the API denies the subsequent read.",
+      "connection": {
+        "edgeId": "dfs_edge_notifications_web",
+        "sourceNodeId": "dfs_notifications",
+        "targetNodeId": "dfs_web",
+        "connectionType": "data-flow",
+        "label": "Minimal share notice",
+        "description": "Notifies the browser without embedding protected file contents."
+      },
+      "requirementIds": ["legacy-requirement:2"]
+    },
+    {
+      "id": "dfs_52",
+      "stepNumber": 52,
+      "phase": "3. Share safely and synchronize devices",
+      "title": "Notify mobile users",
+      "type": "add_connection",
+      "content": "Mobile notifications are hints to sync, not durable delivery guarantees. The application reconciles from its cursor after reconnect and rechecks permissions before downloading.",
+      "connection": {
+        "edgeId": "dfs_edge_notifications_mobile",
+        "sourceNodeId": "dfs_notifications",
+        "targetNodeId": "dfs_mobile",
+        "connectionType": "data-flow",
+        "label": "Minimal mobile share notice",
+        "description": "Wakes the client to fetch current authorized state."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4"]
+    },
+    {
+      "id": "dfs_53",
+      "stepNumber": 53,
+      "phase": "3. Share safely and synchronize devices",
+      "title": "Notify desktop users",
+      "type": "add_connection",
+      "content": "Desktop notifications can prompt a sync but do not replace cursor replay. If the desktop is offline, the next authenticated reconnect discovers changes and revocations from the server.",
+      "connection": {
+        "edgeId": "dfs_edge_notifications_desktop",
+        "sourceNodeId": "dfs_notifications",
+        "targetNodeId": "dfs_desktop",
+        "connectionType": "data-flow",
+        "label": "Minimal desktop share notice",
+        "description": "Alerts the user while server-side sync remains authoritative."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4"]
+    },
+    {
+      "id": "dfs_54",
+      "stepNumber": 54,
+      "phase": "3. Share safely and synchronize devices",
+      "title": "Choose explicit offline conflict behavior",
+      "type": "decision_point",
+      "content": "Offline clients keep a protected local snapshot and a durable operation journal. Reconnect sends the base revision; unchanged heads accept the edit conditionally, while changed heads create a visible conflict copy or a format-aware merge proposal. A product decision is still needed for local-cache retention and what happens to already-downloaded bytes after access is revoked.",
+      "decision": {
+        "question": "What is the safe behavior for an edit made offline while another device changes the same file?",
+        "chosen": "Replay idempotent operations against their base revision and preserve unresolved edits as conflict versions.",
+        "chosenReason": "Offline access remains useful without silently losing a concurrent edit or bypassing server authorization.",
+        "alternatives": [
+          {
+            "option": "Overwrite the server copy on reconnect",
+            "tradeoff": "The offline device can erase a newer edit made elsewhere."
+          },
+          {
+            "option": "Reject every offline edit",
+            "tradeoff": "It defeats offline access even when the server head has not changed."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "dfs_web",
+        "properties": {
+          "logic": "Queue offline edits with their base revision; reconcile on reconnect instead of silently replacing a newer server revision. Protect locally cached files, show conflict and revocation status, and require fresh authorization before remote sync."
+        }
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:2"]
+    },
+    {
+      "id": "dfs_55",
+      "stepNumber": 55,
+      "phase": "4. Recover data and validate scale",
+      "title": "Add a separate backup and archive tier",
+      "type": "add_component",
+      "content": "Retain recoverable copies under a policy that is independent of ordinary delete and account permissions. Define retention, encryption-key custody, legal hold, and restore authorization with the product; none is specified in the problem brief.",
+      "component": {
+        "nodeId": "dfs_backup",
+        "componentType": "cold-storage",
+        "label": "Backup and Archive Tier",
+        "description": "Separate recovery copies of metadata snapshots and object manifests",
+        "position": { "x": 2480, "y": 420 },
+        "properties": {
+          "componentName": "Backup and Archive Tier",
+          "purpose": "Keep independently protected recovery copies of metadata snapshots and referenced object versions; apply a defined retention and key policy, and require tested restore procedures before treating backups as usable.",
+          "provider": "AWS Glacier",
+          "encryption": true
+        },
+        "highlightReason": "Durability requires recoverable metadata and content, not merely a versioning switch."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "dfs_56",
+      "stepNumber": 56,
+      "phase": "4. Recover data and validate scale",
+      "title": "Back up metadata and version references",
+      "type": "add_connection",
+      "content": "Snapshot metadata with a recoverable point-in-time boundary, including ACLs, version heads, manifests, tombstones, and the outbox cursor. A restore must not expose a manifest whose referenced content has not been verified.",
+      "connection": {
+        "edgeId": "dfs_edge_metadata_backup",
+        "sourceNodeId": "dfs_metadata",
+        "targetNodeId": "dfs_backup",
+        "connectionType": "data-flow",
+        "label": "Metadata and manifest recovery copies",
+        "description": "Preserves ACLs, file heads, version manifests, and recovery checkpoints."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "dfs_57",
+      "stepNumber": 57,
+      "phase": "4. Recover data and validate scale",
+      "title": "Back up referenced object content",
+      "type": "add_connection",
+      "content": "Copy or replicate immutable objects under a policy coordinated with metadata snapshots. Preserve checksums and version identity. Restore ordering should make objects available and verified before metadata points users at the recovered version set.",
+      "connection": {
+        "edgeId": "dfs_edge_objects_backup",
+        "sourceNodeId": "dfs_objects",
+        "targetNodeId": "dfs_backup",
+        "connectionType": "data-flow",
+        "label": "Immutable object recovery copies",
+        "description": "Retains verifiable content needed by saved version manifests."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "dfs_58",
+      "stepNumber": 58,
+      "phase": "4. Recover data and validate scale",
+      "title": "Add service and data-path monitoring",
+      "type": "add_component",
+      "content": "Measure user-visible transfer and sync behavior plus internal queues, checksum failures, search freshness, authorization denials, storage growth, and restore results. Establish thresholds only after traffic and service objectives are agreed; the brief gives no numeric SLO.",
+      "component": {
+        "nodeId": "dfs_monitoring",
+        "componentType": "monitoring",
+        "label": "Storage System Monitoring",
+        "description": "Observability for transfer, metadata, queues, search, and recovery",
+        "position": { "x": 2780, "y": 650 },
+        "properties": {
+          "componentName": "Storage System Monitoring",
+          "purpose": "Observe transfer completion and retry rates, API and metadata errors, authorization denials, queue age, extraction and search freshness, checksum failures, storage growth, and backup/restore verification.",
+          "stack": "Prometheus + Grafana",
+          "metrics": true,
+          "alerts": true
+        },
+        "highlightReason": "Operational evidence is required to know whether the unstated speed and durability goals are actually met."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "dfs_59",
+      "stepNumber": 59,
+      "phase": "4. Recover data and validate scale",
+      "title": "Observe API and permission outcomes",
+      "type": "add_connection",
+      "content": "Emit low-cardinality metrics for upload-session creation/finalization, transfer authorization failures, conflict outcomes, and API errors. Keep file names, user IDs, access tokens, and raw content out of metric labels and ordinary logs.",
+      "connection": {
+        "edgeId": "dfs_edge_api_monitoring",
+        "sourceNodeId": "dfs_file_api",
+        "targetNodeId": "dfs_monitoring",
+        "connectionType": "data-flow",
+        "label": "API and authorization signals",
+        "description": "Reports service health without leaking file content into telemetry."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2"]
+    },
+    {
+      "id": "dfs_60",
+      "stepNumber": 60,
+      "phase": "4. Recover data and validate scale",
+      "title": "Observe processing and integrity",
+      "type": "add_connection",
+      "content": "Alert on repeated checksum mismatches, corrupt or missing object references, poison jobs, and extraction failures. Include a repair path and an operator-visible affected version; do not convert a failed integrity check into a successful response.",
+      "connection": {
+        "edgeId": "dfs_edge_worker_monitoring",
+        "sourceNodeId": "dfs_worker",
+        "targetNodeId": "dfs_monitoring",
+        "connectionType": "data-flow",
+        "label": "Worker and integrity signals",
+        "description": "Surfaces processing failures and integrity problems for repair."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "dfs_61",
+      "stepNumber": 61,
+      "phase": "4. Recover data and validate scale",
+      "title": "Observe metadata transactions and backup state",
+      "type": "add_connection",
+      "content": "Track conditional-write conflicts, query latency distributions, partition skew, backup completion, and point-in-time restore validation. Compare results with an agreed objective; do not report an untested recovery point as achieved.",
+      "connection": {
+        "edgeId": "dfs_edge_metadata_monitoring",
+        "sourceNodeId": "dfs_metadata",
+        "targetNodeId": "dfs_monitoring",
+        "connectionType": "data-flow",
+        "label": "Metadata, contention, and recovery signals",
+        "description": "Makes head conflicts, skew, and backup validation visible."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "dfs_62",
+      "stepNumber": 62,
+      "phase": "4. Recover data and validate scale",
+      "title": "Observe queue backlog and retry health",
+      "type": "add_connection",
+      "content": "Monitor backlog age, retry volume, dead-letter or quarantine growth, and oldest unindexed version. Autoscaling is useful only when downstream storage and search capacity can accept the extra work.",
+      "connection": {
+        "edgeId": "dfs_edge_queue_monitoring",
+        "sourceNodeId": "dfs_ingest_queue",
+        "targetNodeId": "dfs_monitoring",
+        "connectionType": "data-flow",
+        "label": "Queue age and retry signals",
+        "description": "Shows whether asynchronous work is keeping up or accumulating."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7"]
+    },
+    {
+      "id": "dfs_63",
+      "stepNumber": 63,
+      "phase": "4. Recover data and validate scale",
+      "title": "Observe search freshness and access filtering",
+      "type": "add_connection",
+      "content": "Track index lag and supported-format coverage while testing that revoked or unauthorized files never appear in names, snippets, or result counts. Search availability may degrade independently from the authoritative file and permission stores.",
+      "connection": {
+        "edgeId": "dfs_edge_search_monitoring",
+        "sourceNodeId": "dfs_search",
+        "targetNodeId": "dfs_monitoring",
+        "connectionType": "data-flow",
+        "label": "Index freshness and coverage",
+        "description": "Measures derived-search health while ACL enforcement remains in the API."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "dfs_64",
+      "stepNumber": 64,
+      "phase": "4. Recover data and validate scale",
+      "title": "Scale metadata for billions of files",
+      "type": "scale_trigger",
+      "content": "The stated target is billions of files, but traffic shape and tenant skew are not supplied. Before launch, load-test realistic file counts and hot-folder distributions; validate partition-key balance, index fan-out, conditional-write contention, and rebalancing while monitoring tail latency and error rates.",
+      "scaleTrigger": {
+        "metric": "Partition skew, rebalancing work, conditional-write contention, and query tail latency as file counts approach the stated billions-of-files scale",
+        "action": "Tune tenant/file partitioning and indexes from measured access patterns; split hot access paths or add capacity only when load tests identify the bottleneck.",
+        "impact": "A hash-based partition plan can distribute identifiers but cannot guarantee balanced tenants, low latency, or a cost envelope without workload evidence."
+      },
+      "componentUpdate": {
+        "nodeId": "dfs_metadata",
+        "properties": {
+          "sharding": "Hash-based"
+        }
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:2"]
+    },
+    {
+      "id": "dfs_65",
+      "stepNumber": 65,
+      "phase": "4. Recover data and validate scale",
+      "title": "Scale transfer from measured bottlenecks",
+      "type": "scale_trigger",
+      "content": "Measure end-to-end upload and download distributions separately from API metadata latency. Break down client/network time, chunk retries, object-store time, CDN hit and authorization behavior, and manifest-commit delay. The brief says fast transfer but supplies no threshold, file-size mix, or regional placement.",
+      "scaleTrigger": {
+        "metric": "Transfer completion distributions, retry rate, object throughput, CDN cache effectiveness, and finalization delay",
+        "action": "Use representative files up to the stated 1GB maximum and realistic network conditions to locate the bottleneck; tune chunk concurrency, edge caching, and storage layout from those measurements.",
+        "impact": "Measurement guides capacity and chunk policy without presenting an invented latency or throughput number as a product guarantee."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "dfs_66",
+      "stepNumber": 66,
+      "phase": "4. Recover data and validate scale",
+      "title": "Make restore a tested consistency procedure",
+      "type": "decision_point",
+      "content": "Choose and document recovery-point and recovery-time objectives with the product; neither is in the brief. A restore should recover metadata and referenced immutable objects to a compatible boundary, verify checksums and ACLs, replay or reconcile the outbox, and only then reopen reads and writes. Run restore exercises and report the observed result rather than equating configured backups with proven recovery.",
+      "decision": {
+        "question": "What does a successful backup mean for a versioned file system?",
+        "chosen": "Restore metadata and immutable content as one verified recovery set, then validate permissions and sync state before serving it.",
+        "chosenReason": "A metadata-only backup can point to missing bytes, while an object-only copy cannot restore file names, sharing, or version heads.",
+        "alternatives": [
+          {
+            "option": "Treat backup job success as proof of recoverability",
+            "tradeoff": "It does not prove manifests, object references, keys, or ACLs can be restored together."
+          },
+          {
+            "option": "Restore the latest metadata and latest objects independently",
+            "tradeoff": "Different recovery points can create manifests that reference content not present in the selected object set."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "dfs_backup",
+        "properties": {
+          "purpose": "Keep independently protected recovery copies of metadata snapshots and referenced object versions; apply a defined retention and key policy, and require tested restore procedures before treating backups as usable. Restore metadata and immutable content to a compatible checkpoint, verify checksums and ACLs, reconcile the change outbox, and reopen service only after integrity checks pass."
+        }
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:4"]
+    }
+  ]
+}

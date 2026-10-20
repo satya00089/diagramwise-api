@@ -1,0 +1,751 @@
+{
+  "problem_id": "mlops_004",
+  "version": "mlops_004-v1-local-review-draft",
+  "requirementRevision": null,
+  "totalSteps": 45,
+  "phases": [
+    {
+      "name": "Set observation and timing boundaries",
+      "stepRange": [1, 5],
+      "description": "Define the observed prediction, comparable reference data, rolling window, and test choices without inventing thresholds or cadence."
+    },
+    {
+      "name": "Capture online predictions without blocking inference",
+      "stepRange": [6, 19],
+      "description": "Build the prediction path and asynchronously retain versioned prediction and feature evidence for analysis."
+    },
+    {
+      "name": "Separate distribution shifts from label-backed quality signals",
+      "stepRange": [20, 35],
+      "description": "Join delayed outcomes, compute distinct signals, control false alarms, and validate the stated volume and detection bound."
+    },
+    {
+      "name": "Notify, retrain, and inspect the evidence",
+      "stepRange": [36, 45],
+      "description": "Route actionable signals into retraining and provide a drill-down dashboard with explicit failure states."
+    }
+  ],
+  "steps": [
+    {
+      "id": "mlops004_scope",
+      "stepNumber": 1,
+      "phase": "Set observation and timing boundaries",
+      "title": "Frame the real-time monitoring problem",
+      "type": "explanation",
+      "content": "Design a monitoring system that detects data drift, concept drift, and model performance degradation in production ML models, triggering automated alerts and retraining workflows. The frozen problem is Design a Real-time Model Monitoring and Drift Detection System. Keep each observed result tied to the model and feature versions that produced it; the later dashboard and retraining decision must be explainable from retained evidence. This walkthrough is a local review draft.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:6"]
+    },
+    {
+      "id": "mlops004_reference_window",
+      "stepNumber": 2,
+      "phase": "Set observation and timing boundaries",
+      "title": "Pin a comparable reference window",
+      "type": "decision_point",
+      "content": "Implement reference-window vs sliding-window comparison. Keep a reference distribution for each released model and feature-schema version, with the cohort definition and source period recorded. A training or validation baseline is one option; a reviewed stable production period is another. Choose a representative baseline with the model owner and avoid comparing unlike populations. The brief does not prescribe the baseline length or replacement schedule.",
+      "decision": {
+        "question": "What should a current prediction window be compared against?",
+        "chosen": "Use a versioned, reviewed reference distribution and compare only matching model, schema, and cohort definitions.",
+        "chosenReason": "Version and cohort alignment makes a measured distribution change interpretable and reproducible.",
+        "alternatives": [
+          {"option": "Compare against all historical traffic", "tradeoff": "Old models, schemas, or populations can make ordinary changes look like drift."},
+          {"option": "Replace the reference continuously with recent traffic", "tradeoff": "A gradual shift can become the new baseline before it is investigated."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4"]
+    },
+    {
+      "id": "mlops004_sliding_window",
+      "stepNumber": 3,
+      "phase": "Set observation and timing boundaries",
+      "title": "Compare an event-time sliding window",
+      "type": "explanation",
+      "content": "Maintain a sliding window over production inference events and compare it with the pinned reference window. Use event timestamps, model version, feature-schema version, and cohort keys so delayed or out-of-order events do not silently enter the wrong comparison. Use time-windowed aggregations for metric tracking. Window length, aggregation cadence, and late-event policy are implementation choices; they must be measured together against the frozen requirement Drift detection within 1 hour of occurrence, not filled in with an assumed interval.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-constraint:1"]
+    },
+    {
+      "id": "mlops004_test_selection",
+      "stepNumber": 4,
+      "phase": "Set observation and timing boundaries",
+      "title": "Choose feature-appropriate statistical tests",
+      "type": "decision_point",
+      "content": "Compute statistical tests for drift detection. The frozen hint is: Use KS-test, PSI, or Jensen-Shannon divergence for drift. Select and validate a suitable comparison per feature type and distribution representation; for example, KS-test can compare numeric distributions, while PSI or Jensen-Shannon divergence can compare binned or categorical distributions. For text, compare a documented, versioned text-feature representation rather than raw strings by default. Use Evidently AI or Whylogs for monitoring as optional examples; the design remains independent of either library. The brief gives no significance cutoff or effect-size threshold.",
+      "decision": {
+        "question": "How should drift statistics vary across numerical, categorical, and text inputs?",
+        "chosen": "Use a validated statistical comparison over feature-type-appropriate histograms, sketches, or text representations, and record the method and version with each result.",
+        "chosenReason": "Method provenance and a suitable representation let reviewers reproduce a signal without assuming every feature has the same distribution form.",
+        "alternatives": [
+          {"option": "Apply one test to every raw feature", "tradeoff": "The input types have different representations and assumptions."},
+          {"option": "Emit only a model-wide aggregate", "tradeoff": "A localized feature or cohort shift becomes hard to inspect."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:3"]
+    },
+    {
+      "id": "mlops004_feature_contract",
+      "stepNumber": 5,
+      "phase": "Set observation and timing boundaries",
+      "title": "Preserve a safe, analyzable feature representation",
+      "type": "decision_point",
+      "content": "Support numerical, categorical, and text features. Track feature distributions with histograms/sketches and retain the feature-schema and representation versions. Keep enough prediction-level evidence for analysis and delayed label joins, while applying the product's data-access and retention policy to sensitive values. The brief does not supply a retention horizon, so do not encode one as a system promise.",
+      "decision": {
+        "question": "What should be retained for feature-level analysis?",
+        "chosen": "Retain a versioned feature snapshot or authorized reference plus mergeable distribution summaries, with the representation appropriate to numerical, categorical, and text features.",
+        "chosenReason": "The snapshot supports prediction-level investigation while summaries make repeated distribution queries efficient.",
+        "alternatives": [
+          {"option": "Retain only the final prediction", "tradeoff": "Input drift cannot be localized or reconstructed."},
+          {"option": "Store unbounded raw feature payloads in every metric row", "tradeoff": "This duplicates high-volume data and may retain sensitive text unnecessarily."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlops004_dashboard_client",
+      "stepNumber": 6,
+      "phase": "Capture online predictions without blocking inference",
+      "title": "Add the monitoring dashboard client",
+      "type": "add_component",
+      "component": {
+        "nodeId": "mlops004_dashboard",
+        "componentType": "web-app",
+        "label": "Model Monitoring Dashboard",
+        "description": "Signal overview, model and cohort filters, and evidence drill-down",
+        "position": {"x": 0, "y": 40},
+        "properties": {
+          "componentName": "Model Monitoring Dashboard",
+          "purpose": "Let authorized users query by model and version, time range, cohort, feature, and signal type; inspect reference and sliding-window distributions, labeled performance, alert history, data freshness, and prediction-log evidence."
+        },
+        "highlightReason": "The frozen brief requires dashboards with drill-down, so the UI must lead back to the underlying comparison and prediction records."
+      },
+      "content": "This is the read surface for operators and model owners. The dashboard displays when the newest evaluated data arrived and which model, schema, and cohort the shown signals describe.",
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "mlops004_api_gateway",
+      "stepNumber": 7,
+      "phase": "Capture online predictions without blocking inference",
+      "title": "Add the API gateway",
+      "type": "add_component",
+      "component": {
+        "nodeId": "mlops004_gateway",
+        "componentType": "api-gateway",
+        "label": "Inference and Monitoring API Gateway",
+        "description": "Routes inference submissions and dashboard queries",
+        "position": {"x": 270, "y": 40},
+        "properties": {
+          "componentName": "Inference and Monitoring API Gateway",
+          "purpose": "Validate and route prediction requests to serving and authorized monitoring queries to the monitoring API, keeping query traffic separate from the inference response path."
+        },
+        "highlightReason": "A shared entry point makes the prediction path and dashboard query path explicit without coupling dashboard reads to model inference."
+      },
+      "content": "Apply authentication and request validation at the boundary. A dashboard query must carry its model, time, and cohort filters through to the monitoring read path.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8"]
+    },
+    {
+      "id": "mlops004_model_serving",
+      "stepNumber": 8,
+      "phase": "Capture online predictions without blocking inference",
+      "title": "Add model serving",
+      "type": "add_component",
+      "component": {
+        "nodeId": "mlops004_serving",
+        "componentType": "model-serving",
+        "label": "Versioned Model Serving",
+        "description": "Online inference with model and feature provenance",
+        "position": {"x": 560, "y": 40},
+        "properties": {
+          "componentName": "Versioned Model Serving",
+          "purpose": "Run the active model version, obtain its required online features, return the prediction, and emit a prediction record containing a stable prediction ID, event time, model version, feature-schema version, feature evidence, and output."
+        },
+        "highlightReason": "Prediction provenance is required to join later outcomes and to attribute a drift or performance signal to the model that produced it."
+      },
+      "content": "Keep telemetry publication asynchronous to inference. The monitoring pipeline must still expose a logging gap if the event cannot be durably accepted; a missing event is not evidence of healthy model behavior.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:2"]
+    },
+    {
+      "id": "mlops004_feature_store",
+      "stepNumber": 9,
+      "phase": "Capture online predictions without blocking inference",
+      "title": "Add the feature store",
+      "type": "add_component",
+      "component": {
+        "nodeId": "mlops004_features",
+        "componentType": "feature-store",
+        "label": "Versioned Online Feature Store",
+        "description": "Serving features and feature-schema provenance",
+        "position": {"x": 560, "y": 330},
+        "properties": {
+          "componentName": "Versioned Online Feature Store",
+          "purpose": "Serve the feature values used by the active model and expose the feature-schema or transformation version so monitoring compares like-for-like inputs."
+        },
+        "highlightReason": "Feature version and values connect the serving-time input distribution to the reference statistics."
+      },
+      "content": "The monitoring event should identify the features actually consumed by inference, rather than a later recomputation that may have changed.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "mlops004_client_gateway",
+      "stepNumber": 10,
+      "phase": "Capture online predictions without blocking inference",
+      "title": "Route client traffic through the gateway",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "mlops004_dashboard_gateway",
+        "sourceNodeId": "mlops004_dashboard",
+        "targetNodeId": "mlops004_gateway",
+        "connectionType": "api-call",
+        "label": "Prediction requests and filtered dashboard queries",
+        "description": "Route inference submissions and authorized drill-down queries through the API boundary."
+      },
+      "content": "The same client can submit production predictions or query monitoring data; the gateway routes these request classes to different backends.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8"]
+    },
+    {
+      "id": "mlops004_gateway_serving",
+      "stepNumber": 11,
+      "phase": "Capture online predictions without blocking inference",
+      "title": "Send inference requests to model serving",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "mlops004_gateway_serving",
+        "sourceNodeId": "mlops004_gateway",
+        "targetNodeId": "mlops004_serving",
+        "connectionType": "api-call",
+        "label": "Validated online inference request",
+        "description": "Forward the request identity and model route while preserving the synchronous prediction response."
+      },
+      "content": "Keep statistical computation, dashboard queries, and retraining off the synchronous prediction response path.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7"]
+    },
+    {
+      "id": "mlops004_features_serving",
+      "stepNumber": 12,
+      "phase": "Capture online predictions without blocking inference",
+      "title": "Read the features used by the active model",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "mlops004_features_serving",
+        "sourceNodeId": "mlops004_features",
+        "targetNodeId": "mlops004_serving",
+        "connectionType": "data-flow",
+        "label": "Online features and schema version",
+        "description": "Return the exact feature values or authorized references and transformation version consumed for this prediction."
+      },
+      "content": "This edge supplies the evidence for input-distribution monitoring across numerical, categorical, and text features.",
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "mlops004_event_broker",
+      "stepNumber": 13,
+      "phase": "Capture online predictions without blocking inference",
+      "title": "Add a durable prediction-event stream",
+      "type": "add_component",
+      "component": {
+        "nodeId": "mlops004_events",
+        "componentType": "message-broker",
+        "label": "Prediction and Outcome Event Stream",
+        "description": "Durable fan-out for prediction logs and later outcomes",
+        "position": {"x": 850, "y": 40},
+        "properties": {
+          "componentName": "Prediction and Outcome Event Stream",
+          "purpose": "Accept versioned prediction records and delayed ground-truth events, retain them for independent archival and stream evaluation, and preserve stable event identity for replay and deduplication."
+        },
+        "highlightReason": "A durable asynchronous boundary decouples inference from both log storage and drift computation."
+      },
+      "content": "Partition or otherwise distribute the event path to handle the stated prediction volume, then size it from measured peak traffic and feature cardinality.",
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlops004_serving_events",
+      "stepNumber": 14,
+      "phase": "Capture online predictions without blocking inference",
+      "title": "Publish prediction and feature evidence",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "mlops004_serving_events",
+        "sourceNodeId": "mlops004_serving",
+        "targetNodeId": "mlops004_events",
+        "connectionType": "event-stream",
+        "label": "Prediction log with feature and version provenance",
+        "description": "Append prediction ID, event time, model and schema versions, feature evidence, prediction output, and any task score needed for later analysis."
+      },
+      "content": "Store prediction logs for analysis. Emit a stable prediction ID so a later ground-truth event can be joined to the precise prediction rather than to an aggregate alone.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:2"]
+    },
+    {
+      "id": "mlops004_prediction_archive",
+      "stepNumber": 15,
+      "phase": "Capture online predictions without blocking inference",
+      "title": "Add efficient prediction-log storage",
+      "type": "add_component",
+      "component": {
+        "nodeId": "mlops004_archive",
+        "componentType": "object-storage",
+        "label": "Partitioned Prediction Log Archive",
+        "description": "Compact durable records for investigation and replay",
+        "position": {"x": 1130, "y": 330},
+        "properties": {
+          "componentName": "Partitioned Prediction Log Archive",
+          "purpose": "Store prediction records in compressed, queryable partitions keyed by event time and model or schema version; preserve stable IDs for analysis and delayed-label joins without duplicating every event into dashboard metric rows."
+        },
+        "highlightReason": "The brief calls for prediction logging at high volume and explicitly requires efficient storage."
+      },
+      "content": "Choose partition and compression details from measured queries and data shape. No retention period is provided in the frozen brief.",
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlops004_events_archive",
+      "stepNumber": 16,
+      "phase": "Capture online predictions without blocking inference",
+      "title": "Archive the durable prediction stream",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "mlops004_events_archive",
+        "sourceNodeId": "mlops004_events",
+        "targetNodeId": "mlops004_archive",
+        "connectionType": "data-flow",
+        "label": "Compressed prediction records",
+        "description": "Persist the event evidence separately from derived distributions and dashboard aggregates."
+      },
+      "content": "Partitioned records support drill-down and replay, while compact aggregate summaries serve routine monitoring queries.",
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlops004_stream_processor",
+      "stepNumber": 17,
+      "phase": "Capture online predictions without blocking inference",
+      "title": "Add the windowed evaluation processor",
+      "type": "add_component",
+      "component": {
+        "nodeId": "mlops004_evaluator",
+        "componentType": "stream-processor",
+        "label": "Windowed Drift and Quality Evaluator",
+        "description": "Builds reference comparisons and label-backed metrics",
+        "position": {"x": 1130, "y": 40},
+        "properties": {
+          "componentName": "Windowed Drift and Quality Evaluator",
+          "purpose": "Consume prediction and label events, maintain event-time sliding-window summaries, compare them with versioned reference distributions, join delayed labels, and publish separate data-drift, concept-drift, and performance results."
+        },
+        "highlightReason": "A stateful stream processor fits the brief's time-windowed aggregations and one-hour drift-detection bound."
+      },
+      "content": "The processor computes signals and compact summaries; it does not rewrite the source prediction log or treat missing events as normal observations.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "mlops004_events_evaluator",
+      "stepNumber": 18,
+      "phase": "Capture online predictions without blocking inference",
+      "title": "Feed prediction events to the evaluator",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "mlops004_events_evaluator",
+        "sourceNodeId": "mlops004_events",
+        "targetNodeId": "mlops004_evaluator",
+        "connectionType": "event-stream",
+        "label": "Versioned predictions and feature evidence",
+        "description": "Consume prediction events by event time and stable ID for feature summaries, reference comparison, and later label correlation."
+      },
+      "content": "Use the event's model and schema versions to select the correct reference and avoid mixing incompatible feature populations.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1"]
+    },
+    {
+      "id": "mlops004_prediction_record_details",
+      "stepNumber": 19,
+      "phase": "Capture online predictions without blocking inference",
+      "title": "Keep logs useful and economical",
+      "type": "explanation",
+      "content": "Efficient storage for prediction logging comes from separating append-only prediction evidence from derived aggregates: compress and partition full records for analysis, deduplicate on prediction ID, and store reusable histograms/sketches for routine comparisons. Include event time, model version, feature-schema version, feature evidence or an authorized immutable reference, prediction output, and join key. Apply access controls to sensitive text and retain only the text representation needed for the chosen monitor. The frozen brief sets daily volume but no log-retention horizon.",
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlops004_ground_truth_source",
+      "stepNumber": 20,
+      "phase": "Separate distribution shifts from label-backed quality signals",
+      "title": "Add the delayed outcome source",
+      "type": "add_component",
+      "component": {
+        "nodeId": "mlops004_label_feed",
+        "componentType": "data-labeling",
+        "label": "Ground-Truth Outcome Feed",
+        "description": "Verified outcomes arriving after inference",
+        "position": {"x": 850, "y": 600},
+        "properties": {
+          "componentName": "Ground-Truth Outcome Feed",
+          "purpose": "Provide verified outcomes with the original prediction ID and outcome event time so quality metrics can be updated when labels become available."
+        },
+        "highlightReason": "Ground truth often arrives after inference, so the architecture must represent its separate arrival path."
+      },
+      "content": "An outcome is useful only when it can be tied to the prediction and model version that generated the result.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3"]
+    },
+    {
+      "id": "mlops004_labels_events",
+      "stepNumber": 21,
+      "phase": "Separate distribution shifts from label-backed quality signals",
+      "title": "Join delayed outcomes by prediction identity",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "mlops004_labels_events",
+        "sourceNodeId": "mlops004_label_feed",
+        "targetNodeId": "mlops004_events",
+        "connectionType": "event-stream",
+        "label": "Delayed ground truth keyed by prediction ID",
+        "description": "Append verified outcomes as separate events and preserve their outcome time and source provenance."
+      },
+      "content": "Implement delayed ground-truth label joins. Keep outcome ingestion independent of the prediction response, and make repeated label delivery idempotent.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3"]
+    },
+    {
+      "id": "mlops004_data_drift_signal",
+      "stepNumber": 22,
+      "phase": "Separate distribution shifts from label-backed quality signals",
+      "title": "Emit the data-drift signal independently",
+      "type": "explanation",
+      "content": "For requirement Monitor input data distribution for drift, compare each feature's current sliding-window distribution with its matching reference. This data-drift signal measures changes in inputs and does not require labels. Emit feature and cohort details, selected test, reference identity, current window, evidence volume, and result freshness so a model owner can inspect what changed.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4"]
+    },
+    {
+      "id": "mlops004_metrics_store",
+      "stepNumber": 23,
+      "phase": "Separate distribution shifts from label-backed quality signals",
+      "title": "Add a queryable monitoring aggregate store",
+      "type": "add_component",
+      "component": {
+        "nodeId": "mlops004_metrics",
+        "componentType": "data-warehouse",
+        "label": "Model Monitoring Metrics Store",
+        "description": "Time-windowed signals and drill-down index",
+        "position": {"x": 1420, "y": 40},
+        "properties": {
+          "componentName": "Model Monitoring Metrics Store",
+          "purpose": "Store time-windowed feature statistics, label coverage, model performance metrics, drift results, alert references, and links to prediction-log partitions for filtered dashboard queries."
+        },
+        "highlightReason": "Derived aggregates support real-time tracking and dashboard drill-down without repeatedly scanning every prediction record."
+      },
+      "content": "Keep signal type, model version, cohort, feature, window boundaries, test method, and freshness fields queryable rather than collapsing them into one opaque score.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:8"]
+    },
+    {
+      "id": "mlops004_evaluator_metrics",
+      "stepNumber": 24,
+      "phase": "Separate distribution shifts from label-backed quality signals",
+      "title": "Persist windowed evaluation results",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "mlops004_evaluator_metrics",
+        "sourceNodeId": "mlops004_evaluator",
+        "targetNodeId": "mlops004_metrics",
+        "connectionType": "data-flow",
+        "label": "Windowed distributions, joins, and quality metrics",
+        "description": "Write versioned comparison results and their evidence metadata for alert evaluation and dashboard queries."
+      },
+      "content": "Use time-windowed aggregations for metric tracking and persist the window boundaries with each result so operators can distinguish a fresh value from an older one.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4"]
+    },
+    {
+      "id": "mlops004_concept_drift_signal",
+      "stepNumber": 25,
+      "phase": "Separate distribution shifts from label-backed quality signals",
+      "title": "Evaluate concept drift only with outcome evidence",
+      "type": "explanation",
+      "content": "To meet Detect concept drift and prediction quality degradation, evaluate whether the relationship between features and verified outcomes has changed, using the delayed-label join and comparable cohorts. Concept drift is a label-backed change in P(y|x); a feature-distribution change alone is not proof of it. Keep label coverage and label delay visible, and revise historical windows when late outcomes arrive.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3"]
+    },
+    {
+      "id": "mlops004_performance_signal",
+      "stepNumber": 26,
+      "phase": "Separate distribution shifts from label-backed quality signals",
+      "title": "Track model performance as its own signal",
+      "type": "explanation",
+      "content": "Track model performance metrics in real-time by aggregating task-appropriate quality metrics over labeled sliding windows and comparing them with the relevant model-version baseline. Keep this observed performance-degradation signal distinct from both input data drift and concept drift; a performance drop is measured from outcomes, while concept drift describes a changed input-to-outcome relationship. The brief supplies no named task metric or numeric performance threshold, so configure both for the model rather than inventing them here.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5"]
+    },
+    {
+      "id": "mlops004_monitoring_alerts",
+      "stepNumber": 27,
+      "phase": "Separate distribution shifts from label-backed quality signals",
+      "title": "Add monitoring and alert evaluation",
+      "type": "add_component",
+      "component": {
+        "nodeId": "mlops004_monitoring",
+        "componentType": "monitoring",
+        "label": "Drift, Quality, and Freshness Monitor",
+        "description": "Separate signal states, alert routing, and evaluation freshness",
+        "position": {"x": 1710, "y": 40},
+        "properties": {
+          "componentName": "Drift, Quality, and Freshness Monitor",
+          "purpose": "Evaluate data-drift, concept-drift, and model-performance results independently; route significant drift or performance alerts; and expose label coverage, ingestion gaps, and last-evaluated time."
+        },
+        "highlightReason": "Alerts need to distinguish a real model signal from missing, delayed, or insufficient monitoring evidence."
+      },
+      "content": "Alert on significant drift or performance drops. Carry signal type, evidence, model version, affected cohort, and freshness into the notification.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:8"]
+    },
+    {
+      "id": "mlops004_metrics_monitor",
+      "stepNumber": 28,
+      "phase": "Separate distribution shifts from label-backed quality signals",
+      "title": "Evaluate stored signals and label coverage",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "mlops004_metrics_monitor",
+        "sourceNodeId": "mlops004_metrics",
+        "targetNodeId": "mlops004_monitoring",
+        "connectionType": "data-flow",
+        "label": "Drift results, task metrics, and evidence freshness",
+        "description": "Read each signal separately with its model, cohort, sample support, label coverage, and window metadata."
+      },
+      "content": "A delayed label should lower the reported coverage or mark a metric pending; it should not be converted into a model-quality failure.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5"]
+    },
+    {
+      "id": "mlops004_monitor_metrics_query",
+      "stepNumber": 29,
+      "phase": "Separate distribution shifts from label-backed quality signals",
+      "title": "Read aggregates for dashboard drill-down",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "mlops004_monitor_metrics_query",
+        "sourceNodeId": "mlops004_monitoring",
+        "targetNodeId": "mlops004_metrics",
+        "connectionType": "api-call",
+        "label": "Filtered time-range and cohort query",
+        "description": "Fetch signal history, feature summaries, label coverage, and references to matching prediction-log records."
+      },
+      "content": "The monitoring read API queries derived metrics first and resolves prediction-log references only when a user drills into evidence.",
+      "requirementIds": ["legacy-requirement:8", "legacy-requirement:7"]
+    },
+    {
+      "id": "mlops004_false_alarm_controls",
+      "stepNumber": 30,
+      "phase": "Separate distribution shifts from label-backed quality signals",
+      "title": "Control false alarms without hiding the first signal",
+      "type": "decision_point",
+      "content": "Minimize false drift alarms by validating statistical and effect-size cutoffs against stable history, requiring adequate evidence, comparing like-for-like cohorts, accounting for multiple feature comparisons, and grouping repeated alerts for the same model and condition. The frozen brief gives no numeric significance, effect-size, or minimum-sample threshold. Mark an under-supported result as provisional or insufficient evidence, and keep the first qualifying signal within the one-hour detection bound rather than delaying every alert for an invented confirmation interval.",
+      "decision": {
+        "question": "How should the monitor balance useful alerts with false-alarm control?",
+        "chosen": "Calibrate per-model criteria on reviewed history, report evidence and confidence, and consolidate duplicate notifications while preserving the original signal time.",
+        "chosenReason": "The decision exposes why a signal qualified and avoids a single unvalidated threshold or repeated pages for the same event.",
+        "alternatives": [
+          {"option": "Page on every feature-level statistic independently", "tradeoff": "Correlated features and repeated evaluations can flood operators with duplicate alerts."},
+          {"option": "Require a fixed number of repeated windows before any signal", "tradeoff": "An unprovided confirmation delay could violate detection within 1 hour."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "mlops004_log_failure",
+      "stepNumber": 31,
+      "phase": "Separate distribution shifts from label-backed quality signals",
+      "title": "Respond explicitly to prediction-log backpressure",
+      "type": "explanation",
+      "content": "If the broker or archive is unavailable, retry through a bounded durable buffer and surface the logging gap with its affected time range. Keep inference isolated from downstream evaluation where serving policy allows, but mark any prediction without a durable log as unlogged; after buffer capacity is exhausted, follow the configured serving policy and raise an operational alert. Never report a healthy drift result from missing telemetry, and replay accepted events idempotently after recovery.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlops004_label_delay_failure",
+      "stepNumber": 32,
+      "phase": "Separate distribution shifts from label-backed quality signals",
+      "title": "Keep delayed labels pending instead of mis-scoring",
+      "type": "explanation",
+      "content": "When an expected ground-truth label has not arrived, keep the prediction in pending-label coverage and exclude it from labeled performance denominators. Join a late outcome idempotently by prediction ID, update the relevant event-time aggregate, and show the label freshness and coverage. Missing labels are not incorrect predictions and must not create a false performance-degradation alert.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "mlops004_insufficient_evidence_failure",
+      "stepNumber": 33,
+      "phase": "Separate distribution shifts from label-backed quality signals",
+      "title": "Separate sparse or malformed input from drift",
+      "type": "explanation",
+      "content": "If a sliding window has insufficient evidence, a feature schema is unknown, or the event stream has a gap, return an explicit insufficient-data or schema-mismatch state and identify the affected feature and model version. Do not emit a normal no-drift result or a drift alarm from an invalid comparison. Route schema and ingestion failures as their own operational signals until comparable observations resume.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5"]
+    },
+    {
+      "id": "mlops004_detection_bound",
+      "stepNumber": 34,
+      "phase": "Separate distribution shifts from label-backed quality signals",
+      "title": "Measure the one-hour drift-detection requirement",
+      "type": "scale_trigger",
+      "content": "The frozen constraint is Drift detection within 1 hour of occurrence. Measure from the event timestamp of an observable distribution change to a persisted, queryable signal, including event transport, window finalization, test computation, and alert visibility. Tune windowing and processing cadence from measured load so the end-to-end path meets this bound; the brief does not specify a fixed window size or polling interval.",
+      "scaleTrigger": {
+        "metric": "Drift detection within 1 hour of occurrence, measured from event time to a visible evaluated signal",
+        "action": "Measure event-to-signal delay for numerical, categorical, and text-feature paths under representative production volume; adjust windowing and processing based on observed delay.",
+        "impact": "Validates the stated detection bound without inventing a shorter sub-target or a fixed evaluation cadence."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "mlops004_prediction_volume",
+      "stepNumber": 35,
+      "phase": "Separate distribution shifts from label-backed quality signals",
+      "title": "Exercise the stated prediction volume and feature types",
+      "type": "scale_trigger",
+      "content": "The frozen constraint is Handle 1M+ predictions per day and support numerical, categorical, and text features. Exercise full prediction logging, event fan-out, feature summaries, delayed joins, and dashboard drill-down at that stated volume; measure peak shape and feature cardinality from the actual workload before sizing partitions or storage. Do not turn the daily volume into an unstated latency or retention promise.",
+      "scaleTrigger": {
+        "metric": "Handle 1M+ predictions per day across numerical, categorical, and text features",
+        "action": "Load representative feature distributions through logging, archival, aggregation, and query paths, then size capacity from measured peak rate and cardinality.",
+        "impact": "Checks the frozen throughput and feature-type constraints without assuming an unstated peak multiplier or storage horizon."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlops004_retraining_pipeline",
+      "stepNumber": 36,
+      "phase": "Notify, retrain, and inspect the evidence",
+      "title": "Add the automated retraining pipeline",
+      "type": "add_component",
+      "component": {
+        "nodeId": "mlops004_retraining",
+        "componentType": "mlops-pipeline",
+        "label": "Policy-Driven Model Retraining Pipeline",
+        "description": "Starts a versioned training run from an actionable signal",
+        "position": {"x": 1980, "y": 330},
+        "properties": {
+          "componentName": "Policy-Driven Model Retraining Pipeline",
+          "purpose": "Accept an actionable, model-scoped alert with its signal evidence and lineage, select the approved training data and configuration, and produce a candidate model for evaluation and registration."
+        },
+        "highlightReason": "The frozen brief requires automated retraining triggers, while separating alerting from candidate validation prevents a raw statistic from silently changing serving."
+      },
+      "content": "Trigger a training run only when the model's configured policy treats the signal as actionable. The prompt provides no significance cutoff or retraining threshold to hard-code.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6"]
+    },
+    {
+      "id": "mlops004_monitor_retraining",
+      "stepNumber": 37,
+      "phase": "Notify, retrain, and inspect the evidence",
+      "title": "Route qualifying alerts into retraining",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "mlops004_monitor_retraining",
+        "sourceNodeId": "mlops004_monitoring",
+        "targetNodeId": "mlops004_retraining",
+        "connectionType": "message-queue",
+        "label": "Policy-approved drift or performance trigger",
+        "description": "Start a retraining workflow with model version, signal type, evidence window, affected cohort, and alert provenance."
+      },
+      "content": "Trigger automated retraining pipelines when significant drift or performance drops satisfy the model's reviewed policy. Preserve a deduplication key so repeated evaluations of the same signal do not create duplicate runs.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "mlops004_model_registry",
+      "stepNumber": 38,
+      "phase": "Notify, retrain, and inspect the evidence",
+      "title": "Add the model registry for candidate lineage",
+      "type": "add_component",
+      "component": {
+        "nodeId": "mlops004_registry",
+        "componentType": "model-registry",
+        "label": "Model and Monitoring Lineage Registry",
+        "description": "Tracks candidate provenance and approved serving versions",
+        "position": {"x": 2270, "y": 330},
+        "properties": {
+          "componentName": "Model and Monitoring Lineage Registry",
+          "purpose": "Record candidate model identity, training run, source signal, evaluation result, feature schema, and the currently approved serving version."
+        },
+        "highlightReason": "Version lineage lets monitoring compare the correct baseline and lets operators trace a retraining trigger to its candidate."
+      },
+      "content": "Registry lineage makes each alert and training run traceable to the active model and the data window that prompted the run.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7"]
+    },
+    {
+      "id": "mlops004_pipeline_registry",
+      "stepNumber": 39,
+      "phase": "Notify, retrain, and inspect the evidence",
+      "title": "Register retraining candidates with provenance",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "mlops004_pipeline_registry",
+        "sourceNodeId": "mlops004_retraining",
+        "targetNodeId": "mlops004_registry",
+        "connectionType": "data-flow",
+        "label": "Candidate, evaluation, and trigger lineage",
+        "description": "Write the candidate and its training configuration, source alert, data lineage, and validation outcome."
+      },
+      "content": "The retraining trigger starts a candidate workflow; it does not by itself assert that the candidate is better or ready to serve.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7"]
+    },
+    {
+      "id": "mlops004_registry_serving",
+      "stepNumber": 40,
+      "phase": "Notify, retrain, and inspect the evidence",
+      "title": "Keep serving tied to an approved model version",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "mlops004_registry_serving",
+        "sourceNodeId": "mlops004_registry",
+        "targetNodeId": "mlops004_serving",
+        "connectionType": "data-flow",
+        "label": "Approved model and feature-schema version",
+        "description": "Expose the active approved version used for inference and monitoring attribution."
+      },
+      "content": "A retraining event creates a candidate and lineage record. Only a candidate accepted by the model's release policy becomes the active serving version; the frozen brief does not specify an automatic promotion policy.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6"]
+    },
+    {
+      "id": "mlops004_dashboard_flow",
+      "stepNumber": 41,
+      "phase": "Notify, retrain, and inspect the evidence",
+      "title": "Make dashboard queries explain each signal",
+      "type": "explanation",
+      "content": "Provide monitoring dashboards with drill-down. Start with model and version, time range, signal type, feature, and cohort filters; query compact time-windowed aggregates; then follow a selected signal to its reference and sliding-window distributions, test method, label coverage, prediction IDs, and matching log records. Show alert and retraining history alongside the evidence. Keep the query bounded by the requested filters and expose the evaluated-through timestamp.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "mlops004_gateway_monitoring",
+      "stepNumber": 42,
+      "phase": "Notify, retrain, and inspect the evidence",
+      "title": "Route filtered dashboard reads to monitoring",
+      "type": "add_connection",
+      "connection": {
+        "edgeId": "mlops004_gateway_monitoring",
+        "sourceNodeId": "mlops004_gateway",
+        "targetNodeId": "mlops004_monitoring",
+        "connectionType": "api-call",
+        "label": "Authorized model, time, cohort, and signal query",
+        "description": "Resolve dashboard filters through the monitoring API and return aggregate results with drill-down references and freshness metadata."
+      },
+      "content": "The query route uses the same model and cohort identity as the evaluator, so displayed signals can be traced to the persisted result and prediction log.",
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "mlops004_stale_dashboard_failure",
+      "stepNumber": 43,
+      "phase": "Notify, retrain, and inspect the evidence",
+      "title": "Show stale or unavailable monitoring data honestly",
+      "type": "explanation",
+      "content": "If the metrics store or evaluator is behind or unavailable, return the last evaluated-through timestamp and a stale or unavailable state with the affected model and time range. Do not render an old aggregate as current, and do not translate a query failure into a zero-drift result. Keep the last known result available when possible while making its age and missing interval explicit.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8"]
+    },
+    {
+      "id": "mlops004_retraining_rejection",
+      "stepNumber": 44,
+      "phase": "Notify, retrain, and inspect the evidence",
+      "title": "Handle an invalid retraining candidate safely",
+      "type": "explanation",
+      "content": "If candidate evaluation or registration fails, record the failed stage and source alert, notify the model owner, and leave the currently approved serving version active. Do not mark retraining successful and do not promote an invalid candidate or erase the monitoring evidence that initiated the run. The exact candidate-quality threshold is model-specific and absent from the frozen brief.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6"]
+    },
+    {
+      "id": "mlops004_acceptance",
+      "stepNumber": 45,
+      "phase": "Notify, retrain, and inspect the evidence",
+      "title": "Review the complete monitoring loop",
+      "type": "conclusion",
+      "content": "Trace one prediction from versioned feature lookup through prediction logging, reference-versus-sliding-window evaluation, separate data-drift, concept-drift, and performance signals, delayed label joining, alert policy, and dashboard drill-down. Then exercise log backpressure, late labels, insufficient evidence, stale queries, and a rejected retraining candidate. Verify the stated detection-within-one-hour and 1M+-predictions-per-day constraints with representative numerical, categorical, and text features. No browser persistence, AI assessment, or publication gate has been run or passed by this local draft and focused structural test.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    }
+  ]
+}

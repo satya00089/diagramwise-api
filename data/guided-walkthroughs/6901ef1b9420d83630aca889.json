@@ -1,0 +1,263 @@
+{
+  "problem_id": "6901ef1b9420d83630aca889",
+  "version": "1.0.0-review-draft",
+  "requirementRevision": null,
+  "totalSteps": 44,
+  "phases": [
+    {"name": "Define the download contract", "stepRange": [1, 7], "description": "Separate supplied requirements from product assumptions, define resumable job state, and make completion semantics explicit."},
+    {"name": "Place the client, control plane, and transfer services", "stepRange": [8, 17], "description": "Build the client-to-backend control path and the bounded worker, origin, storage, throttling, and operations components from the existing catalog."},
+    {"name": "Connect submission, transfer, and delivery", "stepRange": [18, 33], "description": "Replay the request, durable queue, protocol-adapter, checkpoint, progress, bandwidth-policy, and verified-artifact paths."},
+    {"name": "Make recovery and portability testable", "stepRange": [34, 44], "description": "Negotiate protocol capabilities, define safe resume and checksum behavior, protect memory and threads, and validate failure and scale assumptions."}
+  ],
+  "steps": [
+    {
+      "id": "downloader_01_brief", "stepNumber": 1, "phase": "Define the download contract", "title": "Start from the supplied problem", "type": "explanation",
+      "content": "The live brief requires URL downloads, resume after interruption, progress reporting, concurrent chunks, integrity checks, GB-scale files, retry logic, and bandwidth throttling. Constraints are network interruptions, efficient memory, HTTP and FTP support, thread safety, and cross-platform compatibility. The brief gives no throughput, latency, file-count, concurrency, retention, or availability target; do not imply one.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "downloader_02_scope", "stepNumber": 2, "phase": "Define the download contract", "title": "State what this reference architecture assumes", "type": "explanation",
+      "content": "Review assumptions: a caller submits a URL to an authenticated backend-managed download job, the service is allowed to fetch that origin, and the caller eventually saves a verified artifact through a platform-specific file sink. Authentication, URL allowlists, tenant isolation, source credentials, retention, and maximum file size are not specified by the brief and require product decisions. The design uses a backend transfer path to give HTTP and FTP one observable job and recovery model; it does not claim that every origin supports ranges.",
+      "requirementIds": []
+    },
+    {
+      "id": "downloader_03_no_capacity_guess", "stepNumber": 3, "phase": "Define the download contract", "title": "Leave capacity numbers as decisions", "type": "explanation",
+      "content": "GB-scale files are explicit, but their size distribution, concurrent jobs, origin bandwidth, and completion objective are not. Agree these with product and operators, then size queue retention, worker concurrency, temporary storage, and egress from measured workloads. Until then, use bounded configurable limits and report no invented requests-per-second or latency SLO.",
+      "requirementIds": ["legacy-requirement:6"]
+    },
+    {
+      "id": "downloader_04_sdk_contract", "stepNumber": 4, "phase": "Define the download contract", "title": "Give callers one stable library interface", "type": "explanation",
+      "content": "A portable SDK can expose start(url, options), resume(downloadId), cancel(downloadId), and subscribe(downloadId, listener). Options include an optional expected digest, per-job byte-rate limit, and destination adapter. Return a durable job ID rather than holding one request open for a multi-GB transfer. Keep browser, desktop, and server file-sink implementations behind the same interface.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "downloader_05_api_contract", "stepNumber": 5, "phase": "Define the download contract", "title": "Separate job submission from progress reads", "type": "explanation",
+      "content": "For example, POST /downloads accepts the URL, approved protocol options, and an idempotency key and returns a job ID. GET /downloads/{id} returns state, bytes completed, known total, retryable status, and verified checksum; DELETE requests cancellation. Authorize every status/result read to the job owner. These are proposed contracts, not existing product APIs.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:7"]
+    },
+    {
+      "id": "downloader_06_state_model", "stepNumber": 6, "phase": "Define the download contract", "title": "Persist enough state to resume safely", "type": "explanation",
+      "content": "A Download manifest should record job and owner IDs, canonical source identity, protocol, state, idempotency key, known length, source validator, completed byte ranges or FTP restart offset, retry schedule, destination object key, and checksum status. A chunk is complete only after its bytes are durably committed and its checkpoint is recorded. Keep transient worker leases separate from durable progress.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "downloader_07_completion", "stepNumber": 7, "phase": "Define the download contract", "title": "Do not report success before verification", "type": "explanation",
+      "content": "Use explicit states such as queued, transferring, retry_wait, verifying, complete, failed, and cancelled. Completion means the expected byte length is assembled and integrity policy passed; a generated checksum alone detects later changes but does not prove source authenticity. A cancelled or failed job remains resumable only while its source validator and retained data are still valid.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:1"]
+    },
+    {
+      "id": "downloader_08_client", "stepNumber": 8, "phase": "Place the client, control plane, and transfer services", "title": "Add the portable downloader client", "type": "add_component",
+      "content": "Use the existing Web App catalog component for the frontend library and its progress UI. Keep the SDK thin: submit and observe a backend job, apply local pacing when requested, and write returned bytes through a platform adapter. Do not assume every browser supports the same filesystem API.",
+      "component": {"nodeId": "downloader_client", "componentType": "web-app", "label": "Downloader SDK & Client", "description": "Cross-platform facade, job controls, progress events, and destination adapters", "position": {"x": 0, "y": 250}, "properties": {"componentName": "Downloader SDK & Client", "purpose": "Expose start, resume, cancel, and progress APIs over the backend job contract; isolate browser/desktop destination adapters and keep memory bounded while saving verified bytes."}, "highlightReason": "The library must present one cross-platform API without moving correctness decisions into a particular UI runtime."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "downloader_09_origins", "stepNumber": 9, "phase": "Place the client, control plane, and transfer services", "title": "Represent external HTTP and FTP origins", "type": "add_component",
+      "content": "The catalog has no dedicated external-origin/source node: its Web Server represents a server component, not a remote dependency boundary. Use the existing Custom Component only for this missing concept. The supported protocols are HTTP and FTP; actual Range, validator, REST-restart, authentication, and parallel-read capabilities must be negotiated per origin.",
+      "component": {"nodeId": "downloader_origins", "componentType": "custom-component", "label": "External HTTP / FTP Origins", "description": "User-selected remote sources; capabilities vary by server", "position": {"x": 0, "y": 590}, "data": {"originalComponentId": "custom-component", "semanticRole": "external-api"}, "properties": {"componentName": "External HTTP / FTP Origins", "subtitle": "Untrusted remote dependencies", "purpose": "Serve source bytes over HTTP or FTP. The transfer adapter probes protocol and range/restart support, validates source identity, and treats remote metadata as untrusted input.", "componentType": "External data source", "technology": "HTTP and FTP endpoints", "notes": "No origin implementation, authentication mode, byte-range capability, or availability is specified by the problem."}, "highlightReason": "No built-in catalog component represents a remote origin as an external dependency; a custom node is limited to this verified gap."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:3"]
+    },
+    {
+      "id": "downloader_10_gateway", "stepNumber": 10, "phase": "Place the client, control plane, and transfer services", "title": "Add the API boundary", "type": "add_component",
+      "content": "Reuse the API Gateway to validate request shape, terminate TLS, enforce coarse admission limits, and route submit/status/cancel operations. The gateway must not proxy multi-GB content; job control and file bytes stay on separate paths.",
+      "component": {"nodeId": "download_gateway", "componentType": "api-gateway", "label": "Download API Gateway", "description": "Validated control-plane entry; no large-file proxying", "position": {"x": 300, "y": 250}, "properties": {"componentName": "Download API Gateway", "purpose": "Validate bounded job-control requests, route status and cancellation, and apply TLS and admission policy without buffering file bodies."}, "highlightReason": "Separating job control from file transfer prevents large payloads from occupying API request memory."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-constraint:2"]
+    },
+    {
+      "id": "downloader_11_control", "stepNumber": 11, "phase": "Place the client, control plane, and transfer services", "title": "Add the download control service", "type": "add_component",
+      "content": "Reuse Backend Server for idempotent job creation, ownership checks, capability policy, status reads, cancellation, and signed-result authorization. It stores references and progress metadata—not multi-GB payloads.",
+      "component": {"nodeId": "download_control_api", "componentType": "backend-server", "label": "Download Control API", "description": "Job lifecycle, policy, checkpoint metadata, and progress queries", "position": {"x": 620, "y": 250}, "properties": {"componentName": "Download Control API", "purpose": "Create or resume idempotent jobs, authorize status/result access, persist transfer metadata, and return progress without carrying file bytes."}, "highlightReason": "A stateless control service can scale separately from long-running transfer workers."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "downloader_12_manifest", "stepNumber": 12, "phase": "Place the client, control plane, and transfer services", "title": "Add durable job and checkpoint metadata", "type": "add_component",
+      "content": "Reuse Database for job state, idempotency, source validators, completed ranges, retry state, and an outbox record. Use conditional state transitions or transactions so duplicate submissions and worker retries cannot both claim the same unfinished work.",
+      "component": {"nodeId": "download_manifest", "componentType": "database", "label": "Download Manifest & Checkpoints", "description": "Durable job state, source identity, progress, and outbox", "position": {"x": 940, "y": 70}, "properties": {"componentName": "Download Manifest & Checkpoints", "purpose": "Persist idempotent job ownership, protocol validators, byte-range checkpoints, retry state, and transactional outbox records; keep file bytes outside the database."}, "highlightReason": "Resume and thread-safe state transitions require durable coordination independent of a worker process."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "downloader_13_queue", "stepNumber": 13, "phase": "Place the client, control plane, and transfer services", "title": "Queue long-running transfer work", "type": "add_component",
+      "content": "Use the existing durable Queue to decouple an accepted download job from worker lifetime. Messages carry a job ID and version, never the file bytes or long-lived source credentials; consumers must tolerate redelivery.",
+      "component": {"nodeId": "download_queue", "componentType": "queue", "label": "Transfer Job Queue", "description": "Durable, bounded-work dispatch for transfer jobs", "position": {"x": 940, "y": 280}, "properties": {"componentName": "Transfer Job Queue", "purpose": "Dispatch versioned job references with bounded retries and backoff; pause or reject admission when the agreed backlog or retention limit is reached."}, "highlightReason": "The API can acknowledge durable work without keeping a request or thread open for the file transfer."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "downloader_14_limiter", "stepNumber": 14, "phase": "Place the client, control plane, and transfer services", "title": "Add a shared bandwidth policy", "type": "add_component",
+      "content": "Reuse Rate Limiter as a token-bucket bandwidth policy keyed by job or approved tenant. It grants byte budgets to server workers; the client SDK applies the same requested per-download limit locally when saving. Define aggregate fairness and policy scope before promising a rate.",
+      "component": {"nodeId": "download_bandwidth_policy", "componentType": "rate-limiter", "label": "Bandwidth Token-Bucket Policy", "description": "Per-job byte budgets for worker reads and client delivery", "position": {"x": 940, "y": 530}, "properties": {"componentName": "Bandwidth Token-Bucket Policy", "purpose": "Grant bounded byte-rate tokens per job or approved tenant; coordinate server transfer pacing while the SDK enforces its local destination rate."}, "highlightReason": "A shared byte budget makes bandwidth throttling explicit rather than relying on uncontrolled worker parallelism."},
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "downloader_15_worker", "stepNumber": 15, "phase": "Place the client, control plane, and transfer services", "title": "Add protocol-aware transfer workers", "type": "add_component",
+      "content": "Reuse Processing Worker for streaming HTTP/FTP adapters, capability probes, bounded parallel ranges, retry scheduling, ordered assembly, and checksum verification. Workers use a fixed buffer and explicit per-job/global concurrency caps; the whole file is never held in RAM.",
+      "component": {"nodeId": "transfer_workers", "componentType": "processing-worker", "label": "HTTP / FTP Transfer Workers", "description": "Streaming protocol adapters, range scheduling, retries, and verification", "position": {"x": 1260, "y": 280}, "properties": {"componentName": "HTTP / FTP Transfer Workers", "purpose": "Stream bounded byte ranges from HTTP or FTP origins, persist safe checkpoints, retry transient failures, apply byte-rate tokens, and verify the assembled artifact before publication."}, "highlightReason": "Long-running I/O and protocol-specific resume behavior belong outside the latency-sensitive control API."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "downloader_16_storage", "stepNumber": 16, "phase": "Place the client, control plane, and transfer services", "title": "Store staged and verified artifacts separately", "type": "add_component",
+      "content": "Reuse Object Storage for multipart staging and completed artifacts. Keep temporary parts private; complete the multipart object only after all expected ranges are present and checksum policy passes. Retention and cleanup periods need product approval.",
+      "component": {"nodeId": "verified_download_store", "componentType": "object-storage", "label": "Staged & Verified Download Store", "description": "Bounded-memory multipart assembly and private completed artifacts", "position": {"x": 1580, "y": 280}, "properties": {"componentName": "Staged & Verified Download Store", "purpose": "Receive streamed multipart ranges, retain private incomplete staging state, and expose an artifact only after ordered assembly, expected-length checks, and integrity policy succeed."}, "highlightReason": "Object storage handles multi-GB bytes without database blobs or whole-file worker memory."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "downloader_17_monitoring", "stepNumber": 17, "phase": "Place the client, control plane, and transfer services", "title": "Add transfer and recovery observability", "type": "add_component",
+      "content": "Reuse Monitoring for queue age, active workers, bytes/sec, retry and checksum failures, resume success, temporary-storage usage, and time-to-complete distributions. Avoid logging signed URLs, credentials, or full user-supplied query strings.",
+      "component": {"nodeId": "download_observability", "componentType": "monitoring", "label": "Transfer Metrics & Alerts", "description": "Progress, saturation, correctness, and recovery signals", "position": {"x": 1260, "y": 570}, "properties": {"componentName": "Transfer Metrics & Alerts", "purpose": "Observe queue backlog, worker saturation, transfer throughput, retries, checksum mismatches, checkpoint age, and storage cleanup without exposing source credentials."}, "highlightReason": "Recovery and scale decisions need measurable signals, not just a client-side progress bar."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "downloader_18_submit", "stepNumber": 18, "phase": "Connect submission, transfer, and delivery", "title": "Submit a durable job from the SDK", "type": "add_connection",
+      "content": "The client sends a small URL/options request plus a stable idempotency key. It receives the same job ID on retry rather than creating duplicate transfers; no file body is sent on this control path.",
+      "connection": {"edgeId": "downloader_client_to_gateway", "sourceNodeId": "downloader_client", "targetNodeId": "download_gateway", "connectionType": "https", "label": "Submit / resume / cancel job", "description": "Small idempotent control request; large file bytes use the separate artifact path."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:7"]
+    },
+    {
+      "id": "downloader_19_route", "stepNumber": 19, "phase": "Connect submission, transfer, and delivery", "title": "Route validated control requests", "type": "add_connection",
+      "content": "The gateway validates bounded fields and sends job control calls to the service. Enforce scheme and URL policy before scheduling; reject unsupported protocols instead of silently downgrading transport.",
+      "connection": {"edgeId": "downloader_gateway_to_api", "sourceNodeId": "download_gateway", "targetNodeId": "download_control_api", "connectionType": "https", "label": "Validated job control", "description": "Route authenticated or otherwise policy-authorized submit, status, and cancel operations."},
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "downloader_20_manifest_write", "stepNumber": 20, "phase": "Connect submission, transfer, and delivery", "title": "Commit job state before dispatch", "type": "add_connection",
+      "content": "Persist the idempotency key, owner, source identity, protocol state, and outbox event transactionally. This gives retries a stable job and allows dispatch to recover after an API process crash.",
+      "connection": {"edgeId": "downloader_api_to_manifest", "sourceNodeId": "download_control_api", "targetNodeId": "download_manifest", "connectionType": "database-connection", "label": "Create job & outbox", "description": "Conditionally create or return the existing idempotent manifest and durable dispatch record."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "downloader_21_dispatch", "stepNumber": 21, "phase": "Connect submission, transfer, and delivery", "title": "Publish work through an outbox relay", "type": "add_connection",
+      "content": "The control service relays committed outbox records to the durable queue and marks them dispatched idempotently. This avoids losing a job between a database commit and a separate queue publish; redelivery remains safe.",
+      "connection": {"edgeId": "downloader_api_to_queue", "sourceNodeId": "download_control_api", "targetNodeId": "download_queue", "connectionType": "message-queue", "label": "Outbox job dispatch", "description": "Publish only committed job IDs with a stable event ID; tolerate relay retries and duplicate queue delivery."},
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "downloader_22_consume", "stepNumber": 22, "phase": "Connect submission, transfer, and delivery", "title": "Lease one job to a bounded worker", "type": "add_connection",
+      "content": "Workers claim a job with a lease/version and compare-and-set its state. A stale or duplicate delivery cannot write overlapping progress or overwrite a newer checkpoint.",
+      "connection": {"edgeId": "downloader_queue_to_workers", "sourceNodeId": "download_queue", "targetNodeId": "transfer_workers", "connectionType": "message-queue", "label": "Leased job reference", "description": "Dispatch a small versioned job pointer; worker claims and acknowledges only after durable state transitions."},
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "downloader_23_fetch_origin", "stepNumber": 23, "phase": "Connect submission, transfer, and delivery", "title": "Fetch only negotiated source ranges", "type": "add_connection",
+      "content": "The worker requests HTTP ranges or uses FTP restart support only after probing capability and stable source identity. Parallelize ranges only when the origin supports it; otherwise use a bounded sequential stream and expose that mode in progress.",
+      "connection": {"edgeId": "downloader_workers_to_origins", "sourceNodeId": "transfer_workers", "targetNodeId": "downloader_origins", "connectionType": "data-flow", "label": "HTTP Range / FTP transfer", "description": "Protocol adapter fetches bounded ranges or a sequential stream after source capability and identity checks."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "downloader_24_stage_bytes", "stepNumber": 24, "phase": "Connect submission, transfer, and delivery", "title": "Stream bytes into private multipart staging", "type": "add_connection",
+      "content": "Each bounded buffer is written as a staging part, not accumulated as a whole file in worker memory. Persist a range checkpoint only after the corresponding part is durable; orphaned parts are garbage-collected by an approved lifecycle policy.",
+      "connection": {"edgeId": "downloader_workers_to_store", "sourceNodeId": "transfer_workers", "targetNodeId": "verified_download_store", "connectionType": "data-flow", "label": "Stream bounded parts", "description": "Write temporary multipart ranges and promote only a fully assembled, verified object."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "downloader_25_checkpoint", "stepNumber": 25, "phase": "Connect submission, transfer, and delivery", "title": "Persist checkpoints and truthful progress", "type": "add_connection",
+      "content": "Workers write completed byte ranges, source validators, retry state, and monotonic progress to the manifest. Compare-and-set the job version so concurrent workers cannot mark an uncommitted part complete.",
+      "connection": {"edgeId": "downloader_workers_to_manifest", "sourceNodeId": "transfer_workers", "targetNodeId": "download_manifest", "connectionType": "database-connection", "label": "Durable range checkpoints", "description": "Commit progress only after storage durability and reject stale worker versions."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "downloader_26_api_budget", "stepNumber": 26, "phase": "Connect submission, transfer, and delivery", "title": "Apply an approved byte budget", "type": "add_connection",
+      "content": "The control plane resolves the requested throttle against global and caller policy. Reject or clamp invalid rates according to a documented policy; do not let one job consume the aggregate transfer budget.",
+      "connection": {"edgeId": "downloader_api_to_bandwidth", "sourceNodeId": "download_control_api", "targetNodeId": "download_bandwidth_policy", "connectionType": "api-call", "label": "Resolve per-job byte budget", "description": "Return a bounded token policy for the accepted job and its authorized scope."},
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "downloader_27_worker_budget", "stepNumber": 27, "phase": "Connect submission, transfer, and delivery", "title": "Pace origin reads and retries", "type": "add_connection",
+      "content": "Workers acquire byte tokens before reading or writing a chunk. A pause due to throttling must preserve the last durable checkpoint and must not be counted as a network failure.",
+      "connection": {"edgeId": "downloader_workers_to_bandwidth", "sourceNodeId": "transfer_workers", "targetNodeId": "download_bandwidth_policy", "connectionType": "api-call", "label": "Consume transfer tokens", "description": "Bound aggregate and per-job bytes per second independently from worker thread count."},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:4"]
+    },
+    {
+      "id": "downloader_28_result_capability", "stepNumber": 28, "phase": "Connect submission, transfer, and delivery", "title": "Authorize access to a completed artifact", "type": "add_connection",
+      "content": "After verification, the control API creates a short-lived, object-scoped read capability for the authorized caller. It returns the capability through the control response and never exposes the storage credential or a mutable staging key.",
+      "connection": {"edgeId": "downloader_api_to_store", "sourceNodeId": "download_control_api", "targetNodeId": "verified_download_store", "connectionType": "api-call", "label": "Authorize verified artifact", "description": "Issue a narrow, expiring read capability only for a complete artifact owned by the requesting principal."},
+      "requirementIds": ["legacy-requirement:5"]
+    },
+    {
+      "id": "downloader_29_deliver_artifact", "stepNumber": 29, "phase": "Connect submission, transfer, and delivery", "title": "Deliver the verified file without API proxying", "type": "add_connection",
+      "content": "The client downloads from object storage using the scoped capability and streams into its destination adapter. If the client-side save is interrupted, retain a local checkpoint only when the adapter and signed capability can safely resume; otherwise request a fresh capability for the same immutable artifact.",
+      "connection": {"edgeId": "downloader_store_to_client", "sourceNodeId": "verified_download_store", "targetNodeId": "downloader_client", "connectionType": "data-flow", "label": "Scoped artifact download", "description": "Stream completed bytes to the client destination; never route the multi-GB response through the control API."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "downloader_30_progress_response", "stepNumber": 30, "phase": "Connect submission, transfer, and delivery", "title": "Return durable progress to the SDK", "type": "add_connection",
+      "content": "Expose progress from the durable manifest through server-sent events where available, with bounded polling as a fallback. Report known total separately from unknown length and distinguish bytes fetched, verified, and delivered to the caller.",
+      "connection": {"edgeId": "downloader_gateway_to_client", "sourceNodeId": "download_gateway", "targetNodeId": "downloader_client", "connectionType": "https", "label": "Progress events / status", "description": "Return authorized monotonic job state; use polling when an event stream disconnects."},
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:1"]
+    },
+    {
+      "id": "downloader_31_api_metrics", "stepNumber": 31, "phase": "Connect submission, transfer, and delivery", "title": "Observe control-plane outcomes", "type": "add_connection",
+      "content": "Emit bounded-cardinality metrics for accepted, rejected, duplicate, cancelled, and expired jobs. Do not use raw URLs or user IDs as metric labels.",
+      "connection": {"edgeId": "downloader_api_to_metrics", "sourceNodeId": "download_control_api", "targetNodeId": "download_observability", "connectionType": "data-flow", "label": "Job lifecycle metrics", "description": "Measure API outcomes and manifest transition errors without sensitive label values."},
+      "requirementIds": []
+    },
+    {
+      "id": "downloader_32_worker_metrics", "stepNumber": 32, "phase": "Connect submission, transfer, and delivery", "title": "Observe transfer correctness and throughput", "type": "add_connection",
+      "content": "Workers report per-protocol throughput, retry classes, range fallback, checksum mismatches, and checkpoint age. These signals explain whether a slow job is origin-limited, throttled, storage-limited, or waiting in queue.",
+      "connection": {"edgeId": "downloader_workers_to_metrics", "sourceNodeId": "transfer_workers", "targetNodeId": "download_observability", "connectionType": "data-flow", "label": "Transfer and integrity metrics", "description": "Track bounded operational signals without recording signed URLs, credentials, or file content."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1"]
+    },
+    {
+      "id": "downloader_33_queue_metrics", "stepNumber": 33, "phase": "Connect submission, transfer, and delivery", "title": "Alert before backlog becomes unbounded", "type": "add_connection",
+      "content": "Queue depth alone can hide stuck work; export oldest-job age, enqueue/dequeue rates, retry backlog, and dead-letter count. Admission policy must stop accepting work before durable capacity is exhausted.",
+      "connection": {"edgeId": "downloader_queue_to_metrics", "sourceNodeId": "download_queue", "targetNodeId": "download_observability", "connectionType": "data-flow", "label": "Backlog and retry signals", "description": "Expose queue age, throughput, redelivery, and terminal-failure counts for capacity decisions."},
+      "requirementIds": ["legacy-requirement:7"]
+    },
+    {
+      "id": "downloader_34_protocol_choice", "stepNumber": 34, "phase": "Make recovery and portability testable", "title": "Negotiate protocol features instead of assuming them", "type": "decision_point",
+      "content": "For HTTP, probe length, Range support, and a stable ETag or Last-Modified validator. For FTP, confirm SIZE and restart-marker support before resuming. Parallel ranges are used only when the origin's semantics support them; otherwise one bounded stream still satisfies protocol coverage but not parallelism for that particular source.",
+      "decision": {"question": "When is a download split into concurrent chunks?", "chosen": "Only when the adapter confirms safe random-access ranges and a stable source validator; otherwise use a bounded sequential transfer", "chosenReason": "A server that ignores ranges or changes the source can create gaps, duplicate bytes, or a corrupt final file.", "alternatives": [{"option": "Always issue parallel ranges", "tradeoff": "Incorrect for origins without range support and unsafe if the source changes during transfer."}, {"option": "Always download sequentially", "tradeoff": "Simple and broadly compatible, but fails to use supported concurrent chunk downloads."}]},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "downloader_35_resume_validator", "stepNumber": 35, "phase": "Make recovery and portability testable", "title": "Resume only the same source generation", "type": "explanation",
+      "content": "Persist the validator and expected length with each checkpoint. On HTTP resume, use conditional range requests and reject a changed validator; for FTP, treat size/time as weaker evidence and restart when identity cannot be established. Never concatenate bytes from different source versions. If resume is unsupported, restart safely from zero and tell the caller.",
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:1"]
+    },
+    {
+      "id": "downloader_36_bounded_memory", "stepNumber": 36, "phase": "Make recovery and portability testable", "title": "Bound memory independently of file size", "type": "explanation",
+      "content": "Stream fixed-size buffers and bound the number of in-flight chunks per worker and per job. Approximate transfer memory as active workers × per-worker parallel chunks × buffer size, then include protocol and storage client overhead in load tests. Apply backpressure when staging or destination writes fall behind; never collect a GB-scale response into one array or buffer.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:2"]
+    },
+    {
+      "id": "downloader_37_integrity", "stepNumber": 37, "phase": "Make recovery and portability testable", "title": "Verify the assembled artifact", "type": "decision_point",
+      "content": "Assemble parts in byte order, check the expected length, and calculate a streaming SHA-256 digest before marking the artifact complete. If the caller or trusted source supplies an expected digest, compare it; if none exists, label the generated digest as a fingerprint, not proof of authenticity. Do not treat a collection of per-part hashes as the whole-file hash.",
+      "decision": {"question": "When may a job transition to complete?", "chosen": "After ordered assembly, byte-length validation, and the configured trusted-digest comparison", "chosenReason": "A progress value reaching 100 percent is not evidence that bytes are complete or correct.", "alternatives": [{"option": "Mark complete when the final range arrives", "tradeoff": "Misses missing, duplicated, reordered, or corrupted ranges."}, {"option": "Trust a source-provided digest without provenance", "tradeoff": "An untrusted response header can be changed by the same origin serving the file."}]},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:2"]
+    },
+    {
+      "id": "downloader_38_atomic_publish", "stepNumber": 38, "phase": "Make recovery and portability testable", "title": "Publish completion atomically", "type": "explanation",
+      "content": "Keep incomplete multipart objects private and expose only a completed immutable object after verification. On a local destination, write through a temporary file and use an atomic rename only where the platform/filesystem guarantees it; otherwise use a completion marker and adapter-specific recovery. A crash during finalization must leave the prior destination intact.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "downloader_39_thread_safety", "stepNumber": 39, "phase": "Make recovery and portability testable", "title": "Make concurrent callers and workers safe", "type": "explanation",
+      "content": "Use immutable job IDs, unique idempotency keys, per-job leases, and compare-and-set manifest versions. A single owner schedules ranges for one job; independent jobs may run concurrently under global caps. The thread-safe local SDK serializes writes to one destination or uses disjoint offsets guarded by an adapter lock. Test two simultaneous resume calls and duplicate queue delivery.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:4"]
+    },
+    {
+      "id": "downloader_40_retry", "stepNumber": 40, "phase": "Make recovery and portability testable", "title": "Retry transient errors without duplicating bytes", "type": "explanation",
+      "content": "Classify timeouts, disconnects, 429, and retryable server errors separately from invalid URLs, authorization failures, and checksum mismatch. Use bounded exponential backoff with jitter and honor Retry-After where appropriate. Retry the same job/range identity from its last durable checkpoint; stop after policy limits and expose a terminal reason instead of looping forever.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:1"]
+    },
+    {
+      "id": "downloader_41_progress", "stepNumber": 41, "phase": "Make recovery and portability testable", "title": "Report progress users can trust", "type": "explanation",
+      "content": "Report committed bytes, verified bytes, and client-delivered bytes as distinct measures. Progress is monotonic for one source generation; unknown lengths use indeterminate progress, and retries do not double-count already completed ranges. Event-stream disconnects resume from the latest job version or fall back to polling.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1"]
+    },
+    {
+      "id": "downloader_42_url_safety", "stepNumber": 42, "phase": "Make recovery and portability testable", "title": "Protect the backend from unsafe source URLs", "type": "explanation",
+      "content": "Because the backend fetches user-selected URLs, validate schemes and redirects, block loopback/private/link-local destinations and cloud metadata ranges, re-check resolved addresses after redirects, and enforce egress controls to mitigate SSRF and DNS rebinding. Never forward ambient credentials. The exact allowlist and authentication policy are product/security decisions absent from the brief.",
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "downloader_43_scale", "stepNumber": 43, "phase": "Make recovery and portability testable", "title": "Scale from backlog and transfer saturation", "type": "scale_trigger",
+      "content": "The brief gives no numeric capacity target. Load-test representative HTTP/FTP origins, file sizes, interruption rates, and client destinations, then agree thresholds before setting autoscaling or admission limits.",
+      "scaleTrigger": {"metric": "Oldest queued-job age, active range count, origin throughput, retry rate, staging capacity, and worker memory", "action": "Scale workers only within origin, storage, memory, and byte-budget caps; apply backpressure or reject new work before the durable backlog or staging reserve is exhausted.", "impact": "Makes concurrency and availability measurable while keeping memory, retries, and bandwidth bounded."},
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "downloader_44_validation", "stepNumber": 44, "phase": "Make recovery and portability testable", "title": "Test the promises, not just the happy path", "type": "explanation",
+      "content": "Test HTTP with and without Range, changed ETag, malformed Content-Range, FTP with and without restart support, disconnect at every checkpoint boundary, duplicate submit/queue delivery, concurrent resume, disk/object-store backpressure, checksum mismatch, 429 Retry-After, cancellation races, and destination write failures on each supported platform. Assert bounded memory, no false 100-percent state, no published partial object, exact final bytes, and progress that recovers from the durable checkpoint. Choose a direct browser-to-origin alternative only when CORS, range semantics, and destination APIs meet product needs; this reference uses the backend-mediated path for consistent HTTP/FTP handling.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

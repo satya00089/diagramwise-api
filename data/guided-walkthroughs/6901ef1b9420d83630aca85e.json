@@ -1,0 +1,683 @@
+{
+  "problem_id": "6901ef1b9420d83630aca85e",
+  "version": "1.0.0-review-draft",
+  "requirementRevision": null,
+  "totalSteps": 36,
+  "phases": [
+    {
+      "name": "Serve the keystroke read path",
+      "stepRange": [1, 17],
+      "description": "Establish the client and low-latency suggestion path, then connect candidate retrieval, personalization, ranking, and the response."
+    },
+    {
+      "name": "Keep the corpus and user signals current",
+      "stepRange": [18, 30],
+      "description": "Persist canonical suggestion changes and user feedback, then apply events to the distributed index, caches, and personalization history."
+    },
+    {
+      "name": "Review matching, language, memory, and scale",
+      "stepRange": [31, 36],
+      "description": "Make the recall, ranking, freshness, and partitioning tradeoffs explicit and scale from observed request behavior."
+    }
+  ],
+  "steps": [
+    {
+      "id": "ta_01_scope",
+      "stepNumber": 1,
+      "phase": "Serve the keystroke read path",
+      "type": "explanation",
+      "title": "Keep the brief and unknowns visible",
+      "content": "The frozen brief requires suggestions while users type, top N relevant results, typo tolerance, personalization, real-time updates, billions of queries per day, and multiple languages. Treat the supplied <100ms limit as the user-visible keystroke-to-suggestion objective. Assume each request carries a partial query and locale, an optional opaque user key, and a requested N. The exact N policy, supported locales, personalization consent and retention policy, anonymous-user behavior, and the freshness meaning of real-time are unspecified; keep those as review decisions rather than inventing values."
+    },
+    {
+      "id": "ta_02_client",
+      "stepNumber": 2,
+      "phase": "Serve the keystroke read path",
+      "type": "add_component",
+      "title": "Add the typeahead client",
+      "content": "Send the current partial text, locale, requested result count, and optional authenticated user key. Ignore responses for superseded input so a slow earlier prefix cannot replace newer suggestions.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1"],
+      "component": {
+        "nodeId": "ta_client",
+        "componentType": "web-app",
+        "label": "Typeahead Client",
+        "description": "Search box and suggestion list in the browser",
+        "position": {"x": 0, "y": 260},
+        "properties": {
+          "componentName": "Typeahead Client",
+          "purpose": "Submit partial text and locale as the user types, optionally include an authenticated opaque user key, render the returned top N suggestions, and discard stale responses when newer input has already been entered."
+        },
+        "highlightReason": "The existing Web App catalog component represents the browser surface without introducing a custom client type."
+      }
+    },
+    {
+      "id": "ta_03_gateway",
+      "stepNumber": 3,
+      "phase": "Serve the keystroke read path",
+      "type": "add_component",
+      "title": "Add the request gateway",
+      "content": "Validate query shape and locale, apply the caller's access policy, and route suggestion reads separately from protected catalog updates. Do not put ranking work or a corpus scan in the gateway.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2"],
+      "component": {
+        "nodeId": "ta_gateway",
+        "componentType": "api-gateway",
+        "label": "Typeahead API Gateway",
+        "description": "Validated entry point for suggestion reads and catalog changes",
+        "position": {"x": 260, "y": 260},
+        "properties": {
+          "componentName": "Typeahead API Gateway",
+          "purpose": "Validate partial-query and locale inputs, enforce any caller identity policy, and route high-volume suggestion reads separately from authorized catalog-update requests."
+        },
+        "highlightReason": "The existing API Gateway catalog component supplies the request boundary and route split."
+      }
+    },
+    {
+      "id": "ta_04_read_api",
+      "stepNumber": 4,
+      "phase": "Serve the keystroke read path",
+      "type": "add_component",
+      "title": "Add a stateless suggestion API",
+      "content": "Normalize the partial query for its locale, fetch candidate and personalization signals in parallel, request ranking, and return the requested top N. Keep handlers stateless so read capacity can scale horizontally for the stated billions of queries per day.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "ta_read_api",
+        "componentType": "backend-server",
+        "label": "Suggestion Read API",
+        "description": "Stateless orchestration for each partial-query request",
+        "position": {"x": 540, "y": 260},
+        "properties": {
+          "componentName": "Suggestion Read API",
+          "purpose": "Normalize each partial query with its locale, read cached and indexed candidates plus compact user-history signals in parallel, invoke ranking, and return the caller's requested top N without scanning the full corpus. Keep the request handler stateless for horizontal read scaling."
+        },
+        "highlightReason": "The existing Backend Server catalog component covers the request orchestration service."
+      }
+    },
+    {
+      "id": "ta_05_prefix_cache",
+      "stepNumber": 5,
+      "phase": "Serve the keystroke read path",
+      "type": "add_component",
+      "title": "Cache popular locale-aware prefixes",
+      "content": "Use cache-aside entries for popular normalized prefixes and their precomputed top suggestions. Keep this cache limited to non-personalized candidates; apply user-specific ranking after lookup so one user's results cannot be served to another.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "ta_prefix_cache",
+        "componentType": "cache",
+        "label": "Popular Prefix Cache",
+        "description": "Bounded cache of locale and prefix keyed common candidates",
+        "position": {"x": 820, "y": 60},
+        "properties": {
+          "componentName": "Popular Prefix Cache",
+          "purpose": "Cache popular locale and normalized-prefix candidate lists with precomputed top suggestions. Store only non-personalized candidates, keep user-specific ranking outside shared keys, and invalidate affected prefixes when index updates arrive.",
+          "engine": "redis",
+          "cacheStrategy": "cache-aside",
+          "eviction": "lfu"
+        },
+        "highlightReason": "The existing Cache catalog component supports Redis, cache-aside, and LFU settings for hot-prefix reads."
+      }
+    },
+    {
+      "id": "ta_prefix_index",
+      "stepNumber": 6,
+      "phase": "Serve the keystroke read path",
+      "type": "add_component",
+      "title": "Add the distributed prefix index",
+      "content": "Represent the suggestion corpus with a compact trie or finite-state prefix index partitioned by locale and prefix range. Store ranking features and selected precomputed top descendants with entries. Use an exact-prefix fast path and a bounded typo-recovery path instead of scanning all suggestions for every partial query.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "ta_prefix_index",
+        "componentType": "search-engine",
+        "label": "Distributed Prefix Index",
+        "description": "Locale-partitioned suggestion terms and retrieval features",
+        "position": {"x": 820, "y": 260},
+        "properties": {
+          "componentName": "Distributed Prefix Index",
+          "purpose": "Serve locale-aware partial-prefix lookups over a distributed compact trie or finite-state representation. Keep popularity and freshness features with terms, precompute top descendants only for selected hot prefixes, and support bounded fuzzy candidates for typo tolerance without a full-corpus scan."
+        },
+        "highlightReason": "The existing Search Engine catalog component represents indexed retrieval; the compact prefix structure remains an implementation choice rather than a custom catalog node."
+      }
+    },
+    {
+      "id": "ta_ranker",
+      "stepNumber": 7,
+      "phase": "Serve the keystroke read path",
+      "type": "add_component",
+      "title": "Rank candidates for the current user",
+      "content": "Combine prefix and fuzzy candidates with locale, query context, popularity, freshness, and permitted user-history signals. A machine-learning ranker chooses the most relevant results; preserve a deterministic feature-based fallback if model inference is unavailable.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"],
+      "component": {
+        "nodeId": "ta_ranker",
+        "componentType": "recommendation-service",
+        "label": "Suggestion Ranking Service",
+        "description": "Personalized relevance ordering for candidate suggestions",
+        "position": {"x": 1100, "y": 260},
+        "properties": {
+          "componentName": "Suggestion Ranking Service",
+          "purpose": "Rank only retrieved candidates using query and locale context, popularity, freshness, and permitted user-history features. Return a relevance-ordered top N with a deterministic fallback when machine-learning inference is unavailable.",
+          "algorithm": "Hybrid",
+          "realTime": true
+        },
+        "highlightReason": "The existing Recommendation catalog component is explicitly intended for ML ranking and personalization."
+      }
+    },
+    {
+      "id": "ta_08_profile_store",
+      "stepNumber": 8,
+      "phase": "Serve the keystroke read path",
+      "type": "add_component",
+      "title": "Store compact suggestion history",
+      "content": "Keep a compact user-keyed history of selected suggestions and eligible interactions, separate from the shared corpus. Apply the product's consent, access, and retention rules; do not put raw identity or history into shared prefix-cache entries.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "ta_profile_store",
+        "componentType": "database",
+        "label": "Suggestion History Store",
+        "description": "User-keyed compact features for personalization",
+        "position": {"x": 1100, "y": 500},
+        "properties": {
+          "componentName": "Suggestion History Store",
+          "purpose": "Persist compact, access-controlled user-keyed suggestion history and preference features for personalized ranking. Apply product-defined consent and retention rules and keep these records out of shared prefix-cache values."
+        },
+        "highlightReason": "The existing Database catalog component represents durable user-specific ranking features."
+      }
+    },
+    {
+      "id": "ta_09_client_gateway",
+      "stepNumber": 9,
+      "phase": "Serve the keystroke read path",
+      "type": "add_connection",
+      "title": "Send partial queries to the gateway",
+      "content": "Carry the partial text, locale, requested N, and optional user key to the validated API boundary.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2"],
+      "connection": {
+        "edgeId": "ta_client_gateway",
+        "sourceNodeId": "ta_client",
+        "targetNodeId": "ta_gateway",
+        "connectionType": "http",
+        "label": "Partial query request",
+        "description": "Per-keystroke suggestion request includes locale and requested result count."
+      }
+    },
+    {
+      "id": "ta_10_gateway_api",
+      "stepNumber": 10,
+      "phase": "Serve the keystroke read path",
+      "type": "add_connection",
+      "title": "Route suggestion reads to the API",
+      "content": "Keep suggestion reads on the low-latency stateless service path.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2"],
+      "connection": {
+        "edgeId": "ta_gateway_read_api",
+        "sourceNodeId": "ta_gateway",
+        "targetNodeId": "ta_read_api",
+        "connectionType": "http",
+        "label": "Validated suggestion request",
+        "description": "Gateway routes validated partial-query reads to stateless suggestion orchestration."
+      }
+    },
+    {
+      "id": "ta_11_api_cache",
+      "stepNumber": 11,
+      "phase": "Serve the keystroke read path",
+      "type": "add_connection",
+      "title": "Check popular prefix candidates first",
+      "content": "Use the locale and normalized prefix as the shared key and keep personalized ordering out of this cache.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "ta_api_prefix_cache",
+        "sourceNodeId": "ta_read_api",
+        "targetNodeId": "ta_prefix_cache",
+        "connectionType": "api-call",
+        "label": "Hot-prefix lookup",
+        "description": "Cache-aside lookup for non-personalized candidates keyed by locale and normalized prefix."
+      }
+    },
+    {
+      "id": "ta_12_api_index",
+      "stepNumber": 12,
+      "phase": "Serve the keystroke read path",
+      "type": "add_connection",
+      "title": "Retrieve prefix and typo-tolerant candidates",
+      "content": "On a cache miss, use the locale-partitioned index for prefix candidates and bounded fuzzy recovery.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "ta_api_prefix_index",
+        "sourceNodeId": "ta_read_api",
+        "targetNodeId": "ta_prefix_index",
+        "connectionType": "api-call",
+        "label": "Prefix candidate retrieval",
+        "description": "Locale-aware prefix lookup with a bounded typo-tolerant candidate path."
+      }
+    },
+    {
+      "id": "ta_13_api_history",
+      "stepNumber": 13,
+      "phase": "Serve the keystroke read path",
+      "type": "add_connection",
+      "title": "Read permitted personalization features",
+      "content": "Fetch compact history by opaque user key in parallel with candidate retrieval; fall back to non-personalized ranking when no eligible history is available.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "ta_api_profile_store",
+        "sourceNodeId": "ta_read_api",
+        "targetNodeId": "ta_profile_store",
+        "connectionType": "database-connection",
+        "label": "User history features",
+        "description": "Read only the requesting user's eligible compact features; absence or denial falls back to general relevance."
+      }
+    },
+    {
+      "id": "ta_14_api_ranker",
+      "stepNumber": 14,
+      "phase": "Serve the keystroke read path",
+      "type": "add_connection",
+      "title": "Submit candidate features for ranking",
+      "content": "Rank the bounded candidate set with locale, query, freshness, popularity, and available user-history context.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "ta_api_ranker",
+        "sourceNodeId": "ta_read_api",
+        "targetNodeId": "ta_ranker",
+        "connectionType": "api-call",
+        "label": "Candidates and ranking context",
+        "description": "The API sends retrieved candidates and only the allowed user and locale features needed to order them."
+      }
+    },
+    {
+      "id": "ta_15_index_ranker",
+      "stepNumber": 15,
+      "phase": "Serve the keystroke read path",
+      "type": "add_connection",
+      "title": "Pass index features into relevance ranking",
+      "content": "Expose candidate popularity, freshness, locale, and prefix-match evidence to the ranker.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "ta_index_ranker_features",
+        "sourceNodeId": "ta_prefix_index",
+        "targetNodeId": "ta_ranker",
+        "connectionType": "data-flow",
+        "label": "Candidate relevance features",
+        "description": "Indexed match and freshness signals supplement request context for ranking."
+      }
+    },
+    {
+      "id": "ta_16_ranker_api",
+      "stepNumber": 16,
+      "phase": "Serve the keystroke read path",
+      "type": "add_connection",
+      "title": "Return the relevance-ordered top N",
+      "content": "Return ranked suggestions and enough match metadata for the API to apply the caller's requested N and locale-safe response format.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "ta_ranker_api",
+        "sourceNodeId": "ta_ranker",
+        "targetNodeId": "ta_read_api",
+        "connectionType": "api-call",
+        "label": "Ranked candidate list",
+        "description": "Return relevance-ordered candidates to the orchestrator for top N response shaping."
+      }
+    },
+    {
+      "id": "ta_17_api_client",
+      "stepNumber": 17,
+      "phase": "Serve the keystroke read path",
+      "type": "add_connection",
+      "title": "Deliver suggestions to the active input",
+      "content": "Return the current request's ranked top N and locale-aware display values; the client ignores responses superseded by newer typing.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "ta_api_client_response",
+        "sourceNodeId": "ta_read_api",
+        "targetNodeId": "ta_client",
+        "connectionType": "http",
+        "label": "Top N suggestions",
+        "description": "Return the ranked list for the active partial query and locale."
+      }
+    },
+    {
+      "id": "ta_18_catalog_writer",
+      "stepNumber": 18,
+      "phase": "Keep the corpus and user signals current",
+      "type": "add_component",
+      "title": "Add an authorized catalog update path",
+      "content": "Validate additions, edits, and removals of suggestion terms independently from read traffic. Commit the canonical change before publishing its event so downstream projections can recover from the durable source.",
+      "requirementIds": ["legacy-requirement:5"],
+      "component": {
+        "nodeId": "ta_catalog_writer",
+        "componentType": "backend-server",
+        "label": "Suggestion Catalog Update Service",
+        "description": "Authorized writes to canonical suggestion terms",
+        "position": {"x": 260, "y": 650},
+        "properties": {
+          "componentName": "Suggestion Catalog Update Service",
+          "purpose": "Validate authorized suggestion-term additions, edits, and removals; commit canonical state before publishing durable change events for online index and cache updates."
+        },
+        "highlightReason": "The existing Backend Server catalog component covers the separate write service without adding a custom component."
+      }
+    },
+    {
+      "id": "ta_19_catalog_store",
+      "stepNumber": 19,
+      "phase": "Keep the corpus and user signals current",
+      "type": "add_component",
+      "title": "Keep canonical terms separate from the index",
+      "content": "Persist the authoritative suggestion corpus and change versions so the derived prefix index can be rebuilt and reconciled after failure.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7"],
+      "component": {
+        "nodeId": "ta_catalog_store",
+        "componentType": "database",
+        "label": "Canonical Suggestion Catalog",
+        "description": "Authoritative terms and versioned catalog state",
+        "position": {"x": 540, "y": 650},
+        "properties": {
+          "componentName": "Canonical Suggestion Catalog",
+          "purpose": "Persist authoritative suggestion terms, locale metadata, ranking inputs, and change versions. Use this source to reconcile or rebuild derived prefix-index partitions after missed or duplicate events."
+        },
+        "highlightReason": "The existing Database catalog component represents durable source state; the search index remains a rebuildable projection."
+      }
+    },
+    {
+      "id": "ta_20_event_stream",
+      "stepNumber": 20,
+      "phase": "Keep the corpus and user signals current",
+      "type": "add_component",
+      "title": "Buffer catalog and eligible interaction events",
+      "content": "Carry versioned catalog changes and privacy-filtered query or selection signals to consumers. Keep event publication off the keystroke response path and make replay and duplicate delivery safe.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1"],
+      "component": {
+        "nodeId": "ta_event_stream",
+        "componentType": "message-broker",
+        "label": "Suggestion Update Event Stream",
+        "description": "Durable change and eligible interaction events",
+        "position": {"x": 820, "y": 650},
+        "properties": {
+          "componentName": "Suggestion Update Event Stream",
+          "purpose": "Durably buffer versioned catalog changes and minimized eligible interaction signals for asynchronous indexing and history updates. Support replay and idempotent consumption without delaying suggestion responses."
+        },
+        "highlightReason": "The existing Message Broker catalog component represents durable asynchronous event delivery."
+      }
+    },
+    {
+      "id": "ta_21_indexer",
+      "stepNumber": 21,
+      "phase": "Keep the corpus and user signals current",
+      "type": "add_component",
+      "title": "Apply online index and history updates",
+      "content": "Consume events idempotently, update the affected locale and prefix partitions, refresh compact user-history features, and invalidate impacted precomputed prefixes. Expose consumer lag so the real-time freshness behavior can be reviewed.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7"],
+      "component": {
+        "nodeId": "ta_indexer",
+        "componentType": "processing-worker",
+        "label": "Suggestion Projection Workers",
+        "description": "Idempotent index, cache, and history projection updates",
+        "position": {"x": 1100, "y": 650},
+        "properties": {
+          "componentName": "Suggestion Projection Workers",
+          "purpose": "Consume versioned catalog and eligible interaction events idempotently; update affected locale and prefix index partitions, compact user-history features, and hot-prefix cache invalidations. Publish consumer lag and failures so real-time freshness can be assessed."
+        },
+        "highlightReason": "The existing Processing Worker catalog component covers asynchronous projection maintenance."
+      }
+    },
+    {
+      "id": "ta_22_gateway_writer",
+      "stepNumber": 22,
+      "phase": "Keep the corpus and user signals current",
+      "type": "add_connection",
+      "title": "Route protected term changes separately",
+      "content": "The gateway sends authorized catalog mutations to the write service, leaving the suggestion read path independently scalable.",
+      "requirementIds": ["legacy-requirement:5"],
+      "connection": {
+        "edgeId": "ta_gateway_catalog_writer",
+        "sourceNodeId": "ta_gateway",
+        "targetNodeId": "ta_catalog_writer",
+        "connectionType": "http",
+        "label": "Authorized catalog mutations",
+        "description": "Protected additions, edits, and removals use the separate catalog write route."
+      }
+    },
+    {
+      "id": "ta_23_writer_catalog",
+      "stepNumber": 23,
+      "phase": "Keep the corpus and user signals current",
+      "type": "add_connection",
+      "title": "Commit canonical changes first",
+      "content": "Persist the authoritative version before announcing it to the projection stream.",
+      "requirementIds": ["legacy-requirement:5"],
+      "connection": {
+        "edgeId": "ta_writer_catalog_store",
+        "sourceNodeId": "ta_catalog_writer",
+        "targetNodeId": "ta_catalog_store",
+        "connectionType": "database-connection",
+        "label": "Versioned canonical terms",
+        "description": "Catalog writes update durable source state before projection events are emitted."
+      }
+    },
+    {
+      "id": "ta_24_writer_events",
+      "stepNumber": 24,
+      "phase": "Keep the corpus and user signals current",
+      "type": "add_connection",
+      "title": "Publish catalog changes for online projection",
+      "content": "Emit the committed version and affected locale or prefix keys so consumers can update only the impacted partitions and cached prefixes.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7"],
+      "connection": {
+        "edgeId": "ta_writer_event_stream",
+        "sourceNodeId": "ta_catalog_writer",
+        "targetNodeId": "ta_event_stream",
+        "connectionType": "message-queue",
+        "label": "Committed catalog changes",
+        "description": "Versioned update events identify affected locale and prefix projections."
+      }
+    },
+    {
+      "id": "ta_25_api_events",
+      "stepNumber": 25,
+      "phase": "Keep the corpus and user signals current",
+      "type": "add_connection",
+      "title": "Record eligible feedback off the read path",
+      "content": "Publish minimized, policy-approved interaction signals asynchronously; do not make a suggestion response wait for analytics or personalization writes.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1"],
+      "connection": {
+        "edgeId": "ta_api_event_stream",
+        "sourceNodeId": "ta_read_api",
+        "targetNodeId": "ta_event_stream",
+        "connectionType": "message-queue",
+        "label": "Eligible query and selection signals",
+        "description": "Asynchronous privacy-filtered feedback supports popularity and personalization projections without blocking the response."
+      }
+    },
+    {
+      "id": "ta_26_events_indexer",
+      "stepNumber": 26,
+      "phase": "Keep the corpus and user signals current",
+      "type": "add_connection",
+      "title": "Deliver replayable events to projection workers",
+      "content": "Allow retries and replay while making each catalog or feedback update idempotent at the consumer.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5"],
+      "connection": {
+        "edgeId": "ta_event_stream_indexer",
+        "sourceNodeId": "ta_event_stream",
+        "targetNodeId": "ta_indexer",
+        "connectionType": "message-queue",
+        "label": "Catalog and interaction events",
+        "description": "Durable delivery with retry, replay, and consumer-side deduplication."
+      }
+    },
+    {
+      "id": "ta_27_indexer_index",
+      "stepNumber": 27,
+      "phase": "Keep the corpus and user signals current",
+      "type": "add_connection",
+      "title": "Update affected prefix partitions",
+      "content": "Apply catalog and popularity changes online to the locale and prefix partitions that own the affected terms.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7"],
+      "connection": {
+        "edgeId": "ta_indexer_prefix_index",
+        "sourceNodeId": "ta_indexer",
+        "targetNodeId": "ta_prefix_index",
+        "connectionType": "data-flow",
+        "label": "Locale and prefix index updates",
+        "description": "Idempotent online updates to affected distributed suggestion-index partitions."
+      }
+    },
+    {
+      "id": "ta_28_indexer_cache",
+      "stepNumber": 28,
+      "phase": "Keep the corpus and user signals current",
+      "type": "add_connection",
+      "title": "Invalidate changed hot-prefix results",
+      "content": "Invalidate or refresh only cache entries affected by an update so precomputed top suggestions do not hide newly relevant terms.",
+      "requirementIds": ["legacy-requirement:5"],
+      "connection": {
+        "edgeId": "ta_indexer_prefix_cache",
+        "sourceNodeId": "ta_indexer",
+        "targetNodeId": "ta_prefix_cache",
+        "connectionType": "data-flow",
+        "label": "Targeted hot-prefix invalidation",
+        "description": "Refresh or evict cached prefixes affected by versioned index updates."
+      }
+    },
+    {
+      "id": "ta_29_indexer_history",
+      "stepNumber": 29,
+      "phase": "Keep the corpus and user signals current",
+      "type": "add_connection",
+      "title": "Project eligible interactions into user history",
+      "content": "Update compact user-keyed ranking features with idempotent event handling and the product's approved data policy.",
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "ta_indexer_profile_store",
+        "sourceNodeId": "ta_indexer",
+        "targetNodeId": "ta_profile_store",
+        "connectionType": "database-connection",
+        "label": "Personalization feature updates",
+        "description": "Eligible query and selection events maintain compact per-user ranking history."
+      }
+    },
+    {
+      "id": "ta_30_indexer_catalog",
+      "stepNumber": 30,
+      "phase": "Keep the corpus and user signals current",
+      "type": "add_connection",
+      "title": "Reconcile projections from canonical state",
+      "content": "Read versioned canonical records to repair missed updates and rebuild an index partition without treating the derived index as the source of truth.",
+      "requirementIds": ["legacy-requirement:5"],
+      "connection": {
+        "edgeId": "ta_indexer_catalog_store",
+        "sourceNodeId": "ta_indexer",
+        "targetNodeId": "ta_catalog_store",
+        "connectionType": "database-connection",
+        "label": "Rebuild and reconciliation reads",
+        "description": "Workers recover derived partitions from the versioned canonical catalog."
+      }
+    },
+    {
+      "id": "ta_31_fuzzy_tradeoff",
+      "stepNumber": 31,
+      "phase": "Review matching, language, memory, and scale",
+      "type": "decision_point",
+      "title": "Bound typo recovery behind prefix matching",
+      "content": "Use exact prefix retrieval first and invoke typo-tolerant matching only over a bounded candidate path. This keeps fuzzy matching useful without turning every partial query into an expensive corpus-wide edit-distance search.",
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:4"],
+      "decision": {
+        "question": "How should the system trade typo recall against keystroke latency?",
+        "chosen": "Use locale-aware exact prefix matching first, then bounded fuzzy recovery when prefix evidence is weak.",
+        "chosenReason": "The fast path serves ordinary typing while a limited typo path adds recall without an unbounded scan.",
+        "alternatives": [
+          {
+            "option": "Run edit-distance matching against the full corpus for every keystroke",
+            "tradeoff": "It may recover more variants but consumes read work and threatens the supplied latency objective."
+          },
+          {
+            "option": "Use exact prefixes only",
+            "tradeoff": "It is simpler and compact but does not meet the brief's typo-tolerance requirement."
+          }
+        ]
+      }
+    },
+    {
+      "id": "ta_32_locale_tradeoff",
+      "stepNumber": 32,
+      "phase": "Review matching, language, memory, and scale",
+      "type": "decision_point",
+      "title": "Keep matching and ranking language-aware",
+      "content": "Normalize Unicode and tokenize with locale-aware rules while preserving display text. Partition index data by locale and keep ranking signals language-appropriate; do not assume English tokenization or mix locales unless product behavior explicitly calls for fallback.",
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4"],
+      "decision": {
+        "question": "How should partial queries behave across multiple languages?",
+        "chosen": "Carry locale through normalization, index lookup, typo recovery, and ranking, with an explicit product-owned fallback policy.",
+        "chosenReason": "Locale-specific processing avoids applying one language's token and ranking rules to another while keeping the fallback behavior reviewable.",
+        "alternatives": [
+          {
+            "option": "Use one English-oriented analyzer for every query",
+            "tradeoff": "It is operationally simpler but can break token boundaries, normalization, and relevance in other languages."
+          },
+          {
+            "option": "Search every locale partition for every partial query",
+            "tradeoff": "It can broaden recall but adds unnecessary fanout and mixes results without an explicit cross-language product rule."
+          }
+        ]
+      }
+    },
+    {
+      "id": "ta_33_memory_tradeoff",
+      "stepNumber": 33,
+      "phase": "Review matching, language, memory, and scale",
+      "type": "decision_point",
+      "title": "Spend memory only on useful prefixes",
+      "content": "Compress shared prefixes in trie or finite-state segments and precompute descendants only for selected hot prefixes. Keep the cache bounded and let colder prefixes use the index, balancing memory use against recomputation and freshness work.",
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:2", "legacy-constraint:5"],
+      "decision": {
+        "question": "How much prefix state should be precomputed and cached?",
+        "chosen": "Use compressed shared-prefix structures and selectively precompute and cache popular prefixes.",
+        "chosenReason": "This reuses common prefix storage and reduces repeated hot reads without retaining a full top-list expansion for every possible prefix.",
+        "alternatives": [
+          {
+            "option": "Materialize top suggestions for every prefix",
+            "tradeoff": "Reads become simpler but memory use and update fanout grow with the corpus and language set."
+          },
+          {
+            "option": "Compute every result only from the full index at request time",
+            "tradeoff": "It minimizes precomputed state but repeats work for popular prefixes and adds read-path cost."
+          }
+        ]
+      }
+    },
+    {
+      "id": "ta_34_scale_throughput",
+      "stepNumber": 34,
+      "phase": "Review matching, language, memory, and scale",
+      "type": "scale_trigger",
+      "title": "Scale reads from observed query shape",
+      "content": "Billions of queries per day describe aggregate demand but not its peak shape, locale mix, prefix skew, or cache behavior. Measure those inputs before choosing capacity or partition boundaries.",
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:2"],
+      "scaleTrigger": {
+        "metric": "Observed read volume, request saturation, cache hits and misses, prefix and locale skew, index-partition health, and consumer lag",
+        "action": "Scale stateless API capacity and distribute or rebalance locale and prefix partitions when measured demand or skew requires it; replicate hot partitions where that relieves a demonstrated read bottleneck.",
+        "impact": "Supports high read throughput at the stated daily query scale while tying capacity and memory cost to observed traffic rather than an invented peak estimate."
+      }
+    },
+    {
+      "id": "ta_35_scale_latency",
+      "stepNumber": 35,
+      "phase": "Review matching, language, memory, and scale",
+      "type": "scale_trigger",
+      "title": "Protect the supplied end-to-end latency objective",
+      "content": "Measure keystroke-to-response latency across cache hits, index misses, fuzzy recovery, and personalization. Fetch candidates and compact history in parallel, keep the fuzzy branch bounded, and use the supplied <100ms requirement as the acceptance boundary; the brief does not define a percentile or measurement environment.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:4"],
+      "scaleTrigger": {
+        "metric": "End-to-end response latency by cache-hit and cache-miss path, locale, fuzzy-match path, and personalization availability",
+        "action": "Profile the slow path, reduce repeated work, rebalance hot index partitions, and agree the percentile and measurement environment with product owners while meeting the supplied latency boundary.",
+        "impact": "Keeps relevance, typo recovery, and personalization visible in latency review instead of optimizing only the easiest cache-hit case."
+      }
+    },
+    {
+      "id": "ta_36_recovery",
+      "stepNumber": 36,
+      "phase": "Review matching, language, memory, and scale",
+      "type": "explanation",
+      "title": "Review freshness and degraded behavior",
+      "content": "Treat the canonical catalog as authoritative and the trie index, hot-prefix cache, and user features as recoverable projections. Replay versioned events idempotently after worker failures, reconcile from canonical state, and expose event lag because the brief does not define a numeric freshness bound. If personalization or model inference is unavailable, return general relevance from indexed candidates; if an index partition is unhealthy, route to a healthy replica or report reduced coverage rather than silently serving stale personalized data. Confirm consent, retention, supported locales, requested-N policy, and the real-time freshness meaning before considering this local review draft publishable."
+    }
+  ]
+}

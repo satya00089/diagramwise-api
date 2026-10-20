@@ -1,0 +1,872 @@
+{
+  "problem_id": "ml_009",
+  "version": "2026-10-14-review-draft",
+  "totalSteps": 45,
+  "phases": [
+    {
+      "name": "Brief and acceptance boundaries",
+      "stepRange": [1, 3],
+      "description": "Preserve the frozen brief and turn its latency and model-quality targets into measurable acceptance tests without claiming they are already met."
+    },
+    {
+      "name": "Ingestion and real-time processing",
+      "stepRange": [4, 10],
+      "description": "Connect heterogeneous sources to a durable stream, retain replayable input, and keep the under-two-second scoring path bounded."
+    },
+    {
+      "name": "Inference, learning, and product outputs",
+      "stepRange": [11, 20],
+      "description": "Represent multilingual multi-task inference, uncertain-case review, controlled model promotion, trend/report stores, alerts, and operational signals."
+    },
+    {
+      "name": "Connect ingestion and scoring",
+      "stepRange": [21, 29],
+      "description": "Wire both source entry paths through the event stream to scoring, durable results, and a separate review path for uncertain or failed cases."
+    },
+    {
+      "name": "Connect learning, reporting, and alerts",
+      "stepRange": [30, 40],
+      "description": "Build a governed offline feedback loop and serve time-windowed trends, automated reports, and significant-shift alerts from scored events."
+    },
+    {
+      "name": "Observe the service boundary",
+      "stepRange": [41, 45],
+      "description": "Observe each stage that can affect freshness, the measured scoring latency, throughput, and quality across language slices."
+    }
+  ],
+  "steps": [
+    {
+      "id": "sentiment_brief",
+      "stepNumber": 1,
+      "phase": "Brief and acceptance boundaries",
+      "title": "Start from the frozen problem brief",
+      "type": "explanation",
+      "content": "Title: Design a Real-time Sentiment Analysis Platform\nDescription: Design a platform that analyzes sentiment from social media, reviews, and customer feedback in real-time, detecting emotions, aspect-level opinions, and trend shifts across brands and topics.\nRequirements:\n- Analyze sentiment from social media streams\n- Perform aspect-based sentiment analysis\n- Detect emotion categories (joy, anger, fear, etc.)\n- Track sentiment trends over time\n- Handle sarcasm and context-dependent language\n- Support multiple social platforms and data sources\n- Generate automated sentiment reports\n- Alert on significant sentiment shifts\nConstraints:\n- Real-time processing under 2 seconds\n- Sentiment accuracy above 85%\n- Process 1M+ posts per day\n- Support 20+ languages\n- Handle informal text, slang, and emojis\nHints:\n- Fine-tune BERT/RoBERTa for sentiment classification\n- Use aspect extraction with sequence labeling models\n- Implement streaming ingestion with Kafka/Pub-Sub\n- Use emoji and emoticon embeddings\n- Implement change point detection for trend shifts\n- Use pre-trained multilingual models (XLM-R)\n\nThese are the supplied requirements and acceptance targets, not an achieved result. The brief does not state peak/burst traffic, the latency percentile or measurement boundary, source-specific delivery guarantees, retention, or the reporting freshness target. The design below treats under 2 seconds as a proposed p95 budget from accepting a post at the platform edge to making its scored event durable; confirm that percentile and boundary with the product owner. Human review, reports, and historical aggregation stay off that synchronous budget.",
+      "requirementIds": [
+        "legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4",
+        "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8",
+        "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "sentiment_latency_contract",
+      "stepNumber": 2,
+      "phase": "Brief and acceptance boundaries",
+      "title": "Bound the real-time scoring path",
+      "type": "decision_point",
+      "content": "Measure event age and end-to-end scoring latency separately. The proposed p95 under-2-second clock starts when the platform edge accepts a post and ends when its scored result is durably emitted; source polling delay and later report rendering are not hidden inside that measurement. Track queue age as well as processing time so a fast model cannot mask a backed-up stream. This p95 interpretation is an assumption because the frozen brief only says under 2 seconds.",
+      "decision": {
+        "question": "How should the under-2-second processing constraint be made testable?",
+        "chosen": "Use an explicitly confirmed percentile and a timestamped acceptance-to-durable-score measurement, with separate ingestion-lag and queue-age indicators.",
+        "chosenReason": "A named measurement boundary exposes queueing and model latency while avoiding an unsupported promise about external source delivery or report freshness.",
+        "alternatives": [
+          {"option": "Measure only model inference time", "tradeoff": "It omits broker wait and stream-processing delay that users experience."},
+          {"option": "Treat every report as fresh within two seconds", "tradeoff": "The brief gives no report freshness target and historical aggregation is asynchronous."}
+        ]
+      },
+      "requirementIds": ["legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "sentiment_quality_contract",
+      "stepNumber": 3,
+      "phase": "Brief and acceptance boundaries",
+      "title": "Make the 85% accuracy target auditable",
+      "type": "decision_point",
+      "content": "Evaluate the stated above-85% sentiment-accuracy target on a held-out, human-adjudicated set that reflects source, language, sentiment class, slang, emoji use, and context-dependent or sarcastic examples. Report the aggregate and each adequately sized language/source slice; do not let a high-volume language hide weak coverage elsewhere. The design establishes an evaluation and review loop, not accuracy itself. Confirm the exact dataset, metric definition, and minimum sample size before treating the threshold as a release gate.",
+      "decision": {
+        "question": "What evidence should allow a sentiment model version into production?",
+        "chosen": "Promote only after the agreed held-out accuracy target is measured on representative labeled data, with language/source slice results and low-confidence cases routed for human review.",
+        "chosenReason": "The brief names a quality threshold and diverse, context-sensitive inputs; slice-level evidence makes regressions visible without inventing per-language guarantees.",
+        "alternatives": [
+          {"option": "Use training accuracy as the release metric", "tradeoff": "It does not show generalization to unseen posts or language/source shifts."},
+          {"option": "Promote on one pooled score alone", "tradeoff": "A strong dominant-language result may conceal poor performance in supported languages."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "sentiment_connectors",
+      "stepNumber": 4,
+      "phase": "Ingestion and real-time processing",
+      "title": "Integrate the named source families",
+      "type": "add_component",
+      "content": "Use a catalog Backend Server as the adapter boundary for social-platform APIs, review feeds, and customer-feedback sources. Normalize each provider's identifiers, timestamps, language hints, and deletion/update semantics without assuming that every provider offers webhooks or identical access. Preserve provider and source IDs for deduplication and provenance.",
+      "component": {
+        "nodeId": "sentiment_source_connectors",
+        "componentType": "backend-server",
+        "label": "Social, Review & Feedback Connectors",
+        "description": "Source-specific adapters for social platforms, reviews, and customer feedback.",
+        "position": {"x": 0, "y": 180},
+        "properties": {
+          "componentName": "Social, Review & Feedback Connectors",
+          "purpose": "Integrate multiple social platforms, review systems, and customer-feedback sources through source-specific polling or webhook adapters; normalize provider IDs and timestamps and retain source provenance without assuming uniform delivery guarantees."
+        },
+        "highlightReason": "The brief requires multiple platforms and source families; Backend Server is an existing catalog component suitable for the adapter service."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "sentiment_ingestion_api",
+      "stepNumber": 5,
+      "phase": "Ingestion and real-time processing",
+      "title": "Accept source events at a validated boundary",
+      "type": "add_component",
+      "content": "Expose the existing catalog API Gateway for provider webhooks and authorized ingestion calls. Validate signatures and payload shape, enforce provider-aware rate limits, and assign an idempotency key before acknowledging accepted events. Source polling remains in the connector service; this gateway is not a claim that every platform supports push delivery.",
+      "component": {
+        "nodeId": "sentiment_ingestion_gateway",
+        "componentType": "api-gateway",
+        "label": "Webhook & Ingestion Gateway",
+        "description": "Validated entry point for provider webhooks and ingestion operations.",
+        "position": {"x": 240, "y": 0},
+        "properties": {
+          "componentName": "Webhook & Ingestion Gateway",
+          "purpose": "Validate provider webhook signatures and event schemas, apply source-aware throttling, deduplicate retried deliveries, and acknowledge only after the accepted event is safely handed to the durable ingestion path."
+        },
+        "highlightReason": "The API Gateway is already in the catalog and provides a bounded entry for push-capable sources."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "sentiment_event_broker",
+      "stepNumber": 6,
+      "phase": "Ingestion and real-time processing",
+      "title": "Buffer and replay the incoming event stream",
+      "type": "add_component",
+      "content": "Use the catalog Message Broker as the durable handoff between ingestion and processing. Partition by a stable key that preserves the ordering needed for a source/entity stream, retain events long enough for the agreed recovery window, and make consumers idempotent because retries can redeliver. The 1M+ posts/day requirement is a floor; provision against measured bursts, not the daily average alone.",
+      "component": {
+        "nodeId": "sentiment_event_broker",
+        "componentType": "message-broker",
+        "label": "Durable Post Event Stream",
+        "description": "Replayable buffer for normalized source posts and scored-result events.",
+        "position": {"x": 500, "y": 100},
+        "properties": {
+          "componentName": "Durable Post Event Stream",
+          "purpose": "Buffer normalized post events and later scored-result events for independent consumers; use idempotent processing, suitable partition keys, and replay retention sized from measured burst traffic and recovery objectives. The 1M+ daily target is not a peak-rate estimate."
+        },
+        "highlightReason": "The catalog Message Broker directly represents the durable pub/sub boundary needed for the streaming workload."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "sentiment_raw_archive",
+      "stepNumber": 7,
+      "phase": "Ingestion and real-time processing",
+      "title": "Retain a governed source-event archive",
+      "type": "add_component",
+      "content": "Keep an immutable or append-only raw-event archive for replay, audits, and offline evaluation, subject to source terms, privacy policy, and retention requirements. Store event time, ingestion time, provider identity, and schema version; do not assume raw posts can be retained indefinitely.",
+      "component": {
+        "nodeId": "sentiment_raw_archive",
+        "componentType": "object-storage",
+        "label": "Raw Post Archive",
+        "description": "Governed source-event archive for replay and offline evaluation.",
+        "position": {"x": 760, "y": -100},
+        "properties": {
+          "componentName": "Raw Post Archive",
+          "purpose": "Retain source events with provider provenance, event and ingestion timestamps, and schema version for bounded replay and offline model evaluation; enforce source-specific privacy, deletion, and retention rules instead of assuming indefinite storage."
+        },
+        "highlightReason": "Object Storage is an existing catalog component for replayable, large-volume source records."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "sentiment_stream_processor",
+      "stepNumber": 8,
+      "phase": "Ingestion and real-time processing",
+      "title": "Normalize, deduplicate, and manage event time",
+      "type": "add_component",
+      "content": "Use the catalog Stream Processor to normalize text, remove duplicate deliveries, preserve original text and metadata, and track event-time versus processing-time. Handle late posts and provider edits explicitly; enrich language and source context without blocking on slow external lookups. Keep transformations bounded so stream queueing does not consume the proposed scoring budget.",
+      "component": {
+        "nodeId": "sentiment_stream_processor",
+        "componentType": "stream-processor",
+        "label": "Post Normalization & Stream Processor",
+        "description": "Stateful event-time processing for normalized posts and downstream windows.",
+        "position": {"x": 760, "y": 160},
+        "properties": {
+          "componentName": "Post Normalization & Stream Processor",
+          "purpose": "Normalize and deduplicate posts, preserve raw text and provenance, detect or validate language, and manage event-time windows and late arrivals; keep work bounded and horizontally scalable for the 1M+ daily floor and measured bursts."
+        },
+        "highlightReason": "The catalog Stream Processor supports stateful real-time normalization and event-time windowing."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "sentiment_review_queue",
+      "stepNumber": 9,
+      "phase": "Ingestion and real-time processing",
+      "title": "Isolate failed and uncertain cases from the hot path",
+      "type": "add_component",
+      "content": "Route poison messages, exhausted transient failures, unsupported language cases, and low-confidence predictions to a durable review/retry queue with reason and model version. Return a provisional or explicitly uncertain result within the online contract where appropriate; human review is asynchronous and must not silently block the under-2-second scoring path.",
+      "component": {
+        "nodeId": "sentiment_review_queue",
+        "componentType": "queue",
+        "label": "Quarantine & Human Review Queue",
+        "description": "Durable isolation for retryable failures and uncertain predictions.",
+        "position": {"x": 760, "y": 420},
+        "properties": {
+          "componentName": "Quarantine & Human Review Queue",
+          "purpose": "Durably isolate poison events, exhausted retries, unsupported-language cases, and low-confidence predictions with their reason and model version; support controlled replay and asynchronous human review without blocking the online scoring response."
+        },
+        "highlightReason": "The catalog Queue represents durable retries and review handoff; abstention prevents uncertain output from being presented as confident truth."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "sentiment_inference_service",
+      "stepNumber": 10,
+      "phase": "Ingestion and real-time processing",
+      "title": "Serve contextual sarcasm-aware multi-task inference",
+      "type": "add_component",
+      "content": "Expose a version-pinned inference endpoint that returns document sentiment, emotion categories, aspect spans and polarity, language, confidence, model version, and an explicit sarcasm/context signal. Run a context-aware sarcasm head over bounded, source-permitted neighboring or thread context plus slang and emoji cues, and use that signal when interpreting polarity rather than treating sarcasm only as an abstention case. If context is unavailable or confidence is low, return a calibrated uncertain result and send it to asynchronous review without blocking the under-two-second online response.",
+      "component": {
+        "nodeId": "sentiment_model_serving",
+        "componentType": "model-serving",
+        "label": "Sentiment, Emotion & Aspect Inference",
+        "description": "Version-pinned online endpoint for multi-task multilingual text inference.",
+        "position": {"x": 1040, "y": 160},
+        "properties": {
+          "componentName": "Sentiment, Emotion & Aspect Inference",
+        "purpose": "Return sentiment, emotion categories, aspect-level spans and polarity, detected language, confidence, model version, and a contextual sarcasm signal. Keep the measured end-to-end path from accepted post to durable scored event under the brief's two-second target using bounded preprocessing, feature lookup, inference, and result writes; reserve serving capacity and autoscale on queue age/latency from burst-load tests. Keep review, reports, and aggregates asynchronous."
+        },
+        "highlightReason": "Model Serving is an existing catalog component for the latency-sensitive inference endpoint."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "sentiment_multilingual_model",
+      "stepNumber": 11,
+      "phase": "Inference, learning, and product outputs",
+      "title": "Model multilingual sentiment, aspects, emotion, and sarcasm",
+      "type": "add_component",
+      "content": "Use an NLP model such as fine-tuned XLM-R (or a benchmarked BERT/RoBERTa alternative) with task heads or sequence labeling for sentiment, emotion, aspect extraction, and context-aware sarcasm detection. Preserve emoji/emoticon and slang signals during preprocessing. Include bounded thread or neighboring context only where source access permits; combine the sarcasm signal with polarity inference, calibrate confidence, and measure by language and platform rather than asserting perfect detection.",
+      "component": {
+        "nodeId": "sentiment_multilingual_model",
+        "componentType": "ml-model",
+        "label": "Multilingual Sentiment, Aspect & Sarcasm Model",
+        "description": "Candidate multilingual NLP model for sentiment, emotion, and aspect outputs.",
+        "position": {"x": 1320, "y": 80},
+        "properties": {
+          "componentName": "Multilingual Sentiment, Aspect & Sarcasm Model",
+          "purpose": "Candidate XLM-R-based NLP model with sentiment and emotion classification plus aspect sequence labeling; retain slang, emoji, and emoticon evidence and evaluate context-dependent sarcasm on representative held-out examples instead of assuming the model resolves it.",
+          "modelType": "NLP",
+          "framework": "PyTorch"
+        },
+        "highlightReason": "The catalog ML Model supports NLP classification and the frozen hints identify XLM-R as a multilingual candidate."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "sentiment_human_labeling",
+      "stepNumber": 12,
+      "phase": "Inference, learning, and product outputs",
+      "title": "Create an adjudicated feedback set",
+      "type": "add_component",
+      "content": "Use the existing Data Labeling component for sampled and low-confidence posts. Define annotation guidance for sentiment, emotion, aspect boundaries, sarcasm/context, language, and ambiguous cases; use adjudication and language-aware sampling to build trustworthy evaluation data. Human labeling is an offline quality loop, not synchronous sentiment output.",
+      "component": {
+        "nodeId": "sentiment_data_labeling",
+        "componentType": "data-labeling",
+        "label": "Human Review & Adjudicated Labels",
+        "description": "Language-aware annotation and adjudication for evaluation and training.",
+        "position": {"x": 1040, "y": 440},
+        "properties": {
+          "componentName": "Human Review & Adjudicated Labels",
+          "purpose": "Review sampled and uncertain posts with consistent labels for sentiment, emotion, aspect spans, language, and context-dependent sarcasm; adjudicate disagreements and maintain language/source coverage for evaluation and model improvement outside the online latency path."
+        },
+        "highlightReason": "Data Labeling is an existing catalog component and supplies the human-grounded labels needed to assess the accuracy target."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "sentiment_model_training",
+      "stepNumber": 13,
+      "phase": "Inference, learning, and product outputs",
+      "title": "Train and evaluate candidates away from serving",
+      "type": "add_component",
+      "content": "Fine-tune candidate multilingual models from permitted archived data and adjudicated labels. Split evaluation to reduce leakage across near-duplicate posts and source/time, inspect held-out accuracy and language/source slices, and record the dataset and preprocessing versions. Keep training and batch evaluation outside the live stream path.",
+      "component": {
+        "nodeId": "sentiment_model_training",
+        "componentType": "model-training",
+        "label": "Offline NLP Training & Evaluation",
+        "description": "Offline fine-tuning and repeatable evaluation for candidate models.",
+        "position": {"x": 1320, "y": 440},
+        "properties": {
+          "componentName": "Offline NLP Training & Evaluation",
+          "purpose": "Fine-tune candidate multilingual models from source-permitted archived posts and adjudicated labels; version data and preprocessing, prevent near-duplicate leakage, measure held-out accuracy by language and source, and keep training and evaluation off the real-time scoring path."
+        },
+        "highlightReason": "Model Training is an existing catalog component for the offline fine-tuning and quality-validation loop."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "sentiment_model_registry",
+      "stepNumber": 14,
+      "phase": "Inference, learning, and product outputs",
+      "title": "Promote only measured model versions",
+      "type": "add_component",
+      "content": "Record each candidate's artifact, label/data snapshot, evaluation report, language coverage, and serving compatibility in a versioned registry. Promotion requires the agreed above-85% accuracy gate and review of language/source slices; retain the prior approved model for rollback. Do not route an unreviewed candidate into live inference.",
+      "component": {
+        "nodeId": "sentiment_model_registry",
+        "componentType": "model-registry",
+        "label": "Versioned Model Registry",
+        "description": "Approved model artifacts and evidence for controlled serving promotion.",
+        "position": {"x": 1580, "y": 440},
+        "properties": {
+          "componentName": "Versioned Model Registry",
+        "purpose": "Store immutable model versions with dataset/preprocessing references and held-out accuracy by language and source. Promote only when the adjudicated held-out accuracy exceeds the brief's 85% target overall and across each supported language/source cohort with sufficient evidence; otherwise block or quarantine the candidate and retain the previous approved version for rollback."
+        },
+        "highlightReason": "Model Registry is already present in the catalog and makes model version approval explicit."
+      },
+      "requirementIds": ["legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "sentiment_results_store",
+      "stepNumber": 15,
+      "phase": "Inference, learning, and product outputs",
+      "title": "Persist scored events and time-bucketed results",
+      "type": "add_component",
+      "content": "Persist the normalized result with source/entity/topic keys, event time, sentiment, emotion, aspect outputs, confidence, model version, and review status. Keep raw text retention governed separately. Store trend aggregates in queryable time buckets and size retention, indexes, and partitioning after topic cardinality and peak write/read patterns are known.",
+      "component": {
+        "nodeId": "sentiment_results_store",
+        "componentType": "database",
+        "label": "Scored Posts & Sentiment Time Series",
+        "description": "Queryable scored-event records and time-windowed sentiment aggregates.",
+        "position": {"x": 1580, "y": 240},
+        "properties": {
+          "componentName": "Scored Posts & Sentiment Time Series",
+          "purpose": "Persist scored post metadata, event time, sentiment, emotion, aspect results, confidence, model version, and review status, plus queryable time-bucketed trend aggregates; determine retention and partition keys from measured cardinality and access patterns."
+        },
+        "highlightReason": "Database is an existing catalog component suitable for durable result and time-series access patterns."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:3"]
+    },
+    {
+      "id": "sentiment_trend_analytics",
+      "stepNumber": 16,
+      "phase": "Inference, learning, and product outputs",
+      "title": "Aggregate trends and detect meaningful shifts",
+      "type": "add_component",
+      "content": "Consume scored events into event-time windows keyed by configured brand, topic, source, language, and aspect. Compare current sentiment distributions to a documented baseline and use change-point detection with minimum sample and noise controls; define significance and false-alert tolerance with product users because the brief does not specify them.",
+      "component": {
+        "nodeId": "sentiment_trend_analytics",
+        "componentType": "analytics",
+        "label": "Trend & Change-Point Analytics",
+        "description": "Windowed trend aggregation and significant-shift candidate detection.",
+        "position": {"x": 1580, "y": 80},
+        "properties": {
+          "componentName": "Trend & Change-Point Analytics",
+          "purpose": "Aggregate scored events into event-time trends by brand, topic, source, language, and aspect; apply change-point detection against explicit baselines with minimum sample and noise controls, while leaving significance and alert tolerance as product decisions to confirm."
+        },
+        "highlightReason": "Analytics is an existing catalog component for real-time windowed trend and change-point computations."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "sentiment_report_warehouse",
+      "stepNumber": 17,
+      "phase": "Inference, learning, and product outputs",
+      "title": "Serve automated reports from historical aggregates",
+      "type": "add_component",
+      "content": "Load versioned aggregates and report dimensions into the catalog Data Warehouse for scheduled or on-demand automated reports. Preserve event-time semantics and model version so reports can explain a change and be recomputed; report freshness is separate from the two-second online scoring objective.",
+      "component": {
+        "nodeId": "sentiment_report_warehouse",
+        "componentType": "data-warehouse",
+        "label": "Historical Sentiment Reporting Store",
+        "description": "Historical aggregate store for automated sentiment reports.",
+        "position": {"x": 1840, "y": 380},
+        "properties": {
+          "componentName": "Historical Sentiment Reporting Store",
+          "purpose": "Store versioned historical aggregates and report dimensions with event-time and model-version provenance for scheduled and on-demand sentiment reports; define report freshness separately from the under-2-second online scoring target."
+        },
+        "highlightReason": "Data Warehouse is an existing catalog component for historical report queries, separate from online inference."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7"]
+    },
+    {
+      "id": "sentiment_reporting_console",
+      "stepNumber": 18,
+      "phase": "Inference, learning, and product outputs",
+      "title": "Expose trends and generated reports to users",
+      "type": "add_component",
+      "content": "Use the catalog Admin Console as the report and trend interface for users. Expose source, language, topic, aspect, window, confidence/review status, and model version filters so a reported sentiment change can be traced to the underlying coverage and data quality.",
+      "component": {
+        "nodeId": "sentiment_reporting_console",
+        "componentType": "admin-console",
+        "label": "Sentiment Reports & Trends Console",
+        "description": "User-facing interface for automated reports and time-based sentiment trends.",
+        "position": {"x": 2100, "y": 240},
+        "properties": {
+          "componentName": "Sentiment Reports & Trends Console",
+          "purpose": "Present generated sentiment reports and time-based trends with source, language, topic, aspect, time-window, confidence/review, and model-version context so users can inspect what evidence supports a reported shift."
+        },
+        "highlightReason": "Admin Console is an existing catalog component for the reporting interface; no new frontend component is introduced."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7"]
+    },
+    {
+      "id": "sentiment_shift_notifications",
+      "stepNumber": 19,
+      "phase": "Inference, learning, and product outputs",
+      "title": "Deliver alerts only for qualified shifts",
+      "type": "add_component",
+      "content": "Send significant-shift candidates through the existing Notification Service after minimum-volume, baseline, deduplication, and configured alert-threshold checks. Include brand/topic, time window, direction, magnitude, sample size, and a report link; avoid implying statistical or business significance until the threshold is defined and validated.",
+      "component": {
+        "nodeId": "sentiment_shift_notifications",
+        "componentType": "notification-service",
+        "label": "Significant Sentiment Shift Alerts",
+        "description": "Qualified trend-shift notifications with evidence and report links.",
+        "position": {"x": 1840, "y": 80},
+        "properties": {
+          "componentName": "Significant Sentiment Shift Alerts",
+          "purpose": "Notify configured users about qualified sentiment shifts with brand/topic, time window, direction, magnitude, sample size, and report link; deduplicate alerts and apply minimum-volume and explicit significance rules before delivery."
+        },
+        "highlightReason": "Notification Service is already in the catalog and covers alert delivery without inventing a notification type."
+      },
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "sentiment_observability",
+      "stepNumber": 20,
+      "phase": "Inference, learning, and product outputs",
+      "title": "Observe latency, backlog, coverage, and quality",
+      "type": "add_component",
+      "content": "Collect stage latency and queue age, source lag/errors, duplicate and late-event rates, inference errors/abstentions, throughput, and trend/report freshness. Track labeled accuracy and drift by language/source when ground truth is available; alert on service health separately from sentiment-shift alerts.",
+      "component": {
+        "nodeId": "sentiment_observability",
+        "componentType": "monitoring",
+        "label": "Pipeline & Model Monitoring",
+        "description": "Operational metrics for ingest, stream processing, inference, and model quality.",
+        "position": {"x": 1840, "y": -180},
+        "properties": {
+          "componentName": "Pipeline & Model Monitoring",
+        "purpose": "Measure end-to-end accepted-post-to-durable-score latency against the under-two-second target and per-stage p95/queue age; alert and apply bounded backpressure/autoscaling on burst risk. Track throughput for the 1M+ daily floor, retries, inference failures, and accuracy/drift by language and source; block promotion or roll back if measured held-out accuracy falls below 85%."
+        },
+        "highlightReason": "Monitoring is an existing catalog component for service and model-health signals."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "sentiment_connect_connector_stream",
+      "stepNumber": 21,
+      "phase": "Connect ingestion and scoring",
+      "title": "Publish normalized connector events",
+      "type": "add_connection",
+      "content": "The platform adapters publish normalized events directly to the durable stream. Source-specific polling and webhook retry behavior remains in the adapters; the stable event envelope lets downstream processing remain provider-neutral.",
+      "connection": {
+        "edgeId": "sentiment_connectors_to_broker",
+        "sourceNodeId": "sentiment_source_connectors",
+        "targetNodeId": "sentiment_event_broker",
+        "connectionType": "event-stream",
+        "label": "Normalized source events",
+        "description": "Adapters publish source ID, provider, event time, text, and provenance to the durable event stream."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "sentiment_connect_gateway_broker",
+      "stepNumber": 22,
+      "phase": "Connect ingestion and scoring",
+      "title": "Publish accepted webhooks to the same stream",
+      "type": "add_connection",
+      "content": "Validated push deliveries join the same normalized topic after gateway checks. Idempotency keys make retries safe, and acceptance is not reported until the durable handoff succeeds.",
+      "connection": {
+        "edgeId": "sentiment_gateway_to_broker",
+        "sourceNodeId": "sentiment_ingestion_gateway",
+        "targetNodeId": "sentiment_event_broker",
+        "connectionType": "event-stream",
+        "label": "Validated webhook events",
+        "description": "The gateway publishes schema-checked, deduplicated provider events after durable broker acceptance."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "sentiment_connect_raw_archive",
+      "stepNumber": 23,
+      "phase": "Connect ingestion and scoring",
+      "title": "Archive raw events for bounded replay",
+      "type": "add_connection",
+      "content": "A separate consumer writes permitted source payloads and their envelope metadata to governed object storage. Broker retention supports operational replay; the archive supports longer, policy-bounded evaluation and recovery.",
+      "connection": {
+        "edgeId": "sentiment_broker_to_archive",
+        "sourceNodeId": "sentiment_event_broker",
+        "targetNodeId": "sentiment_raw_archive",
+        "connectionType": "data-flow",
+        "label": "Governed raw-event archive",
+        "description": "A decoupled consumer archives source events with schema and timestamp provenance under retention/deletion policy."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "sentiment_connect_stream_processor",
+      "stepNumber": 24,
+      "phase": "Connect ingestion and scoring",
+      "title": "Consume the durable stream in event time",
+      "type": "add_connection",
+      "content": "The stream processor consumes normalized events with replay offsets and event timestamps. Partition and parallelism choices must be load-tested against measured burst traffic and the agreed latency budget.",
+      "connection": {
+        "edgeId": "sentiment_broker_to_processor",
+        "sourceNodeId": "sentiment_event_broker",
+        "targetNodeId": "sentiment_stream_processor",
+        "connectionType": "event-stream",
+        "label": "Replayable post stream",
+        "description": "Consumers normalize and deduplicate events while preserving source order where required and recording event-time lag."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "sentiment_connect_processor_inference",
+      "stepNumber": 25,
+      "phase": "Connect ingestion and scoring",
+      "title": "Send bounded normalized posts to inference",
+      "type": "add_connection",
+      "content": "Only the normalized text and necessary context go to the online inference endpoint. Avoid unbounded feature lookups; include the source, language, and event metadata required for model interpretation and result provenance.",
+      "connection": {
+        "edgeId": "sentiment_processor_to_serving",
+        "sourceNodeId": "sentiment_stream_processor",
+        "targetNodeId": "sentiment_model_serving",
+        "connectionType": "api-call",
+        "label": "Bounded scoring request",
+        "description": "The processor sends normalized text and permitted context with event metadata to the version-pinned inference API."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "sentiment_connect_serving_model",
+      "stepNumber": 26,
+      "phase": "Connect ingestion and scoring",
+      "title": "Pin serving to an approved model artifact",
+      "type": "add_connection",
+      "content": "The serving layer loads only the registry-approved artifact. Return all task outputs and confidence with the artifact version so results can be reproduced and quality regressions traced.",
+      "connection": {
+        "edgeId": "sentiment_serving_to_model",
+        "sourceNodeId": "sentiment_model_serving",
+        "targetNodeId": "sentiment_multilingual_model",
+        "connectionType": "data-flow",
+        "label": "Approved multilingual model",
+        "description": "Serving executes the pinned NLP artifact and returns sentiment, emotion, aspect, language, confidence, and model-version metadata."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "sentiment_connect_results_stream",
+      "stepNumber": 27,
+      "phase": "Connect ingestion and scoring",
+      "title": "Emit scored results as a separate event",
+      "type": "add_connection",
+      "content": "Publish successful scored results to a result topic rather than coupling each consumer to inference. Include stable event identity, model version, confidence, event time, and task outputs; make downstream writes idempotent.",
+      "connection": {
+        "edgeId": "sentiment_serving_to_results_topic",
+        "sourceNodeId": "sentiment_model_serving",
+        "targetNodeId": "sentiment_event_broker",
+        "connectionType": "event-stream",
+        "label": "Scored-result events",
+        "description": "The serving worker emits idempotent result events for persistence, trend aggregation, and reporting consumers."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "sentiment_connect_review_queue",
+      "stepNumber": 28,
+      "phase": "Connect ingestion and scoring",
+      "title": "Route abstentions and exhausted failures to review",
+      "type": "add_connection",
+      "content": "Low-confidence or unsupported-language outputs and exhausted processing failures go to a separate queue with a reason code; they do not disappear or masquerade as confident sentiment. Retry only transient errors with bounded backoff and idempotent writes.",
+      "connection": {
+        "edgeId": "sentiment_serving_to_review_queue",
+        "sourceNodeId": "sentiment_model_serving",
+        "targetNodeId": "sentiment_review_queue",
+        "connectionType": "event-stream",
+        "label": "Uncertain cases & failures",
+        "description": "Abstentions and exhausted failures enter durable review with confidence, reason, source, and model-version context."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "sentiment_connect_human_review",
+      "stepNumber": 29,
+      "phase": "Connect ingestion and scoring",
+      "title": "Keep human adjudication asynchronous",
+      "type": "add_connection",
+      "content": "Reviewers label queued examples using the shared annotation guide. Adjudicated outcomes feed offline evaluation and training; they are not placed on the synchronous request path.",
+      "connection": {
+        "edgeId": "sentiment_queue_to_labeling",
+        "sourceNodeId": "sentiment_review_queue",
+        "targetNodeId": "sentiment_data_labeling",
+        "connectionType": "data-flow",
+        "label": "Asynchronous review cases",
+        "description": "Reviewers receive uncertain posts with source/language context and record adjudicated sentiment, emotion, aspect, or sarcasm labels."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "sentiment_connect_archive_training",
+      "stepNumber": 30,
+      "phase": "Connect learning, reporting, and alerts",
+      "title": "Build offline data from permitted archived posts",
+      "type": "add_connection",
+      "content": "Offline jobs read policy-permitted, versioned archive snapshots for training and evaluation. Apply deletion and consent rules before a snapshot is eligible for model use.",
+      "connection": {
+        "edgeId": "sentiment_archive_to_training",
+        "sourceNodeId": "sentiment_raw_archive",
+        "targetNodeId": "sentiment_model_training",
+        "connectionType": "data-flow",
+        "label": "Governed training/evaluation snapshot",
+        "description": "Offline pipelines read source-permitted, versioned post snapshots after retention and deletion-policy checks."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "sentiment_connect_labels_training",
+      "stepNumber": 31,
+      "phase": "Connect learning, reporting, and alerts",
+      "title": "Join adjudicated labels to training data",
+      "type": "add_connection",
+      "content": "Training consumes adjudicated labels with their annotation version and language/source strata. Keep evaluation examples isolated so the accuracy gate remains independent of training feedback.",
+      "connection": {
+        "edgeId": "sentiment_labels_to_training",
+        "sourceNodeId": "sentiment_data_labeling",
+        "targetNodeId": "sentiment_model_training",
+        "connectionType": "data-flow",
+        "label": "Adjudicated language-aware labels",
+        "description": "Versioned labels and annotation guidance support training while a separate held-out set remains reserved for evaluation."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "sentiment_connect_training_registry",
+      "stepNumber": 32,
+      "phase": "Connect learning, reporting, and alerts",
+      "title": "Register candidates with evaluation evidence",
+      "type": "add_connection",
+      "content": "Training publishes immutable candidate artifacts and evaluation metadata. Registry promotion remains a review decision gated on the measured quality target and language/source coverage.",
+      "connection": {
+        "edgeId": "sentiment_training_to_registry",
+        "sourceNodeId": "sentiment_model_training",
+        "targetNodeId": "sentiment_model_registry",
+        "connectionType": "data-flow",
+        "label": "Candidate artifact & evaluation",
+        "description": "Candidate artifacts arrive with dataset, preprocessing, held-out accuracy, slice results, and compatibility evidence for review."
+      },
+      "requirementIds": ["legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "sentiment_connect_registry_serving",
+      "stepNumber": 33,
+      "phase": "Connect learning, reporting, and alerts",
+      "title": "Deploy only an approved version and retain rollback",
+      "type": "add_connection",
+      "content": "Serving resolves an approved immutable registry version. Roll out gradually, compare latency/errors and labeled quality, and revert to the previous artifact if the deployment regresses; never silently swap a model while interpreting old results.",
+      "connection": {
+        "edgeId": "sentiment_registry_to_serving",
+        "sourceNodeId": "sentiment_model_registry",
+        "targetNodeId": "sentiment_model_serving",
+        "connectionType": "data-flow",
+        "label": "Approved versioned model",
+        "description": "A reviewed registry version is deployed to serving with staged rollout, explicit version metadata, and rollback to the previous approved artifact."
+      },
+      "requirementIds": ["legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "sentiment_connect_result_storage",
+      "stepNumber": 34,
+      "phase": "Connect learning, reporting, and alerts",
+      "title": "Persist idempotent scored-post records",
+      "type": "add_connection",
+      "content": "A result consumer writes by stable post/event identity and records model version and event time. Handle provider edits and duplicate deliveries deterministically; apply source-specific retention and deletion to stored text and derived data.",
+      "connection": {
+        "edgeId": "sentiment_results_to_store",
+        "sourceNodeId": "sentiment_event_broker",
+        "targetNodeId": "sentiment_results_store",
+        "connectionType": "database-connection",
+        "label": "Idempotent scored-result writes",
+        "description": "The result consumer persists task outputs, confidence, model version, event time, and review status using a stable event key."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:3"]
+    },
+    {
+      "id": "sentiment_connect_trend_analytics",
+      "stepNumber": 35,
+      "phase": "Connect learning, reporting, and alerts",
+      "title": "Aggregate scored events into time-based trends",
+      "type": "add_connection",
+      "content": "Analytics consumes the result topic independently of result persistence. Use event-time windows and retain correction/replay behavior for late events so a delayed source post can update the appropriate trend window.",
+      "connection": {
+        "edgeId": "sentiment_results_to_analytics",
+        "sourceNodeId": "sentiment_event_broker",
+        "targetNodeId": "sentiment_trend_analytics",
+        "connectionType": "event-stream",
+        "label": "Scored events for windowing",
+        "description": "Analytics groups model outputs by configured entities and event-time windows, supporting late-event correction and replay."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "sentiment_connect_trend_store",
+      "stepNumber": 36,
+      "phase": "Connect learning, reporting, and alerts",
+      "title": "Store trend windows for low-latency queries",
+      "type": "add_connection",
+      "content": "Write current and historical window aggregates separately from per-post scoring records where access patterns require it. Version the aggregation logic and baseline so trend comparisons can be interpreted and recomputed.",
+      "connection": {
+        "edgeId": "sentiment_analytics_to_store",
+        "sourceNodeId": "sentiment_trend_analytics",
+        "targetNodeId": "sentiment_results_store",
+        "connectionType": "database-connection",
+        "label": "Versioned time-window aggregates",
+        "description": "Analytics persists trend buckets and baseline/version metadata for query and trend correction."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3"]
+    },
+    {
+      "id": "sentiment_connect_warehouse",
+      "stepNumber": 37,
+      "phase": "Connect learning, reporting, and alerts",
+      "title": "Publish historical aggregates for reports",
+      "type": "add_connection",
+      "content": "Export versioned aggregates asynchronously to the reporting warehouse. This decouples report scans from the scoring database and lets the team define a separate freshness objective.",
+      "connection": {
+        "edgeId": "sentiment_analytics_to_warehouse",
+        "sourceNodeId": "sentiment_trend_analytics",
+        "targetNodeId": "sentiment_report_warehouse",
+        "connectionType": "data-flow",
+        "label": "Historical report aggregates",
+        "description": "A background export loads event-time aggregates and model-version dimensions for automated reporting."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7"]
+    },
+    {
+      "id": "sentiment_connect_reports_ui",
+      "stepNumber": 38,
+      "phase": "Connect learning, reporting, and alerts",
+      "title": "Generate reports from the historical store",
+      "type": "add_connection",
+      "content": "The reporting interface queries bounded, pre-aggregated report views rather than scanning the hot event stream. Include time range and slice filters and show the aggregation's last-updated time.",
+      "connection": {
+        "edgeId": "sentiment_warehouse_to_console",
+        "sourceNodeId": "sentiment_report_warehouse",
+        "targetNodeId": "sentiment_reporting_console",
+        "connectionType": "api-call",
+        "label": "Automated reports & history",
+        "description": "The console reads bounded historical report views with source, language, topic, aspect, and freshness context."
+      },
+      "requirementIds": ["legacy-requirement:7"]
+    },
+    {
+      "id": "sentiment_connect_live_trends_ui",
+      "stepNumber": 39,
+      "phase": "Connect learning, reporting, and alerts",
+      "title": "Expose recent trend results to the console",
+      "type": "add_connection",
+      "content": "The interface reads recent event results and trend buckets through bounded queries, preserving review status and model version so users can distinguish confident output from abstentions.",
+      "connection": {
+        "edgeId": "sentiment_store_to_console",
+        "sourceNodeId": "sentiment_results_store",
+        "targetNodeId": "sentiment_reporting_console",
+        "connectionType": "api-call",
+        "label": "Recent results & trend queries",
+        "description": "The console queries scored records and time buckets by authorized source, topic, language, aspect, and interval."
+      },
+      "requirementIds": ["legacy-requirement:4"]
+    },
+    {
+      "id": "sentiment_connect_alerts",
+      "stepNumber": 40,
+      "phase": "Connect learning, reporting, and alerts",
+      "title": "Notify on deduplicated significant shifts",
+      "type": "add_connection",
+      "content": "The analytics layer emits a qualified shift event only after its configured sample, baseline, and significance checks. Notification delivery includes a link to supporting report context and applies deduplication to avoid alert storms.",
+      "connection": {
+        "edgeId": "sentiment_analytics_to_notifications",
+        "sourceNodeId": "sentiment_trend_analytics",
+        "targetNodeId": "sentiment_shift_notifications",
+        "connectionType": "event-stream",
+        "label": "Qualified sentiment-shift event",
+        "description": "Only a thresholded and deduplicated candidate with magnitude, interval, and sample evidence is sent for notification."
+      },
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "sentiment_observe_gateway",
+      "stepNumber": 41,
+      "phase": "Observe the service boundary",
+      "title": "Measure source acceptance and ingestion lag",
+      "type": "add_connection",
+      "content": "Export gateway request latency, rejected signatures/schemas, provider throttling, and time from source event to accepted event. This separates external source lag from platform processing latency.",
+      "connection": {
+        "edgeId": "sentiment_gateway_to_monitoring",
+        "sourceNodeId": "sentiment_ingestion_gateway",
+        "targetNodeId": "sentiment_observability",
+        "connectionType": "data-flow",
+        "label": "Ingress latency & source errors",
+        "description": "Gateway metrics distinguish validation/acceptance time and provider lag from downstream scoring time."
+      },
+      "requirementIds": ["legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "sentiment_observe_broker",
+      "stepNumber": 42,
+      "phase": "Observe the service boundary",
+      "title": "Alert on backlog before the latency budget is lost",
+      "type": "add_connection",
+      "content": "Track broker lag, oldest-event age, retries, partition skew, and consumer throughput. Autoscale or shed noncritical work based on backlog and measured peak behavior; a daily volume alone cannot determine safe partition or capacity settings.",
+      "connection": {
+        "edgeId": "sentiment_broker_to_monitoring",
+        "sourceNodeId": "sentiment_event_broker",
+        "targetNodeId": "sentiment_observability",
+        "connectionType": "data-flow",
+        "label": "Lag, age & throughput",
+        "description": "Broker and consumer metrics expose backlog growth and partition skew before end-to-end processing misses its target."
+      },
+      "requirementIds": ["legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "sentiment_observe_processor",
+      "stepNumber": 43,
+      "phase": "Observe the service boundary",
+      "title": "Measure stream-stage time and data quality",
+      "type": "add_connection",
+      "content": "Measure processing p95, late/duplicate rates, language-detection outcomes, and event-time window correction volume. Keep event timestamps through the pipeline so the under-2-second budget can be attributed by stage.",
+      "connection": {
+        "edgeId": "sentiment_processor_to_monitoring",
+        "sourceNodeId": "sentiment_stream_processor",
+        "targetNodeId": "sentiment_observability",
+        "connectionType": "data-flow",
+        "label": "Stream p95 & data-quality signals",
+        "description": "Per-stage timing and event-quality measures explain stream delay and language/source coverage."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "sentiment_observe_inference",
+      "stepNumber": 44,
+      "phase": "Observe the service boundary",
+      "title": "Track inference latency, abstention, and model slices",
+      "type": "add_connection",
+      "content": "Track model-serving p95, timeout/error rate, throughput, confidence and abstention rates by supported language and source. Compare labeled results against the above-85% target when adjudicated truth arrives; do not infer model accuracy from unreviewed predictions.",
+      "connection": {
+        "edgeId": "sentiment_serving_to_monitoring",
+        "sourceNodeId": "sentiment_model_serving",
+        "targetNodeId": "sentiment_observability",
+        "connectionType": "data-flow",
+        "label": "Inference health & quality slices",
+        "description": "Serving emits latency/errors and confidence/abstention metrics; labeled outcomes later provide language/source quality evidence."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "sentiment_observe_analytics",
+      "stepNumber": 45,
+      "phase": "Observe the service boundary",
+      "title": "Separate pipeline health from sentiment-shift alerts",
+      "type": "add_connection",
+      "content": "Observe trend-window freshness, change-point volume, report export delay, and notification delivery separately from business sentiment alerts. This lets operators detect a broken analytics pipeline without confusing infrastructure alarms with a real change in public sentiment.",
+      "connection": {
+        "edgeId": "sentiment_analytics_to_monitoring",
+        "sourceNodeId": "sentiment_trend_analytics",
+        "targetNodeId": "sentiment_observability",
+        "connectionType": "data-flow",
+        "label": "Trend freshness & export health",
+        "description": "Operational metrics report window freshness and export/delivery health independently of user-facing sentiment-shift notifications."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7", "legacy-requirement:8"]
+    }
+  ]
+}

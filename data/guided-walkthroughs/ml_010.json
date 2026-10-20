@@ -1,0 +1,848 @@
+{
+  "problem_id": "ml_010",
+  "version": "1.0",
+  "totalSteps": 46,
+  "phases": [
+    {
+      "name": "Phase 1: Scope, data, and ingestion",
+      "stepRange": [1, 14],
+      "description": "Define the forecast grain and connect trustworthy retail and external data to replayable storage and curated history."
+    },
+    {
+      "name": "Phase 2: Time-safe forecasting features",
+      "stepRange": [15, 18],
+      "description": "Create point-in-time features for calendar effects, hierarchy, promotions, and external signals without leakage."
+    },
+    {
+      "name": "Phase 3: Train, select, and approve models",
+      "stepRange": [19, 28],
+      "description": "Cross-learn across sparse series, select candidates per series, backtest them, register approved versions, and produce interval forecasts."
+    },
+    {
+      "name": "Phase 4: Reconcile, persist, and serve forecasts",
+      "stepRange": [29, 41],
+      "description": "Generate bottom-level forecasts, reconcile all hierarchy and time rollups, then expose versioned forecasts to planning clients."
+    },
+    {
+      "name": "Phase 5: Quality gates and operations",
+      "stepRange": [42, 46],
+      "description": "Observe accuracy, calibration, data health, and the daily batch deadline; treat targets as measured release criteria."
+    }
+  ],
+  "steps": [
+    {
+      "id": "df_scope",
+      "stepNumber": 1,
+      "phase": "Phase 1: Scope, data, and ingestion",
+      "type": "explanation",
+      "title": "Set the forecast contract before choosing models",
+      "content": "Use one canonical bottom-level series key: (sku_id, store_id, business_date), with product and store hierarchy versions attached. The brief sets 100k+ SKU-location series, a 90-day horizon, a daily reforecast under two hours, and a MAPE target below 15%. Treat those as product acceptance targets to prove with representative data and load tests—not as guarantees from a model name. Any numeric component settings shown later are illustrative starting assumptions only, not capacity recommendations; validate them against representative workload, peak, recovery, and cost measurements. Assume daily observations are available; preserve timezone and business-calendar rules so stores do not shift demand across dates.",
+      "requirementIds": ["legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "df_granularity",
+      "stepNumber": 2,
+      "phase": "Phase 1: Scope, data, and ingestion",
+      "type": "explanation",
+      "title": "Forecast daily at the leaf; derive consistent rollups",
+      "content": "Generate the 90-day daily path at SKU-store grain as the canonical output. Weekly and monthly views are calendar-aware sums of those daily values (with the retailer's agreed week start, local business timezone, and partial-period behavior), not independently rounded numbers. The store-to-region-to-national hierarchy is versioned separately from the time aggregation, so a store move or assortment change does not silently rewrite historical evaluation.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "df_add_retail_sources",
+      "stepNumber": 3,
+      "phase": "Phase 1: Scope, data, and ingestion",
+      "type": "add_component",
+      "title": "Represent retail source systems",
+      "content": "Start with POS sales, product/store master data, inventory availability, prices, and promotion calendars. The palette has no retail-source connector, so this is a narrowly scoped custom boundary rather than a new platform component. Include stock availability: observed sales during a stockout are censored demand, not proof that customers wanted zero units.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7"],
+      "component": {
+        "nodeId": "df_retail_sources",
+        "componentType": "custom-component",
+        "label": "Retail Source Connectors",
+        "description": "POS, ERP, product/store master, inventory, price, and promotion feeds",
+        "position": {"x": 40, "y": 80},
+        "highlightReason": "These systems provide observed demand and the item, location, price, promotion, and availability context needed to forecast true demand.",
+        "properties": {
+          "componentName": "Retail Source Connectors",
+          "subtitle": "POS / ERP / inventory / merchandising",
+          "componentType": "Data source",
+          "purpose": "Versioned batch extracts and change feeds for sales, product/store hierarchy, on-hand availability, regular price, and promotion plans; attach source timestamps and stable identifiers."
+        }
+      }
+    },
+    {
+      "id": "df_add_external_sources",
+      "stepNumber": 4,
+      "phase": "Phase 1: Scope, data, and ingestion",
+      "type": "add_component",
+      "title": "Bring in external covariate feeds",
+      "content": "Weather forecasts and economic indicators are separate upstream sources with their own revisions and publication times. There is no dedicated external-data-source palette item, so reuse the same custom connector pattern but keep this boundary distinct: a weather forecast published after a historical prediction cutoff must not leak into that backtest.",
+      "requirementIds": ["legacy-requirement:5"],
+      "component": {
+        "nodeId": "df_external_sources",
+        "componentType": "custom-component",
+        "label": "Weather & Economic Feeds",
+        "description": "External covariate providers with publication-time and revision metadata",
+        "position": {"x": 40, "y": 300},
+        "highlightReason": "Weather and economic signals can improve forecasts only when their historical as-of versions are preserved.",
+        "properties": {
+          "componentName": "Weather & Economic Feeds",
+          "subtitle": "Forecast vintages / indicators",
+          "componentType": "External data source",
+          "purpose": "Fetch weather forecast vintages and economic indicators; retain provider, geography, valid-time, published-at, and revision identifiers for as-of training joins."
+        }
+      }
+    },
+    {
+      "id": "df_add_ingestion",
+      "stepNumber": 5,
+      "phase": "Phase 1: Scope, data, and ingestion",
+      "type": "add_component",
+      "title": "Validate and normalize incoming records",
+      "content": "A bounded ingestion worker validates schemas, units, currencies, business dates, duplicate event IDs, late corrections, and source watermarks. Quarantine malformed partitions instead of poisoning a whole daily run. Keep the incoming source record and transformation version so a forecast run can be reproduced.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:3"],
+      "component": {
+        "nodeId": "df_ingestion_worker",
+        "componentType": "processing-worker",
+        "label": "Ingestion & Quality Workers",
+        "description": "Idempotent validation, normalization, deduplication, and quarantine",
+        "position": {"x": 340, "y": 190},
+        "highlightReason": "Parallel, idempotent ingestion turns heterogeneous feeds into trusted, replayable inputs for the daily forecast run.",
+        "properties": {
+          "componentName": "Ingestion & Quality Workers",
+          "purpose": "Validate and normalize retail and external feeds; deduplicate by source event ID, track watermarks, isolate bad partitions, and emit a run manifest.",
+          "tasks": "Data Processing",
+          "concurrency": 32
+        }
+      }
+    },
+    {
+      "id": "df_retail_ingestion",
+      "stepNumber": 6,
+      "phase": "Phase 1: Scope, data, and ingestion",
+      "type": "add_connection",
+      "title": "Connect retail feeds to validation",
+      "content": "Land POS and merchandising batches or CDC records through the same idempotent validation path. A stable source event key makes retries safe and prevents duplicate sales from inflating demand.",
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:2"],
+      "connection": {
+        "edgeId": "df_edge_retail_ingestion",
+        "sourceNodeId": "df_retail_sources",
+        "targetNodeId": "df_ingestion_worker",
+        "connectionType": "data-flow",
+        "label": "Sales, hierarchy, inventory, price, promotions",
+        "description": "Batch extracts and CDC enter schema, deduplication, and business-date validation."
+      }
+    },
+    {
+      "id": "df_external_ingestion",
+      "stepNumber": 7,
+      "phase": "Phase 1: Scope, data, and ingestion",
+      "type": "add_connection",
+      "title": "Connect time-versioned external signals",
+      "content": "Normalize external geography and effective dates, while retaining when each value became knowable. This gives rolling-origin tests the same information that a production forecast would actually have had.",
+      "requirementIds": ["legacy-requirement:5"],
+      "connection": {
+        "edgeId": "df_edge_external_ingestion",
+        "sourceNodeId": "df_external_sources",
+        "targetNodeId": "df_ingestion_worker",
+        "connectionType": "data-flow",
+        "label": "As-of weather and economic revisions",
+        "description": "External covariates keep valid time and publication time for leakage-safe joins."
+      }
+    },
+    {
+      "id": "df_add_raw_lake",
+      "stepNumber": 8,
+      "phase": "Phase 1: Scope, data, and ingestion",
+      "type": "add_component",
+      "title": "Keep immutable raw snapshots",
+      "content": "Write validated source partitions to object storage by source and business date, with schema and transformation versions in the manifest. Immutable snapshots allow replay, audit, and point-in-time backtests without depending on a mutable warehouse table.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5"],
+      "component": {
+        "nodeId": "df_raw_lake",
+        "componentType": "object-storage",
+        "label": "Versioned Raw Data Lake",
+        "description": "Immutable, partitioned source snapshots and run manifests",
+        "position": {"x": 640, "y": 330},
+        "highlightReason": "Reproducible raw snapshots are the durable boundary for correction replay and leakage-safe evaluation.",
+        "properties": {
+          "componentName": "Versioned Raw Data Lake",
+          "purpose": "Store versioned, immutable sales, inventory, hierarchy, promotion, weather, and economic partitions plus data-quality and run manifests.",
+          "provider": "S3",
+          "versioning": true
+        }
+      }
+    },
+    {
+      "id": "df_ingestion_raw",
+      "stepNumber": 9,
+      "phase": "Phase 1: Scope, data, and ingestion",
+      "type": "add_connection",
+      "title": "Persist source snapshots before transformation",
+      "content": "The worker writes the accepted source payload and manifest to the raw lake before downstream feature jobs consume it. Failed transformations can then restart from the same input rather than re-fetching an upstream source that may have changed.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5"],
+      "connection": {
+        "edgeId": "df_edge_ingestion_raw",
+        "sourceNodeId": "df_ingestion_worker",
+        "targetNodeId": "df_raw_lake",
+        "connectionType": "data-flow",
+        "label": "Validated immutable partitions",
+        "description": "Persist inputs and provenance before curation or model execution."
+      }
+    },
+    {
+      "id": "df_add_queue",
+      "stepNumber": 10,
+      "phase": "Phase 1: Scope, data, and ingestion",
+      "type": "add_component",
+      "title": "Decouple run events from data processing",
+      "content": "Publish idempotent partition-ready and run-manifest events rather than placing an entire sales history on a queue. Consumers can retry, scale independently, and resume the daily batch from completed partitions.",
+      "requirementIds": ["legacy-constraint:2", "legacy-constraint:3"],
+      "component": {
+        "nodeId": "df_event_bus",
+        "componentType": "message-broker",
+        "label": "Partition & Run Event Bus",
+        "description": "Durable notifications for ingestion, curation, and forecast-run stages",
+        "position": {"x": 640, "y": 90},
+        "highlightReason": "Small durable work events enable retries and partition-level progress without coupling every batch stage.",
+        "properties": {
+          "componentName": "Partition & Run Event Bus",
+          "purpose": "Carry idempotent partition-ready, correction, and forecast-run manifest events; payloads reference data objects rather than embed histories.",
+          "partitions": 48,
+          "replication": 3,
+          "durable": true,
+          "retention": 168
+        }
+      }
+    },
+    {
+      "id": "df_ingestion_bus",
+      "stepNumber": 11,
+      "phase": "Phase 1: Scope, data, and ingestion",
+      "type": "add_connection",
+      "title": "Emit durable partition-ready events",
+      "content": "A consumer acknowledges only after its idempotent stage commits. Retry exhausted partitions to a dead-letter path and keep run state in the orchestrator/manifest, not in an in-memory worker.",
+      "requirementIds": ["legacy-constraint:2", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "df_edge_ingestion_bus",
+        "sourceNodeId": "df_ingestion_worker",
+        "targetNodeId": "df_event_bus",
+        "connectionType": "message-queue",
+        "label": "Partition-ready / correction events",
+        "description": "Durable run events carry object references and idempotency keys."
+      }
+    },
+    {
+      "id": "df_add_warehouse",
+      "stepNumber": 12,
+      "phase": "Phase 1: Scope, data, and ingestion",
+      "type": "add_component",
+      "title": "Build curated point-in-time history",
+      "content": "The analytical warehouse contains deduplicated demand observations, inventory/stockout intervals, effective-dated item-store hierarchy, and promotion and external-signal history. Keep observed sales distinct from estimated unconstrained demand and record the estimation method.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5"],
+      "component": {
+        "nodeId": "df_curated_warehouse",
+        "componentType": "data-warehouse",
+        "label": "Curated Retail History",
+        "description": "Columnar, effective-dated facts and hierarchy snapshots for training and backtesting",
+        "position": {"x": 940, "y": 210},
+        "highlightReason": "A curated historical source of truth supports high-throughput joins and repeatable model evaluation.",
+        "properties": {
+          "componentName": "Curated Retail History",
+          "purpose": "Store point-in-time demand, stock availability, prices, promotions, calendar/external vintages, and effective-dated SKU-store-region hierarchy for training and backtesting.",
+          "platform": "Snowflake",
+          "storageTB": 20,
+          "compression": "Columnar"
+        }
+      }
+    },
+    {
+      "id": "df_raw_warehouse",
+      "stepNumber": 13,
+      "phase": "Phase 1: Scope, data, and ingestion",
+      "type": "add_connection",
+      "title": "Curate from replayable raw partitions",
+      "content": "Transform object partitions into deduplicated, effective-dated fact tables. Track source watermarks and correction versions so a late-arriving sale can trigger a bounded recomputation rather than silently changing an already published run.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4"],
+      "connection": {
+        "edgeId": "df_edge_raw_warehouse",
+        "sourceNodeId": "df_raw_lake",
+        "targetNodeId": "df_curated_warehouse",
+        "connectionType": "data-flow",
+        "label": "Replayable curation and deduplication",
+        "description": "Build point-in-time analytical facts from immutable raw snapshots."
+      }
+    },
+    {
+      "id": "df_bus_warehouse",
+      "stepNumber": 14,
+      "phase": "Phase 1: Scope, data, and ingestion",
+      "type": "add_connection",
+      "title": "Trigger incremental curation by partition",
+      "content": "The event bus announces newly complete partitions and corrections. The warehouse loader processes those references idempotently; a full historical reload is not required for each daily forecast.",
+      "requirementIds": ["legacy-constraint:2", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "df_edge_bus_warehouse",
+        "sourceNodeId": "df_event_bus",
+        "targetNodeId": "df_curated_warehouse",
+        "connectionType": "event-stream",
+        "label": "Partition manifests and corrections",
+        "description": "Incremental event-driven loads preserve progress and avoid full re-ingestion."
+      }
+    },
+    {
+      "id": "df_feature_contract",
+      "stepNumber": 15,
+      "phase": "Phase 2: Time-safe forecasting features",
+      "type": "explanation",
+      "title": "Make feature time and forecast time explicit",
+      "content": "For each target date, join only covariates available at the forecast creation time. Build calendar and holiday-calendar features, local seasonality, planned price/promotion depth, weather forecast vintages, economic indicators, product/store attributes, and availability-corrected demand; explicitly model recurring holidays. A feature's valid date alone is insufficient: preserve its published-at time to prevent future information leaking into training.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7"]
+    },
+    {
+      "id": "df_add_feature_store",
+      "stepNumber": 16,
+      "phase": "Phase 2: Time-safe forecasting features",
+      "type": "add_component",
+      "title": "Create reusable point-in-time features",
+      "content": "Store feature definitions and snapshots under the same series key and as-of semantics used by both training and batch inference. Include launch-time product attributes and category/region hierarchy so a new SKU with no sales history can be matched to validated analog series; mark sparse or absent history explicitly rather than fabricating observations.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7"],
+      "component": {
+        "nodeId": "df_feature_store",
+        "componentType": "feature-store",
+        "label": "Point-in-Time Feature Store",
+        "description": "Shared offline feature definitions and batch snapshots keyed by SKU, store, and date",
+        "position": {"x": 1240, "y": 210},
+        "highlightReason": "The shared, time-aware feature contract prevents training-serving skew and supports cross-learning across related series.",
+        "properties": {
+          "componentName": "Point-in-Time Feature Store",
+        "purpose": "Versioned point-in-time features for daily targets, calendar/holiday seasonality, price/promotions, weather/economic vintages, availability, launch-time product attributes, analog cohorts, and SKU-store-region hierarchy; expose a cold-start or sparse-history flag.",
+          "platform": "Feast",
+          "features": 80
+        }
+      }
+    },
+    {
+      "id": "df_warehouse_features",
+      "stepNumber": 17,
+      "phase": "Phase 2: Time-safe forecasting features",
+      "type": "add_connection",
+      "title": "Materialize features from curated facts",
+      "content": "Feature materialization reads effective-dated retail history and joins each historical training row using its original forecast cutoff. Use the same transformation code for future known covariates and production scoring.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5"],
+      "connection": {
+        "edgeId": "df_edge_warehouse_features",
+        "sourceNodeId": "df_curated_warehouse",
+        "targetNodeId": "df_feature_store",
+        "connectionType": "data-flow",
+        "label": "Point-in-time feature materialization",
+        "description": "Curated hierarchy, target history, promotions, availability, and external vintages become versioned model inputs."
+      }
+    },
+    {
+      "id": "df_feature_learning",
+      "stepNumber": 18,
+      "phase": "Phase 2: Time-safe forecasting features",
+      "type": "explanation",
+      "title": "Use cross-learning without erasing local behavior",
+      "content": "Global models learn seasonal and promotional patterns across similar products and locations, which gives sparse and new series a useful prior. Retain SKU/store identity and local scale, and compare pooled models with simpler per-series baselines so high-volume items do not dominate every decision.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "df_add_mlops",
+      "stepNumber": 19,
+      "phase": "Phase 3: Train, select, and approve models",
+      "type": "add_component",
+      "title": "Orchestrate rolling-origin evaluation and selection",
+      "content": "The pipeline compares candidate families by series/cohort and forecast horizon. Use rolling-origin backtests with promotion and external-feature cutoffs frozen at each origin. Include seasonal-naive/ETS baselines alongside global DeepAR or Temporal Fusion Transformer candidates; select by held-out performance and reliability, not training fit. Detect zero- or sparse-history products and route them to a separately evaluated metadata/analog cold-start path until observed history is sufficient for normal per-series selection.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:1"],
+      "component": {
+        "nodeId": "df_mlops_pipeline",
+        "componentType": "mlops-pipeline",
+        "label": "Backtest & Model Selection Pipeline",
+        "description": "Rolling-origin candidate evaluation, per-series selection, release gates, and scheduled batch runs",
+        "position": {"x": 1240, "y": 30},
+        "highlightReason": "Automated, leakage-safe rolling-origin selection determines which model is suitable for each series or cohort.",
+        "properties": {
+          "componentName": "Backtest & Model Selection Pipeline",
+        "purpose": "Run leakage-safe rolling-origin tests and select by SKU-location cohort and horizon. Detect new or sparse-history SKUs, route them to a separately evaluated product-attribute/analog and hierarchical-prior cold-start forecast, and switch to normal series selection only after a backtest-validated history sufficiency rule. Block model promotion unless representative held-out MAPE is below 15% under the documented zero-demand policy and a representative 100k+ SKU-location daily run completes within two hours; retain cohort and horizon evidence for both gates.",
+          "platform": "Kubeflow",
+          "stages": "validate data -> build point-in-time features -> rolling-origin backtest -> select per series/cohort -> train -> calibrate intervals -> reconcile -> publish"
+        }
+      }
+    },
+    {
+      "id": "df_features_mlops",
+      "stepNumber": 20,
+      "phase": "Phase 3: Train, select, and approve models",
+      "type": "add_connection",
+      "title": "Feed reproducible features into evaluation",
+      "content": "Record the feature snapshot and hierarchy version for every fold and production run. That lineage lets the team distinguish model changes from upstream data revisions when accuracy shifts.",
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:1"],
+      "connection": {
+        "edgeId": "df_edge_features_mlops",
+        "sourceNodeId": "df_feature_store",
+        "targetNodeId": "df_mlops_pipeline",
+        "connectionType": "data-flow",
+        "label": "Versioned features and snapshot IDs",
+        "description": "The evaluation and forecast run consume reproducible, point-in-time inputs."
+      }
+    },
+    {
+      "id": "df_add_training",
+      "stepNumber": 21,
+      "phase": "Phase 3: Train, select, and approve models",
+      "type": "add_component",
+      "title": "Train global and candidate forecasters",
+      "content": "Train candidate global probabilistic time-series models such as DeepAR or TFT on related SKU-location histories, plus statistical baselines. Evaluate a metadata-based cold-start model or analog fallback for products without sales history, borrowing from comparable product/category and store/region series without treating their sales as observed for the new product. Use quantile loss or sampled predictive distributions for intervals. Keep the model family replaceable.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2"],
+      "component": {
+        "nodeId": "df_model_training",
+        "componentType": "model-training",
+        "label": "Probabilistic Forecast Training",
+        "description": "Distributed training for global DeepAR/TFT candidates and comparable baselines",
+        "position": {"x": 1540, "y": 30},
+        "highlightReason": "Global models share signal across series, while evaluated baselines prevent unnecessary complexity.",
+        "properties": {
+          "componentName": "Probabilistic Forecast Training",
+        "purpose": "Train cross-series DeepAR/TFT candidates and baselines, plus an attribute/analog cold-start path for new products without sales history; evaluate zero-history cohorts separately and produce daily probabilistic paths and uncertainty samples.",
+          "computeType": "Distributed",
+          "batchSize": 512,
+          "epochs": 30
+        }
+      }
+    },
+    {
+      "id": "df_mlops_training",
+      "stepNumber": 22,
+      "phase": "Phase 3: Train, select, and approve models",
+      "type": "add_connection",
+      "title": "Launch training from an evaluated run manifest",
+      "content": "Train only candidates that passed data validation and backtest gates. Partition by product family or series cohort, persist checkpoints, and make retries idempotent so a failed shard does not force a full-catalog retrain.",
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "df_edge_mlops_training",
+        "sourceNodeId": "df_mlops_pipeline",
+        "targetNodeId": "df_model_training",
+        "connectionType": "api-call",
+        "label": "Validated candidate and run configuration",
+        "description": "The pipeline schedules partitioned, reproducible candidate training jobs."
+      }
+    },
+    {
+      "id": "df_model_selection",
+      "stepNumber": 23,
+      "phase": "Phase 3: Train, select, and approve models",
+      "type": "explanation",
+      "title": "Select per series, and do not game MAPE",
+      "content": "Choose the candidate per SKU-location or a statistically justified cohort using held-out rolling-origin results, segmented by horizon, volume, category, and promotion regime. The brief's MAPE-below-15% target is a release objective; MAPE is unstable when actual demand is zero or near zero, so publish the requested MAPE with a documented zero-demand policy and also inspect WAPE/MASE and high-impact segments. Reject a model if aggregate accuracy hides materially poor cohorts.",
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:1"]
+    },
+    {
+      "id": "df_add_registry",
+      "stepNumber": 24,
+      "phase": "Phase 3: Train, select, and approve models",
+      "type": "add_component",
+      "title": "Register approved model and selection metadata",
+      "content": "Store immutable model versions together with feature schema, training snapshot, hierarchy version, per-series/cohort routing, cold-start routing metadata, backtest windows, accuracy by horizon, and interval calibration results. Only a candidate that meets the agreed release gate becomes active.",
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:1"],
+      "component": {
+        "nodeId": "df_model_registry",
+        "componentType": "model-registry",
+        "label": "Forecast Model Registry",
+        "description": "Versioned candidate artifacts, evaluation evidence, and per-series selection metadata",
+        "position": {"x": 1840, "y": 30},
+        "highlightReason": "Registry lineage makes automated model selection auditable and permits a safe rollback.",
+        "properties": {
+          "componentName": "Forecast Model Registry",
+          "purpose": "Version model artifacts, feature and hierarchy schemas, calibrated interval metrics, and explicit SKU/cohort/cold-start-to-model routing. Promote only when leakage-safe held-out MAPE is below 15% under the documented zero-demand policy and a representative 100k+ SKU-location daily run completes within two hours; retain the evidence and prior approved version for rollback.",
+          "platform": "MLflow",
+          "models": 40
+        }
+      }
+    },
+    {
+      "id": "df_training_registry",
+      "stepNumber": 25,
+      "phase": "Phase 3: Train, select, and approve models",
+      "type": "add_connection",
+      "title": "Register artifacts only with their evidence",
+      "content": "A model artifact without its data cutoff and evaluation report is not reproducible. Persist the selected model identifier for each series/cohort so inference does not rerun model selection in the critical batch path.",
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:1"],
+      "connection": {
+        "edgeId": "df_edge_training_registry",
+        "sourceNodeId": "df_model_training",
+        "targetNodeId": "df_model_registry",
+        "connectionType": "data-flow",
+        "label": "Versioned artifact and evaluation report",
+        "description": "Only candidates with lineage and release evidence are eligible for production."
+      }
+    },
+    {
+      "id": "df_add_batch_inference",
+      "stepNumber": 26,
+      "phase": "Phase 3: Train, select, and approve models",
+      "type": "add_component",
+      "title": "Run bounded batch and cold-start inference",
+      "content": "The daily job loads the approved model mapping once and scores series in retryable chunks. For a new SKU with no sales history, use the registered metadata/analog and hierarchy-prior cold-start route, mark the forecast as cold-start, and widen uncertainty according to held-out cold-start calibration; switch routes only when the validated history sufficiency policy is met. Write idempotent outputs keyed by forecast run and series, with P10/P50/P90 calibrated on held-out data.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "df_batch_inference",
+        "componentType": "model-serving",
+        "label": "90-Day Batch & Cold-Start Forecasting",
+        "description": "Autoscaled chunk inference with point and probabilistic forecast outputs",
+        "position": {"x": 1840, "y": 280},
+        "highlightReason": "Chunked inference turns 100k+ series into a bounded daily batch and emits prediction intervals for each horizon date.",
+        "properties": {
+        "componentName": "90-Day Batch & Cold-Start Forecasting",
+        "purpose": "Score 100k+ SKU-location series in bounded chunks for the next 90 daily dates. Route new products with no history through the registered metadata/analog and hierarchy-prior path, mark cold-start status, and emit calibrated uncertainty; switch to normal series models only after the validated history sufficiency rule. Preserve resumable shard status.",
+          "platform": "KServe",
+          "instances": 16,
+          "autoscaling": true
+        }
+      }
+    },
+    {
+      "id": "df_registry_inference",
+      "stepNumber": 27,
+      "phase": "Phase 3: Train, select, and approve models",
+      "type": "add_connection",
+      "title": "Pin each run to an approved model version",
+      "content": "The batch run resolves the immutable approved artifact and its per-series selection table at start, then records both in every shard manifest. If deployment or data checks fail, keep serving the previous approved forecast version.",
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:1"],
+      "connection": {
+        "edgeId": "df_edge_registry_inference",
+        "sourceNodeId": "df_model_registry",
+        "targetNodeId": "df_batch_inference",
+        "connectionType": "data-flow",
+        "label": "Approved artifact and series-model map",
+        "description": "Every output records the selected immutable model version."
+      }
+    },
+    {
+      "id": "df_features_inference",
+      "stepNumber": 28,
+      "phase": "Phase 3: Train, select, and approve models",
+      "type": "add_connection",
+      "title": "Score with the matching as-of feature contract",
+      "content": "Inference reads the future-known calendar, holiday, planned promotion/price, and available weather forecasts together with lagged history and product/store attributes. Missing external values need explicit fallback and missingness flags; silently dropping a signal changes model semantics.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7"],
+      "connection": {
+        "edgeId": "df_edge_features_inference",
+        "sourceNodeId": "df_feature_store",
+        "targetNodeId": "df_batch_inference",
+        "connectionType": "data-flow",
+        "label": "Time-safe inference feature batches",
+        "description": "Production scores use the same versioned transforms and known-future covariates as evaluation."
+      }
+    },
+    {
+      "id": "df_add_reconciliation",
+      "stepNumber": 29,
+      "phase": "Phase 4: Reconcile, persist, and serve forecasts",
+      "type": "add_component",
+      "title": "Reconcile forecasts across hierarchy and time",
+      "content": "Forecast bottom-level SKU-store daily demand first, then reconcile against store-region-national hierarchy constraints. Use a tested method such as MinT with shrinkage when covariance estimates are reliable; compare with bottom-up/top-down baselines. Derive weekly/monthly paths from the reconciled daily values using the agreed calendar boundaries.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "df_reconciler",
+        "componentType": "processing-worker",
+        "label": "Hierarchical Forecast Reconciliation",
+        "description": "Bottom-up or MinT reconciliation across store, region, national, daily, weekly, and monthly views",
+        "position": {"x": 2140, "y": 280},
+        "highlightReason": "Explicit reconciliation enforces that child forecasts sum to their parent across both the location tree and calendar rollups.",
+        "properties": {
+          "componentName": "Hierarchical Forecast Reconciliation",
+          "purpose": "Reconcile SKU-store daily base forecasts to store/region/national totals with versioned hierarchy matrices; derive calendar-aware weekly/monthly totals and preserve the run's interval scenarios.",
+          "tasks": "Data Processing",
+          "concurrency": 32
+        }
+      }
+    },
+    {
+      "id": "df_inference_reconcile",
+      "stepNumber": 30,
+      "phase": "Phase 4: Reconcile, persist, and serve forecasts",
+      "type": "add_connection",
+      "title": "Send base trajectories to reconciliation",
+      "content": "Reconcile from full paths or joint forecast samples, not independently rounded point outputs. For coherent uncertainty bands, reconcile scenario samples first and compute quantiles afterward; separately reconciling P10/P50/P90 can produce intervals that do not add up across parents and children.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "df_edge_inference_reconcile",
+        "sourceNodeId": "df_batch_inference",
+        "targetNodeId": "df_reconciler",
+        "connectionType": "data-flow",
+        "label": "Daily bottom-level paths and uncertainty samples",
+        "description": "Base predictions and joint scenarios are reconciled before publishing any hierarchy level."
+      }
+    },
+    {
+      "id": "df_hierarchy_reconcile",
+      "stepNumber": 31,
+      "phase": "Phase 4: Reconcile, persist, and serve forecasts",
+      "type": "add_connection",
+      "title": "Apply the effective-dated hierarchy",
+      "content": "Use the hierarchy snapshot associated with this forecast run, including store-region and product membership. Validate each parent equals the sum of its children at each date and at every supported aggregation level; reject or quarantine outputs with missing children or stale hierarchy versions.",
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "df_edge_hierarchy_reconcile",
+        "sourceNodeId": "df_curated_warehouse",
+        "targetNodeId": "df_reconciler",
+        "connectionType": "data-flow",
+        "label": "Versioned hierarchy and aggregation calendar",
+        "description": "Effective-dated store-region-national membership and calendar rules constrain coherent rollups."
+      }
+    },
+    {
+      "id": "df_hierarchy_coherence",
+      "stepNumber": 32,
+      "phase": "Phase 4: Reconcile, persist, and serve forecasts",
+      "type": "explanation",
+      "title": "Make coherence an invariant, not a charting convention",
+      "content": "For every day and forecast run, store demand at store level must sum to region, and regions must sum to national; weekly and monthly values must equal their constituent daily totals under the declared calendar. For intervals, test coherence on aligned scenario paths and report empirical coverage/width. Point forecasts can be coherent while their separately computed marginal intervals are not.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "df_add_forecast_store",
+      "stepNumber": 33,
+      "phase": "Phase 4: Reconcile, persist, and serve forecasts",
+      "type": "add_component",
+      "title": "Persist versioned forecasts for planning reads",
+      "content": "Store forecast rows under a key that includes run/version, series or hierarchy node, frequency, and target date. Keep point estimate, interval quantiles, model version, hierarchy version, feature snapshot, and generated-at timestamp. Write a new run atomically or expose it only after all required partitions and reconciliation checks pass.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:4", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "df_forecast_db",
+        "componentType": "database",
+        "label": "Forecast Results Store",
+        "description": "Query-ready, versioned daily and calendar-rollup forecast outputs",
+        "position": {"x": 2440, "y": 280},
+        "highlightReason": "A versioned serving store separates forecast computation from low-latency planning queries and atomic publication.",
+        "properties": {
+          "componentName": "Forecast Results Store",
+          "purpose": "Persist run-versioned forecasts by SKU-store or hierarchy node, frequency, and target date, including P10/P50/P90, model/hierarchy/feature versions, and freshness metadata.",
+          "type": "Time-Series"
+        }
+      }
+    },
+    {
+      "id": "df_reconcile_store",
+      "stepNumber": 34,
+      "phase": "Phase 4: Reconcile, persist, and serve forecasts",
+      "type": "add_connection",
+      "title": "Commit only complete reconciled runs",
+      "content": "Write idempotently by forecast-run ID, then atomically mark a run visible after shard completeness, hierarchy checks, and interval checks pass. Consumers can keep reading the previous successful run while a new run is in progress.",
+      "requirementIds": ["legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "df_edge_reconcile_store",
+        "sourceNodeId": "df_reconciler",
+        "targetNodeId": "df_forecast_db",
+        "connectionType": "database-connection",
+        "label": "Validated atomic forecast run",
+        "description": "Only fully reconciled, versioned forecast partitions become visible to readers."
+      }
+    },
+    {
+      "id": "df_add_planning_client",
+      "stepNumber": 35,
+      "phase": "Phase 4: Reconcile, persist, and serve forecasts",
+      "type": "add_component",
+      "title": "Add a planning consumer",
+      "content": "Supply planners need comparable forecasts at SKU-store, region, and national levels, with daily/weekly/monthly selection and interval visibility. The client should show forecast run freshness and distinguish a missing forecast from a true zero.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6"],
+      "component": {
+        "nodeId": "df_planning_portal",
+        "componentType": "web-app",
+        "label": "Supply Planning Portal",
+        "description": "Planner views for forecast level, frequency, uncertainty, and run freshness",
+        "position": {"x": 2440, "y": 520},
+        "highlightReason": "The consumer view makes aggregation level, forecast horizon, and uncertainty explicit to planners.",
+        "properties": {
+          "componentName": "Supply Planning Portal",
+          "purpose": "Display daily, weekly, and monthly forecasts by SKU-store, region, or national scope, with prediction intervals and run freshness."
+        }
+      }
+    },
+    {
+      "id": "df_add_forecast_gateway",
+      "stepNumber": 36,
+      "phase": "Phase 4: Reconcile, persist, and serve forecasts",
+      "type": "add_component",
+      "title": "Expose a stable forecast query boundary",
+      "content": "The gateway validates scope and request size, authenticates planner access, and rate-limits expensive multi-series queries. Forecast generation remains asynchronous; user-facing requests read the most recent complete run rather than triggering 100k-series inference.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:2"],
+      "component": {
+        "nodeId": "df_forecast_gateway",
+        "componentType": "api-gateway",
+        "label": "Forecast Query API",
+        "description": "Authenticated, bounded reads over published forecast runs",
+        "position": {"x": 2740, "y": 520},
+        "highlightReason": "A bounded read API keeps planning latency independent from the two-hour batch computation.",
+        "properties": {
+          "componentName": "Forecast Query API",
+          "purpose": "Expose authenticated forecast reads with scope, frequency, horizon, and result-size validation; never start a full forecast batch on a synchronous request.",
+          "authentication": "OAuth 2.0",
+          "inputValidation": true
+        }
+      }
+    },
+    {
+      "id": "df_portal_gateway",
+      "stepNumber": 37,
+      "phase": "Phase 4: Reconcile, persist, and serve forecasts",
+      "type": "add_connection",
+      "title": "Connect planner queries to the API",
+      "content": "A representative request identifies the SKU/store or aggregate node, desired frequency, and target-date range within the published 90-day horizon. Pagination and bounded result size avoid oversized responses for national rollups.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "df_edge_portal_gateway",
+        "sourceNodeId": "df_planning_portal",
+        "targetNodeId": "df_forecast_gateway",
+        "connectionType": "http",
+        "label": "Scoped forecast query",
+        "description": "Planner selects hierarchy scope, frequency, and dates for an already-published forecast run."
+      }
+    },
+    {
+      "id": "df_add_forecast_api",
+      "stepNumber": 38,
+      "phase": "Phase 4: Reconcile, persist, and serve forecasts",
+      "type": "add_component",
+      "title": "Resolve the requested forecast view",
+      "content": "The read service resolves the latest complete run or an explicitly requested version, applies tenant and hierarchy scope, and returns values, quantiles, units, model/run metadata, and freshness. If only daily bottom-level forecasts are persisted, compute supported calendar sums consistently or persist precomputed rollups from the same reconciled run.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:4", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "df_forecast_api",
+        "componentType": "backend-server",
+        "label": "Forecast Read Service",
+        "description": "Serves run-consistent forecasts and metadata to planning clients",
+        "position": {"x": 3040, "y": 520},
+        "highlightReason": "A separate read service serves complete forecasts without coupling consumers to model execution or storage layout.",
+        "properties": {
+          "componentName": "Forecast Read Service",
+          "purpose": "Resolve complete forecast-run versions, enforce hierarchy scope, and return daily/weekly/monthly values, quantile bands, model version, units, and freshness.",
+          "architecture": "Microservices",
+          "instances": 4
+        }
+      }
+    },
+    {
+      "id": "df_gateway_api",
+      "stepNumber": 39,
+      "phase": "Phase 4: Reconcile, persist, and serve forecasts",
+      "type": "add_connection",
+      "title": "Route validated reads to the service",
+      "content": "Keep authentication, request validation, and rate controls at the edge; the read service still enforces authorization on the requested hierarchy scope. Return the forecast run ID so clients can compare the same snapshot across granularities.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2"],
+      "connection": {
+        "edgeId": "df_edge_gateway_api",
+        "sourceNodeId": "df_forecast_gateway",
+        "targetNodeId": "df_forecast_api",
+        "connectionType": "api-call",
+        "label": "Validated, scoped query",
+        "description": "The service rechecks hierarchy authorization and binds the response to a complete run ID."
+      }
+    },
+    {
+      "id": "df_api_store",
+      "stepNumber": 40,
+      "phase": "Phase 4: Reconcile, persist, and serve forecasts",
+      "type": "add_connection",
+      "title": "Read a complete forecast snapshot",
+      "content": "Use indexes matching common access patterns: series or aggregate-node plus frequency and target-date range, with run ID as a version dimension. Cache only immutable run-versioned responses so a newly published run cannot return stale data under the same key.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "df_edge_api_store",
+        "sourceNodeId": "df_forecast_api",
+        "targetNodeId": "df_forecast_db",
+        "connectionType": "database-connection",
+        "label": "Versioned forecast lookup",
+        "description": "Read published run partitions by node, frequency, and target date."
+      }
+    },
+    {
+      "id": "df_api_contract",
+      "stepNumber": 41,
+      "phase": "Phase 4: Reconcile, persist, and serve forecasts",
+      "type": "explanation",
+      "title": "Expose daily, weekly, monthly, and uncertainty consistently",
+      "content": "A representative contract is GET /forecasts?node=store-42&frequency=weekly&from=2026-10-14&horizonDays=90&run=latest. Return each period's P50 plus P10/P90, units, node level, run ID, model/hierarchy versions, and freshness. For weekly output, return 13 calendar buckets with the final bucket clipped at the 90-day end date; define week/month boundaries in the retailer's business calendar.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "df_add_monitoring",
+      "stepNumber": 42,
+      "phase": "Phase 5: Quality gates and operations",
+      "type": "add_component",
+      "title": "Monitor the quality and deadline, not just uptime",
+      "content": "Track input freshness/completeness, quarantined partitions, per-shard throughput, total batch wall time, forecast publication age, MAPE with its zero-demand policy, WAPE/MASE, bias, and interval coverage by horizon and cohort. Alert on the two-hour deadline and accuracy/calibration regressions; retain the last complete run if a new run fails.",
+      "requirementIds": ["legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "df_monitoring",
+        "componentType": "monitoring",
+        "label": "Forecast Quality & Batch Monitoring",
+        "description": "Data, model, hierarchy, uncertainty, and operational SLO dashboards and alerts",
+        "position": {"x": 1840, "y": 560},
+        "highlightReason": "Accuracy, interval coverage, coherence, and elapsed batch time are observable acceptance signals for this product.",
+        "properties": {
+          "componentName": "Forecast Quality & Batch Monitoring",
+          "purpose": "Measure MAPE under the documented zero-demand policy by cohort and horizon, plus WAPE/MASE, bias, interval coverage, hierarchy-sum violations, stale inputs, missing shards, publication freshness, and full 100k+ SKU-location daily runtime. Alert and block release on MAPE at or above 15% or runtime over two hours; preserve the last complete approved run when a gate fails.",
+          "stack": "Prometheus + Grafana",
+          "metrics": true
+        }
+      }
+    },
+    {
+      "id": "df_mlops_monitoring",
+      "stepNumber": 43,
+      "phase": "Phase 5: Quality gates and operations",
+      "type": "add_connection",
+      "title": "Observe evaluation and model release evidence",
+      "content": "Persist backtest metrics by model, product/location cohort, and horizon. A release gate should fail on unacceptable accuracy or interval coverage even when the average metric looks healthy; keep candidate evaluation separate from production actuals, which arrive later.",
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:1"],
+      "connection": {
+        "edgeId": "df_edge_mlops_monitoring",
+        "sourceNodeId": "df_mlops_pipeline",
+        "targetNodeId": "df_monitoring",
+        "connectionType": "data-flow",
+        "label": "Backtest, selection, and run metrics",
+        "description": "Evaluation and model-routing outcomes become observable release evidence."
+      }
+    },
+    {
+      "id": "df_store_monitoring",
+      "stepNumber": 44,
+      "phase": "Phase 5: Quality gates and operations",
+      "type": "add_connection",
+      "title": "Measure publication and coherence invariants",
+      "content": "Compare parent totals with child sums for every target date and verify weekly/monthly values against their daily constituents. Measure interval coverage after reconciliation, and expose published-run freshness to both operators and planning clients.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "df_edge_store_monitoring",
+        "sourceNodeId": "df_forecast_db",
+        "targetNodeId": "df_monitoring",
+        "connectionType": "data-flow",
+        "label": "Published-run quality and freshness",
+        "description": "Serving outputs are checked for completeness, interval coverage, and hierarchy coherence."
+      }
+    },
+    {
+      "id": "df_capacity_check",
+      "stepNumber": 45,
+      "phase": "Phase 5: Quality gates and operations",
+      "type": "explanation",
+      "title": "Turn 100k series and two hours into a benchmark",
+      "content": "At exactly 100,000 SKU-location series, finishing within 7,200 seconds requires a sustained average above 13.9 series/second, before accounting for data preparation, retries, reconciliation, and publication. A 90-day output is 9 million point values before intervals and hierarchy rollups. Benchmark the full pipeline with realistic skew, cold-start series, late data, and retries; shard by stable series keys, autoscale bounded workers, and reserve time for reconciliation and atomic publish.",
+      "requirementIds": ["legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "df_final_acceptance",
+      "stepNumber": 46,
+      "phase": "Phase 5: Quality gates and operations",
+      "type": "explanation",
+      "title": "Close with measurable acceptance checks",
+      "content": "Before calling the design ready, replay representative daily, weekly, and monthly requests; prove 90-day coverage; verify store-to-region-to-national and daily-to-calendar rollups; measure rolling-origin MAPE against the below-15% target with zero-demand cohorts reported separately; confirm calibrated prediction-interval coverage; test a brand-new SKU with no sales history through the metadata/analog and hierarchy-prior route, including its uncertainty and transition policy; and show a complete 100k+ SKU-location run finishes under two hours with restartable shards. The design is a testable path to these goals, not proof they are already met.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

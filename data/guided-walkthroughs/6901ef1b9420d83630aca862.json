@@ -1,0 +1,245 @@
+{
+  "problem_id": "6901ef1b9420d83630aca862",
+  "version": "1.0.0-review-draft",
+  "requirementRevision": null,
+  "totalSteps": 32,
+  "phases": [
+    { "name": "Frame the request contract", "stepRange": [1, 6], "description": "Keep the supplied brief intact and establish the client, API, and coordinator path." },
+    { "name": "Partition and replicate durable data", "stepRange": [7, 16], "description": "Use a versioned token map and make per-operation consistency and partition tradeoffs explicit." },
+    { "name": "Support ordered range queries", "stepRange": [17, 20], "description": "Separate an ordered secondary index from hash-partitioned base values and expose index freshness." },
+    { "name": "Repair and reconcile asynchronously", "stepRange": [21, 27], "description": "Replay committed changes, project the index, and reconcile replicas without blocking primary writes." },
+    { "name": "Observe correctness and freshness", "stepRange": [28, 30], "description": "Measure request, replica, projection, and repair outcomes without inventing thresholds." },
+    { "name": "Scale from measured pressure and review", "stepRange": [31, 32], "description": "Tie scaling to observed workload and list unresolved assumptions." }
+  ],
+  "steps": [
+    {
+      "id": "kv_01", "stepNumber": 1, "phase": "Frame the request contract", "title": "Read the frozen brief and label assumptions", "type": "explanation",
+      "content": "The supplied problem is Design a Key-Value Store: Design a distributed key-value database like DynamoDB or Cassandra. Requirements: Store and retrieve key-value pairs; Support CRUD operations; Horizontal scalability; High availability and fault tolerance; Configurable consistency levels; Handle billions of records; Support range queries. Constraints: Low latency reads and writes; Handle node failures automatically; Data should be durable; Support partitioning across nodes; Handle network partitions (CAP theorem). Hints: Consistent hashing for data distribution; Replication for availability; Quorum-based consistency; Merkle trees for data synchronization; Gossip protocol for cluster membership. Hints are prompts, not mandates. The brief gives no traffic distribution, item size, growth rate, hot-key profile, region layout, retention policy, latency or availability SLO, or exact range-query shape. The design below is one Cassandra-style candidate, not a claim about DynamoDB or Cassandra internals. RF=3 and R=W=2 are illustrative quorum examples only, not supplied capacity targets or service promises; validate them against the actual workload and failure domains.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "kv_02", "stepNumber": 2, "phase": "Frame the request contract", "title": "Add a representative API client", "type": "add_component",
+      "content": "Issue item CRUD and bounded range requests with a partition key, optional sort key, requested consistency level, cursor, and stable operation ID for safe retries. Do not treat an asynchronously maintained index as the authoritative value store.",
+      "component": {
+        "nodeId": "kv_client", "componentType": "web-app", "label": "Key-Value API Client", "description": "Representative client for item CRUD and range APIs", "position": { "x": 0, "y": 300 },
+        "properties": { "componentName": "Key-Value API Client", "purpose": "Call item CRUD and bounded range APIs with keys, an optional sort key, a requested consistency level, cursor, and stable operation ID; display stale, conflict, unavailable, and unknown-outcome responses explicitly." },
+        "highlightReason": "The existing Web App catalog item represents an API consumer without a client-specific component type."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "kv_03", "stepNumber": 3, "phase": "Frame the request contract", "title": "Add a validated API boundary", "type": "add_component",
+      "content": "Validate operation shape, key bounds, payload size, and consistency level. Return explicit not-found, conflict, unavailable, timeout, and unknown-outcome states. The brief does not specify an authentication protocol or quota values.",
+      "component": {
+        "nodeId": "kv_gateway", "componentType": "api-gateway", "label": "Key-Value API Gateway", "description": "Validated, bounded CRUD and range request entry point", "position": { "x": 320, "y": 300 },
+        "properties": { "componentName": "Key-Value API Gateway", "purpose": "Validate bounded CRUD and range requests, reject unsupported consistency levels, propagate operation and correlation IDs, terminate TLS, and return explicit failure outcomes without assuming an authentication scheme or quota target.", "inputValidation": true, "tlsTermination": true, "rateLimiting": true },
+        "highlightReason": "The catalog API Gateway exposes validation and TLS controls that fit the public request boundary."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1"]
+    },
+    {
+      "id": "kv_04", "stepNumber": 4, "phase": "Frame the request contract", "title": "Route requests to the API boundary", "type": "add_connection",
+      "content": "Carry operation type, key or range, requested consistency, cursor, and a stable operation ID over TLS.",
+      "connection": { "edgeId": "kv_client_gateway", "sourceNodeId": "kv_client", "targetNodeId": "kv_gateway", "connectionType": "http", "label": "TLS CRUD and range requests", "description": "Carry bounded operation inputs, consistency choice, pagination state, and a stable operation ID; return explicit results and failures." },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "kv_05", "stepNumber": 5, "phase": "Frame the request contract", "title": "Add stateless request coordination", "type": "add_component",
+      "content": "Implement Put, Get, Update, and Delete; resolve a replica set from a versioned token map; apply the caller's consistency level; and coordinate bounded range reads. Keep request handling stateless so healthy instances can take over after process failure.",
+      "component": {
+        "nodeId": "kv_coordinator", "componentType": "backend-server", "label": "Partition-Aware Request Coordinator", "description": "CRUD semantics, replica fan-out, consistency checks, and range orchestration", "position": { "x": 650, "y": 300 },
+        "properties": { "componentName": "Partition-Aware Request Coordinator", "purpose": "Implement Put, Get, Update, and Delete; resolve replica ownership from a versioned token map; fan out reads and writes at the requested consistency; coordinate ordered range scans and base-value fetches; and return explicit conflict, unavailable, or unknown-outcome states.", "architecture": "Microservices" },
+        "highlightReason": "The existing Backend Server fits request coordination; its editable purpose carries the key-value semantics."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "kv_06", "stepNumber": 6, "phase": "Frame the request contract", "title": "Forward validated commands", "type": "add_connection",
+      "content": "Pass the consistency level, deadline, operation ID, and command so the coordinator can distinguish a definite failure from an unknown commit outcome.",
+      "connection": { "edgeId": "kv_gateway_coordinator", "sourceNodeId": "kv_gateway", "targetNodeId": "kv_coordinator", "connectionType": "http", "label": "Validated operation and deadline", "description": "Forward the bounded command with consistency, operation, and trace identifiers." },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "kv_07", "stepNumber": 7, "phase": "Partition and replicate durable data", "title": "Add gossip membership and token ownership", "type": "add_component",
+      "content": "Track node liveness and token ownership with gossip, publish versioned membership snapshots, and treat a heartbeat timeout as suspicion rather than proof that data is lost. Reconcile ownership changes after membership stabilizes.",
+      "component": {
+        "nodeId": "kv_membership", "componentType": "backend-server", "label": "Gossip Membership and Token Map", "description": "Liveness, token ownership, and versioned routing snapshots", "position": { "x": 650, "y": 590 },
+        "properties": { "componentName": "Gossip Membership and Token Map", "purpose": "Exchange gossip heartbeats and token ownership, track suspected node failures, publish versioned replica maps, and notify repair after ownership stabilizes; never equate a missed heartbeat with lost durable data.", "architecture": "Microservices", "caching": true },
+        "highlightReason": "The catalog Backend Server represents membership; no dedicated gossip or token-ring component exists."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "kv_08", "stepNumber": 8, "phase": "Partition and replicate durable data", "title": "Refresh replica ownership", "type": "add_connection",
+      "content": "Refresh the token map when its membership epoch is stale; use the local versioned snapshot on ordinary requests instead of a synchronous control-plane lookup for every key.",
+      "connection": { "edgeId": "kv_coordinator_membership", "sourceNodeId": "kv_coordinator", "targetNodeId": "kv_membership", "connectionType": "api-call", "label": "Membership epoch and token map", "description": "Ask for refreshed ownership and health when the coordinator's cached membership version is stale." },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "kv_09", "stepNumber": 9, "phase": "Partition and replicate durable data", "title": "Publish routing changes", "type": "add_connection",
+      "content": "Return the accepted map version and node-health state so coordinators can stop routing new work to unavailable replicas without discarding prior versions.",
+      "connection": { "edgeId": "kv_membership_coordinator", "sourceNodeId": "kv_membership", "targetNodeId": "kv_coordinator", "connectionType": "api-call", "label": "Versioned routing snapshot", "description": "Publish changed ownership and health state; coordinators can detect stale routing decisions." },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "kv_10", "stepNumber": 10, "phase": "Partition and replicate durable data", "title": "Add the durable key-value cluster", "type": "add_component",
+      "content": "Persist values, versions, and delete tombstones by partition key, with a sort key for ordered access. Enable durable logging, backups, point-in-time recovery, and encryption; these protect different failure classes and do not replace replica repair.",
+      "component": {
+        "nodeId": "kv_primary", "componentType": "database", "label": "Partitioned Key-Value Replica Set", "description": "Logical Cassandra-style store for values, versions, and tombstones", "position": { "x": 1020, "y": 300 },
+        "properties": { "componentName": "Partitioned Key-Value Replica Set", "purpose": "Persist key-value items, versions, and delete tombstones in a logical Cassandra-style distributed store with durable logs, backups, point-in-time recovery, and encryption; this is a cluster abstraction, not one physical server or a capacity promise.", "type": "NoSQL", "engine": "cassandra", "workload": "OLTP", "multiAZ": true, "backups": true, "pitr": true, "encryption": true, "wal": true },
+        "highlightReason": "The existing Database catalog supports Cassandra, partitioning, replication, durability, and recovery; no custom store type is needed."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:3"]
+    },
+    {
+      "id": "kv_11", "stepNumber": 11, "phase": "Partition and replicate durable data", "title": "Choose hash placement and an example replica factor", "type": "decision_point",
+      "content": "Hash the partition key onto a consistent-hash token ring and route it to the current replica set. RF=3 is an example for quorum discussion, not a required node count or capacity target. Adding nodes still requires controlled token movement and repair.",
+      "decision": { "question": "How should point keys be distributed while retaining replica copies?", "chosen": "Use consistent-hash partitioning with an illustrative replication factor of three across independent failure domains.", "chosenReason": "Hash placement distributes ownership and limits remapping to token ranges when membership changes. The example replica factor makes quorum tradeoffs concrete; validate the actual factor and failure-domain layout against workload and availability goals.", "alternatives": [{ "option": "Range-partition the base keyspace by primary key.", "tradeoff": "Ordered scans are direct, but skew can create hot partitions and concentrated rebalancing." }, { "option": "Use one unpartitioned authoritative store.", "tradeoff": "Routing is simpler, but this does not provide horizontal distribution across nodes." }] },
+      "componentUpdate": { "nodeId": "kv_primary", "properties": { "sharding": "Hash-based", "replication": 3 } },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "kv_12", "stepNumber": 12, "phase": "Partition and replicate durable data", "title": "Route point CRUD and range value reads", "type": "add_connection",
+      "content": "Hash point keys to their replica set and carry each operation's consistency rule. Use version conditions for updates and tombstones for deletes. The coordinator also fetches authoritative values for keys selected by a range index.",
+      "connection": { "edgeId": "kv_coordinator_primary", "sourceNodeId": "kv_coordinator", "targetNodeId": "kv_primary", "connectionType": "database-connection", "label": "Point CRUD and range value fetch", "description": "Route Put, Get, Update, and Delete by token; carry operation ID, version condition, tombstone, and requested read or write threshold; fetch base values for indexed ranges." },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "kv_13", "stepNumber": 13, "phase": "Partition and replicate durable data", "title": "Return versions and durable acknowledgments", "type": "add_connection",
+      "content": "Return versioned values for reconciliation and acknowledge writes only after the configured durable boundary. A timeout can leave the outcome unknown; do not report definite failure if a commit may have occurred.",
+      "connection": { "edgeId": "kv_primary_coordinator", "sourceNodeId": "kv_primary", "targetNodeId": "kv_coordinator", "connectionType": "database-connection", "label": "Replica versions and durable acknowledgments", "description": "Return values, versions, tombstones, and replica acknowledgments for the caller-selected consistency rule." },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "kv_14", "stepNumber": 14, "phase": "Partition and replicate durable data", "title": "Exchange gossip and replica health", "type": "add_connection",
+      "content": "Replica nodes gossip liveness and ownership. A network partition can make the failure detector wrong, so suspicion changes routing and repair behavior but does not erase data or silently weaken acknowledged-write guarantees.",
+      "connection": { "edgeId": "kv_primary_membership", "sourceNodeId": "kv_primary", "targetNodeId": "kv_membership", "connectionType": "data-flow", "label": "Gossip liveness and token ownership", "description": "Exchange peer heartbeats and ownership epochs; retain replica data when a peer is only suspected unavailable." },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "kv_15", "stepNumber": 15, "phase": "Partition and replicate durable data", "title": "Distribute accepted token-map changes", "type": "add_connection",
+      "content": "Publish the accepted membership epoch and changed token ranges to the logical store and repair consumers; compare epochs before routing or moving data.",
+      "connection": { "edgeId": "kv_membership_primary", "sourceNodeId": "kv_membership", "targetNodeId": "kv_primary", "connectionType": "data-flow", "label": "Versioned ownership updates", "description": "Publish accepted token ownership for request routing, streaming, and repair." },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "kv_16", "stepNumber": 16, "phase": "Partition and replicate durable data", "title": "Make consistency a per-operation choice", "type": "decision_point",
+      "content": "Expose named read and write levels such as ONE, QUORUM, and ALL with documented acknowledgment and reconciliation rules. For the illustrative N=3 set, R=2 and W=2 give R+W>N and intersect during a stable ownership epoch. This does not promise global linearizability through partitions or reconfiguration. QUORUM can be unavailable during a partition; ONE can favor availability while allowing stale or concurrent versions that require reconciliation.",
+      "decision": { "question": "What should an operation trade for availability when replicas cannot all communicate?", "chosen": "Allow per-operation ONE, QUORUM, or ALL; use R=2 and W=2 only as an illustrative quorum for N=3.", "chosenReason": "Separate read and write thresholds make consistency and availability visible. Quorum intersection applies in a stable replica set; when a partition prevents quorum, fail that request rather than silently acknowledge below its selected level.", "alternatives": [{ "option": "Require ALL replicas for every operation.", "tradeoff": "One unavailable replica can block both reads and writes." }, { "option": "Acknowledge every write from one reachable replica.", "tradeoff": "Improves availability but permits divergent versions and stale reads that need later reconciliation." }] },
+      "componentUpdate": { "nodeId": "kv_primary", "properties": { "replicationMode": "Semi-Sync" } },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "kv_17", "stepNumber": 17, "phase": "Support ordered range queries", "title": "Add a derived ordered range index", "type": "add_component",
+      "content": "Keep the base store hash-partitioned for point keys. Maintain a separate ordered mapping from range key and sort value to base item key. The index is derived, not authoritative, and its freshness must be visible to callers.",
+      "component": {
+        "nodeId": "kv_range_index", "componentType": "database", "label": "Ordered Range Secondary Index", "description": "Derived ordered index for bounded range selection", "position": { "x": 1390, "y": 540 },
+        "properties": { "componentName": "Ordered Range Secondary Index", "purpose": "Persist an ordered secondary mapping from range key and sort value to base item keys; serve bounded pages with freshness metadata. This derived access path is not authoritative for values and can lag the committed base change stream.", "type": "NoSQL", "engine": "cassandra", "workload": "OLTP", "multiAZ": true, "backups": true, "pitr": true, "encryption": true, "wal": true },
+        "highlightReason": "The catalog Database component provides an existing ordered-index storage abstraction with editable durability settings."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "kv_18", "stepNumber": 18, "phase": "Support ordered range queries", "title": "Choose indexed range semantics", "type": "decision_point",
+      "content": "Use a range-partitioned secondary index for seekable ordered scans while leaving base values hash-partitioned. Asynchronous projection allows lag; return its watermark. A caller requiring fresher results can request bounded fan-out over base partitions and accept higher work. Broad ranges without selective bounds are not promised constant cost.",
+      "decision": { "question": "How should range queries coexist with hash-distributed point lookups?", "chosen": "Maintain an asynchronously projected range-partitioned index, expose its freshness watermark, and offer bounded base-store fan-out for fresher reads.", "chosenReason": "This keeps the point-key distribution separate from ordered access. Asynchronous index writes stay off the primary acknowledgment path but can be stale; direct base fan-out is fresher at higher work and latency. No global range-latency target was supplied.", "alternatives": [{ "option": "Broadcast each range query to every hash partition.", "tradeoff": "Avoids index maintenance but consumes work across the cluster and complicates pagination." }, { "option": "Range-partition the authoritative base keyspace.", "tradeoff": "Makes ordering direct but can concentrate writes on hot key ranges." }] },
+      "componentUpdate": { "nodeId": "kv_range_index", "properties": { "sharding": "Range-based", "replication": 3 } },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "kv_19", "stepNumber": 19, "phase": "Support ordered range queries", "title": "Seek a bounded ordered page", "type": "add_connection",
+      "content": "The coordinator seeks by the requested range, returns candidate base keys and a stable cursor, then fetches authoritative values using the requested read consistency. Apply current tombstones so stale index entries cannot resurrect deletes.",
+      "connection": { "edgeId": "kv_coordinator_range_index", "sourceNodeId": "kv_coordinator", "targetNodeId": "kv_range_index", "connectionType": "database-connection", "label": "Bounded ordered scan and base-key lookup", "description": "Seek range bounds and return candidate keys, version, cursor, and freshness watermark; the coordinator fetches current values from the base store." },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "kv_20", "stepNumber": 20, "phase": "Support ordered range queries", "title": "Return range results with freshness context", "type": "add_connection",
+      "content": "Return values with base versions and the index watermark/cursor. Do not label an eventually consistent index response as a strongly consistent base read.",
+      "connection": { "edgeId": "kv_range_index_coordinator", "sourceNodeId": "kv_range_index", "targetNodeId": "kv_coordinator", "connectionType": "database-connection", "label": "Candidate keys and freshness watermark", "description": "Return a bounded page, index epoch, freshness watermark, and continuation cursor for value fetch and response labeling." },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "kv_21", "stepNumber": 21, "phase": "Repair and reconcile asynchronously", "title": "Add a durable change and repair log", "type": "add_component",
+      "content": "Publish committed mutation events with item key, version, operation ID, and tombstone state. Replay offsets let projection and repair resume after failures. The base store's configured durable acknowledgment remains authoritative; retention is an unresolved recovery choice.",
+      "component": {
+        "nodeId": "kv_change_log", "componentType": "message-broker", "label": "Durable Change and Repair Log", "description": "Replayable committed mutation events for indexing and repair", "position": { "x": 1390, "y": 100 },
+        "properties": { "componentName": "Durable Change and Repair Log", "purpose": "Retain replayable committed mutation events with item key, version, operation ID, and tombstone state for index projection and replica repair; the base store's durable write acknowledgment remains authoritative and retention follows recovery needs.", "durable": true },
+        "highlightReason": "The catalog Message Broker represents durable replayable background events with an editable durability setting."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "kv_22", "stepNumber": 22, "phase": "Repair and reconcile asynchronously", "title": "Add separate index and repair consumers", "type": "add_component",
+      "content": "Run distinct consumer groups for index projection and replica repair. Project committed changes idempotently by version; use hinted handoff and Merkle trees to find divergent token ranges. Preserve tombstones and throttle repair against foreground pressure.",
+      "component": {
+        "nodeId": "kv_maintenance", "componentType": "processing-worker", "label": "Index Projection and Replica Repair Workers", "description": "Replayable index projection, hinted handoff, and Merkle anti-entropy", "position": { "x": 1700, "y": 300 },
+        "properties": { "componentName": "Index Projection and Replica Repair Workers", "purpose": "Use separate replayable consumer groups to project committed changes into the range index and repair replicas with hinted handoff and Merkle-tree comparisons; apply versions and tombstones idempotently, throttle transfers, and report projection and repair lag.", "tasks": "Data Processing", "autoscale": true },
+        "highlightReason": "The catalog Processing Worker fits both background roles; no indexer or Merkle-specific component is needed."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "kv_23", "stepNumber": 23, "phase": "Repair and reconcile asynchronously", "title": "Publish only committed mutations", "type": "add_connection",
+      "content": "Emit versioned changes after the base mutation crosses its configured durable boundary. Consumers deduplicate and reject older events.",
+      "connection": { "edgeId": "kv_primary_change_log", "sourceNodeId": "kv_primary", "targetNodeId": "kv_change_log", "connectionType": "message-queue", "label": "Committed versioned mutations", "description": "Publish replayable operation IDs, versions, and tombstones after durable base commit." },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "kv_24", "stepNumber": 24, "phase": "Repair and reconcile asynchronously", "title": "Deliver replayable maintenance work", "type": "add_connection",
+      "content": "Advance consumer offsets only after version-checked work succeeds so crashes can replay safely.",
+      "connection": { "edgeId": "kv_change_log_maintenance", "sourceNodeId": "kv_change_log", "targetNodeId": "kv_maintenance", "connectionType": "message-queue", "label": "Replayable events and offsets", "description": "Deliver committed changes at least once; index and repair consumer groups deduplicate by operation and version." },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "kv_25", "stepNumber": 25, "phase": "Repair and reconcile asynchronously", "title": "Scope repair to stable ownership", "type": "add_connection",
+      "content": "Compare token epochs before repair; restart or wait if membership changes during a range comparison.",
+      "connection": { "edgeId": "kv_membership_maintenance", "sourceNodeId": "kv_membership", "targetNodeId": "kv_maintenance", "connectionType": "api-call", "label": "Stable ownership epoch", "description": "Scope index movement and repair to current token owners; restart work when the membership epoch changes." },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "kv_26", "stepNumber": 26, "phase": "Repair and reconcile asynchronously", "title": "Reconcile divergent replica versions", "type": "add_connection",
+      "content": "Use Merkle comparisons to transfer only differing token-range records; retain delete tombstones until repair and retention rules make removal safe.",
+      "connection": { "edgeId": "kv_maintenance_primary", "sourceNodeId": "kv_maintenance", "targetNodeId": "kv_primary", "connectionType": "database-connection", "label": "Version-aware replica repair", "description": "Repair differences and tombstones for the accepted ownership epoch with bounded, retryable transfers." },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "kv_27", "stepNumber": 27, "phase": "Repair and reconcile asynchronously", "title": "Project the ordered range index", "type": "add_connection",
+      "content": "Apply index entries by source version and preserve tombstones. The asynchronous index may lag; expose its watermark rather than claiming it is current.",
+      "connection": { "edgeId": "kv_maintenance_range_index", "sourceNodeId": "kv_maintenance", "targetNodeId": "kv_range_index", "connectionType": "database-connection", "label": "Idempotent index projection", "description": "Conditionally project range keys and base-item mappings by source version, retaining delete state and freshness watermark." },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "kv_28", "stepNumber": 28, "phase": "Observe correctness and freshness", "title": "Add correctness and operations monitoring", "type": "add_component",
+      "content": "Track request latency against an operator-defined SLO, consistency-level failures, replica acknowledgment shortfalls, token skew, membership suspicion, log lag, index watermark age, and repair backlog. Set alert thresholds only after workload and SLO review.",
+      "component": {
+        "nodeId": "kv_monitoring", "componentType": "monitoring", "label": "KV Correctness and Operations Monitoring", "description": "Request, replica, index freshness, and repair signals", "position": { "x": 2070, "y": 320 },
+        "properties": { "componentName": "KV Correctness and Operations Monitoring", "purpose": "Track CRUD outcomes and latency against an operator-defined SLO, quorum shortfalls, conflicts, suspected nodes, token skew, log lag, range-index watermark age, and repair backlog; set alert thresholds after workload and SLO review.", "metrics": true, "alerts": true },
+        "highlightReason": "The catalog Monitoring component provides metrics and alerts without invented numerical thresholds."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "kv_29", "stepNumber": 29, "phase": "Observe correctness and freshness", "title": "Observe request and quorum outcomes", "type": "add_connection",
+      "content": "Measure success and rejection separately; retain requested consistency in trace context without recording item values.",
+      "connection": { "edgeId": "kv_coordinator_monitoring", "sourceNodeId": "kv_coordinator", "targetNodeId": "kv_monitoring", "connectionType": "data-flow", "label": "CRUD latency and consistency outcomes", "description": "Export operation class, requested level, acknowledgment count, conflict or unavailable result, and trace timing without payloads." },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "kv_30", "stepNumber": 30, "phase": "Observe correctness and freshness", "title": "Observe convergence and repair", "type": "add_connection",
+      "content": "Expose projection offsets and watermarks, suspected-node transitions, Merkle comparison progress, hint age, and repair throttling so automatic recovery remains inspectable.",
+      "connection": { "edgeId": "kv_maintenance_monitoring", "sourceNodeId": "kv_maintenance", "targetNodeId": "kv_monitoring", "connectionType": "data-flow", "label": "Projection freshness and repair progress", "description": "Report oldest unprojected version, index watermark, suspected-node state, differing token ranges, and repair backlog." },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "kv_31", "stepNumber": 31, "phase": "Scale from measured pressure and review", "title": "Scale partitions from observed pressure", "type": "scale_trigger",
+      "content": "Distinguish total volume, hot-key skew, token imbalance, range-index hotspots, and coordinator saturation before choosing a scaling action.",
+      "scaleTrigger": { "metric": "Per-token and range request/byte skew, hot keys, coordinator saturation, index lag, and latency relative to the operator-defined SLO", "action": "Add capacity or split and stream affected token or index ranges with bounded concurrency; publish a new ownership epoch and verify repair", "impact": "More partitions distribute load but add routing and repair work; movement consumes disk and network and may temporarily increase index lag" },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "kv_32", "stepNumber": 32, "phase": "Scale from measured pressure and review", "title": "Review the CAP and workload decisions", "type": "explanation",
+      "content": "This candidate separates a hash-partitioned durable base store from an ordered derived range index. Quorum choices trade availability for consistency during partitions and do not promise global linearizability. Confirm consistency-level semantics, replica factor and failure domains, range-query shape and freshness, item size and workload skew, retention/recovery objectives, and latency/availability SLO before production use. The brief supplied no numerical latency, traffic, shard-count, or capacity target, and none is asserted here.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

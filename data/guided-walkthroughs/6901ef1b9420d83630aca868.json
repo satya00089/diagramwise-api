@@ -1,0 +1,747 @@
+{
+  "problem_id": "6901ef1b9420d83630aca868",
+  "version": "1.0.0-review-draft",
+  "requirementRevision": null,
+  "totalSteps": 38,
+  "phases": [
+    {
+      "name": "Define event meaning and safe ingestion",
+      "stepRange": [1, 11],
+      "description": "Separate the frozen workload from assumptions, define retry-safe event identity, and build a durable path that can absorb bursts."
+    },
+    {
+      "name": "Publish real-time metrics and definitions",
+      "stepRange": [12, 16],
+      "description": "Produce the sub-minute stream view while keeping event schemas, custom measures, and conversion definitions versioned."
+    },
+    {
+      "name": "Build the batch and historical path",
+      "stepRange": [17, 21],
+      "description": "Retain raw events under an approved policy and load them into a warehouse for historical and complex analysis."
+    },
+    {
+      "name": "Serve reports, dashboards, exports, and operations",
+      "stepRange": [22, 35],
+      "description": "Connect common-query pre-aggregation and report APIs to both real-time and historical data, and observe correctness and freshness."
+    },
+    {
+      "name": "Review exactness and unresolved policies",
+      "stepRange": [36, 38],
+      "description": "Make sampling and retention boundaries explicit and identify decisions that need product or policy approval."
+    }
+  ],
+  "steps": [
+    {
+      "id": "ga_01",
+      "stepNumber": 1,
+      "phase": "Define event meaning and safe ingestion",
+      "title": "Mark brief facts and open decisions",
+      "type": "explanation",
+      "content": "Brief facts: collect user events and page views; provide real-time and historical analytics, custom reports, segmentation, funnels, goals, conversions, custom dimensions and metrics, and exports; handle billions of events per day; process real-time data in less than one minute; tolerate spikes; count and aggregate accurately; answer complex queries; and follow retention policies. The stated scale and freshness values are acceptance targets, not demonstrated capacity or a proven result. The brief does not define event identity, what constitutes a unique person or session, event lateness, peak rate, dimension cardinality, query latency, or any retention duration. The architecture choices in this walkthrough are assumptions to review, not additional brief facts.",
+      "requirementIds": []
+    },
+    {
+      "id": "ga_02",
+      "stepNumber": 2,
+      "phase": "Define event meaning and safe ingestion",
+      "title": "Choose retry-safe event counting semantics",
+      "type": "decision_point",
+      "content": "Assumption to validate: an accepted event has a stable event_id created before retries. Count accepted page-view and named-event records separately, and deduplicate a repeated event_id so delivery retries do not increment an aggregate twice. Do not treat event counts as unique people, sessions, or conversions; those need their own identity, session, and goal rules. The brief does not specify those rules or how long retry identities must remain available.",
+      "decision": {
+        "question": "What is the counting unit for events and page views?",
+        "chosen": "Count accepted event records by event type and use a stable event_id for idempotent retry deduplication; define people, sessions, and conversion attribution as separate product semantics.",
+        "chosenReason": "This protects accurate aggregation from transport retries without inventing a user identity or claiming exactly-once delivery. The event ID format and deduplication horizon remain assumptions to ratify.",
+        "alternatives": [
+          {
+            "option": "Increment every time an event is delivered",
+            "tradeoff": "Retries and replay can overcount events."
+          },
+          {
+            "option": "Count every event as a unique person or session",
+            "tradeoff": "Event volume does not establish person or session identity."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-constraint:3"]
+    },
+    {
+      "id": "ga_03",
+      "stepNumber": 3,
+      "phase": "Define event meaning and safe ingestion",
+      "title": "Choose the batch and stream split",
+      "type": "decision_point",
+      "content": "Use the hint's Lambda-style split as an architecture assumption: a stream path publishes current metrics against the stated less-than-one-minute constraint, while a batch path rebuilds and queries history from retained raw events in the warehouse. Both paths consume the same accepted event record and schema version. Batch results are not used to claim real-time freshness.",
+      "decision": {
+        "question": "How should real-time and historical analytics share event data?",
+        "chosen": "Fan out the durable event log to stream processing for current metrics and to retained raw storage for batch loading into the historical warehouse.",
+        "chosenReason": "The brief asks for both real-time and historical analytics and names batch plus stream processing. A shared durable input makes rebuild and comparison possible.",
+        "alternatives": [
+          {
+            "option": "Run every dashboard query over the raw event log",
+            "tradeoff": "Repeated large scans make interactive and historical queries compete with ingestion."
+          },
+          {
+            "option": "Use only streaming state for all history",
+            "tradeoff": "It does not provide the requested warehouse-backed historical analysis or a clean rebuild source."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:1"]
+    },
+    {
+      "id": "ga_04",
+      "stepNumber": 4,
+      "phase": "Define event meaning and safe ingestion",
+      "title": "Add browser and app event clients",
+      "type": "add_component",
+      "content": "Represent the browser and app SDKs that report page views and named events. The stable event_id is an explicit design assumption from the counting decision; include event time, event type, tenant or site scope, schema version, and only consent-permitted identity fields. Do not infer an identity policy from the brief.",
+      "component": {
+        "nodeId": "ga_sdk",
+        "componentType": "web-app",
+        "label": "Browser / App Analytics SDK",
+        "description": "Reports page views and user events",
+        "position": {"x": 0, "y": 220},
+        "properties": {
+          "componentName": "Browser / App Analytics SDK",
+          "purpose": "Emit page-view and named-event records with a stable retry identity, event time, event type, tenant or site scope, schema version, and consent-permitted identity fields; preserve the same event identity on retry."
+        },
+        "highlightReason": "The Web App catalog component represents the client SDK without introducing a new client type."
+      },
+      "requirementIds": ["legacy-requirement:1"]
+    },
+    {
+      "id": "ga_05",
+      "stepNumber": 5,
+      "phase": "Define event meaning and safe ingestion",
+      "title": "Add a validated event-ingestion boundary",
+      "type": "add_component",
+      "content": "Accept SDK events through the API boundary. Validate tenant authorization, event type, schema version, payload shape, and event identity before acknowledging. Return retryable backpressure when durable enqueue is unavailable; the acknowledgement must not imply that the real-time aggregate is already visible.",
+      "component": {
+        "nodeId": "ga_ingest_api",
+        "componentType": "api-gateway",
+        "label": "Analytics Event Ingestion API",
+        "description": "Validates and durably accepts client events",
+        "position": {"x": 340, "y": 220},
+        "properties": {
+          "componentName": "Analytics Event Ingestion API",
+          "purpose": "Authenticate the tenant or site, validate event identity and the registered schema version, reject malformed payloads, and acknowledge only after durable enqueue; expose retryable backpressure instead of silently dropping events."
+        },
+        "highlightReason": "API Gateway is the existing catalog request boundary and exposes validation, authentication, and throttling controls."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "ga_06",
+      "stepNumber": 6,
+      "phase": "Define event meaning and safe ingestion",
+      "title": "Send client events to ingestion",
+      "type": "add_connection",
+      "content": "The client retries an unconfirmed event with the same event_id. Keep tenant authorization and schema validation at the API boundary, and report acceptance separately from later aggregate freshness.",
+      "connection": {
+        "edgeId": "ga_sdk_ingest",
+        "sourceNodeId": "ga_sdk",
+        "targetNodeId": "ga_ingest_api",
+        "connectionType": "http",
+        "label": "Page views + named events",
+        "description": "Authenticated event records retain their retry identity and schema version"
+      },
+      "requirementIds": ["legacy-requirement:1"]
+    },
+    {
+      "id": "ga_07",
+      "stepNumber": 7,
+      "phase": "Define event meaning and safe ingestion",
+      "title": "Add a durable event buffer",
+      "type": "add_component",
+      "content": "Use the catalog Message Broker to absorb traffic spikes and decouple API acceptance from stream and batch consumers. Select partitioning from the ordering and isolation contract after those are defined; the brief supplies no partition count, retention duration, or peak-rate target.",
+      "component": {
+        "nodeId": "ga_event_log",
+        "componentType": "message-broker",
+        "label": "Durable Analytics Event Log",
+        "description": "Buffers events for independent stream and batch consumers",
+        "position": {"x": 680, "y": 220},
+        "properties": {
+          "componentName": "Durable Analytics Event Log",
+          "purpose": "Persist accepted event records, absorb traffic spikes, expose consumer lag, and allow independent stream and raw-history consumers to replay; choose partitioning and retention only after ordering, recovery, and policy requirements are agreed."
+        },
+        "highlightReason": "Message Broker is the existing catalog concept for durable event distribution and burst decoupling."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:2"]
+    },
+    {
+      "id": "ga_08",
+      "stepNumber": 8,
+      "phase": "Define event meaning and safe ingestion",
+      "title": "Acknowledge only after durable enqueue",
+      "type": "add_connection",
+      "content": "The API publishes validated events to the durable log and acknowledges only after enqueue confirmation. On broker pressure, preserve the same event identity for retry and surface backpressure so accepted-event counts remain auditable.",
+      "connection": {
+        "edgeId": "ga_ingest_log",
+        "sourceNodeId": "ga_ingest_api",
+        "targetNodeId": "ga_event_log",
+        "connectionType": "message-queue",
+        "label": "Validated durable event",
+        "description": "The queue buffers bursts and supports consumer recovery without changing event identity"
+      },
+      "requirementIds": ["legacy-requirement:1"]
+    },
+    {
+      "id": "ga_09",
+      "stepNumber": 9,
+      "phase": "Define event meaning and safe ingestion",
+      "title": "Add event-time stream processing",
+      "type": "add_component",
+      "content": "Deduplicate transport retries by event_id, maintain exact event and page-view aggregates, and publish event-time progress for the real-time path. Apply state updates idempotently before advancing consumer checkpoints. Define late-event correction and deduplication retention with the product owner; neither is quantified in the brief.",
+      "component": {
+        "nodeId": "ga_stream",
+        "componentType": "stream-processor",
+        "label": "Event-Time Metrics Processor",
+        "description": "Retry-safe real-time event aggregation",
+        "position": {"x": 1020, "y": 220},
+        "properties": {
+          "componentName": "Event-Time Metrics Processor",
+          "purpose": "Deduplicate stable event identities, maintain exact page-view and named-event aggregates, compute configured goals and conversion inputs, attach event-time freshness markers, and checkpoint only after an idempotent state update; define late-event correction before production."
+        },
+        "highlightReason": "Stream Processor is an existing catalog component for event-time processing and stateful metrics."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "ga_10",
+      "stepNumber": 10,
+      "phase": "Define event meaning and safe ingestion",
+      "title": "Consume and recover events from the log",
+      "type": "add_connection",
+      "content": "The stream processor consumes replayable records and commits dedupe state and aggregate updates before acknowledging a batch or checkpoint. Monitor consumer lag and event age against the stated less-than-one-minute freshness requirement; do not substitute an unstated latency target.",
+      "connection": {
+        "edgeId": "ga_log_stream",
+        "sourceNodeId": "ga_event_log",
+        "targetNodeId": "ga_stream",
+        "connectionType": "event-stream",
+        "label": "Replayable event-time records",
+        "description": "Stable event identities support idempotent replay and accurate aggregation"
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "ga_11",
+      "stepNumber": 11,
+      "phase": "Define event meaning and safe ingestion",
+      "title": "Choose how the pipeline absorbs spikes",
+      "type": "decision_point",
+      "content": "Treat burst handling as an explicit design assumption: let the durable log buffer temporary producer surges, scale stream consumers using observed lag and safe state ownership, and apply backpressure before acknowledging data that was not persisted. Validate capacity and scaling behavior with the actual traffic shape; the brief gives no peak rate or numeric scaling thresholds.",
+      "decision": {
+        "question": "How should ingestion preserve events during traffic spikes?",
+        "chosen": "Buffer accepted events durably, scale consumers from measured lag within safe partition ownership, and surface retryable backpressure when the durable boundary is saturated.",
+        "chosenReason": "This separates burst absorption from processing speed while keeping acknowledgement and event loss observable. Capacity remains a workload-validation task.",
+        "alternatives": [
+          {
+            "option": "Acknowledge before enqueue to protect API latency",
+            "tradeoff": "A process or broker failure can lose an event already reported as accepted."
+          },
+          {
+            "option": "Scale workers without checking partition or state ownership",
+            "tradeoff": "More workers do not fix an ordering bottleneck and can duplicate state ownership."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "ga_12",
+      "stepNumber": 12,
+      "phase": "Publish real-time metrics and definitions",
+      "title": "Add the real-time aggregate store",
+      "type": "add_component",
+      "content": "Publish current exact event counts and configured metric results with their event-time boundary and schema version. Keep these aggregates separate from unique-person and session claims until identity semantics are approved; do not hide stale or corrected results.",
+      "component": {
+        "nodeId": "ga_realtime_metrics",
+        "componentType": "analytics",
+        "label": "Real-Time Analytics Aggregates",
+        "description": "Current event, funnel, and conversion metrics",
+        "position": {"x": 1360, "y": 220},
+        "properties": {
+          "componentName": "Real-Time Analytics Aggregates",
+          "purpose": "Serve current exact page-view and event aggregates plus configured segmentation, funnel, and conversion measures; include event-time freshness, schema version, correction status, and whether a result is exact or sampled."
+        },
+        "highlightReason": "Analytics is the existing catalog concept for event metrics, aggregations, and business intelligence."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "ga_13",
+      "stepNumber": 13,
+      "phase": "Publish real-time metrics and definitions",
+      "title": "Publish stream aggregates with freshness",
+      "type": "add_connection",
+      "content": "Write completed aggregate updates with their event-time boundary and schema version. Compare event acceptance time to aggregate availability so the less-than-one-minute requirement is measured end to end, including backlog and correction work.",
+      "connection": {
+        "edgeId": "ga_stream_metrics",
+        "sourceNodeId": "ga_stream",
+        "targetNodeId": "ga_realtime_metrics",
+        "connectionType": "data-flow",
+        "label": "Exact current aggregates + freshness",
+        "description": "Published values carry event-time and schema context for honest real-time reads"
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "ga_14",
+      "stepNumber": 14,
+      "phase": "Publish real-time metrics and definitions",
+      "title": "Add a versioned analytics-definition registry",
+      "type": "add_component",
+      "content": "Store tenant-scoped event schemas, custom dimension definitions, metric formulas and units, goal definitions, and the approved identity and retention policies. Validate schema versions at ingestion and processing. The brief does not specify dimension cardinality limits, conversion attribution, or goal windows, so leave those values for product review.",
+      "component": {
+        "nodeId": "ga_definitions",
+        "componentType": "database",
+        "label": "Schema, Metrics, and Goal Registry",
+        "description": "Versioned tenant analytics definitions and policies",
+        "position": {"x": 1360, "y": 560},
+        "properties": {
+          "componentName": "Schema, Metrics, and Goal Registry",
+          "purpose": "Persist tenant-scoped versioned event schemas, custom dimensions, metric formulas and units, goal definitions, identity semantics, and approved retention and export policies; preserve definition versions used to produce each aggregate."
+        },
+        "highlightReason": "Database is an existing catalog persistence concept for versioned analytics configuration; no custom node is needed."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "ga_15",
+      "stepNumber": 15,
+      "phase": "Publish real-time metrics and definitions",
+      "title": "Resolve definitions before aggregation",
+      "type": "add_connection",
+      "content": "The processor reads the registered schema and goal versions used by each event. Unknown or incompatible versions must be visible as rejected or unresolved input, not silently coerced into a different metric definition.",
+      "connection": {
+        "edgeId": "ga_stream_definitions",
+        "sourceNodeId": "ga_stream",
+        "targetNodeId": "ga_definitions",
+        "connectionType": "database-connection",
+        "label": "Versioned schema + goal lookup",
+        "description": "Processing records which registered definitions shaped each result"
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "ga_16",
+      "stepNumber": 16,
+      "phase": "Publish real-time metrics and definitions",
+      "title": "Apply segmentation, funnels, and conversion definitions",
+      "type": "update_component",
+      "content": "Assumption to review: represent segments and funnel steps as versioned predicates over approved event dimensions, and calculate conversions from an explicit goal definition. Require the product owner to decide person or session identity, step ordering, conversion window, attribution, and treatment of late events before interpreting these as user-level outcomes.",
+      "componentUpdate": {
+        "nodeId": "ga_realtime_metrics",
+        "properties": {
+          "purpose": "Serve exact event aggregates and versioned segment, funnel, and goal-conversion results. Use only registered custom dimensions and metric formulas; retain schema version, identity semantics, event-time freshness, correction status, and exact-or-sampled status with each result. User or session identity, funnel ordering, conversion window, and attribution require product approval."
+        }
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "ga_17",
+      "stepNumber": 17,
+      "phase": "Build the batch and historical path",
+      "title": "Add retained raw-event storage",
+      "type": "add_component",
+      "content": "Keep replayable raw event records in object storage so batch jobs can rebuild historical aggregates and exports can be materialized. Apply the approved retention and deletion policy across raw data and derived copies; do not choose a duration that the brief does not provide.",
+      "component": {
+        "nodeId": "ga_raw_events",
+        "componentType": "object-storage",
+        "label": "Raw Event History and Export Files",
+        "description": "Replayable event input and generated export artifacts",
+        "position": {"x": 1020, "y": 650},
+        "data": {"semanticRole": "storage", "originalComponentId": "object-storage"},
+        "properties": {
+          "componentName": "Raw Event History and Export Files",
+          "purpose": "Retain replayable raw events and generated export artifacts under the approved tenant retention and deletion policy; preserve schema and event-time metadata and enforce tenant-scoped access to stored data."
+        },
+        "highlightReason": "Object Storage is the existing catalog concept for durable raw history and export artifacts."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "ga_18",
+      "stepNumber": 18,
+      "phase": "Build the batch and historical path",
+      "title": "Archive the accepted event stream",
+      "type": "add_connection",
+      "content": "Write the same accepted, schema-versioned records to raw history. Keep the archive independent of stream state so it can support batch recomputation, retention enforcement, and export generation.",
+      "connection": {
+        "edgeId": "ga_log_raw",
+        "sourceNodeId": "ga_event_log",
+        "targetNodeId": "ga_raw_events",
+        "connectionType": "data-flow",
+        "label": "Replayable raw event records",
+        "description": "The durable history is the batch rebuild and export source"
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "ga_19",
+      "stepNumber": 19,
+      "phase": "Build the batch and historical path",
+      "title": "Add the historical analytics warehouse",
+      "type": "add_component",
+      "content": "Use the warehouse for historical reports, large scans, cohort and funnel analysis, and recomputation from retained raw events. Choose physical partitioning and query limits from representative tenant queries and measured data; no warehouse size, query-latency goal, or retention duration is stated.",
+      "component": {
+        "nodeId": "ga_warehouse",
+        "componentType": "data-warehouse",
+        "label": "Historical Analytics Warehouse",
+        "description": "Batch-built store for complex historical queries",
+        "position": {"x": 1700, "y": 650},
+        "data": {"semanticRole": "storage", "originalComponentId": "data-warehouse"},
+        "properties": {
+          "componentName": "Historical Analytics Warehouse",
+          "purpose": "Store batch-built historical event aggregates and queryable dimensions for complex reports, cohorts, and funnels; preserve definition versions and event-time boundaries, and set physical layout and retention only from reviewed workloads and policy."
+        },
+        "highlightReason": "Data Warehouse is the existing catalog concept for OLAP and historical analysis."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "ga_20",
+      "stepNumber": 20,
+      "phase": "Build the batch and historical path",
+      "title": "Load raw events into historical tables",
+      "type": "add_connection",
+      "content": "Batch jobs read retained raw records and build historical tables and rollups for reports and approved segment or funnel analyses, using the same versioned event and metric definitions as the stream path. Make late corrections and rebuild status visible so historical totals can be compared with current aggregates.",
+      "connection": {
+        "edgeId": "ga_raw_warehouse",
+        "sourceNodeId": "ga_raw_events",
+        "targetNodeId": "ga_warehouse",
+        "connectionType": "data-flow",
+        "label": "Batch loads + historical rollups",
+        "description": "Rebuildable warehouse tables retain event-time and definition-version context"
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "ga_21",
+      "stepNumber": 21,
+      "phase": "Build the batch and historical path",
+      "title": "Make historical reports schema-aware",
+      "type": "update_component",
+      "content": "Use the same tenant-scoped custom dimensions and versioned metric definitions for historical segmentation and funnels. High-cardinality behavior and backfill semantics are open workload decisions; measure representative queries and preserve raw events so a reviewed definition change can be rebuilt deliberately.",
+      "componentUpdate": {
+        "nodeId": "ga_warehouse",
+        "properties": {
+          "purpose": "Serve historical custom reports, cohorts, and funnels using tenant-scoped registered dimensions and versioned metric formulas; preserve event-time and definition versions for reproducible backfills. Determine high-cardinality handling, query guardrails, and physical layout from measured workloads rather than invented limits."
+        }
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "ga_22",
+      "stepNumber": 22,
+      "phase": "Serve reports, dashboards, exports, and operations",
+      "title": "Add a cache for common query results",
+      "type": "add_component",
+      "content": "Pre-aggregate or cache common dashboard queries by tenant, query definition, schema version, and source freshness. Keep the analytics stores authoritative and return the result's freshness and exact-or-sampled status with cached responses.",
+      "component": {
+        "nodeId": "ga_query_cache",
+        "componentType": "cache",
+        "label": "Common Analytics Query Cache",
+        "description": "Reusable pre-aggregates for frequent dashboard queries",
+        "position": {"x": 1700, "y": 220},
+        "properties": {
+          "componentName": "Common Analytics Query Cache",
+          "purpose": "Cache or pre-aggregate frequent tenant-scoped query results by definition and schema version; carry source freshness and exact-or-sampled status, and never make cached values the source of truth."
+        },
+        "highlightReason": "Cache is an existing catalog component for common-query acceleration; no cache duration or capacity is assumed."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ga_23",
+      "stepNumber": 23,
+      "phase": "Serve reports, dashboards, exports, and operations",
+      "title": "Pre-aggregate common real-time queries",
+      "type": "add_connection",
+      "content": "Populate reusable cache entries from published stream aggregates. Invalidate or version entries when late-event corrections or metric-definition changes alter their meaning.",
+      "connection": {
+        "edgeId": "ga_metrics_cache",
+        "sourceNodeId": "ga_realtime_metrics",
+        "targetNodeId": "ga_query_cache",
+        "connectionType": "data-flow",
+        "label": "Versioned common-query results",
+        "description": "Pre-aggregates retain the source freshness and metric-definition version"
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ga_24",
+      "stepNumber": 24,
+      "phase": "Serve reports, dashboards, exports, and operations",
+      "title": "Add the report and export API",
+      "type": "add_component",
+      "content": "Provide tenant-authorized report queries and dashboard data over real-time aggregates and historical warehouse tables. Validate custom metric definitions, expose freshness and sampling status, and create asynchronous export jobs for large result sets rather than making an interactive request wait for a full export.",
+      "component": {
+        "nodeId": "ga_report_api",
+        "componentType": "backend-server",
+        "label": "Reports and Export Service",
+        "description": "Authorizes dashboards, custom reports, and export jobs",
+        "position": {"x": 2040, "y": 220},
+        "properties": {
+          "componentName": "Reports and Export Service",
+          "purpose": "Authorize tenant-scoped dashboard and custom-report queries across current aggregates and historical warehouse data; validate registered dimensions and metrics, return freshness and exact-or-sampled status, and schedule large exports for controlled delivery."
+        },
+        "highlightReason": "Backend Server is an existing catalog service concept for report orchestration and export-job APIs."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:4"]
+    },
+    {
+      "id": "ga_25",
+      "stepNumber": 25,
+      "phase": "Serve reports, dashboards, exports, and operations",
+      "title": "Read current metrics for reports",
+      "type": "add_connection",
+      "content": "The report service queries current aggregates with their event-time watermark. A response must not label an older or corrected generation as current; use the freshness marker measured against the stated real-time constraint.",
+      "connection": {
+        "edgeId": "ga_metrics_reports",
+        "sourceNodeId": "ga_realtime_metrics",
+        "targetNodeId": "ga_report_api",
+        "connectionType": "api-call",
+        "label": "Current aggregates + freshness",
+        "description": "Report responses expose the published event-time boundary and correction state"
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1"]
+    },
+    {
+      "id": "ga_26",
+      "stepNumber": 26,
+      "phase": "Serve reports, dashboards, exports, and operations",
+      "title": "Query historical warehouse data",
+      "type": "add_connection",
+      "content": "Run complex historical report, segment, and funnel queries against warehouse data using the registered metric and dimension versions. Enforce tenant scope and query guardrails chosen from workload evidence, and make incomplete or retention-expired results explicit.",
+      "connection": {
+        "edgeId": "ga_warehouse_reports",
+        "sourceNodeId": "ga_warehouse",
+        "targetNodeId": "ga_report_api",
+        "connectionType": "database-connection",
+        "label": "Historical report queries",
+        "description": "Warehouse queries use versioned definitions and explicit retention boundaries"
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "ga_27",
+      "stepNumber": 27,
+      "phase": "Serve reports, dashboards, exports, and operations",
+      "title": "Look up cached common queries",
+      "type": "add_connection",
+      "content": "The report service may use a matching cache entry before querying its source. A hit is usable only with its tenant, definition version, freshness marker, and exact-or-sampled status; cache misses fall through to the current aggregate or warehouse.",
+      "connection": {
+        "edgeId": "ga_reports_cache",
+        "sourceNodeId": "ga_report_api",
+        "targetNodeId": "ga_query_cache",
+        "connectionType": "api-call",
+        "label": "Common-query lookup",
+        "description": "Only entries with matching tenant and definition context can be reused"
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ga_28",
+      "stepNumber": 28,
+      "phase": "Serve reports, dashboards, exports, and operations",
+      "title": "Read approved report definitions",
+      "type": "add_connection",
+      "content": "Resolve each report's tenant-scoped dimensions, metric formulas, goals, and policy versions from the registry. Enforce authorization before returning results or starting exports.",
+      "connection": {
+        "edgeId": "ga_reports_definitions",
+        "sourceNodeId": "ga_report_api",
+        "targetNodeId": "ga_definitions",
+        "connectionType": "database-connection",
+        "label": "Authorized metric + goal definitions",
+        "description": "Report execution uses the approved schema and policy versions"
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "ga_29",
+      "stepNumber": 29,
+      "phase": "Serve reports, dashboards, exports, and operations",
+      "title": "Add the analytics dashboard",
+      "type": "add_component",
+      "content": "Give users a dashboard for custom reports, segments, funnels, and goal conversions. Show the selected date range, event-time freshness, metric definition, and whether a view is exact or sampled so users can interpret results correctly.",
+      "component": {
+        "nodeId": "ga_dashboard",
+        "componentType": "web-app",
+        "label": "User Analytics Dashboard",
+        "description": "Custom reports, segments, funnels, and goals",
+        "position": {"x": 2380, "y": 220},
+        "properties": {
+          "componentName": "User Analytics Dashboard",
+          "purpose": "Render tenant-authorized custom reports, segments, funnels, and goal conversions with selected time range, metric definition, freshness, and exact-or-sampled status visible to the user."
+        },
+        "highlightReason": "The Web App catalog component represents the user-facing dashboard using an existing frontend concept."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5"]
+    },
+    {
+      "id": "ga_30",
+      "stepNumber": 30,
+      "phase": "Serve reports, dashboards, exports, and operations",
+      "title": "Connect dashboard queries to the report API",
+      "type": "add_connection",
+      "content": "Send authenticated dashboard queries and report selections to the API. Keep query execution, metric validation, and export authorization on the service side rather than trusting browser-provided definitions.",
+      "connection": {
+        "edgeId": "ga_dashboard_reports",
+        "sourceNodeId": "ga_dashboard",
+        "targetNodeId": "ga_report_api",
+        "connectionType": "http",
+        "label": "Dashboard queries + report results",
+        "description": "The service validates and authorizes report definitions for the tenant"
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5"]
+    },
+    {
+      "id": "ga_31",
+      "stepNumber": 31,
+      "phase": "Serve reports, dashboards, exports, and operations",
+      "title": "Write authorized export artifacts",
+      "type": "add_connection",
+      "content": "The report service materializes an authorized export to object storage and returns a tenant-scoped retrieval path. Apply the approved export-artifact retention and deletion policy; the brief does not specify a file format, size limit, or expiry duration.",
+      "connection": {
+        "edgeId": "ga_reports_exports",
+        "sourceNodeId": "ga_report_api",
+        "targetNodeId": "ga_raw_events",
+        "connectionType": "data-flow",
+        "label": "Authorized export artifact",
+        "description": "Generated files use tenant-scoped access and the approved artifact lifecycle policy"
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "ga_32",
+      "stepNumber": 32,
+      "phase": "Serve reports, dashboards, exports, and operations",
+      "title": "Add pipeline and query monitoring",
+      "type": "add_component",
+      "content": "Observe accepted and rejected events, queue age, consumer lag, deduplication and correction counts, aggregate freshness, warehouse query health, and export completion. Alert against the brief's freshness requirement and agreed operational policies without inventing numeric thresholds.",
+      "component": {
+        "nodeId": "ga_monitoring",
+        "componentType": "monitoring",
+        "label": "Analytics Pipeline Observability",
+        "description": "Tracks freshness, correctness, query health, and backlog",
+        "position": {"x": 2040, "y": 850},
+        "data": {"semanticRole": "backend", "originalComponentId": "monitoring"},
+        "properties": {
+          "componentName": "Analytics Pipeline Observability",
+          "purpose": "Track event acceptance and rejection, queue age, consumer lag, duplicate handling, late corrections, aggregate freshness, warehouse query health, and export completion; set alert thresholds from the stated freshness requirement and reviewed operations policy."
+        },
+        "highlightReason": "Monitoring is an existing catalog concept for operational metrics and alerts."
+      },
+      "requirementIds": ["legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ga_33",
+      "stepNumber": 33,
+      "phase": "Serve reports, dashboards, exports, and operations",
+      "title": "Observe broker pressure and accepted events",
+      "type": "add_connection",
+      "content": "Export received and accepted event rates alongside queue age, enqueue rejection, replay, and consumer lag signals. Compare measured daily volume with the brief's target of billions of events per day; validate burst headroom separately because peak rate is unspecified. These signals expose traffic spikes before an accepted event is lost or stream freshness falls behind.",
+      "connection": {
+        "edgeId": "ga_log_monitoring",
+        "sourceNodeId": "ga_event_log",
+        "targetNodeId": "ga_monitoring",
+        "connectionType": "data-flow",
+        "label": "Event rate + queue age + replay + rejection metrics",
+        "description": "Broker pressure and recovery are visible to operators"
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "ga_34",
+      "stepNumber": 34,
+      "phase": "Serve reports, dashboards, exports, and operations",
+      "title": "Observe exactness and real-time freshness",
+      "type": "add_connection",
+      "content": "Publish processor event age, deduplication outcomes, correction state, checkpoint health, and aggregate publication time. Compare the full accepted-event-to-visible-metric path with the stated less-than-one-minute constraint.",
+      "connection": {
+        "edgeId": "ga_stream_monitoring",
+        "sourceNodeId": "ga_stream",
+        "targetNodeId": "ga_monitoring",
+        "connectionType": "data-flow",
+        "label": "Event age + exactness + checkpoint health",
+        "description": "Operators can distinguish stale output from duplicate or corrected events"
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "ga_35",
+      "stepNumber": 35,
+      "phase": "Serve reports, dashboards, exports, and operations",
+      "title": "Observe historical queries and retention outcomes",
+      "type": "add_connection",
+      "content": "Track warehouse query behavior, batch completion, rebuild status, and policy-driven expiry or deletion. Review these measures against representative large-dataset queries and the approved retention contract.",
+      "connection": {
+        "edgeId": "ga_warehouse_monitoring",
+        "sourceNodeId": "ga_warehouse",
+        "targetNodeId": "ga_monitoring",
+        "connectionType": "data-flow",
+        "label": "Batch + query + lifecycle health",
+        "description": "Historical analysis and retention enforcement remain observable"
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "ga_36",
+      "stepNumber": 36,
+      "phase": "Review exactness and unresolved policies",
+      "title": "Keep sampling out of authoritative counts",
+      "type": "decision_point",
+      "content": "The brief's sampling hint is an option for high-traffic exploratory queries, not permission to silently approximate accurate counts. Assumption to review: keep event totals and configured conversion aggregates exact; allow sampling only when a report explicitly accepts approximation, and expose its sample basis and status. Decide which report classes may be sampled with product owners.",
+      "decision": {
+        "question": "Where, if anywhere, may high-traffic analytics use sampling?",
+        "chosen": "Do not sample authoritative event counts or conversions; permit only explicitly requested exploratory sampling with visible sample status and basis.",
+        "chosenReason": "This preserves the stated accurate-counting constraint while retaining sampling as an opt-in query-cost tradeoff from the brief's hints.",
+        "alternatives": [
+          {
+            "option": "Sample every high-volume metric without marking it",
+            "tradeoff": "Users cannot distinguish an estimate from the accurate totals the brief requests."
+          },
+          {
+            "option": "Never allow sampling for any exploratory query",
+            "tradeoff": "Some large ad hoc queries may consume more resources than users need to spend."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "ga_37",
+      "stepNumber": 37,
+      "phase": "Review exactness and unresolved policies",
+      "title": "Leave retention and identity policy values open",
+      "type": "decision_point",
+      "content": "The brief requires retention policies but supplies no duration or deletion contract. Assumption to review: apply an approved policy consistently to broker replay, raw events, stream deduplication state, warehouse data, cached results, and export artifacts, including derived copies and deletion requests. The product and policy owners must set durations, legal holds, erasure behavior, and the event-retry horizon before expiry is configured.",
+      "decision": {
+        "question": "What data lifecycle should the system enforce?",
+        "chosen": "Use a versioned, approved retention and deletion policy across raw, processed, cached, and exported data; leave every duration and erasure rule unset until the responsible owners decide.",
+        "chosenReason": "This makes the retention constraint actionable without inventing a duration or claiming compliance with an unspecified policy.",
+        "alternatives": [
+          {
+            "option": "Choose one default retention duration in the walkthrough",
+            "tradeoff": "The brief gives no period, legal basis, tenant variation, or deletion requirement to justify that value."
+          },
+          {
+            "option": "Retain every copy indefinitely",
+            "tradeoff": "This does not implement a retention policy and can conflict with future deletion requirements."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-constraint:5"]
+    },
+    {
+      "id": "ga_38",
+      "stepNumber": 38,
+      "phase": "Review exactness and unresolved policies",
+      "title": "Validate the design against real workload evidence",
+      "type": "explanation",
+      "content": "Before implementation, confirm the event identity and session rules, ordering and late-arrival semantics, custom-dimension cardinality, peak traffic shape, query mix, conversion attribution, export contract, and retention policy. Then measure accepted-event loss, duplicate correction, aggregate accuracy, end-to-end freshness against less than one minute, spike recovery, and representative warehouse queries. The brief's stated scale target (billions of events per day) and real-time bound (less than one minute) are acceptance inputs to validate, not achieved guarantees; query latency, peak throughput, and retention duration remain unspecified.",
+      "requirementIds": []
+    }
+  ]
+}

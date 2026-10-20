@@ -1,0 +1,1095 @@
+{
+  "problem_id": "ai_003",
+  "version": "1.0",
+  "totalSteps": 45,
+  "phases": [
+    {
+      "name": "Freeze the brief and define service targets",
+      "stepRange": [1, 2],
+      "description": "Keep the supplied problem distinct from assumptions, then make its latency, throughput, freshness, and storage goals measurable."
+    },
+    {
+      "name": "Construct the bounded hybrid query path",
+      "stepRange": [3, 25],
+      "description": "Route requests through one API boundary, understand and encode queries, retrieve lexical and dense candidates in parallel, and return a relevance-ranked result with facets."
+    },
+    {
+      "name": "Ingest multimodal content and publish index versions",
+      "stepRange": [26, 41],
+      "description": "Keep source media durable, process versioned updates asynchronously, and make them visible only after both retrieval indexes are ready."
+    },
+    {
+      "name": "Operate against freshness, latency, and cost targets",
+      "stepRange": [42, 45],
+      "description": "Instrument both paths and use measured latency, query load, embedding time, and indexing lag to guide scaling and backpressure."
+    }
+  ],
+  "steps": [
+    {
+      "id": "semantic_search_brief",
+      "stepNumber": 1,
+      "phase": "Freeze the brief and define service targets",
+      "title": "Start from the exact frozen problem",
+      "type": "explanation",
+      "content": "Problem: Design an AI-Powered Semantic Search Engine (ai_003; semantic-search-engine). Category: AI - Search & Retrieval; domain: aiml; difficulty: Hard; estimated time: 60-90 minutes. Description: Design a search engine that understands natural language queries, uses vector embeddings for semantic similarity, supports hybrid search with keyword matching, and provides relevance ranking. Requirements: Convert documents into vector embeddings; Support semantic similarity search; Implement hybrid search (vector + keyword); Handle multi-modal search (text, images); Provide faceted filtering and aggregations; Support real-time index updates; Implement query understanding and expansion; Rank results by relevance. Constraints: Search latency under 100ms for 100M+ documents; Support 10k+ queries per second; Embedding generation under 50ms; Index update latency under 5 seconds; Cost-effective storage for billions of vectors. Supplied hints: Use vector databases (Pinecone, Weaviate, Milvus); Generate embeddings with sentence transformers; Implement ANN (Approximate Nearest Neighbor) search; Use HNSW or IVF indexes for fast retrieval; Combine BM25 with vector scores for hybrid ranking; Cache frequent queries and embeddings. Companies named in the frozen row: Google, Elastic, Pinecone, Algolia. These are problem context, not required vendors."
+    },
+    {
+      "id": "semantic_search_targets",
+      "stepNumber": 2,
+      "phase": "Freeze the brief and define service targets",
+      "title": "Separate acceptance targets from sizing assumptions",
+      "type": "explanation",
+      "content": "Treat every supplied number as a target to prove, not an achieved guarantee; the brief leaves percentiles and workload shape open. Use an initial p95 query budget of 95ms: gateway/auth/validation 5ms, optional query understanding 5ms (skip when deadline is tight), online embedding 35ms, parallel BM25+ANN retrieval 30ms, fusion/facets/response encoding 15ms, and network reserve 5ms. This leaves 5ms headroom under 100ms and is a test budget, not a claim of measured performance. Size for a 0% cache-hit baseline so cache savings are not required to meet the target; report observed hit rate separately. For 10k QPS, begin with ceil(10,000 / (0.70 x measured per-replica QPS)) coordinator replicas, then benchmark BM25/ANN shard counts using the real filter and modality mix at 100M+ documents. Define the update clock from the 202 response after checksum-verified upload, metadata, and event are durable. For an explicitly assumed bounded update (up to 10 text chunks and one image; confirm this profile), budget p95 <=4.5s: queue <=0.5s, fetch/chunk/embed <=2.0s, parallel lexical+vector searchable acknowledgements <=1.0s, active-generation switch/cache namespace <=0.5s, and 0.5s reserve. Measure this boundary; keep bulk re-indexing separate and report pending rather than claiming success when it misses. For scale context, 1B x 768 raw fp32 vectors are about 3.07TB decimal; int8 is about 0.768TB (1.536TB with two copies), before ANN structures, metadata, and operational headroom. Benchmark compression against recall and latency; do not present the estimate as a price quote."
+    },
+    {
+      "id": "semantic_search_clients",
+      "stepNumber": 3,
+      "phase": "Construct the bounded hybrid query path",
+      "title": "Add clients for queries and document updates",
+      "type": "add_component",
+      "content": "Represent the applications and source systems that submit text or image queries, upload source documents, request filters/facets, and receive ranked results. Keep large source-media transfer separate from interactive query traffic so uploads do not consume the search latency budget.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:8",
+        "legacy-constraint:2"
+      ],
+      "component": {
+        "nodeId": "semantic_search_client",
+        "componentType": "web-app",
+        "label": "Search & Indexing Clients",
+        "position": { "x": 50, "y": 220 },
+        "properties": {
+          "componentName": "Search & Indexing Clients",
+          "purpose": "Submit text/image queries and versioned document updates, request filters and facets, and display ranked results or an accepted/pending indexing status. Authenticate users and carry tenant/subject context to the API; large media uploads use short-lived, object/version-scoped upload URLs rather than the interactive query body."
+        },
+        "highlightReason": "The same public boundary serves interactive retrieval and document-update clients while distinguishing their latency and payload needs."
+      }
+    },
+    {
+      "id": "semantic_search_gateway",
+      "stepNumber": 4,
+      "phase": "Construct the bounded hybrid query path",
+      "title": "Set a measured API admission boundary",
+      "type": "add_component",
+      "content": "Use the gateway for request validation, rate limiting, and an explicit query deadline. The 10k+ requests/second figure is a capacity target, not a safe fixed throttle: configure admission and burst behavior from load tests, and return a deliberate retryable response rather than allowing unbounded work to violate the latency objective.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:4"
+      ],
+      "component": {
+        "nodeId": "semantic_search_gateway",
+        "componentType": "api-gateway",
+        "label": "Search API Gateway",
+        "position": { "x": 300, "y": 220 },
+        "properties": {
+          "componentName": "Search API Gateway",
+          "purpose": "Validate OAuth/OIDC identity and derive tenant/subject context; validate modality, filters, facets, document identifiers, and update versions; enforce request deadlines and measured per-tenant rate limits; route search and indexing APIs. Require TLS, reject cross-tenant filters, and keep large media bytes on short-lived scoped object-store uploads.",
+          "requestsPerSecond": 10000,
+          "rateLimiting": true
+        },
+        "highlightReason": "One validated, bounded API boundary protects the interactive path and admits the stated 10k+ query load under tested capacity."
+      }
+    },
+    {
+      "id": "semantic_search_client_gateway",
+      "stepNumber": 5,
+      "phase": "Construct the bounded hybrid query path",
+      "title": "Route search and update requests through the gateway",
+      "type": "add_connection",
+      "content": "Send query and document-control requests through the same validated API boundary. Pass request IDs and deadlines to the coordinator; reject malformed filters or unsupported modalities explicitly instead of silently returning incomplete results.",
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-constraint:1",
+        "legacy-constraint:2"
+      ],
+      "connection": {
+        "edgeId": "semantic_search_client_to_gateway",
+        "sourceNodeId": "semantic_search_client",
+        "targetNodeId": "semantic_search_gateway",
+        "connectionType": "api-call",
+        "label": "Search, facet & document APIs",
+        "description": "Submit bounded text/image queries and versioned update commands with a request ID, filters, and deadline; large media is uploaded separately using a scoped URL."
+      }
+    },
+    {
+      "id": "semantic_search_coordinator",
+      "stepNumber": 6,
+      "phase": "Construct the bounded hybrid query path",
+      "title": "Add a stateless search and indexing coordinator",
+      "type": "add_component",
+      "content": "The coordinator validates product-level query semantics, fans lexical and dense retrieval out concurrently, fuses and ranks bounded candidate sets, and manages the index-update control path. Keep it stateless where practical so query capacity can scale horizontally; do not make a large generative model a serial dependency of every search.",
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:5",
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:2"
+      ],
+      "component": {
+        "nodeId": "semantic_search_api",
+        "componentType": "backend-server",
+        "label": "Search & Index Coordinator",
+        "position": { "x": 550, "y": 220 },
+        "properties": {
+          "componentName": "Search & Index Coordinator",
+          "purpose": "Normalize and deadline-bound queries; derive tenant and ACL-version filters from authenticated server context (never trust client-supplied scope); run optional query understanding and embedding, then BM25 and ANN in parallel with identical filters. Deduplicate document versions, fuse bounded candidates with Reciprocal Rank Fusion, and return facets plus relevance-ranked results. Target the documented 95ms p95 stage budget with a 0% cache-hit capacity baseline; size stateless replicas as ceil(10,000/(0.70 x measured per-replica QPS)) and validate at 100M+ documents before claiming the 10k QPS target."
+        },
+        "highlightReason": "This is the explicit fan-out and ranking boundary that keeps hybrid retrieval parallel and controls the user-visible deadline."
+      }
+    },
+    {
+      "id": "semantic_search_gateway_coordinator",
+      "stepNumber": 7,
+      "phase": "Construct the bounded hybrid query path",
+      "title": "Pass validated work and remaining deadline to the coordinator",
+      "type": "add_connection",
+      "content": "Forward a normalized request, requested modality, filter/facet specification, request ID, and remaining deadline. The coordinator must not reset the gateway deadline when it calls downstream services.",
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-constraint:1",
+        "legacy-constraint:2"
+      ],
+      "connection": {
+        "edgeId": "semantic_search_gateway_to_api",
+        "sourceNodeId": "semantic_search_gateway",
+        "targetNodeId": "semantic_search_api",
+        "connectionType": "api-call",
+        "label": "Validated request + deadline",
+        "description": "Pass a bounded query or idempotent document command with validated filters, modality, request ID, and the remaining end-to-end deadline."
+      }
+    },
+    {
+      "id": "semantic_search_api_gateway_response",
+      "stepNumber": 8,
+      "phase": "Construct the bounded hybrid query path",
+      "title": "Return a bounded ranked response through the API boundary",
+      "type": "add_connection",
+      "content": "Return a stable response envelope containing ranked document references, requested facet buckets, pagination state, and index freshness metadata. Enforce a result-count and payload-size limit so serialization cannot consume the entire search deadline.",
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:8",
+        "legacy-constraint:1"
+      ],
+      "connection": {
+        "edgeId": "semantic_search_api_to_gateway_response",
+        "sourceNodeId": "semantic_search_api",
+        "targetNodeId": "semantic_search_gateway",
+        "connectionType": "data-flow",
+        "label": "Ranked results + facets",
+        "description": "Return a bounded, deduplicated ranked page, requested aggregations, and the index generation used; keep response encoding inside the end-to-end latency budget."
+      }
+    },
+    {
+      "id": "semantic_search_gateway_client_response",
+      "stepNumber": 9,
+      "phase": "Construct the bounded hybrid query path",
+      "title": "Expose result ordering and freshness to the client",
+      "type": "add_connection",
+      "content": "Deliver the fused ranking and facets with stable pagination and an explicit freshness/index-generation marker. Do not describe the five-second indexing target as guaranteed until it is measured against the agreed update boundary.",
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:4"
+      ],
+      "connection": {
+        "edgeId": "semantic_search_gateway_to_client_response",
+        "sourceNodeId": "semantic_search_gateway",
+        "targetNodeId": "semantic_search_client",
+        "connectionType": "data-flow",
+        "label": "Ranked response + freshness",
+        "description": "Return ordered results, requested facets, pagination state, and the index generation so clients can distinguish a current result set from an indexing update still in progress."
+      }
+    },
+    {
+      "id": "semantic_search_cache",
+      "stepNumber": 10,
+      "phase": "Construct the bounded hybrid query path",
+      "title": "Cache only safe, version-aware query responses",
+      "type": "add_component",
+      "content": "Cache-aside can reduce repeated work, but a cache hit must not bypass current filters or return an obsolete document version. Include normalized query, modality, filters/facets, access scope when applicable, and active index generation in the key; use a short TTL and invalidate affected entries when a new generation is published.",
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-constraint:1",
+        "legacy-constraint:2"
+      ],
+      "component": {
+        "nodeId": "semantic_search_cache",
+        "componentType": "cache",
+        "label": "Versioned Query Cache",
+        "position": { "x": 800, "y": 500 },
+        "properties": {
+          "componentName": "Versioned Query Cache",
+          "purpose": "Cache eligible normalized query results only when query, modality, filters/facets, tenant/subject/role and ACL version, and active index generation are part of the key. Expire quickly and invalidate or advance the generation namespace only after index publication; never let a cache hit bypass current authorization, filters, or freshness checks. Capacity planning assumes zero hits; measure hit rate as an optimization.",
+          "engine": "redis",
+          "cacheStrategy": "cache-aside",
+          "ttl": 60,
+          "eviction": "lru",
+          "inMemory": true,
+          "replication": true,
+          "clusterMode": true
+        },
+        "highlightReason": "A narrowly keyed, version-aware cache supports repeated-query efficiency without weakening filter correctness or update freshness."
+      }
+    },
+    {
+      "id": "semantic_search_api_cache_lookup",
+      "stepNumber": 11,
+      "phase": "Construct the bounded hybrid query path",
+      "title": "Check the versioned cache before retrieval",
+      "type": "add_connection",
+      "content": "Look up only an eligible complete response using all result-affecting inputs in the key. A miss proceeds to retrieval; a hit still carries its index generation and is rejected if it no longer matches the active generation.",
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:5",
+        "legacy-constraint:1",
+        "legacy-constraint:2"
+      ],
+      "connection": {
+        "edgeId": "semantic_search_api_to_cache",
+        "sourceNodeId": "semantic_search_api",
+        "targetNodeId": "semantic_search_cache",
+        "connectionType": "data-flow",
+        "label": "Scoped query-result lookup",
+        "description": "Read by normalized query, modality, exact filters/facets, applicable access scope, and index generation; bypass on an incomplete key or stale generation."
+      }
+    },
+    {
+      "id": "semantic_search_cache_hit",
+      "stepNumber": 12,
+      "phase": "Construct the bounded hybrid query path",
+      "title": "Use only a still-current cache hit",
+      "type": "add_connection",
+      "content": "Return a cache hit to the coordinator with its generation and eligibility metadata. If the generation or authorization/filter context differs, treat it as a miss and run both retrieval branches.",
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-constraint:1"
+      ],
+      "connection": {
+        "edgeId": "semantic_search_cache_to_api",
+        "sourceNodeId": "semantic_search_cache",
+        "targetNodeId": "semantic_search_api",
+        "connectionType": "data-flow",
+        "label": "Current cached page or miss",
+        "description": "Return the cached ranked page and generation; stale or mismatched entries are treated as misses rather than serving old results."
+      }
+    },
+    {
+      "id": "semantic_search_understanding_model",
+      "stepNumber": 13,
+      "phase": "Construct the bounded hybrid query path",
+      "title": "Add bounded natural-language query understanding",
+      "type": "add_component",
+      "content": "Use a small NLP model for intent and safe query expansion, not an unbounded text-generation call. Preserve the original query, cap expansion terms, attach confidence, and skip expansion when the request deadline or confidence does not justify it. Image queries can retain their original representation and proceed to the aligned multimodal encoder.",
+      "requirementIds": [
+        "legacy-requirement:7",
+        "legacy-constraint:1"
+      ],
+      "component": {
+        "nodeId": "semantic_query_model",
+        "componentType": "ml-model",
+        "label": "Query Understanding Model",
+        "position": { "x": 800, "y": 40 },
+        "properties": {
+          "componentName": "Query Understanding Model",
+          "purpose": "Perform low-latency NLP intent classification and bounded term/synonym expansion for text queries within the 5ms optional stage budget. Preserve the original query and return confidence; skip or fall back to original text on low confidence or insufficient remaining deadline. Image queries pass through without text-only rewriting; version the model and retain a safe rollback target.",
+          "modelType": "NLP",
+          "framework": "ONNX"
+        },
+        "highlightReason": "Query understanding and expansion are explicit, bounded capabilities rather than an implied side effect of vector similarity."
+      }
+    },
+    {
+      "id": "semantic_search_query_to_understanding",
+      "stepNumber": 14,
+      "phase": "Construct the bounded hybrid query path",
+      "title": "Send the original text and deadline to query understanding",
+      "type": "add_connection",
+      "content": "Send the original text query and only the context needed to classify intent or expand terms. Keep filters and modality explicit, cap input size, and propagate the same deadline; do not send image bytes to a text-only model.",
+      "requirementIds": [
+        "legacy-requirement:7",
+        "legacy-constraint:1"
+      ],
+      "connection": {
+        "edgeId": "semantic_search_api_to_query_model",
+        "sourceNodeId": "semantic_search_api",
+        "targetNodeId": "semantic_query_model",
+        "connectionType": "api-call",
+        "label": "Bounded text intent + expansion",
+        "description": "Pass original text, modality, a bounded context, and remaining deadline; text expansion is optional and image bytes do not enter this text-only path."
+      }
+    },
+    {
+      "id": "semantic_search_understanding_result",
+      "stepNumber": 15,
+      "phase": "Construct the bounded hybrid query path",
+      "title": "Return the original query plus confidence-scored expansions",
+      "type": "add_connection",
+      "content": "Return the original query, a small confidence-scored set of expansions, and the model version. The coordinator can use the original text for exact matching and expansion terms for recall; if the model times out or is uncertain, continue with the original query rather than blocking search.",
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:7",
+        "legacy-constraint:1"
+      ],
+      "connection": {
+        "edgeId": "semantic_search_query_model_to_api",
+        "sourceNodeId": "semantic_query_model",
+        "targetNodeId": "semantic_search_api",
+        "connectionType": "data-flow",
+        "label": "Intent + bounded expansions",
+        "description": "Return original text, capped expansion terms, confidence, and model version; timeout or low confidence falls back to the original query within the remaining deadline."
+      }
+    },
+    {
+      "id": "semantic_search_embedding_service",
+      "stepNumber": 16,
+      "phase": "Construct the bounded hybrid query path",
+      "title": "Add a shared-space text and image encoder",
+      "type": "add_component",
+      "content": "Use an aligned multimodal model so text and image inputs can be compared in one vector space. The selected 768 dimensions and self-hosted model are design assumptions, not frozen requirements: benchmark relevance, memory, and per-item embedding latency before fixing them. Keep query inference warm and provision indexing capacity separately so backfills cannot starve search.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:4",
+        "legacy-constraint:1",
+        "legacy-constraint:3",
+        "legacy-constraint:4"
+      ],
+      "component": {
+        "nodeId": "semantic_embedding_service",
+        "componentType": "embedding-service",
+        "label": "Text/Image Embedding Service",
+        "position": { "x": 800, "y": 250 },
+        "properties": {
+          "componentName": "Text/Image Embedding Service",
+          "purpose": "Generate aligned 768-dimensional vectors for text queries, image queries, and indexed text/image content using one version-pinned multimodal model. Use <=35ms p95 as the initial online per-item budget (inside the supplied under-50ms target); benchmark by modality and payload size. Isolate query capacity from document backfills, record model/version with each vector, and roll model/index generations forward or back together.",
+          "model": "Self-hosted",
+          "dimensions": 768,
+          "batchSize": 32
+        },
+        "highlightReason": "A single aligned text-image embedding space supports cross-modal semantic similarity; dimensions and model remain explicit benchmarkable assumptions."
+      }
+    },
+    {
+      "id": "semantic_search_query_embedding_request",
+      "stepNumber": 17,
+      "phase": "Construct the bounded hybrid query path",
+      "title": "Encode the bounded query representation",
+      "type": "add_connection",
+      "content": "Encode the original text or normalized image query with the same versioned multimodal model used for documents. Include accepted text expansions without replacing the original meaning, enforce payload limits, and leave time for retrieval and response assembly inside the under-100ms target.",
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:4",
+        "legacy-requirement:7",
+        "legacy-constraint:1",
+        "legacy-constraint:3"
+      ],
+      "connection": {
+        "edgeId": "semantic_search_api_to_embedding_query",
+        "sourceNodeId": "semantic_search_api",
+        "targetNodeId": "semantic_embedding_service",
+        "connectionType": "api-call",
+        "label": "Text/image query encoding",
+        "description": "Encode a bounded text or image query in the same model/version space as indexed documents; the online embedding target is under 50ms."
+      }
+    },
+    {
+      "id": "semantic_search_query_embedding_result",
+      "stepNumber": 18,
+      "phase": "Construct the bounded hybrid query path",
+      "title": "Return the query vector and encoder version",
+      "type": "add_connection",
+      "content": "Return the vector, modality, and encoder version so the coordinator can query only a compatible index generation. On timeout, return an explicit degraded/unavailable outcome within the deadline; do not silently substitute an incompatible embedding model.",
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:4",
+        "legacy-constraint:1",
+        "legacy-constraint:3"
+      ],
+      "connection": {
+        "edgeId": "semantic_embedding_to_api_query",
+        "sourceNodeId": "semantic_embedding_service",
+        "targetNodeId": "semantic_search_api",
+        "connectionType": "data-flow",
+        "label": "Versioned query vector",
+        "description": "Return the query vector with modality and encoder version; reject incompatible index/model versions and surface timeout explicitly."
+      }
+    },
+    {
+      "id": "semantic_search_lexical_index",
+      "stepNumber": 19,
+      "phase": "Construct the bounded hybrid query path",
+      "title": "Add the lexical index for exact terms and facets",
+      "type": "add_component",
+      "content": "Use a search engine for BM25 keyword retrieval and filterable document fields. Store the normalized text and only the metadata needed for requested filters and aggregations; tune shard and replica counts from measured cardinality and QPS rather than choosing them from the document count alone.",
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:4"
+      ],
+      "component": {
+        "nodeId": "semantic_lexical_index",
+        "componentType": "search-engine",
+        "label": "BM25 Search & Facet Index",
+        "position": { "x": 1080, "y": 80 },
+        "properties": {
+          "componentName": "BM25 Search & Facet Index",
+          "purpose": "Run lexical BM25 retrieval over normalized document text and serve filterable metadata plus requested facet aggregations. Apply authenticated tenant and ACL-version filters inside retrieval before scoring/faceting. Keep document ID, source/index version, modality, and required filter fields in each record; size shards and replicas from filtered cardinality and load tests, with a 30ms parallel-branch budget."
+        },
+        "highlightReason": "The lexical branch preserves keyword matching and supplies filter/facet aggregations that dense similarity alone does not provide."
+      }
+    },
+    {
+      "id": "semantic_search_lexical_query",
+      "stepNumber": 20,
+      "phase": "Construct the bounded hybrid query path",
+      "title": "Run BM25 with filters and aggregations",
+      "type": "add_connection",
+      "content": "Search the original query and only the accepted expansion terms. Apply the same eligible metadata filters used by dense retrieval before selecting top candidates, and compute requested facets over the filtered set rather than the global corpus.",
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:5",
+        "legacy-requirement:7",
+        "legacy-constraint:1",
+        "legacy-constraint:2"
+      ],
+      "connection": {
+        "edgeId": "semantic_search_api_to_lexical_index",
+        "sourceNodeId": "semantic_search_api",
+        "targetNodeId": "semantic_lexical_index",
+        "connectionType": "api-call",
+        "label": "Parallel BM25 + filtered facets",
+        "description": "Search original and bounded expanded terms with BM25, the request's filter set, a capped top-K, and requested facet aggregations; execute alongside dense retrieval."
+      }
+    },
+    {
+      "id": "semantic_search_lexical_results",
+      "stepNumber": 21,
+      "phase": "Construct the bounded hybrid query path",
+      "title": "Return lexical candidates and filtered facet buckets",
+      "type": "add_connection",
+      "content": "Return document IDs, source/index versions, lexical rank/score, and only the requested facet buckets. Keep the top-K bounded so the coordinator can fuse results before its deadline; the lexical score is one ranking signal, not directly comparable to a cosine score.",
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:5",
+        "legacy-requirement:8",
+        "legacy-constraint:1"
+      ],
+      "connection": {
+        "edgeId": "semantic_lexical_index_to_api",
+        "sourceNodeId": "semantic_lexical_index",
+        "targetNodeId": "semantic_search_api",
+        "connectionType": "data-flow",
+        "label": "BM25 candidates + facets",
+        "description": "Return a bounded lexical candidate list with document/version IDs, lexical ranks, and filtered facet counts for result fusion."
+      }
+    },
+    {
+      "id": "semantic_search_vector_index",
+      "stepNumber": 22,
+      "phase": "Construct the bounded hybrid query path",
+      "title": "Add an approximate nearest-neighbor vector index",
+      "type": "add_component",
+      "content": "Use Milvus with IVF as the initial cost-conscious ANN choice for the billions-of-vectors constraint. The 768 dimensions must match the encoder. Evaluate quantization, partitioning, replication, and recall together on representative filters; HNSW is an alternative when measured recall/latency justify its higher memory footprint. Neither index choice alone proves cost or latency targets.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:4",
+        "legacy-requirement:6",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:5"
+      ],
+      "component": {
+        "nodeId": "semantic_vector_index",
+        "componentType": "vector-database",
+        "label": "Multimodal ANN Vector Index",
+        "position": { "x": 1080, "y": 330 },
+        "properties": {
+          "componentName": "Multimodal ANN Vector Index",
+          "purpose": "Store versioned aligned text/image vectors with document IDs and authenticated tenant/ACL-version filter metadata; apply the same eligibility filters as BM25 before ANN top-K. Partition and shard for measured filtered cardinality/QPS within the 30ms parallel-branch budget; benchmark quantization, recall, and bytes per vector. Keep original content in lower-cost object storage rather than treating source bytes as vector-index data.",
+          "engine": "Milvus",
+          "dimensions": 768,
+          "indexType": "IVF"
+        },
+        "highlightReason": "The vector index supplies dense semantic similarity while IVF and tested compression provide a cost/recall tradeoff for a very large vector corpus."
+      }
+    },
+    {
+      "id": "semantic_search_dense_query",
+      "stepNumber": 23,
+      "phase": "Construct the bounded hybrid query path",
+      "title": "Run filtered ANN retrieval in parallel with BM25",
+      "type": "add_connection",
+      "content": "Use the query vector from the matching encoder generation and apply the same eligible metadata filters as the lexical branch before top-K selection. Bound search effort and candidate count; parallel fan-out is needed to leave room for fusion within the under-100ms target.",
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:5"
+      ],
+      "connection": {
+        "edgeId": "semantic_search_api_to_vector_index",
+        "sourceNodeId": "semantic_search_api",
+        "targetNodeId": "semantic_vector_index",
+        "connectionType": "api-call",
+        "label": "Filtered dense ANN top-K",
+        "description": "Search with the matching versioned text/image query vector and apply the same request filters as BM25 before bounded top-K selection."
+      }
+    },
+    {
+      "id": "semantic_search_dense_results",
+      "stepNumber": 24,
+      "phase": "Construct the bounded hybrid query path",
+      "title": "Return dense matches for relevance fusion",
+      "type": "add_connection",
+      "content": "Return document/version IDs, vector rank and similarity, and the index/model generation. The coordinator rejects stale or incompatible versions, deduplicates against BM25, and combines ranks rather than comparing raw lexical and vector scores as if they shared a scale.",
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:5"
+      ],
+      "connection": {
+        "edgeId": "semantic_vector_index_to_api",
+        "sourceNodeId": "semantic_vector_index",
+        "targetNodeId": "semantic_search_api",
+        "connectionType": "data-flow",
+        "label": "Dense candidates + generation",
+        "description": "Return bounded similarity-ranked candidates with document/version IDs and encoder/index generation for hybrid fusion and stale-version rejection."
+      }
+    },
+    {
+      "id": "semantic_search_hybrid_decision",
+      "stepNumber": 25,
+      "phase": "Construct the bounded hybrid query path",
+      "title": "Fuse ranks before considering a heavier reranker",
+      "type": "decision_point",
+      "content": "The coordinator now has keyword candidates, dense candidates, and filtered facet buckets. Keep the two retrieval calls parallel and begin with a transparent rank-fusion method; only add a learned reranker if a representative benchmark proves its quality gain fits the remaining latency budget.",
+      "decision": {
+        "question": "How should lexical and dense matches be combined under the strict query-latency target?",
+        "chosen": "Run BM25 and filtered ANN in parallel, then deduplicate and fuse their bounded candidate ranks with Reciprocal Rank Fusion; return the requested filtered facets.",
+        "chosenReason": "Rank fusion does not assume lexical and vector raw scores are calibrated to the same scale, and bounded parallel retrieval preserves room for response assembly within the sub-100ms goal.",
+        "alternatives": [
+          {
+            "option": "Use only dense vector similarity.",
+            "tradeoff": "It loses exact keyword behavior and cannot by itself meet the hybrid-search requirement."
+          },
+          {
+            "option": "Use only BM25 keyword retrieval.",
+            "tradeoff": "It misses semantic matches when relevant wording differs from the query."
+          },
+          {
+            "option": "Always run a large cross-encoder reranker.",
+            "tradeoff": "It may improve relevance but adds serial inference cost; adopt only if measured quality gain fits the remaining deadline."
+          }
+        ]
+      }
+    },
+    {
+      "id": "semantic_search_object_storage",
+      "stepNumber": 26,
+      "phase": "Ingest multimodal content and publish index versions",
+      "title": "Store source documents and media outside the indexes",
+      "type": "add_component",
+      "content": "Keep original documents and image/media bytes in versioned object storage and pass immutable object/version references through the indexing pipeline. This avoids copying large source payloads into the query API and lets the lexical and vector indexes be rebuilt from authoritative inputs.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:4",
+        "legacy-requirement:6",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ],
+      "component": {
+        "nodeId": "semantic_source_store",
+        "componentType": "object-storage",
+        "label": "Versioned Source Document Store",
+        "position": { "x": 300, "y": 560 },
+        "properties": {
+          "componentName": "Versioned Source Document Store",
+          "purpose": "Store authoritative source documents and original images/media as immutable, encrypted, versioned objects with checksums and tenant-scoped access. Issue short-lived single-object upload references; keep object references in metadata/indexes and tier source data by lifecycle policy so billions of vectors do not force expensive duplicate source storage.",
+          "versioning": true,
+          "checksumValidation": true
+        },
+        "highlightReason": "Durable versioned source objects support multimodal ingestion, retries, and index rebuilds without storing source blobs in search indexes."
+      }
+    },
+    {
+      "id": "semantic_search_create_upload_reference",
+      "stepNumber": 27,
+      "phase": "Ingest multimodal content and publish index versions",
+      "title": "Issue a scoped upload reference for source content",
+      "type": "add_connection",
+      "content": "After validating a document update, create a short-lived, object/version-scoped upload reference and expected checksum. Keep this control-plane call separate from query retrieval; the client confirms upload completion before the update event is accepted.",
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:6",
+        "legacy-constraint:4"
+      ],
+      "connection": {
+        "edgeId": "semantic_search_api_to_source_store",
+        "sourceNodeId": "semantic_search_api",
+        "targetNodeId": "semantic_source_store",
+        "connectionType": "api-call",
+        "label": "Create scoped versioned upload",
+        "description": "Create a short-lived upload reference for one document/version and expected checksum; do not proxy large image or document bytes through the search request path."
+      }
+    },
+    {
+      "id": "semantic_search_direct_upload",
+      "stepNumber": 28,
+      "phase": "Ingest multimodal content and publish index versions",
+      "title": "Upload document bytes directly to durable storage",
+      "type": "add_connection",
+      "content": "Upload the source text/document and its image assets through the scoped reference, verify the checksum, then complete the update through the API. The indexing clock should start at the explicitly agreed durable-acceptance point; the brief does not specify whether it begins before or after a large upload.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:4",
+        "legacy-requirement:6",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ],
+      "connection": {
+        "edgeId": "semantic_search_client_to_source_store",
+        "sourceNodeId": "semantic_search_client",
+        "targetNodeId": "semantic_source_store",
+        "connectionType": "data-flow",
+        "label": "Checksum-verified source upload",
+        "description": "Write original document/image bytes using the scoped upload reference and retain the immutable object version and checksum for idempotent indexing and rebuilds."
+      }
+    },
+    {
+      "id": "semantic_search_metadata_store",
+      "stepNumber": 29,
+      "phase": "Ingest multimodal content and publish index versions",
+      "title": "Keep canonical document and index-version metadata",
+      "type": "add_component",
+      "content": "Persist canonical document identity, object version, modality, filterable metadata, tombstone/update state, and the active index generation. The two search indexes carry queryable snapshots; this store remains the source of truth for update ordering and publication state. Define any tenant/access policy before enabling scoped results.",
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-constraint:4"
+      ],
+      "component": {
+        "nodeId": "semantic_document_metadata",
+        "componentType": "database",
+        "label": "Document Metadata & Version Store",
+        "position": { "x": 550, "y": 560 },
+        "properties": {
+          "componentName": "Document Metadata & Version Store",
+          "purpose": "Keep canonical tenant/document IDs, owner and ACL version, source object/version references, modality, filterable fields, tombstones, update status, per-index acknowledgements, and the active index generation. Treat search/vector indexes as rebuildable snapshots; enforce authorization from canonical metadata, and derive capacity from metadata cardinality and update load.",
+          "type": "NoSQL"
+        },
+        "highlightReason": "Canonical version and metadata state makes dual-index updates, filters, retries, and stale-version handling explicit."
+      }
+    },
+    {
+      "id": "semantic_search_metadata_write",
+      "stepNumber": 30,
+      "phase": "Ingest multimodal content and publish index versions",
+      "title": "Record an idempotent source version before indexing",
+      "type": "add_connection",
+      "content": "After upload verification, persist the stable document ID, source object version, checksum, filter metadata, and update/tombstone version. Use an idempotency key so client retries do not create competing logical updates.",
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-constraint:4"
+      ],
+      "connection": {
+        "edgeId": "semantic_search_api_to_metadata",
+        "sourceNodeId": "semantic_search_api",
+        "targetNodeId": "semantic_document_metadata",
+        "connectionType": "database-connection",
+        "label": "Persist document version + filters",
+        "description": "Write the checksum-verified source reference, stable document ID, filter metadata, and idempotent update/tombstone version before publishing indexing work."
+      }
+    },
+    {
+      "id": "semantic_search_index_queue",
+      "stepNumber": 31,
+      "phase": "Ingest multimodal content and publish index versions",
+      "title": "Add a durable queue for index updates",
+      "type": "add_component",
+      "content": "Buffer versioned indexing events independently from interactive queries. Partition or group work by stable document ID to preserve per-document update ordering; make consumers idempotent, cap retries, and send poison events to an inspectable dead-letter path.",
+      "requirementIds": [
+        "legacy-requirement:6",
+        "legacy-constraint:2",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ],
+      "component": {
+        "nodeId": "semantic_index_queue",
+        "componentType": "queue",
+        "label": "Versioned Index Update Queue",
+        "position": { "x": 800, "y": 700 },
+        "properties": {
+          "componentName": "Versioned Index Update Queue",
+          "purpose": "Durably buffer idempotent tenant/document-version and tombstone events; preserve per-document ordering, bound retries, and expose a replayable dead-letter path. Alert when oldest-event age approaches the 0.5s queue budget; apply bounded backpressure and expose pending state rather than hiding a missed five-second visibility target.",
+          "visibilityTimeout": 30,
+          "maxRetries": 5,
+          "durable": true
+        },
+        "highlightReason": "A durable queue isolates document ingestion from query serving and provides a measurable place to observe update lag and backpressure."
+      }
+    },
+    {
+      "id": "semantic_search_enqueue_update",
+      "stepNumber": 32,
+      "phase": "Ingest multimodal content and publish index versions",
+      "title": "Enqueue only durable, versioned update events",
+      "type": "add_connection",
+      "content": "Enqueue the document ID, source object version/checksum, metadata version, and idempotency key after durable acceptance. Return an accepted/pending update state to the client; do not claim search visibility until both indexes acknowledge the version.",
+      "requirementIds": [
+        "legacy-requirement:6",
+        "legacy-constraint:4"
+      ],
+      "connection": {
+        "edgeId": "semantic_search_api_to_queue",
+        "sourceNodeId": "semantic_search_api",
+        "targetNodeId": "semantic_index_queue",
+        "connectionType": "message-queue",
+        "label": "Idempotent document-version event",
+        "description": "Publish a durable event only after source and metadata versions are accepted; the client receives pending status until lexical and vector indexes are both current."
+      }
+    },
+    {
+      "id": "semantic_search_index_worker",
+      "stepNumber": 33,
+      "phase": "Ingest multimodal content and publish index versions",
+      "title": "Add an idempotent multimodal indexing worker",
+      "type": "add_component",
+      "content": "Consume versioned events, retrieve and validate the immutable source, normalize/chunk text, extract image inputs, and create aligned embeddings. Upsert lexical and vector records with the same document and generation IDs. Publish a generation only after both writes acknowledge; retries are idempotent, and an update that cannot meet the five-second target remains visibly pending rather than exposing a half-updated result set.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-constraint:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ],
+      "component": {
+        "nodeId": "semantic_index_worker",
+        "componentType": "processing-worker",
+        "label": "Multimodal Indexing Worker",
+        "position": { "x": 1080, "y": 700 },
+        "properties": {
+          "componentName": "Multimodal Indexing Worker",
+          "purpose": "Process idempotent document versions: verify and normalize source content, chunk text, prepare image inputs, create aligned embeddings, and upsert lexical and vector indexes with a shared generation. Publish by atomic active-generation switch only after both indexes are searchable; retain the last-good generation on partial failure, retry/replay safely, and expose pending/lag state. Roll back by switching the active pointer to the retained generation; never expose a half-updated pair.",
+          "tasks": "Data Processing"
+        },
+        "highlightReason": "The worker is the explicit asynchronous boundary for document conversion, multimodal embedding, and coordinated index freshness."
+      }
+    },
+    {
+      "id": "semantic_search_queue_worker",
+      "stepNumber": 34,
+      "phase": "Ingest multimodal content and publish index versions",
+      "title": "Consume updates with ordering, retry, and lag visibility",
+      "type": "add_connection",
+      "content": "Consume events in document order where possible, checkpoint only after durable progress, and make each source version safe to replay. Track queue age as well as throughput; a high-throughput consumer can still violate freshness if the oldest event is stuck.",
+      "requirementIds": [
+        "legacy-requirement:6",
+        "legacy-constraint:2",
+        "legacy-constraint:4"
+      ],
+      "connection": {
+        "edgeId": "semantic_queue_to_worker",
+        "sourceNodeId": "semantic_index_queue",
+        "targetNodeId": "semantic_index_worker",
+        "connectionType": "message-queue",
+        "label": "Ordered, replayable update work",
+        "description": "Deliver per-document version events with retry and checkpoint semantics; processing is idempotent and queue age is measured against the five-second target."
+      }
+    },
+    {
+      "id": "semantic_search_worker_source_read",
+      "stepNumber": 35,
+      "phase": "Ingest multimodal content and publish index versions",
+      "title": "Read and verify the exact source version",
+      "type": "add_connection",
+      "content": "Resolve the immutable object version from the event, verify its checksum, and report missing or changed content as an explicit failed update. Never index bytes fetched through an unversioned mutable path.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:4",
+        "legacy-requirement:6"
+      ],
+      "connection": {
+        "edgeId": "semantic_source_store_to_worker",
+        "sourceNodeId": "semantic_source_store",
+        "targetNodeId": "semantic_index_worker",
+        "connectionType": "data-flow",
+        "label": "Immutable source + checksum",
+        "description": "Read the precise document/image object version referenced by the event and verify integrity before extracting text or media features."
+      }
+    },
+    {
+      "id": "semantic_search_worker_metadata",
+      "stepNumber": 36,
+      "phase": "Ingest multimodal content and publish index versions",
+      "title": "Load canonical fields and advance update state",
+      "type": "add_connection",
+      "content": "Read the accepted metadata version and write per-index acknowledgements, retry status, tombstone state, and the committed generation. Keep metadata filters identical across lexical and vector documents so result fusion cannot reintroduce a candidate excluded by one branch.",
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-constraint:4"
+      ],
+      "connection": {
+        "edgeId": "semantic_worker_to_metadata",
+        "sourceNodeId": "semantic_index_worker",
+        "targetNodeId": "semantic_document_metadata",
+        "connectionType": "database-connection",
+        "label": "Version state + index acknowledgements",
+        "description": "Read canonical filters and source version; persist retry/tombstone state and mark a generation active only after both retrieval indexes acknowledge it."
+      }
+    },
+    {
+      "id": "semantic_search_worker_embedding_request",
+      "stepNumber": 37,
+      "phase": "Ingest multimodal content and publish index versions",
+      "title": "Generate aligned vectors for normalized text and images",
+      "type": "add_connection",
+      "content": "Send normalized text chunks and image inputs to the same versioned encoder used by queries. Batch for throughput only within the freshness budget; reserve enough inference capacity to keep individual embedding generation under its stated target while incremental indexing remains under five seconds.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:4",
+        "legacy-requirement:6",
+        "legacy-constraint:3",
+        "legacy-constraint:4"
+      ],
+      "connection": {
+        "edgeId": "semantic_worker_to_embedding",
+        "sourceNodeId": "semantic_index_worker",
+        "targetNodeId": "semantic_embedding_service",
+        "connectionType": "api-call",
+        "label": "Versioned text/image embedding jobs",
+        "description": "Encode normalized text chunks and image inputs in the query-compatible shared space; provision indexing inference separately and measure per-item latency and update freshness."
+      }
+    },
+    {
+      "id": "semantic_search_worker_embedding_result",
+      "stepNumber": 38,
+      "phase": "Ingest multimodal content and publish index versions",
+      "title": "Return vectors with source and model version metadata",
+      "type": "add_connection",
+      "content": "Return embeddings tagged with document ID, source version, modality, and encoder version. Reject partial or mismatched batches and make retries idempotent so a failed index write cannot associate a vector with a newer document revision.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:4",
+        "legacy-requirement:6",
+        "legacy-constraint:3",
+        "legacy-constraint:4"
+      ],
+      "connection": {
+        "edgeId": "semantic_embedding_to_worker",
+        "sourceNodeId": "semantic_embedding_service",
+        "targetNodeId": "semantic_index_worker",
+        "connectionType": "data-flow",
+        "label": "Source-versioned embeddings",
+        "description": "Return aligned vectors with document/source version, modality, and encoder generation so retries and dual-index writes remain consistent."
+      }
+    },
+    {
+      "id": "semantic_search_worker_lexical_upsert",
+      "stepNumber": 39,
+      "phase": "Ingest multimodal content and publish index versions",
+      "title": "Upsert lexical text and filter fields",
+      "type": "add_connection",
+      "content": "Write normalized searchable text, document/version IDs, modality, and the filterable fields used by query filters and facet aggregations. Use idempotent versioned upserts and tombstones; wait for a searchable acknowledgement before committing the shared generation.",
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-constraint:2",
+        "legacy-constraint:4"
+      ],
+      "connection": {
+        "edgeId": "semantic_worker_to_lexical_index",
+        "sourceNodeId": "semantic_index_worker",
+        "targetNodeId": "semantic_lexical_index",
+        "connectionType": "data-flow",
+        "label": "Versioned BM25 + facet upsert",
+        "description": "Idempotently upsert normalized text, document/version IDs, and matching filter/facet fields; acknowledge only when the new version is searchable."
+      }
+    },
+    {
+      "id": "semantic_search_worker_vector_upsert",
+      "stepNumber": 40,
+      "phase": "Ingest multimodal content and publish index versions",
+      "title": "Upsert vectors and filter metadata into the ANN index",
+      "type": "add_connection",
+      "content": "Write the aligned vectors using the same document ID, source version, modality, and filter fields as the lexical index. Measure indexing completion and recall under the selected IVF/compression settings; stale generations remain inactive until both index acknowledgements exist.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-constraint:2",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ],
+      "connection": {
+        "edgeId": "semantic_worker_to_vector_index",
+        "sourceNodeId": "semantic_index_worker",
+        "targetNodeId": "semantic_vector_index",
+        "connectionType": "data-flow",
+        "label": "Versioned vector + filter upsert",
+        "description": "Idempotently upsert aligned dense vectors and matching document/version/filter metadata; measure recall, resource cost, and five-second visibility under realistic load."
+      }
+    },
+    {
+      "id": "semantic_search_cache_invalidation",
+      "stepNumber": 41,
+      "phase": "Ingest multimodal content and publish index versions",
+      "title": "Invalidate query results only after the new generation is ready",
+      "type": "add_connection",
+      "content": "After both index writes are acknowledged and the active generation advances, invalidate affected cached result keys or advance their generation namespace. Do not evict a valid old generation before the replacement is queryable; do not serve stale entries as a substitute for a missed update target.",
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-constraint:1",
+        "legacy-constraint:4"
+      ],
+      "connection": {
+        "edgeId": "semantic_worker_to_cache_invalidation",
+        "sourceNodeId": "semantic_index_worker",
+        "targetNodeId": "semantic_search_cache",
+        "connectionType": "data-flow",
+        "label": "Committed generation invalidation",
+        "description": "Advance the cache generation or invalidate affected result keys only after both lexical and vector indexes acknowledge the same document version."
+      }
+    },
+    {
+      "id": "semantic_search_monitoring",
+      "stepNumber": 42,
+      "phase": "Operate against freshness, latency, and cost targets",
+      "title": "Measure the query path and indexing pipeline separately",
+      "type": "add_component",
+      "content": "Observe end-to-end and per-stage query latency, QPS, saturation, cache hit rate, query embedding latency, lexical/vector errors, index update age, queue depth, dual-write failures, and vector storage/recall. Alert on measured objectives and broken version parity; avoid logging raw query or document content by default.",
+  "requirementIds": [
+    "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ],
+      "component": {
+        "nodeId": "semantic_search_monitoring",
+        "componentType": "monitoring",
+        "label": "Search & Index SLO Monitoring",
+        "position": { "x": 1370, "y": 500 },
+        "properties": {
+          "componentName": "Search & Index SLO Monitoring",
+          "purpose": "Measure end-to-end and per-stage p50/p95/p99 latency, QPS/saturation, cache hit rate (without depending on hits), query/document embedding time, lexical/vector errors, oldest queue age, accepted-to-visible lag, dual-index generation parity, recall, vector bytes, and cost. Page before the 95ms/4.5s working budgets are exhausted; detect one-sided acknowledgements and trigger backpressure/replay. Redact query/document payloads and tenant identifiers in telemetry by default.",
+          "stack": "Prometheus + Grafana"
+        },
+        "highlightReason": "Both query quality/latency and asynchronous freshness/cost need separate observable signals to show whether targets are met."
+      }
+    },
+    {
+      "id": "semantic_search_query_telemetry",
+      "stepNumber": 43,
+      "phase": "Operate against freshness, latency, and cost targets",
+      "title": "Trace query latency and relevance inputs",
+      "type": "add_connection",
+      "content": "Emit request rate, end-to-end and stage percentiles, deadline exhaustion, query-model/embedding timeouts, branch latency, candidate counts, cache outcomes, and version mismatches. Track relevance with an offline judged set and production-safe feedback signals; latency alone does not show whether ranking is useful.",
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3"
+      ],
+      "connection": {
+        "edgeId": "semantic_api_to_monitoring",
+        "sourceNodeId": "semantic_search_api",
+        "targetNodeId": "semantic_search_monitoring",
+        "connectionType": "data-flow",
+        "label": "Query SLO + relevance telemetry",
+        "description": "Publish redacted query rates, stage/end-to-end latency, branch errors, cache status, deadlines, generation mismatches, and ranking evaluation signals."
+      }
+    },
+    {
+      "id": "semantic_search_index_telemetry",
+      "stepNumber": 44,
+      "phase": "Operate against freshness, latency, and cost targets",
+      "title": "Trace index age, dual-write health, and vector cost",
+      "type": "add_connection",
+      "content": "Measure oldest queue age and accepted-to-searchable update latency, not only worker throughput. Compare lexical and vector generation acknowledgements, dead-letter/retry counts, embedding capacity, vector bytes per item, and recall under compression so the five-second and storage targets are visible together.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-constraint:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ],
+      "connection": {
+        "edgeId": "semantic_worker_to_monitoring",
+        "sourceNodeId": "semantic_index_worker",
+        "targetNodeId": "semantic_search_monitoring",
+        "connectionType": "data-flow",
+        "label": "Index freshness + vector cost telemetry",
+        "description": "Report oldest event age, accepted-to-visible lag, dual-index acknowledgements, retries, embedding latency, vector footprint, and recall/compression measurements."
+      }
+    },
+    {
+      "id": "semantic_search_scale_trigger",
+      "stepNumber": 45,
+      "phase": "Operate against freshness, latency, and cost targets",
+      "title": "Scale from measured bottlenecks, not document count alone",
+      "type": "scale_trigger",
+      "content": "Benchmark 100M+ documents, 10k+ QPS, modality/filter/facet mix, cache-disabled traffic, and the agreed bounded update profile. Verify p95 against the 95ms query budget and 4.5s accepted-to-visible budget while tracking p99 and recall. Size query replicas from measured per-replica QPS at 70% utilization; size lexical/vector shards from filtered workload tests. Compare 3.07TB raw fp32 versus 0.768TB int8 per billion 768-dimensional vectors before index/replica overhead. Use separate query and backfill pools, test saturation and one-sided index failure, and do not claim a target is met until measured results and rollback behavior support it.",
+      "requirementIds": [
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ],
+      "scaleTrigger": {
+        "metric": "Query p95/p99 and stage latency; embedding latency; oldest index-event age and accepted-to-visible lag; vector bytes per item and recall at the selected compression/index settings.",
+        "action": "Scale stateless query replicas, encoder capacity, search/vector partitions, and indexing workers independently from measured bottlenecks. Keep a 0% cache-hit capacity baseline; alert before the 95ms/4.5s working budgets are exhausted; apply bounded backpressure, replay failed updates, and atomically roll back to the retained generation if either index is unhealthy. Use versioned model/index releases with canary and recall checks before advancing the active generation.",
+        "impact": "Creates measurable evidence for the supplied under-100ms, 10k QPS, under-50ms embedding, under-five-second indexing, and cost-effectiveness targets without presenting untested assumptions as production guarantees."
+      }
+    }
+  ]
+}

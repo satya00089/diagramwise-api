@@ -1,0 +1,917 @@
+{
+  "problem_id": "cloud_aws_001",
+  "version": "1.0-review",
+  "requirementRevision": null,
+  "totalSteps": 66,
+  "phases": [
+    {
+      "name": "Frame the serverless workload and trust boundaries",
+      "stepRange": [1, 16],
+      "description": "Separate prompt facts from assumptions, establish identity and payment boundaries, then build the public request and media paths."
+    },
+    {
+      "name": "Serve the catalog and protect the transactional order path",
+      "stepRange": [17, 30],
+      "description": "Use managed compute and fit-for-purpose data paths; keep cached catalog reads separate from strongly consistent inventory reservations."
+    },
+    {
+      "name": "Make order processing durable and payment-safe",
+      "stepRange": [31, 49],
+      "description": "Bridge the atomic order transaction to asynchronous orchestration with an outbox, then model payment as an idempotent saga with recoverable notifications."
+    },
+    {
+      "name": "Publish inventory changes and prove scale behavior",
+      "stepRange": [50, 66],
+      "description": "Fan out committed inventory changes to live clients, expose operational signals, and validate burst, concurrency, cost, latency, and recovery assumptions."
+    }
+  ],
+  "steps": [
+    {
+      "id": "ecom_01",
+      "stepNumber": 1,
+      "phase": "Frame the serverless workload and trust boundaries",
+      "title": "Distinguish stated requirements from sizing assumptions",
+      "type": "explanation",
+      "content": "The brief asks for catalog management, orders and payments, authenticated sessions, product media, sales-spike handling, live inventory updates, order confirmations, and automatic scaling. Its explicit constraints are cost-effective variable traffic, cold starts under one second, 10,000+ concurrent users, secure payment transactions, and ACID order properties. It does not specify peak requests per second, read/write mix, availability target, live-update freshness, region policy, or order volume. Treat those as discovery questions; size concurrency from measured request rate × duration rather than equating 10,000 signed-in users with 10,000 simultaneous Lambda executions.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "ecom_02",
+      "stepNumber": 2,
+      "phase": "Frame the serverless workload and trust boundaries",
+      "title": "Plan for active sessions and burst rates, not a single average",
+      "type": "decision_point",
+      "content": "Use 10,000+ concurrent users as a required load-test population, but first measure the fraction active at once, API requests per active user, and handler duration. Replay a sharp sale-start burst and a sustained sale plateau. Check API Gateway quotas, Lambda regional and per-function concurrency, DynamoDB partition distribution, WebSocket connection quotas, SQS age, and downstream payment-provider limits before launch; request quota increases early where measured headroom is insufficient.",
+      "decision": {
+        "question": "What does the 10,000+ concurrent-user constraint mean for capacity planning?",
+        "chosen": "Load-test at least 10,000 active user sessions and derive in-flight requests and service quotas from observed request rate and latency; do not assume one Lambda invocation per logged-in user.",
+        "chosenReason": "Concurrency is a workload property. This makes the constraint testable without inventing an unstated requests-per-second target.",
+        "alternatives": [
+          {"option": "Provision exactly 10,000 Lambda executions continuously", "tradeoff": "Can waste money during quiet periods and still miss burst, duration, or downstream quota bottlenecks."},
+          {"option": "Treat the user count as equivalent to requests per second", "tradeoff": "Confuses connected users with request arrival rate and produces unreliable sizing."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "ecom_03",
+      "stepNumber": 3,
+      "phase": "Frame the serverless workload and trust boundaries",
+      "title": "Keep raw card data outside the application boundary",
+      "type": "decision_point",
+      "content": "Use a PCI-compliant payment provider's hosted fields or tokenization flow. The platform should persist only provider tokens, payment intent/reference IDs, outcome, amount, and audit metadata; never log or store PAN or CVV. The provider call is an external side effect, so it cannot join a DynamoDB ACID transaction; make it a saga step with a stable idempotency key, verified callbacks, bounded retries, and compensation.",
+      "decision": {
+        "question": "How should order ACID guarantees coexist with an external card processor?",
+        "chosen": "Atomically create the order, reserve inventory, and write an outbox event in DynamoDB; then orchestrate tokenized payment as an idempotent Step Functions saga with explicit success, retry, timeout, and compensation paths.",
+        "chosenReason": "The local order invariant remains transactional while the external payment side effect is handled with durable, replay-safe workflow state.",
+        "alternatives": [
+          {"option": "Call the processor inside a database transaction", "tradeoff": "A remote network call cannot be made atomic with DynamoDB and can hold locks or reservations across unpredictable latency."},
+          {"option": "Retry every payment timeout as a new charge", "tradeoff": "An ambiguous response can create duplicate charges."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "ecom_04",
+      "stepNumber": 4,
+      "phase": "Frame the serverless workload and trust boundaries",
+      "title": "Represent shoppers and authenticated sellers",
+      "type": "add_component",
+      "content": "This client boundary includes browser and mobile shoppers plus seller/admin users. Give catalog write operations a seller role while shoppers receive only the catalog, cart, order, and subscription permissions they need. The client sends a stable checkout idempotency key and does not treat a successful button click as proof of payment.",
+      "component": {
+        "nodeId": "ecom_clients",
+        "componentType": "web-app",
+        "label": "Shopper + Seller Clients",
+        "description": "Browser/mobile storefront and authenticated catalog console",
+        "position": {"x": 0, "y": 380},
+        "properties": {"componentName": "Shopper + Seller Clients", "purpose": "Browse catalog and media, authenticate, submit idempotent checkout requests, and subscribe to live inventory; seller/admin catalog writes require a separate authorized role."},
+        "highlightReason": "The existing Web App palette component represents the human and seller client boundary without inventing a node type."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6"]
+    },
+    {
+      "id": "ecom_05",
+      "stepNumber": 5,
+      "phase": "Frame the serverless workload and trust boundaries",
+      "title": "Add an edge security and bot-control boundary",
+      "type": "add_component",
+      "content": "Use AWS WAF managed rules and carefully tuned bot/rate controls in front of the REST and WebSocket API stages. Apply per-identity/API throttles and validation at the API boundary as well; WAF mitigates abusive traffic but is not a replacement for application authorization or payment idempotency.",
+      "component": {
+        "nodeId": "ecom_waf",
+        "componentType": "firewall",
+        "label": "AWS WAF",
+        "description": "Managed rules and abuse controls at API edges",
+        "position": {"x": 280, "y": 360},
+        "properties": {"componentName": "AWS WAF", "purpose": "Protect REST and WebSocket API stages with managed rules, request-size limits, and tuned bot/rate controls; alert on blocks and avoid rules that reject legitimate sale traffic.", "type": "web-application-firewall", "rules": "Managed baseline plus reviewed application-specific rules; no payment secrets or card data in logs", "logging": true},
+        "highlightReason": "The catalog Firewall component is the existing representation for WAF and edge filtering."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ecom_06",
+      "stepNumber": 6,
+      "phase": "Frame the serverless workload and trust boundaries",
+      "title": "Create the REST API boundary",
+      "type": "add_component",
+      "content": "Expose versioned catalog, seller, cart, checkout, order-status, and inventory-read endpoints through API Gateway. Validate payload sizes and schemas, authenticate protected routes, enforce per-client throttles, and return an order-pending response only after the transaction and outbox event are durable.",
+      "component": {
+        "nodeId": "ecom_rest_api",
+        "componentType": "api-gateway",
+        "label": "Storefront REST API",
+        "description": "Validated, authenticated, throttled HTTPS endpoints",
+        "position": {"x": 570, "y": 360},
+        "properties": {"componentName": "Storefront REST API", "purpose": "Route versioned catalog, seller, checkout, order-status, and inventory-read endpoints; validate schemas and payload limits; require JWT/role checks on protected routes; acknowledge checkout only after durable order/outbox commit.", "inputValidation": "Strict schemas, size limits, price/quantity validation, and server-side price lookup", "authentication": "JWT authorizer; role-based seller/admin checks; anonymous access only to explicitly public catalog reads", "rateLimiting": "Per-client and per-route throttles with stricter checkout and login abuse controls", "tlsTermination": true, "deduplication": "Require stable checkout idempotency key and persist its outcome with the order", "throttling": true},
+        "highlightReason": "API Gateway is the catalog's existing component for HTTPS request routing and API-level protections."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ecom_07",
+      "stepNumber": 7,
+      "phase": "Frame the serverless workload and trust boundaries",
+      "title": "Route shopper traffic through edge protection",
+      "type": "add_connection",
+      "content": "Send shopper and seller requests through the same edge control, then let API Gateway apply route-specific authentication and throttling. The WAF decision is not authorization: seller permissions are checked against the authenticated identity in the application path.",
+      "connection": {"edgeId": "ecom_clients_waf", "sourceNodeId": "ecom_clients", "targetNodeId": "ecom_waf", "connectionType": "http", "label": "HTTPS storefront + seller traffic", "description": "WAF evaluates requests before protected API routes"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ecom_08",
+      "stepNumber": 8,
+      "phase": "Frame the serverless workload and trust boundaries",
+      "title": "Forward inspected requests to API Gateway",
+      "type": "add_connection",
+      "content": "Only the protected API stage is reachable from this edge path. Apply distinct route quotas so a catalog sale burst cannot consume all checkout or authentication capacity, and return retry guidance rather than silently dropping throttled requests.",
+      "connection": {"edgeId": "ecom_waf_rest_api", "sourceNodeId": "ecom_waf", "targetNodeId": "ecom_rest_api", "connectionType": "http", "label": "Inspected HTTPS requests", "description": "WAF-protected REST routes with API quotas and schema validation"},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "ecom_09",
+      "stepNumber": 9,
+      "phase": "Frame the serverless workload and trust boundaries",
+      "title": "Add the managed identity and session service",
+      "type": "add_component",
+      "content": "Use a managed identity provider such as Amazon Cognito for signup/login, JWT issuance, refresh-token rotation, and MFA for seller/admin accounts. Keep authorization decisions scoped to user and tenant roles, and never trust a client-supplied price, role, or inventory count.",
+      "component": {
+        "nodeId": "ecom_identity",
+        "componentType": "auth-service",
+        "label": "Identity + Session Provider",
+        "description": "Managed sign-in, JWTs, refresh, and seller MFA",
+        "position": {"x": 860, "y": 100},
+        "properties": {"componentName": "Identity + Session Provider", "purpose": "Use a managed IdP (for example Cognito) for authentication, JWT issuance, refresh-token rotation, account recovery, and seller/admin MFA; enforce user and seller roles server-side.", "oauth": "OAuth 2.0 / OIDC authorization-code flow with PKCE for public clients", "sessions": "Short-lived access tokens, rotated refresh tokens, revocation and logout", "tokenTTL": "Short-lived access token; choose exact TTL from risk and UX policy", "mfa": true},
+        "highlightReason": "Auth Service is an existing palette component for identity and session lifecycle."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ecom_10",
+      "stepNumber": 10,
+      "phase": "Frame the serverless workload and trust boundaries",
+      "title": "Authorize protected routes with verified identity claims",
+      "type": "add_connection",
+      "content": "The API authorizer validates issuer, audience, signature, expiry, and required scopes/roles. Catalog writes require a seller/admin claim; checkout derives customer identity from the token, not the request body. Keep public product reads explicitly separate from privileged routes.",
+      "connection": {"edgeId": "ecom_api_identity", "sourceNodeId": "ecom_rest_api", "targetNodeId": "ecom_identity", "connectionType": "api-call", "label": "OIDC/JWT authorization", "description": "API validates token claims and route roles; identity service owns login and session lifecycle"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ecom_11",
+      "stepNumber": 11,
+      "phase": "Frame the serverless workload and trust boundaries",
+      "title": "Add the product-media delivery edge",
+      "type": "add_component",
+      "content": "Serve immutable, versioned product images from CloudFront so repeated catalog reads do not invoke application Lambdas or repeatedly fetch the origin. Use short-lived signed upload URLs for authorized sellers and a reviewed cache-invalidation/versioning policy for changed media.",
+      "component": {
+        "nodeId": "ecom_media_cdn",
+        "componentType": "cdn",
+        "label": "CloudFront Product Media CDN",
+        "description": "Cache static product images near shoppers",
+        "position": {"x": 290, "y": 760},
+        "properties": {"componentName": "CloudFront Product Media CDN", "purpose": "Deliver versioned public product media from S3; use immutable object keys, safe cache headers, origin access control, and targeted invalidation only when an object must change in place.", "provider": "AWS CloudFront", "ttl": "Long TTL for versioned media; honor explicit cache policy", "cacheInvalidation": "Prefer versioned keys; invalidate only on exceptional replacement"},
+        "highlightReason": "The existing CDN component accurately represents CloudFront's media edge."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1"]
+    },
+    {
+      "id": "ecom_12",
+      "stepNumber": 12,
+      "phase": "Frame the serverless workload and trust boundaries",
+      "title": "Store product images and media in object storage",
+      "type": "add_component",
+      "content": "Store original and derived product media in S3 with versioning, encryption, checksums, lifecycle policy, and tightly scoped seller upload permissions. Keep the bucket private; CloudFront uses origin access control, and uploads use constrained presigned URLs rather than public write access.",
+      "component": {
+        "nodeId": "ecom_media_bucket",
+        "componentType": "object-storage",
+        "label": "Private Product Media Bucket (S3)",
+        "description": "Versioned, encrypted image and media origin",
+        "position": {"x": 580, "y": 760},
+        "properties": {"componentName": "Private Product Media Bucket (S3)", "purpose": "Private origin for product images and media; enforce encryption, origin access control, seller-scoped presigned writes, checksum validation, versioning, and lifecycle retention.", "provider": "AWS S3", "versioning": true, "checksumValidation": true},
+        "highlightReason": "Object Storage is the existing palette component for S3; it supports the media-origin role without a custom node."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "ecom_13",
+      "stepNumber": 13,
+      "phase": "Frame the serverless workload and trust boundaries",
+      "title": "Connect the CDN to the private media origin",
+      "type": "add_connection",
+      "content": "CloudFront fetches media from S3 through origin access control; browsers never receive bucket write credentials. Validate content type/size during seller upload and serve only approved object paths.",
+      "connection": {"edgeId": "ecom_cdn_bucket", "sourceNodeId": "ecom_media_cdn", "targetNodeId": "ecom_media_bucket", "connectionType": "data-flow", "label": "OAC origin fetch", "description": "CloudFront reads private versioned media from S3"},
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:4"]
+    },
+    {
+      "id": "ecom_14",
+      "stepNumber": 14,
+      "phase": "Frame the serverless workload and trust boundaries",
+      "title": "Serve media independently of the API path",
+      "type": "add_connection",
+      "content": "Clients request static images from the CDN rather than proxying every byte through API Gateway and Lambda. This lowers origin work and keeps sale traffic from turning media downloads into compute invocations.",
+      "connection": {"edgeId": "ecom_client_cdn", "sourceNodeId": "ecom_clients", "targetNodeId": "ecom_media_cdn", "connectionType": "http", "label": "Cached product media", "description": "Shopper clients fetch images directly from CloudFront"},
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1"]
+    },
+    {
+      "id": "ecom_15",
+      "stepNumber": 15,
+      "phase": "Frame the serverless workload and trust boundaries",
+      "title": "Keep cardholder data out of logs and storage",
+      "type": "explanation",
+      "content": "Redact authorization headers, tokens, payment references where needed, and all payment secrets from application logs and traces. Encrypt data in transit and at rest, scope IAM roles per function, and audit seller catalog writes and payment-state transitions. WAF and authentication do not replace PCI scope review with the payment provider.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ecom_16",
+      "stepNumber": 16,
+      "phase": "Frame the serverless workload and trust boundaries",
+      "title": "Use the same edge boundary for live API sessions",
+      "type": "explanation",
+      "content": "The live-inventory WebSocket endpoint will use its own API Gateway stage but remains behind the same WAF policy. Authenticate the WebSocket connect route, bind subscriptions to the verified user/tenant, and expire stale connection records; a guessed connection ID must never grant access to another customer's inventory scope.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ecom_17",
+      "stepNumber": 17,
+      "phase": "Serve the catalog and protect the transactional order path",
+      "title": "Add the catalog Lambda",
+      "type": "add_component",
+      "content": "Keep catalog reads and seller catalog mutations in a focused Lambda handler with separate authorization and validation branches. Look up price and product status server-side at checkout; a browser's displayed price is not authoritative.",
+      "component": {
+        "nodeId": "ecom_catalog_lambda",
+        "componentType": "serverless-function",
+        "label": "Catalog + Seller Lambda",
+        "description": "Product reads, validated seller writes, and media URL issuance",
+        "position": {"x": 870, "y": 300},
+        "properties": {"componentName": "Catalog + Seller Lambda", "purpose": "Serve product reads and authorized seller create/update operations; validate ownership and fields, issue constrained presigned media URLs, and emit cache invalidation/version changes after committed updates.", "runtime": "Small supported runtime selected from team skills and cold-start benchmarks", "memoryMB": 512, "timeout": "Short bounded request handler; tune from traces", "concurrency": "Reserved capacity for catalog isolation with target-tracked provisioned concurrency only where measured latency requires it", "coldStart": "Keep package and initialization lean; provision warm concurrency for latency-critical peaks and verify cold-start distribution under load"},
+        "highlightReason": "Serverless Function is the existing palette component for Lambda business logic."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "ecom_18",
+      "stepNumber": 18,
+      "phase": "Serve the catalog and protect the transactional order path",
+      "title": "Store catalog records in DynamoDB",
+      "type": "add_component",
+      "content": "Choose keys and indexes from product lookup patterns: product ID, category/brand listings, seller-owned products, and deliberate sort order. Use on-demand capacity initially for uncertain variable traffic, then compare measured cost and throttling against provisioned capacity with autoscaling. Keep catalog records distinct from reservation invariants when that makes access patterns and permissions clearer.",
+      "component": {
+        "nodeId": "ecom_catalog_db",
+        "componentType": "database",
+        "label": "Product Catalog (DynamoDB)",
+        "description": "Product metadata and query-pattern indexes",
+        "position": {"x": 1180, "y": 180},
+        "properties": {"componentName": "Product Catalog (DynamoDB)", "purpose": "Store product metadata and seller ownership; define partition/sort keys and GSIs for product ID, category listings, and seller management from measured access patterns. Use on-demand capacity while traffic is uncertain, encryption, PITR, and least-privilege access.", "type": "NoSQL", "engine": "Amazon DynamoDB", "workload": "Product reads and authorized seller catalog writes; variable sale traffic", "encryption": true, "pitr": true, "rbac": true, "auditLog": true},
+        "highlightReason": "The catalog Database component represents DynamoDB using editable engine and workload properties."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "ecom_19",
+      "stepNumber": 19,
+      "phase": "Serve the catalog and protect the transactional order path",
+      "title": "Cache only safe catalog responses",
+      "type": "add_component",
+      "content": "Use a short, explicit TTL for popular product/category reads if measurements justify it; invalidate or version entries after seller updates. Never use this cache as the authority for inventory availability, price at checkout, order state, or payment outcome.",
+      "component": {
+        "nodeId": "ecom_catalog_cache",
+        "componentType": "cache",
+        "label": "Hot Catalog Cache",
+        "description": "Short-lived product-read acceleration",
+        "position": {"x": 1180, "y": 420},
+        "properties": {"componentName": "Hot Catalog Cache", "purpose": "Optionally cache popular product/category reads with a bounded TTL and explicit invalidation/versioning; never cache authoritative inventory reservations, checkout prices, payment results, or order state.", "engine": "Managed Redis-compatible cache if load tests justify it", "cacheStrategy": "Cache-aside for non-authoritative catalog reads", "ttl": "Short measured TTL; invalidate/version on product update", "inMemory": true, "eviction": "LRU", "encryption": true},
+        "highlightReason": "Cache is an existing component for hot read acceleration, with a stated boundary around transactional data."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:1"]
+    },
+    {
+      "id": "ecom_20",
+      "stepNumber": 20,
+      "phase": "Serve the catalog and protect the transactional order path",
+      "title": "Route catalog requests to Lambda",
+      "type": "add_connection",
+      "content": "API Gateway invokes the catalog handler for public reads and authenticated seller writes. Apply role checks and price/product-state validation server-side, and keep media bytes on the CDN path.",
+      "connection": {"edgeId": "ecom_api_catalog_lambda", "sourceNodeId": "ecom_rest_api", "targetNodeId": "ecom_catalog_lambda", "connectionType": "api-call", "label": "Catalog + seller routes", "description": "Validated route invokes the focused catalog Lambda"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5"]
+    },
+    {
+      "id": "ecom_21",
+      "stepNumber": 21,
+      "phase": "Serve the catalog and protect the transactional order path",
+      "title": "Read and update catalog records",
+      "type": "add_connection",
+      "content": "The function accesses DynamoDB through a narrowly scoped IAM role. Seller updates should be conditional on ownership/version and should publish a cache-version change only after the write succeeds.",
+      "connection": {"edgeId": "ecom_catalog_lambda_db", "sourceNodeId": "ecom_catalog_lambda", "targetNodeId": "ecom_catalog_db", "connectionType": "database-connection", "label": "Product query + seller writes", "description": "Least-privilege DynamoDB access keyed by product and seller access patterns"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:4"]
+    },
+    {
+      "id": "ecom_22",
+      "stepNumber": 22,
+      "phase": "Serve the catalog and protect the transactional order path",
+      "title": "Accelerate repeat product reads",
+      "type": "add_connection",
+      "content": "Only responses safe under the chosen freshness policy flow through the catalog cache. A catalog cache miss or outage falls back to DynamoDB within a bounded timeout; checkout re-reads authoritative price and inventory regardless of cached product-page data.",
+      "connection": {"edgeId": "ecom_catalog_lambda_cache", "sourceNodeId": "ecom_catalog_lambda", "targetNodeId": "ecom_catalog_cache", "connectionType": "data-flow", "label": "Non-authoritative catalog cache", "description": "Cache-aside product reads; checkout bypasses cached price and inventory"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "ecom_23",
+      "stepNumber": 23,
+      "phase": "Serve the catalog and protect the transactional order path",
+      "title": "Make the cold-start target an observed SLO candidate",
+      "type": "update_component",
+      "content": "The brief's under-one-second cold-start limit is a hard design constraint, but the runtime, memory, initialization work, and percentile are unspecified. Keep dependencies and initialization small; use provisioned concurrency with target tracking for measured latency-critical functions and scheduled pre-warming when sale times are known. Evaluate SnapStart only for supported runtimes. Verify cold starts separately from warm handler latency, including p95/p99 and cost; do not claim the target is met until measured.",
+      "componentUpdate": {"nodeId": "ecom_catalog_lambda", "properties": {"coldStart": "Constraint: cold starts <1s. Keep init/package lean; provisioned concurrency with target tracking for measured latency-critical periods; benchmark cold p95/p99 and cost before claiming compliance."}},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "ecom_24",
+      "stepNumber": 24,
+      "phase": "Serve the catalog and protect the transactional order path",
+      "title": "Keep reservation decisions on the authoritative path",
+      "type": "explanation",
+      "content": "A cached product page can be slightly stale; a successful stock reservation cannot. At checkout, recompute the price and reserve quantity using a conditional transactional write. Publish availability changes asynchronously only after the authoritative transaction commits.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "ecom_25",
+      "stepNumber": 25,
+      "phase": "Serve the catalog and protect the transactional order path",
+      "title": "Add the checkout and order Lambda",
+      "type": "add_component",
+      "content": "This handler validates the authenticated customer, cart quantities, current price, and idempotency key, then conditionally reserves stock and creates a pending order. It returns a stable order ID and pending state after the local transaction commits; payment confirmation happens later in the durable workflow.",
+      "component": {
+        "nodeId": "ecom_order_lambda",
+        "componentType": "serverless-function",
+        "label": "Checkout + Order Lambda",
+        "description": "Validate cart and atomically create pending order/reservation",
+        "position": {"x": 870, "y": 650},
+        "properties": {"componentName": "Checkout + Order Lambda", "purpose": "Derive customer identity from JWT; validate cart and current catalog price; require a stable idempotency key; transact order creation, inventory reservation, and outbox write; return pending order only after commit.", "runtime": "Small supported runtime selected from measured cold-start and team-operation needs", "memoryMB": 1024, "timeout": "Bounded synchronous transaction handler; no payment-provider call", "concurrency": "Reserved capacity to isolate checkout; scale against measured peak RPS and downstream quotas", "coldStart": "Lean initialization plus provisioned concurrency/target tracking for latency-critical sale windows; verify <1s cold-start constraint under test"},
+        "highlightReason": "A separate Lambda isolates the transactional checkout path from catalog read bursts."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "ecom_26",
+      "stepNumber": 26,
+      "phase": "Serve the catalog and protect the transactional order path",
+      "title": "Create the order and inventory transaction store",
+      "type": "add_component",
+      "content": "Use an order/inventory table design whose keys make stock reservation and order lookup conditional and transactional. A DynamoDB TransactWriteItems operation can atomically create the order, decrement or reserve stock only when sufficient quantity remains, and write an outbox item in the same Region/account; stay within transaction item/size limits and model hot SKU contention explicitly.",
+      "component": {
+        "nodeId": "ecom_commerce_db",
+        "componentType": "database",
+        "label": "Orders + Inventory (DynamoDB)",
+        "description": "Transactional order state, reservations, idempotency, and outbox",
+        "position": {"x": 1180, "y": 680},
+        "properties": {"componentName": "Orders + Inventory (DynamoDB)", "purpose": "Persist orders, inventory reservations, checkout idempotency outcomes, and transactional outbox records; use conditional writes and TransactWriteItems for order + reservation + outbox atomicity. Keep all transaction items in a supported same-account/Region boundary and design hot-SKU contention deliberately.", "type": "NoSQL", "engine": "Amazon DynamoDB", "workload": "Transactional order writes, inventory reservations, order status reads, and outbox events", "encryption": true, "pitr": true, "rbac": true, "auditLog": true},
+        "highlightReason": "The catalog Database component represents the authoritative DynamoDB transaction store."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "ecom_27",
+      "stepNumber": 27,
+      "phase": "Serve the catalog and protect the transactional order path",
+      "title": "Route checkout separately from catalog reads",
+      "type": "add_connection",
+      "content": "The API uses a dedicated checkout handler so catalog cache behavior and request bursts do not blur order correctness. Enforce authenticated customer ownership on every order read and mutation.",
+      "connection": {"edgeId": "ecom_api_order_lambda", "sourceNodeId": "ecom_rest_api", "targetNodeId": "ecom_order_lambda", "connectionType": "api-call", "label": "Checkout + order routes", "description": "Authenticated, idempotent order operations use the transactional handler"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5"]
+    },
+    {
+      "id": "ecom_28",
+      "stepNumber": 28,
+      "phase": "Serve the catalog and protect the transactional order path",
+      "title": "Commit reservation and pending order atomically",
+      "type": "add_connection",
+      "content": "The conditional transaction rejects overselling and duplicate checkout attempts. The order begins in PENDING_PAYMENT; a duplicate idempotency key returns its original order result rather than creating another reservation or payment intent.",
+      "connection": {"edgeId": "ecom_order_lambda_db", "sourceNodeId": "ecom_order_lambda", "targetNodeId": "ecom_commerce_db", "connectionType": "database-connection", "label": "ACID order + stock reservation", "description": "Conditional TransactWriteItems includes order, inventory reservation, idempotency record, and outbox"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "ecom_29",
+      "stepNumber": 29,
+      "phase": "Serve the catalog and protect the transactional order path",
+      "title": "State the ACID boundary precisely",
+      "type": "decision_point",
+      "content": "The database transaction protects local order invariants: there is one idempotent order, stock is reserved only if enough remains, and the outbox event exists if and only if that commit succeeds. It does not make a card-network charge atomic. Use explicit PENDING_PAYMENT, CONFIRMED, FAILED, and COMPENSATING transitions with conditional version checks; reconcile ambiguous provider outcomes before retrying capture.",
+      "decision": {
+        "question": "Which operations must be atomic at checkout?",
+        "chosen": "Atomically create the pending order, reserve inventory, persist the idempotency result, and write the workflow outbox record; run payment and later state transitions as a durable idempotent saga.",
+        "chosenReason": "This guarantees local ACID properties without making a false distributed-transaction promise about an external processor.",
+        "alternatives": [
+          {"option": "Decrement stock, then separately create the order", "tradeoff": "A failure between writes can leak inventory or create an order without stock."},
+          {"option": "Call payment first and write the order afterward", "tradeoff": "A database failure after a successful charge leaves an untracked payment."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "ecom_30",
+      "stepNumber": 30,
+      "phase": "Serve the catalog and protect the transactional order path",
+      "title": "Make the database's operational assumptions explicit",
+      "type": "update_component",
+      "content": "Use on-demand capacity while the traffic curve is uncertain, then compare cost with provisioned capacity and autoscaling using actual sale traces. Enable PITR and encryption, monitor throttles and hot keys, and add conditional writes/transaction idempotency rather than relying on eventual reads for stock correctness.",
+      "componentUpdate": {"nodeId": "ecom_commerce_db", "properties": {"workload": "On-demand initially for variable sales; evaluate provisioned autoscaling against measured workload and cost. ACID reservation uses conditional transactions; enable PITR, encryption, alarms for throttling/hot-key contention, and same-Region recovery procedures."}},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "ecom_31",
+      "stepNumber": 31,
+      "phase": "Make order processing durable and payment-safe",
+      "title": "Relay committed outbox events from the database stream",
+      "type": "add_component",
+      "content": "A DynamoDB Streams-triggered Lambda reads only committed outbox records and publishes them to the order queue. It checkpoints safely, tolerates replay, and marks each event by stable order/event ID; if delivery fails, retry or route to a failure path without losing the committed order.",
+      "component": {
+        "nodeId": "ecom_outbox_relay",
+        "componentType": "serverless-function",
+        "label": "DynamoDB Stream Outbox Relay",
+        "description": "Replay-safe publisher for committed order events",
+        "position": {"x": 1480, "y": 680},
+        "properties": {"componentName": "DynamoDB Stream Outbox Relay", "purpose": "Consume committed outbox records from DynamoDB Streams and publish stable event/order IDs to SQS; handle at-least-once delivery idempotently, bound retries, expose iterator age, and preserve failed records for replay/DLQ handling.", "runtime": "Small supported runtime", "memoryMB": 512, "timeout": "Bounded batch processing", "concurrency": "Tune batch size and event-source concurrency to downstream queue capacity"},
+        "highlightReason": "Serverless Function is the existing Lambda component; DynamoDB Streams is an integration detail of the flow, not a new node type."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "ecom_32",
+      "stepNumber": 32,
+      "phase": "Make order processing durable and payment-safe",
+      "title": "Trigger the relay from committed database changes",
+      "type": "add_connection",
+      "content": "The stream carries the durable outbox boundary; consumers may see the same record again, so the relay must be idempotent. Alert on iterator age and failed batches before outbox delivery falls behind the user-visible order workflow.",
+      "connection": {"edgeId": "ecom_db_outbox_relay", "sourceNodeId": "ecom_commerce_db", "targetNodeId": "ecom_outbox_relay", "connectionType": "event-stream", "label": "DynamoDB Streams: committed outbox", "description": "At-least-once change stream invokes the idempotent relay after transaction commit"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "ecom_33",
+      "stepNumber": 33,
+      "phase": "Make order processing durable and payment-safe",
+      "title": "Buffer order workflow starts across a sale burst",
+      "type": "add_component",
+      "content": "SQS absorbs short-term workflow-start and downstream processing bursts while keeping the order transaction independent of payment-provider throughput. Configure visibility timeout above consumer duration, bounded retries, redrive to a DLQ, and alarms on oldest-message age; a queue buffers demand but does not create downstream capacity.",
+      "component": {
+        "nodeId": "ecom_order_queue",
+        "componentType": "queue",
+        "label": "Durable Order Workflow Queue (SQS)",
+        "description": "Burst buffer and replay boundary for committed orders",
+        "position": {"x": 1780, "y": 680},
+        "properties": {"componentName": "Durable Order Workflow Queue (SQS)", "purpose": "Buffer committed order events across sale spikes; retain stable event/order IDs, configure visibility timeout above processing time, bounded retries with backoff, DLQ/redrive, and oldest-message alarms.", "visibilityTimeout": "Greater than max consumer batch duration; tune from measured processing time", "maxRetries": 5, "durable": true, "backoff": "Exponential backoff with jitter; redrive exhausted messages to an alarmed DLQ"},
+        "highlightReason": "Queue is the existing palette component matching SQS buffering, retries, and replay."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "ecom_34",
+      "stepNumber": 34,
+      "phase": "Make order processing durable and payment-safe",
+      "title": "Publish each outbox event to SQS",
+      "type": "add_connection",
+      "content": "The relay publishes an idempotent order event. A queue send retry can duplicate delivery; the workflow uses order ID plus workflow version as its execution key and checks durable order state before taking action.",
+      "connection": {"edgeId": "ecom_relay_order_queue", "sourceNodeId": "ecom_outbox_relay", "targetNodeId": "ecom_order_queue", "connectionType": "message-queue", "label": "Committed order event", "description": "Outbox relay publishes a replay-safe message to durable SQS"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "ecom_35",
+      "stepNumber": 35,
+      "phase": "Make order processing durable and payment-safe",
+      "title": "Orchestrate fulfillment with a managed state machine",
+      "type": "add_component",
+      "content": "Use an AWS Step Functions Standard workflow for durable order state, timeouts, retries, compensation, and audit history. An EventBridge Pipe from SQS can start the workflow; use a deterministic execution name and an idempotent start/duplicate policy. This is the only custom node because the current palette has no Step Functions/state-machine component; the generic custom node is explicitly named and keeps its real workflow role visible.",
+      "component": {
+        "nodeId": "ecom_order_workflow",
+        "componentType": "custom-component",
+        "label": "AWS Step Functions Order Saga",
+        "description": "Durable order/payment workflow with retry and compensation",
+        "position": {"x": 2100, "y": 680},
+        "properties": {"componentName": "AWS Step Functions Order Saga", "subtitle": "Standard workflow; idempotent order execution", "purpose": "Orchestrate reserve-confirmed order state, payment authorization/capture, bounded retries, timeout reconciliation, success notification, and compensation that releases reservation on terminal payment failure. Persist workflow execution by stable order ID and never retry an ambiguous charge without checking provider state.", "componentType": "AWS Step Functions Standard Workflow", "technology": "AWS Step Functions", "notes": "Started through an SQS EventBridge Pipe using a deterministic execution key. External payment remains outside the DynamoDB ACID boundary; use conditional status transitions and idempotent tasks."},
+        "highlightReason": "No existing catalog node represents a durable managed state machine; the supported custom-component is used with an explicit Step Functions identity rather than mislabeling a Lambda or container node."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "ecom_36",
+      "stepNumber": 36,
+      "phase": "Make order processing durable and payment-safe",
+      "title": "Start workflows from SQS without adding synchronous checkout latency",
+      "type": "add_connection",
+      "content": "An EventBridge Pipe consumes the durable order queue and starts the Standard workflow. Configure retry/DLQ behavior and deterministic execution handling; the pipe is called out in the edge description because no dedicated EventBridge Pipes palette item exists.",
+      "connection": {"edgeId": "ecom_order_queue_workflow", "sourceNodeId": "ecom_order_queue", "targetNodeId": "ecom_order_workflow", "connectionType": "message-queue", "label": "SQS via EventBridge Pipe", "description": "Pipe starts an idempotently named Standard workflow; failures retry and redrive without blocking checkout"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "ecom_37",
+      "stepNumber": 37,
+      "phase": "Make order processing durable and payment-safe",
+      "title": "Add a narrow payment-provider adapter",
+      "type": "add_component",
+      "content": "Keep gateway-specific signing, token exchange, idempotency headers, webhook verification, and response normalization in a small Lambda adapter. Bound connection/read timeouts, rate-limit outbound calls to provider capacity, and distinguish retryable failures from definitive declines.",
+      "component": {
+        "nodeId": "ecom_payment_lambda",
+        "componentType": "serverless-function",
+        "label": "Payment Adapter Lambda",
+        "description": "Tokenized, idempotent calls to the payment provider",
+        "position": {"x": 2400, "y": 500},
+        "properties": {"componentName": "Payment Adapter Lambda", "purpose": "Call the gateway with provider token and stable order/payment idempotency key; verify webhook signatures; normalize outcomes; redact logs; reconcile timeouts before retrying a possible charge.", "runtime": "Small supported runtime with minimal network dependencies", "memoryMB": 512, "timeout": "Bounded below workflow task timeout; explicit connect/read budgets", "concurrency": "Cap to provider quota and scale only within approved payment-provider throughput", "coldStart": "Provision warm capacity only if measured payment-start latency requires it; benchmark cold starts against the <1s constraint"},
+        "highlightReason": "Serverless Function is the existing Lambda component for a small provider adapter."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ecom_38",
+      "stepNumber": 38,
+      "phase": "Make order processing durable and payment-safe",
+      "title": "Invoke payment as a workflow task",
+      "type": "add_connection",
+      "content": "The workflow passes order ID, amount, currency, and provider token reference—not raw card data—to the adapter. Use a stable payment idempotency key and persist the provider's intent/reference before capture; if the task times out, query provider state before repeating a charge.",
+      "connection": {"edgeId": "ecom_workflow_payment_lambda", "sourceNodeId": "ecom_order_workflow", "targetNodeId": "ecom_payment_lambda", "connectionType": "api-call", "label": "Tokenized idempotent payment task", "description": "Workflow invokes adapter with order/payment reference and bounded retry semantics"},
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "ecom_39",
+      "stepNumber": 39,
+      "phase": "Make order processing durable and payment-safe",
+      "title": "Connect to the PCI-compliant payment gateway",
+      "type": "add_component",
+      "content": "Use a processor-hosted/tokenized card flow and retain only payment tokens and provider references. The adapter must validate provider certificates, sign/authenticate requests, verify callback signatures and replay timestamps, and exclude sensitive values from logs.",
+      "component": {
+        "nodeId": "ecom_payment_gateway",
+        "componentType": "payment-service",
+        "label": "PCI-Compliant Payment Provider",
+        "description": "Tokenization and external authorization/capture",
+        "position": {"x": 2710, "y": 500},
+        "properties": {"componentName": "PCI-Compliant Payment Provider", "purpose": "Hosted/tokenized card capture, payment intent authorization/capture, signed callbacks, and provider-side idempotency; application stores provider token/reference only and never stores PAN/CVV.", "gateway": "PCI-compliant external processor; select provider through product/security review", "pciDss": true, "tokenization": true, "retry": "Retry only with stable idempotency key; reconcile ambiguous timeout/provider state before repeating charge"},
+        "highlightReason": "Payment Service is the existing palette component; provider-specific choice stays configurable."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "ecom_40",
+      "stepNumber": 40,
+      "phase": "Make order processing durable and payment-safe",
+      "title": "Send payment requests only through the adapter",
+      "type": "add_connection",
+      "content": "Only the payment adapter communicates with the external gateway. The adapter uses TLS, provider credentials from a managed secret, strict egress controls where practical, and an allowlist/contract for the gateway API.",
+      "connection": {"edgeId": "ecom_payment_lambda_gateway", "sourceNodeId": "ecom_payment_lambda", "targetNodeId": "ecom_payment_gateway", "connectionType": "http", "label": "TLS tokenized payment API", "description": "Provider adapter sends token/reference and idempotency key; no raw card data"},
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "ecom_41",
+      "stepNumber": 41,
+      "phase": "Make order processing durable and payment-safe",
+      "title": "Keep provider credentials in managed secrets",
+      "type": "add_component",
+      "content": "Store gateway credentials and webhook verification keys in AWS Secrets Manager with KMS-backed encryption, least-privilege read access, rotation where supported, and audit trails. Do not put secrets in Lambda environment plaintext, source control, or traces.",
+      "component": {
+        "nodeId": "ecom_payment_secrets",
+        "componentType": "secrets-manager",
+        "label": "Payment Secrets (Secrets Manager)",
+        "description": "Rotated gateway credentials and webhook verification keys",
+        "position": {"x": 2100, "y": 390},
+        "properties": {"componentName": "Payment Secrets (Secrets Manager)", "purpose": "Store payment API credentials and webhook verification keys encrypted with KMS; grant read only to the payment adapter, audit access, and rotate credentials on the provider-supported schedule.", "provider": "AWS Secrets Manager + KMS", "rotation": "Automated where provider supports overlapping credentials; otherwise controlled rotation runbook", "encryption": true, "audit": true},
+        "highlightReason": "Secrets Manager is an existing palette component for managed credential storage and rotation."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "ecom_42",
+      "stepNumber": 42,
+      "phase": "Make order processing durable and payment-safe",
+      "title": "Grant only the payment adapter access to its secret",
+      "type": "add_connection",
+      "content": "The payment Lambda retrieves the specific secret it needs through its execution role. Secret rotation, retrieval failures, and gateway authentication failures are observable without exposing the secret value.",
+      "connection": {"edgeId": "ecom_secrets_payment_lambda", "sourceNodeId": "ecom_payment_secrets", "targetNodeId": "ecom_payment_lambda", "connectionType": "data-flow", "label": "Scoped credential retrieval", "description": "Payment adapter role can read only its gateway secret; access is audited"},
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "ecom_43",
+      "stepNumber": 43,
+      "phase": "Make order processing durable and payment-safe",
+      "title": "Persist payment outcomes and compensation state",
+      "type": "add_connection",
+      "content": "The workflow conditionally updates the order with payment intent/reference and versioned state. On confirmed payment, transition to CONFIRMED; on a definitive terminal failure, release the stock reservation and mark FAILED in a compensating transaction. An ambiguous timeout enters reconciliation rather than an unsafe duplicate charge.",
+      "connection": {"edgeId": "ecom_workflow_commerce_db", "sourceNodeId": "ecom_order_workflow", "targetNodeId": "ecom_commerce_db", "connectionType": "database-connection", "label": "Conditional status + compensation", "description": "Persist payment reference, versioned status, and reservation release/confirmation"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "ecom_44",
+      "stepNumber": 44,
+      "phase": "Make order processing durable and payment-safe",
+      "title": "Queue order confirmations after durable success",
+      "type": "add_component",
+      "content": "Publish a confirmation event only after the workflow records the successful order transition. A separate notification queue isolates email-provider slowness from checkout and supports controlled retries, deduplication, and DLQ investigation.",
+      "component": {
+        "nodeId": "ecom_notification_queue",
+        "componentType": "queue",
+        "label": "Order Confirmation Queue (SQS)",
+        "description": "Asynchronous, retryable notification delivery",
+        "position": {"x": 2400, "y": 840},
+        "properties": {"componentName": "Order Confirmation Queue (SQS)", "purpose": "Buffer confirmation events emitted after durable CONFIRMED state; deduplicate by order/event ID, retry transient provider errors with backoff, and redrive exhausted messages to an alarmed DLQ.", "visibilityTimeout": "Greater than notification consumer duration", "maxRetries": 5, "durable": true, "backoff": "Exponential backoff with jitter and bounded DLQ redrive"},
+        "highlightReason": "The existing Queue component matches SQS-based asynchronous email delivery."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-requirement:5", "legacy-constraint:1"]
+    },
+    {
+      "id": "ecom_45",
+      "stepNumber": 45,
+      "phase": "Make order processing durable and payment-safe",
+      "title": "Emit a confirmation event only for confirmed orders",
+      "type": "add_connection",
+      "content": "The workflow writes a notification event with a stable dedupe key after the CONFIRMED transition. Do not send a success email for PENDING_PAYMENT, a decline, or an unverified provider callback.",
+      "connection": {"edgeId": "ecom_workflow_notification_queue", "sourceNodeId": "ecom_order_workflow", "targetNodeId": "ecom_notification_queue", "connectionType": "message-queue", "label": "Confirmed order event", "description": "Only durable successful order transitions enqueue a deduplicated confirmation"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "ecom_46",
+      "stepNumber": 46,
+      "phase": "Make order processing durable and payment-safe",
+      "title": "Add an asynchronous notification worker",
+      "type": "add_component",
+      "content": "The worker formats a versioned email template from the canonical order record, sends through a managed provider, and records/deduplicates delivery attempts. Keep PII out of logs and never make checkout wait for email delivery.",
+      "component": {
+        "nodeId": "ecom_notification_lambda",
+        "componentType": "serverless-function",
+        "label": "Order Notification Lambda",
+        "description": "Idempotent email formatting and delivery worker",
+        "position": {"x": 2710, "y": 840},
+        "properties": {"componentName": "Order Notification Lambda", "purpose": "Consume confirmed-order events, load the canonical order, render versioned templates, deduplicate sends by order/event ID, redact PII from logs, and retry transient delivery failures without delaying checkout.", "runtime": "Small supported runtime", "memoryMB": 512, "timeout": "Bounded provider call with explicit timeout", "concurrency": "Scale from SQS backlog but cap at email-provider quota"},
+        "highlightReason": "Serverless Function is the existing component for a queue-driven notification worker."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1"]
+    },
+    {
+      "id": "ecom_47",
+      "stepNumber": 47,
+      "phase": "Make order processing durable and payment-safe",
+      "title": "Consume confirmations with bounded retries",
+      "type": "add_connection",
+      "content": "SQS invokes the notification worker in bounded batches. Use partial batch failure handling so one bad message does not replay successful neighbors; exhausted records go to the DLQ with order/event correlation IDs for safe redrive.",
+      "connection": {"edgeId": "ecom_notification_queue_lambda", "sourceNodeId": "ecom_notification_queue", "targetNodeId": "ecom_notification_lambda", "connectionType": "message-queue", "label": "SQS-triggered email worker", "description": "Partial batch retries, idempotent send key, and DLQ for exhausted failures"},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1"]
+    },
+    {
+      "id": "ecom_48",
+      "stepNumber": 48,
+      "phase": "Make order processing durable and payment-safe",
+      "title": "Deliver order emails through a managed provider",
+      "type": "add_component",
+      "content": "Use Amazon SES or another approved provider for transactional order confirmation. Verify sender identity, configure bounce/complaint handling, avoid marketing consent assumptions, and expose delivery/bounce outcomes separately from the payment/order success state.",
+      "component": {
+        "nodeId": "ecom_email_provider",
+        "componentType": "email-service",
+        "label": "Transactional Email Provider (SES)",
+        "description": "Order confirmation templates and delivery feedback",
+        "position": {"x": 3020, "y": 840},
+        "properties": {"componentName": "Transactional Email Provider (SES)", "purpose": "Send transactional order confirmation only after durable order success; verify sender, use versioned templates, process bounces/complaints, and keep marketing consent separate.", "provider": "Amazon SES or approved managed provider", "templates": "Versioned transactional confirmation template", "tracking": true, "bounceHandling": "Process bounce/complaint events and suppress invalid addresses"},
+        "highlightReason": "Email Service is an existing component for managed transactional email delivery."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1"]
+    },
+    {
+      "id": "ecom_49",
+      "stepNumber": 49,
+      "phase": "Make order processing durable and payment-safe",
+      "title": "Send the confirmation without blocking order completion",
+      "type": "add_connection",
+      "content": "The worker calls the provider asynchronously and records provider message ID/status. A provider outage delays notification but does not roll back a confirmed order or trigger another payment attempt.",
+      "connection": {"edgeId": "ecom_notification_lambda_email", "sourceNodeId": "ecom_notification_lambda", "targetNodeId": "ecom_email_provider", "connectionType": "api-call", "label": "Transactional confirmation", "description": "Async delivery with provider message tracking and bounce feedback"},
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1"]
+    },
+    {
+      "id": "ecom_50",
+      "stepNumber": 50,
+      "phase": "Publish inventory changes and prove scale behavior",
+      "title": "Publish only committed inventory changes",
+      "type": "add_component",
+      "content": "A stream consumer turns committed stock/order changes into inventory-change events for interested shoppers. Include SKU, version/sequence, availability state, and a coarse update timestamp; do not expose customer/order data. The update is an asynchronous projection, not the authority used to accept a checkout.",
+      "component": {
+        "nodeId": "ecom_inventory_publisher",
+        "componentType": "serverless-function",
+        "label": "Inventory Change Publisher Lambda",
+        "description": "DynamoDB Streams projection for committed stock changes",
+        "position": {"x": 1480, "y": 1040},
+        "properties": {"componentName": "Inventory Change Publisher Lambda", "purpose": "Consume committed inventory/order stream records, publish minimal SKU availability and monotonic version to the event topic, filter irrelevant changes, and tolerate at-least-once replay without exposing order/customer PII.", "runtime": "Small supported runtime", "memoryMB": 512, "timeout": "Bounded batch publish", "concurrency": "Tune stream/event-source concurrency to topic and WebSocket fanout capacity"},
+        "highlightReason": "Serverless Function is the existing Lambda component for the DynamoDB Streams projection."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "ecom_51",
+      "stepNumber": 51,
+      "phase": "Publish inventory changes and prove scale behavior",
+      "title": "Observe the durable inventory stream",
+      "type": "add_connection",
+      "content": "Stream delivery is at least once and may be delayed or reordered relative to another partition. Consumers deduplicate and use the inventory version so clients can discard stale updates; checkout still conditionally reserves against DynamoDB's authoritative state.",
+      "connection": {"edgeId": "ecom_commerce_db_inventory_publisher", "sourceNodeId": "ecom_commerce_db", "targetNodeId": "ecom_inventory_publisher", "connectionType": "event-stream", "label": "Committed inventory changes", "description": "DynamoDB Streams feeds the replay-safe inventory projection"},
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "ecom_52",
+      "stepNumber": 52,
+      "phase": "Publish inventory changes and prove scale behavior",
+      "title": "Add an inventory event fan-out topic",
+      "type": "add_component",
+      "content": "Use a managed pub/sub topic such as SNS to decouple committed inventory changes from live-client delivery and future consumers. Partition/filter by relevant SKU or tenant where supported, preserve an event version, and avoid broadcasting every stock mutation to every connected user.",
+      "component": {
+        "nodeId": "ecom_inventory_topic",
+        "componentType": "pubsub",
+        "label": "Inventory Update Topic (SNS)",
+        "description": "Filtered fan-out of committed availability changes",
+        "position": {"x": 1780, "y": 1040},
+        "properties": {"componentName": "Inventory Update Topic (SNS)", "purpose": "Fan out compact committed SKU availability updates to interested delivery consumers; preserve event version, filter subscriptions by SKU/tenant, and retain no customer/order PII.", "topics": "Inventory availability changes", "fanout": "Filtered consumers, not global broadcast to all shoppers", "ordering": "Consumers compare per-SKU version; do not claim global ordering", "durable": true},
+        "highlightReason": "Pub/Sub is an existing palette component for an SNS-style managed event topic."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "ecom_53",
+      "stepNumber": 53,
+      "phase": "Publish inventory changes and prove scale behavior",
+      "title": "Publish inventory changes after commit",
+      "type": "add_connection",
+      "content": "The projection publishes a compact versioned message. A retry may publish the same event again, so downstream delivery uses SKU/version deduplication and cannot alter the stock count or order result.",
+      "connection": {"edgeId": "ecom_inventory_publisher_topic", "sourceNodeId": "ecom_inventory_publisher", "targetNodeId": "ecom_inventory_topic", "connectionType": "event-stream", "label": "Versioned SKU availability event", "description": "Publish post-commit minimal inventory projection for interested subscribers"},
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "ecom_54",
+      "stepNumber": 54,
+      "phase": "Publish inventory changes and prove scale behavior",
+      "title": "Add the real-time WebSocket API",
+      "type": "add_component",
+      "content": "Use API Gateway WebSocket routes for authenticated subscribe/unsubscribe and server-to-client delivery. Authorize connect/subscribe messages, scope subscriptions to a user/tenant, cap message size, and load-test active connection and management-API quotas at 10,000+ sessions.",
+      "component": {
+        "nodeId": "ecom_websocket_api",
+        "componentType": "api-gateway",
+        "label": "Inventory WebSocket API",
+        "description": "Authenticated live inventory subscriptions and pushes",
+        "position": {"x": 2100, "y": 1040},
+        "properties": {"componentName": "Inventory WebSocket API", "purpose": "API Gateway WebSocket connect/subscribe/unsubscribe and management API for live inventory pushes; authenticate connect and subscription routes, enforce tenant/SKU authorization, and benchmark active-session and callback quotas.", "inputValidation": "Validate route, SKU, tenant, message size, and subscription limits", "authentication": "JWT/custom authorizer at connect; re-check authorization for subscription changes", "rateLimiting": "Bound connect, subscribe, and outbound callback rates; shed/coalesce stale updates under pressure", "tlsTermination": true, "throttling": true},
+        "highlightReason": "A second existing API Gateway component represents the distinct WebSocket protocol endpoint."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "ecom_55",
+      "stepNumber": 55,
+      "phase": "Publish inventory changes and prove scale behavior",
+      "title": "Protect WebSocket handshakes with the edge policy",
+      "type": "add_connection",
+      "content": "Apply the WAF policy to the WebSocket API stage and reject unauthenticated or abusive connection attempts. The connect authorizer still determines identity; WAF rules only filter traffic patterns.",
+      "connection": {"edgeId": "ecom_waf_websocket", "sourceNodeId": "ecom_waf", "targetNodeId": "ecom_websocket_api", "connectionType": "http", "label": "Protected WebSocket handshake", "description": "WAF filters connection traffic; API authorizer establishes identity"},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ecom_56",
+      "stepNumber": 56,
+      "phase": "Publish inventory changes and prove scale behavior",
+      "title": "Persist live connection and subscription ownership",
+      "type": "add_component",
+      "content": "Store connection ID, user/tenant, authorized SKU subscriptions, and expiry in DynamoDB with a TTL and access checks. Treat disconnect cleanup as best effort; the broadcaster removes stale IDs after a Gone response. Never use this table as the inventory source of truth.",
+      "component": {
+        "nodeId": "ecom_connection_db",
+        "componentType": "database",
+        "label": "WebSocket Connections (DynamoDB)",
+        "description": "Connection ownership, subscriptions, and expiry",
+        "position": {"x": 2400, "y": 1210},
+        "properties": {"componentName": "WebSocket Connections (DynamoDB)", "purpose": "Persist API Gateway connection IDs, verified user/tenant ownership, allowed SKU subscriptions, and TTL; keep separate from authoritative stock records and delete stale connections on Gone callbacks.", "type": "NoSQL", "engine": "Amazon DynamoDB", "workload": "Connection/subscription lookups and TTL cleanup for 10,000+ active sessions", "encryption": true, "pitr": true, "rbac": true, "auditLog": true},
+        "highlightReason": "Database is the existing component for the WebSocket connection registry."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ecom_57",
+      "stepNumber": 57,
+      "phase": "Publish inventory changes and prove scale behavior",
+      "title": "Register and authorize WebSocket subscriptions",
+      "type": "add_connection",
+      "content": "The connect/subscribe route writes only the authenticated principal's connection and authorized SKU subscriptions. Use conditional ownership checks and TTL; do not let clients choose another tenant's topics by guessing IDs.",
+      "connection": {"edgeId": "ecom_ws_connection_db", "sourceNodeId": "ecom_websocket_api", "targetNodeId": "ecom_connection_db", "connectionType": "database-connection", "label": "Owned connection + SKU subscriptions", "description": "WebSocket routes persist verified principal, allowed subscriptions, and expiry"},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "ecom_58",
+      "stepNumber": 58,
+      "phase": "Publish inventory changes and prove scale behavior",
+      "title": "Add a bounded real-time fan-out worker",
+      "type": "add_component",
+      "content": "The fan-out worker loads only subscriptions for changed SKUs and batches API Gateway Management API callbacks. Coalesce superseded availability updates during bursts, apply backpressure, retry transient callback failures within a bound, and delete stale connections; reconnecting clients can fetch a fresh authoritative snapshot.",
+      "component": {
+        "nodeId": "ecom_inventory_fanout",
+        "componentType": "serverless-function",
+        "label": "Inventory WebSocket Fan-out Lambda",
+        "description": "Filtered, bounded push delivery to subscribed clients",
+        "position": {"x": 2400, "y": 1040},
+        "properties": {"componentName": "Inventory WebSocket Fan-out Lambda", "purpose": "Find authorized subscribers for changed SKU, send compact versioned updates through API Gateway Management API, coalesce superseded events, bound callback concurrency/retries, and remove stale connections; clients resync from authoritative inventory after reconnect.", "runtime": "Small supported runtime", "memoryMB": 1024, "timeout": "Bounded callback batches", "concurrency": "Scale with topic backlog while respecting WebSocket callback quotas"},
+        "highlightReason": "Serverless Function is the existing Lambda component for controlled WebSocket fan-out."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "ecom_59",
+      "stepNumber": 59,
+      "phase": "Publish inventory changes and prove scale behavior",
+      "title": "Deliver topic events to the fan-out worker",
+      "type": "add_connection",
+      "content": "Subscribe the broadcaster to inventory events with SKU/tenant filtering. It compares event versions, ignores stale duplicates, and processes bursts without making the inventory transaction wait for WebSocket delivery.",
+      "connection": {"edgeId": "ecom_topic_fanout", "sourceNodeId": "ecom_inventory_topic", "targetNodeId": "ecom_inventory_fanout", "connectionType": "event-stream", "label": "Filtered inventory updates", "description": "Topic delivers versioned SKU changes to bounded live fan-out"},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "ecom_60",
+      "stepNumber": 60,
+      "phase": "Publish inventory changes and prove scale behavior",
+      "title": "Resolve subscribers by connection ownership",
+      "type": "add_connection",
+      "content": "The worker queries the registry by authorized SKU/tenant subscription and applies TTL/ownership checks before sending. If fan-out grows beyond a single partition or batch budget, shard subscription indexes by SKU/tenant and scale consumers while preserving per-SKU version checks.",
+      "connection": {"edgeId": "ecom_fanout_connection_db", "sourceNodeId": "ecom_inventory_fanout", "targetNodeId": "ecom_connection_db", "connectionType": "database-connection", "label": "Authorized subscribers by SKU", "description": "Lookup ownership and subscriptions; stale connection cleanup is idempotent"},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ecom_61",
+      "stepNumber": 61,
+      "phase": "Publish inventory changes and prove scale behavior",
+      "title": "Push updates through the WebSocket management API",
+      "type": "add_connection",
+      "content": "Push only to authorized connections with a monotonically versioned SKU payload. Under overload, coalesce older availability messages and expose the update version so clients can detect gaps and refetch; never let notification delivery decide whether checkout may reserve stock.",
+      "connection": {"edgeId": "ecom_fanout_websocket", "sourceNodeId": "ecom_inventory_fanout", "targetNodeId": "ecom_websocket_api", "connectionType": "websocket", "label": "Versioned live inventory push", "description": "Management API pushes to authorized active connections; coalesce stale events under load"},
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "ecom_62",
+      "stepNumber": 62,
+      "phase": "Publish inventory changes and prove scale behavior",
+      "title": "Let shoppers subscribe and recover from missed events",
+      "type": "add_connection",
+      "content": "Clients authenticate a WebSocket session, subscribe only to permitted SKU updates, and compare event versions. On reconnect or a version gap, fetch the current inventory snapshot from the REST API; WebSocket events are a low-latency projection, not a durable client-side ledger.",
+      "connection": {"edgeId": "ecom_websocket_clients", "sourceNodeId": "ecom_websocket_api", "targetNodeId": "ecom_clients", "connectionType": "websocket", "label": "Authenticated live stock updates", "description": "Clients reconnect and resync authoritative availability after a missed version"},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "ecom_63",
+      "stepNumber": 63,
+      "phase": "Publish inventory changes and prove scale behavior",
+      "title": "Measure correctness, latency, and spend together",
+      "type": "add_component",
+      "content": "Track API p95/p99 and throttles, Lambda cold starts/concurrency/errors, DynamoDB throttles/transaction conflicts/hot keys, SQS oldest-message age and DLQ count, workflow/payment outcomes, email delivery, WebSocket active connections/callback failures, and inventory event freshness. Alert on business correctness signals as well as infrastructure health.",
+      "component": {
+        "nodeId": "ecom_monitoring",
+        "componentType": "monitoring",
+        "label": "Commerce Reliability + Cost Monitoring",
+        "description": "End-to-end order correctness, scale, and latency signals",
+        "position": {"x": 3020, "y": 240},
+        "properties": {"componentName": "Commerce Reliability + Cost Monitoring", "purpose": "Correlate request/order IDs across API, functions, DynamoDB, SQS, workflow, gateway, notifications, and WebSockets; alert on cold-start latency, throttles, transaction conflicts, queue age/DLQ, payment ambiguity, inventory freshness, callback failures, and cost per order.", "stack": "CloudWatch metrics/logs/alarms and distributed tracing", "metrics": "API p95/p99; Lambda init/concurrency/errors; DynamoDB throttles/conflicts; queue age/DLQ; workflow/payment outcomes; email bounces; active sockets and inventory update lag", "alerts": "Page on correctness/data-loss indicators and SLO burn; ticket on cost/headroom trends", "retention": "Set by security, audit, and cost policy; redact sensitive fields"},
+        "highlightReason": "Monitoring is an existing palette component for service health and business-level reliability signals."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "ecom_64",
+      "stepNumber": 64,
+      "phase": "Publish inventory changes and prove scale behavior",
+      "title": "Observe API and Lambda saturation",
+      "type": "add_connection",
+      "content": "Publish request latency, throttles, authorization failures, cold starts, concurrency saturation, and errors to the monitoring path with correlation IDs. Keep payloads and card/payment credentials out of telemetry.",
+      "connection": {"edgeId": "ecom_api_monitoring", "sourceNodeId": "ecom_rest_api", "targetNodeId": "ecom_monitoring", "connectionType": "data-flow", "label": "API latency + throttles", "description": "Route-level p95/p99, WAF/API throttles, and trace correlation"},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ecom_65",
+      "stepNumber": 65,
+      "phase": "Publish inventory changes and prove scale behavior",
+      "title": "Observe storage and queue pressure",
+      "type": "add_connection",
+      "content": "Monitor DynamoDB transaction conflicts, throttled requests, consumed capacity, and hot partition keys alongside oldest SQS message age, retries, and DLQ depth. Scale or shed work based on the constrained downstream service, not just Lambda invocation count.",
+      "connection": {"edgeId": "ecom_commerce_monitoring", "sourceNodeId": "ecom_commerce_db", "targetNodeId": "ecom_monitoring", "connectionType": "data-flow", "label": "Transactions + capacity signals", "description": "Monitor reservation conflicts, throttles, hot keys, queue lag, and cost"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "ecom_66",
+      "stepNumber": 66,
+      "phase": "Publish inventory changes and prove scale behavior",
+      "title": "Validate the design before calling the constraints met",
+      "type": "explanation",
+      "content": "Run a sale-shaped load test with 10,000+ active users, measured burst and sustained request rates, skewed hot SKUs, duplicate checkout retries, delayed/duplicate stream events, queue and provider outages, cold Lambda starts, WebSocket reconnects, and ambiguous payment timeouts. Verify no oversell or duplicate charge, every committed order is recoverable from its outbox, terminal payment failure releases stock, and notifications remain asynchronous. Report cold-start latency against the strict <1s constraint, API/order latency and live-update freshness against explicitly agreed targets, concurrency/quota headroom, queue drain time, failure recovery, and cost per successful order. The brief does not provide the numeric traffic curve, live-update SLO, availability target, or budget, so do not claim those unknowns are satisfied until stakeholders set and tests validate them.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

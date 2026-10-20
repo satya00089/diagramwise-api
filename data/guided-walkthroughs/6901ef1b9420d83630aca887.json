@@ -1,0 +1,932 @@
+{
+  "problem_id": "6901ef1b9420d83630aca887",
+  "version": "1.0.0-review-draft",
+  "requirementRevision": null,
+  "totalSteps": 47,
+  "phases": [
+    {
+      "name": "Frame the control-plane contract",
+      "stepRange": [1, 8],
+      "description": "Read the live brief, mark unknown targets as assumptions, and choose a safe control-plane consistency model."
+    },
+    {
+      "name": "Build the intent and reconciliation services",
+      "stepRange": [9, 21],
+      "description": "Add existing catalog components for tenant-aware APIs, quorum metadata, durable commands, cluster operations, backups, and monitoring."
+    },
+    {
+      "name": "Connect provisioning, recovery, and backup flows",
+      "stepRange": [22, 43],
+      "description": "Connect the full control loop, health-driven recovery path, backup/restore path, and operational telemetry."
+    },
+    {
+      "name": "Prove partition behavior and operational readiness",
+      "stepRange": [44, 47],
+      "description": "Make failure semantics explicit and define measurable capacity and release checks without inventing unsupported SLOs."
+    }
+  ],
+  "steps": [
+    {
+      "id": "cdb_01_live_brief",
+      "stepNumber": 1,
+      "phase": "Frame the control-plane contract",
+      "type": "explanation",
+      "title": "Start from the exact live problem brief",
+      "content": "ID: 6901ef1b9420d83630aca887\nSlug: design-a-control-plane-for-a-distributed-database\nTitle: Design a Control Plane for a Distributed Database\nDescription: Design the control plane that manages a distributed database cluster including provisioning, scaling, and failure recovery.\nCategory: Database Systems\nDomain: application\nDifficulty: Very Hard\nEstimated time: 90+ minutes\nCompanies:\n- Netflix\n- Google\n- Amazon\n- CockroachDB\nTags:\n- distributed-systems\n- databases\n- control-plane\n- consensus\n- orchestration\nRequirements:\n- Cluster provisioning and configuration\n- Automatic failover and recovery\n- Scaling (add/remove nodes)\n- Health monitoring and diagnostics\n- Data replication management\n- Backup and restore operations\n- Rolling upgrades\n- Multi-tenancy support\nConstraints:\n- Minimize downtime during operations\n- Maintain data consistency\n- Handle network partitions\n- Efficient resource utilization\n- Support thousands of clusters\nHints:\n- Consensus algorithms (Raft, Paxos)\n- State machine replication\n- Leader election for coordination\n- Metadata store for cluster state\n- Declarative configuration management\nCreated at: 2025-10-29T10:40:27.393000\nUpdated at: 2025-10-29T10:40:27.393000",
+      "requirementIds": []
+    },
+    {
+      "id": "cdb_02_assumptions",
+      "stepNumber": 2,
+      "phase": "Frame the control-plane contract",
+      "type": "explanation",
+      "title": "Separate stated needs from design assumptions",
+      "content": "The brief requires support for thousands of clusters but gives no exact cluster count, nodes per cluster, request rate, recovery objective, latency target, retention period, or geographic footprint. Treat those as discovery questions and benchmark dimensions, not facts. Assume each managed cluster exposes an authenticated management/agent interface; tenant identity and policy are available to the control plane; and the managed database's own data plane continues serving clients independently of this control plane. Use a three-voter metadata quorum across separate failure domains as an initial, replaceable example, not a promised availability target. The architecture remains provider-neutral except where a catalog property illustrates the quorum store.",
+      "requirementIds": []
+    },
+    {
+      "id": "cdb_03_quorum_decision",
+      "stepNumber": 3,
+      "phase": "Frame the control-plane contract",
+      "type": "decision_point",
+      "title": "Choose quorum-backed state over a lone coordinator",
+      "content": "The control plane must coordinate changes while respecting data consistency and network partitions. Keep desired and observed cluster state in a linearizable, replicated metadata store; elect a leader through the store's consensus protocol and attach monotonically increasing fencing epochs to mutations. If the control plane loses quorum, stop issuing conflicting mutations while already-running database data planes continue operating. A single active coordinator without a durable quorum can accept stale writes after a partition heals.",
+      "requirementIds": ["legacy-constraint:2", "legacy-constraint:3"],
+      "decision": {
+        "question": "What should remain authoritative when control-plane members are partitioned?",
+        "chosen": "A quorum-backed replicated state machine with leader election, compare-and-set transitions, and fencing epochs; no quorum means no new authoritative mutation.",
+        "chosenReason": "It makes ownership and state transitions explicit, prevents stale leaders from applying commands, and keeps the managed data plane separate from control-plane availability.",
+        "alternatives": [
+          {
+            "option": "A single writable metadata database with a standby coordinator",
+            "tradeoff": "Simpler to operate initially, but split-brain prevention and promotion safety become fragile during partitions."
+          },
+          {
+            "option": "Best-effort direct RPCs from API servers to cluster nodes",
+            "tradeoff": "Loses durable intent, replay, and a reliable way to determine which command or leader owns a partial operation."
+          }
+        ]
+      }
+    },
+    {
+      "id": "cdb_04_admin_console",
+      "stepNumber": 4,
+      "phase": "Frame the control-plane contract",
+      "type": "add_component",
+      "title": "Add the operator console",
+      "content": "Give operators and tenant administrators a place to inspect cluster status, submit declarative configuration, request maintenance, and follow long-running operation progress. The console is a client, not an authority: it must display server-confirmed operation state and never infer success from a browser-side timeout.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:8"],
+      "component": {
+        "nodeId": "cdb_admin_console",
+        "componentType": "admin-console",
+        "label": "Operator & Tenant Console",
+        "description": "Submit and observe tenant-scoped cluster operations without owning control-plane state.",
+        "position": {"x": 0, "y": 300},
+        "properties": {
+          "componentName": "Operator & Tenant Console",
+          "purpose": "Lets operators and tenant administrators inspect health, submit desired configuration, request backups or upgrades, and follow durable operation IDs. It renders server-confirmed state and treats client timeouts as unknown outcomes rather than success."
+        },
+        "data": {"originalComponentId": "admin-console", "semanticRole": "frontend"},
+        "highlightReason": "This is the human entry point for provisioning, diagnostics, and multi-tenant administration."
+      }
+    },
+    {
+      "id": "cdb_05_api_gateway",
+      "stepNumber": 5,
+      "phase": "Frame the control-plane contract",
+      "type": "add_component",
+      "title": "Put a validated API boundary in front",
+      "content": "Terminate authenticated TLS requests, validate command envelopes, apply tenant-aware rate limits, and require idempotency keys for operations that may be retried. Rate limits should be configurable per tenant and tuned from the actual control-plane workload; the brief supplies no request-per-second target.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:8", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "cdb_api_gateway",
+        "componentType": "api-gateway",
+        "label": "Control API Gateway",
+        "description": "Authenticated, validated, tenant-aware ingress for administrative commands and reads.",
+        "position": {"x": 320, "y": 300},
+        "properties": {
+          "componentName": "Control API Gateway",
+          "purpose": "Terminates TLS, validates command envelopes, authenticates OAuth tokens, enforces configurable tenant-aware throttles, and forwards idempotency keys so retried provisioning or recovery requests do not create duplicate operations.",
+          "inputValidation": true,
+          "authentication": "OAuth 2.0",
+          "rateLimiting": true,
+          "tlsTermination": true,
+          "deduplication": true
+        },
+        "data": {"originalComponentId": "api-gateway", "semanticRole": "api-gateway"},
+        "highlightReason": "All mutation requests cross one validation and authentication boundary before control-plane logic runs."
+      }
+    },
+    {
+      "id": "cdb_06_auth_service",
+      "stepNumber": 6,
+      "phase": "Frame the control-plane contract",
+      "type": "add_component",
+      "title": "Enforce tenant identity and permissions",
+      "content": "Authenticate operators and workloads, resolve tenant-scoped roles, and authorize each cluster operation against ownership and policy. Carry the tenant ID into every operation record, queue message, audit event, and secret lookup. MFA is a reasonable operator-policy assumption, but tenant roles, delegation, and compliance requirements must be confirmed with product owners.",
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "cdb_auth_service",
+        "componentType": "auth-service",
+        "label": "Identity & Tenant Authorization",
+        "description": "Resolves identities, tenant-scoped roles, and policy for every administrative operation.",
+        "position": {"x": 620, "y": 90},
+        "properties": {
+          "componentName": "Identity & Tenant Authorization",
+          "purpose": "Authenticates administrators and service identities, checks tenant-scoped roles and cluster ownership on every operation, and emits an auditable decision. Tenant IDs remain explicit through workflows; operator MFA is enabled as an assumption pending policy review.",
+          "oauth": true,
+          "sessions": "database",
+          "mfa": true
+        },
+        "data": {"originalComponentId": "auth-service", "semanticRole": "security"},
+        "highlightReason": "Tenant isolation is enforced at authorization and carried through every asynchronous boundary, not only hidden in the UI."
+      }
+    },
+    {
+      "id": "cdb_07_control_api",
+      "stepNumber": 7,
+      "phase": "Frame the control-plane contract",
+      "type": "add_component",
+      "title": "Accept declarative cluster intent",
+      "content": "Expose create, configure, scale, failover, backup, restore, and upgrade operations. Validate a tenant-scoped desired-state revision, persist an operation ID, and return accepted/in-progress status rather than waiting synchronously for a whole cluster workflow. This service is the front door to cluster provisioning and configuration and to multi-tenancy support; it must not directly perform slow node operations inside the request handler.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "cdb_control_api",
+        "componentType": "backend-server",
+        "label": "Cluster Control API",
+        "description": "Validates tenant-scoped desired state and creates durable operation records.",
+        "position": {"x": 620, "y": 300},
+        "properties": {
+          "componentName": "Cluster Control API",
+          "purpose": "Validates declarative cluster provisioning and configuration requests, checks tenant quotas and authorization, writes a versioned desired-state revision plus operation ID, and returns asynchronous progress. It accepts scaling, backup, restore, failover, and rolling-upgrade intents without performing node work in the request path."
+        },
+        "data": {"originalComponentId": "backend-server", "semanticRole": "backend"},
+        "highlightReason": "The synchronous API validates intent; durable workers perform the long-running cluster lifecycle operations."
+      }
+    },
+    {
+      "id": "cdb_08_idempotency_decision",
+      "stepNumber": 8,
+      "phase": "Frame the control-plane contract",
+      "type": "decision_point",
+      "title": "Make retries return the same operation",
+      "content": "A client can lose its connection after the server has accepted a request. Scope an idempotency key by tenant and operation, store its request hash with the durable operation ID, and return the existing operation for a matching retry. Reject reuse of the same key with a different payload. This keeps a transient API timeout from starting a second provisioning or restore workflow.",
+      "decision": {
+        "question": "How should the API handle a retried mutation when the first response was lost?",
+        "chosen": "Persist a tenant-scoped idempotency record atomically with the desired revision and return its original operation ID for identical retries.",
+        "chosenReason": "The caller can safely retry without duplicate side effects, while conflicting key reuse remains visible and rejectable.",
+        "alternatives": [
+          {
+            "option": "Assume clients will not retry",
+            "tradeoff": "Network timeouts can create duplicate clusters, upgrades, or restores."
+          },
+          {
+            "option": "Deduplicate only in API-process memory",
+            "tradeoff": "A restart or request routed to another replica loses the deduplication record."
+          }
+        ]
+      }
+    },
+    {
+      "id": "cdb_09_metadata_store",
+      "stepNumber": 9,
+      "phase": "Build the intent and reconciliation services",
+      "type": "add_component",
+      "title": "Store authoritative state in a consensus-backed metadata service",
+      "content": "Keep tenant/cluster identity, desired and observed revisions, operation state, controller leases, fencing epochs, and a transactional outbox in a linearizable store replicated across failure domains. The catalog's NewSQL/CockroachDB configuration is an illustrative implementation of a Raft-backed quorum store, not a mandated vendor. A write is authoritative only after quorum commit; during a network partition without quorum, maintain data consistency by refusing conflicting control-plane writes.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "cdb_metadata_store",
+        "componentType": "database",
+        "label": "Quorum Metadata Store",
+        "description": "Linearizable source of desired/observed cluster state, operation records, leases, epochs, and outbox entries.",
+        "position": {"x": 940, "y": 300},
+        "properties": {
+          "componentName": "Quorum Metadata Store",
+          "purpose": "Stores tenant-scoped desired and observed revisions, operation state, controller leases, fencing epochs, and transactional outbox records. Consensus commits must require a majority across separate failure domains; without quorum, reject state mutations rather than accept divergent leaders.",
+          "type": "NewSQL",
+          "engine": "cockroachdb",
+          "workload": "OLTP",
+          "replication": 3,
+          "replicationMode": "Sync",
+          "multiAZ": true
+        },
+        "data": {"originalComponentId": "database", "semanticRole": "database"},
+        "highlightReason": "This is the consensus-backed source of truth for control state and the guard against stale leaders during partitions."
+      }
+    },
+    {
+      "id": "cdb_10_outbox_publisher",
+      "stepNumber": 10,
+      "phase": "Build the intent and reconciliation services",
+      "type": "add_component",
+      "title": "Publish committed intent without a dual-write gap",
+      "content": "Read committed outbox rows and publish versioned commands to the durable queue. Mark an outbox row delivered only after broker acknowledgment; retry safely because consumers deduplicate by operation ID and desired revision. Writing metadata and a queue message independently in the API would risk a committed cluster request that is never reconciled.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:2", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "cdb_outbox_publisher",
+        "componentType": "backend-server",
+        "label": "Transactional Outbox Publisher",
+        "description": "Relays committed desired-state events to durable work queues with replay-safe delivery.",
+        "position": {"x": 1260, "y": 300},
+        "properties": {
+          "componentName": "Transactional Outbox Publisher",
+          "purpose": "Polls committed tenant-scoped outbox records, publishes versioned operation IDs to the work queue, and records delivery only after acknowledgment. Retries are expected and safe because downstream reconcilers compare desired revisions and deduplicate operations."
+        },
+        "data": {"originalComponentId": "backend-server", "semanticRole": "backend"},
+        "highlightReason": "The transactional outbox closes the metadata/queue dual-write gap while preserving ordered, replayable intent."
+      }
+    },
+    {
+      "id": "cdb_11_command_queue",
+      "stepNumber": 11,
+      "phase": "Build the intent and reconciliation services",
+      "type": "add_component",
+      "title": "Buffer cluster operations durably",
+      "content": "Partition work by stable tenant and cluster identity, retain operation ID and desired revision, and use bounded retries with backoff and operator-visible poison-operation handling. A durable queue absorbs controller restarts and smooths bursts across thousands of clusters; its partitions, retention, and throughput must be load-tested against actual cluster churn rather than guessed from the phrase thousands.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "cdb_command_queue",
+        "componentType": "queue",
+        "label": "Durable Cluster Command Queue",
+        "description": "Buffers tenant-scoped create, scale, recover, backup, restore, and upgrade operations for replayable execution.",
+        "position": {"x": 1580, "y": 300},
+        "properties": {
+          "componentName": "Durable Cluster Command Queue",
+          "purpose": "Retains tenant-scoped operation IDs and desired revisions, partitions commands by stable cluster identity, and absorbs bursts across thousands of clusters. Apply bounded retries and backoff; surface poison commands for operator diagnosis instead of retrying forever.",
+          "durable": true,
+          "maxRetries": 5,
+          "backoff": "exponential"
+        },
+        "data": {"originalComponentId": "queue", "semanticRole": "queue"},
+        "highlightReason": "Durability and replay keep accepted operations alive through worker restarts and temporary downstream failures."
+      }
+    },
+    {
+      "id": "cdb_12_reconcilers",
+      "stepNumber": 12,
+      "phase": "Build the intent and reconciliation services",
+      "type": "add_component",
+      "title": "Reconcile desired state with observed clusters",
+      "content": "Run horizontally scalable reconcilers that claim bounded batches under leases, compare desired and observed revisions, and apply idempotent differences. They drive cluster provisioning and configuration, scaling (add/remove nodes), and rolling upgrades as stateful workflows. Enforce per-tenant and per-cluster concurrency limits, maintenance windows, backpressure, and resource budgets so efficient resource utilization and low operational downtime hold during large bursts.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "cdb_reconcilers",
+        "componentType": "processing-worker",
+        "label": "Cluster Reconciliation Workers",
+        "description": "Compare desired and observed revisions and apply safe, idempotent lifecycle changes under bounded leases.",
+        "position": {"x": 1900, "y": 300},
+        "properties": {
+          "componentName": "Cluster Reconciliation Workers",
+          "purpose": "Horizontally scalable workers claim bounded cluster batches under leases, compare desired and observed revisions, and run idempotent provisioning, configuration, scaling (add/remove nodes), and rolling-upgrade steps. Per-tenant concurrency, maintenance windows, backpressure, and resource budgets protect efficient resource utilization and minimize downtime."
+        },
+        "data": {"originalComponentId": "processing-worker", "semanticRole": "backend"},
+        "highlightReason": "The reconcile loop makes slow lifecycle work asynchronous, resumable, and safe to scale independently."
+      }
+    },
+    {
+      "id": "cdb_13_cluster_adapter",
+      "stepNumber": 13,
+      "phase": "Build the intent and reconciliation services",
+      "type": "add_component",
+      "title": "Isolate cluster-specific operations behind an adapter",
+      "content": "Translate versioned control-plane actions into the supported database provider or cluster-management API. Check preconditions, use the current fencing epoch, limit parallel changes to preserve quorum, and report observed state with the revision applied. Keep provider-specific APIs behind this seam so adding a managed database engine does not change tenant authorization or workflow semantics.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "cdb_cluster_adapter",
+        "componentType": "backend-server",
+        "label": "Cluster Operations Adapter",
+        "description": "Provider-neutral, fenced interface for topology changes, upgrades, repair, and observed-state reporting.",
+        "position": {"x": 2220, "y": 300},
+        "properties": {
+          "componentName": "Cluster Operations Adapter",
+          "purpose": "Translates reconciler actions into provider-specific cluster APIs, validates preconditions and fencing epochs, limits concurrent replica changes to preserve quorum, and reports the applied desired revision. Isolates engine-specific protocols behind a replaceable adapter."
+        },
+        "data": {"originalComponentId": "backend-server", "semanticRole": "backend"},
+        "highlightReason": "A provider seam keeps safe workflow behavior independent of each database engine's node-management API."
+      }
+    },
+    {
+      "id": "cdb_14_database_cluster",
+      "stepNumber": 14,
+      "phase": "Build the intent and reconciliation services",
+      "type": "add_component",
+      "title": "Represent the managed distributed database data plane",
+      "content": "Treat this node as a managed cluster composed of database members, shards or ranges, and its own consensus/replication protocol. The control plane's data replication management covers topology and policy, but the database data plane owns write ordering and replica agreement. Preserve a majority before maintenance or rolling upgrades; never let an unavailable control plane silently rewrite data-plane consistency rules.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"],
+      "component": {
+        "nodeId": "cdb_database_cluster",
+        "componentType": "database",
+        "label": "Managed Distributed Database Cluster",
+        "description": "Database data plane with replicated members, sharding/topology, and its own consensus and client-serving path.",
+        "position": {"x": 2540, "y": 300},
+        "properties": {
+          "componentName": "Managed Distributed Database Cluster",
+          "purpose": "Represents a multi-member distributed database whose own data plane handles client queries, replication, leader election, and consistency. The control plane manages replica topology and configuration, and gates maintenance on quorum safety; ordinary database traffic remains independent of control-plane health.",
+          "type": "NewSQL",
+          "engine": "cockroachdb",
+          "workload": "OLTP",
+          "replication": 3,
+          "replicationMode": "Sync",
+          "multiAZ": true,
+          "backups": true
+        },
+        "data": {"originalComponentId": "database", "semanticRole": "database"},
+        "highlightReason": "The managed data plane owns data replication and availability; the control plane orchestrates it without becoming a query-path dependency."
+      }
+    },
+    {
+      "id": "cdb_15_cluster_agent",
+      "stepNumber": 15,
+      "phase": "Build the intent and reconciliation services",
+      "type": "add_component",
+      "title": "Collect cluster-local health and topology signals",
+      "content": "An authenticated agent or provider integration reports member health, topology, applied configuration revision, and diagnostics. Make reports versioned and freshness-aware; a missed heartbeat means unknown or stale health, not proof that a replica is dead. During network partitions, agents must not independently promote a stale controller or bypass database quorum.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "cdb_cluster_agent",
+        "componentType": "backend-server",
+        "label": "Cluster Health & Topology Agent",
+        "description": "Reports authenticated member health, topology, applied revisions, and diagnostics from managed clusters.",
+        "position": {"x": 2540, "y": 620},
+        "properties": {
+          "componentName": "Cluster Health & Topology Agent",
+          "purpose": "Publishes authenticated, versioned member health and topology, applied configuration revision, and diagnostic summaries. Includes heartbeat freshness and explicit unknown states so a network partition is not confused with a confirmed member failure."
+        },
+        "data": {"originalComponentId": "backend-server", "semanticRole": "backend"},
+        "highlightReason": "Freshness-aware cluster observations are the input to diagnostics and automatic recovery decisions."
+      }
+    },
+    {
+      "id": "cdb_16_event_stream",
+      "stepNumber": 16,
+      "phase": "Build the intent and reconciliation services",
+      "type": "add_component",
+      "title": "Buffer health events independently from command work",
+      "content": "Use a durable event stream for health, topology, and operation-progress updates. Partition by cluster identity to preserve useful per-cluster ordering and replicate the log; consumers checkpoint progress and tolerate duplicate delivery. Separate telemetry/event ingestion from lifecycle commands so a health burst does not starve provisioning work for thousands of clusters.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:2", "legacy-constraint:4", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "cdb_event_stream",
+        "componentType": "message-broker",
+        "label": "Cluster Health Event Stream",
+        "description": "Replicated, replayable stream for member-health, topology, and workflow progress events.",
+        "position": {"x": 2220, "y": 620},
+        "properties": {
+          "componentName": "Cluster Health Event Stream",
+          "purpose": "Buffers versioned health, topology, and workflow progress events by cluster identity. Replicated retention and consumer checkpoints support replay; this separate path prevents bursts of health events from starving lifecycle commands for thousands of clusters.",
+          "partitions": 12,
+          "replication": 3,
+          "durable": true,
+          "retention": 168
+        },
+        "data": {"originalComponentId": "message-broker", "semanticRole": "message-broker"},
+        "highlightReason": "A replayable event path decouples health diagnostics from command execution and absorbs reporting bursts."
+      }
+    },
+    {
+      "id": "cdb_17_failover_controller",
+      "stepNumber": 17,
+      "phase": "Build the intent and reconciliation services",
+      "type": "add_component",
+      "title": "Make failover a fenced, observable workflow",
+      "content": "Correlate multiple signals and freshness windows before declaring a failure. Acquire or renew a quorum-backed controller lease, advance a fencing epoch, verify the database's own quorum and replica health, then enqueue a bounded recovery action. This is the control-plane path for automatic failover and recovery; ambiguous network partitions should trigger diagnosis and safe refusal, not two competing promotions.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "cdb_failover_controller",
+        "componentType": "backend-server",
+        "label": "Health & Failover Controller",
+        "description": "Correlates health signals and schedules quorum-safe, fenced recovery operations.",
+        "position": {"x": 1900, "y": 620},
+        "properties": {
+          "componentName": "Health & Failover Controller",
+          "purpose": "Consumes freshness-aware diagnostics, acquires a quorum-backed lease, advances a fencing epoch, checks the database's own quorum and replica state, then schedules automatic failover and recovery as an idempotent operation. On ambiguous partitions it preserves consistency by refusing unsafe promotion and exposes the reason to operators."
+        },
+        "data": {"originalComponentId": "backend-server", "semanticRole": "backend"},
+        "highlightReason": "Failover is a durable decision with fencing and safety checks, not an uncoordinated reaction to one missed heartbeat."
+      }
+    },
+    {
+      "id": "cdb_18_backup_workers",
+      "stepNumber": 18,
+      "phase": "Build the intent and reconciliation services",
+      "type": "add_component",
+      "title": "Run backup and restore as resumable operations",
+      "content": "Coordinate consistent snapshots through the database's supported snapshot/export interface, record manifest and operation state, verify checksums, and make restore a separately authorized workflow. Throttle concurrent snapshots and restores by tenant and cluster so backup traffic does not exhaust database or control-plane resources. Preserve an explicit recovery-point and retention policy as an open product decision.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:1", "legacy-constraint:1", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "cdb_backup_workers",
+        "componentType": "processing-worker",
+        "label": "Backup & Restore Workers",
+        "description": "Coordinate consistent snapshots, validate manifests, and execute separately authorized restores.",
+        "position": {"x": 2540, "y": 920},
+        "properties": {
+          "componentName": "Backup & Restore Workers",
+          "purpose": "Run resumable backup and restore operations through the database snapshot interface, persist manifests and progress, verify checksums, and enforce tenant authorization. Bounded concurrency and throttling protect cluster resources; recovery-point and retention objectives remain configurable and require product agreement."
+        },
+        "data": {"originalComponentId": "processing-worker", "semanticRole": "backend"},
+        "highlightReason": "Backup/restore is explicit, auditable lifecycle work with integrity checks and resource limits."
+      }
+    },
+    {
+      "id": "cdb_19_snapshot_store",
+      "stepNumber": 19,
+      "phase": "Build the intent and reconciliation services",
+      "type": "add_component",
+      "title": "Keep verified snapshots in versioned object storage",
+      "content": "Store encrypted snapshot objects and manifests with tenant and cluster ownership, checksums, versioning, and lifecycle retention. Apply least-privilege access so a worker can access only the snapshot scope it is authorized to process. Choose immutability and retention after backup policy and regulatory requirements are known; do not invent a retention duration from this brief.",
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "cdb_snapshot_store",
+        "componentType": "object-storage",
+        "label": "Encrypted Snapshot Object Store",
+        "description": "Tenant-scoped, checksummed, versioned storage for database snapshots and restore manifests.",
+        "position": {"x": 2860, "y": 920},
+        "properties": {
+          "componentName": "Encrypted Snapshot Object Store",
+          "purpose": "Stores encrypted database snapshots and manifests under tenant/cluster-scoped access, validates checksums, enables object versioning, and applies an explicitly configured lifecycle policy after retention requirements are agreed.",
+          "provider": "S3",
+          "versioning": true,
+          "checksumValidation": true
+        },
+        "data": {"originalComponentId": "object-storage", "semanticRole": "storage"},
+        "highlightReason": "Versioned, checksum-verified object storage separates durable backup artifacts from live cluster members."
+      }
+    },
+    {
+      "id": "cdb_20_monitoring",
+      "stepNumber": 20,
+      "phase": "Build the intent and reconciliation services",
+      "type": "add_component",
+      "title": "Observe control-plane health and operation progress",
+      "content": "Collect API and worker saturation, quorum/lease health, command age and depth, reconciliation lag, failed transitions, cluster-agent freshness, replica health, backup integrity, and per-tenant throttling. Alert on stalled work and unsafe quorum conditions. Keep tenant labels bounded and access-controlled so monitoring itself does not create a high-cardinality data leak.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:4", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "cdb_control_monitoring",
+        "componentType": "monitoring",
+        "label": "Control-Plane Monitoring & Alerts",
+        "description": "Tracks control-plane health, operation freshness, reconciliation lag, and managed-cluster diagnostics.",
+        "position": {"x": 1580, "y": 920},
+        "properties": {
+          "componentName": "Control-Plane Monitoring & Alerts",
+          "purpose": "Tracks quorum and lease health, API/worker saturation, queue age, reconciliation lag, failed transitions, cluster-agent freshness, replica health, backup integrity, and tenant throttling. Alerts on stalled operations and unsafe quorum while bounding and protecting tenant dimensions.",
+          "metrics": true,
+          "alerts": true
+        },
+        "data": {"originalComponentId": "monitoring", "semanticRole": "monitoring"},
+        "highlightReason": "Diagnostics and freshness indicators make failures and slow workflows visible before operators make risky manual changes."
+      }
+    },
+    {
+      "id": "cdb_21_versioned_workflows",
+      "stepNumber": 21,
+      "phase": "Build the intent and reconciliation services",
+      "type": "decision_point",
+      "title": "Version every long-running operation",
+      "content": "Represent provisioning, scaling, backup, restore, recovery, and rolling upgrades as durable state machines with explicit preconditions, checkpoints, retry policy, and terminal outcomes. Persist the desired revision and last completed safe step. After restart, a worker resumes from observed state instead of replaying an unsafe sequence blindly. For an upgrade, advance only one safe failure domain at a time and stop before violating database quorum.",
+      "decision": {
+        "question": "How should a multi-step operation resume after a worker or cluster failure?",
+        "chosen": "Persist a versioned workflow state machine with idempotent checkpoints, preconditions, fencing epoch, and a resumable next action.",
+        "chosenReason": "Durable checkpoints make retries inspectable and allow rolling upgrades or recovery to pause at a safe boundary instead of restarting from an ambiguous partial state.",
+        "alternatives": [
+          {
+            "option": "Run the entire change in one synchronous request",
+            "tradeoff": "Long operations exceed request timeouts and have no safe resume point after process failure."
+          },
+          {
+            "option": "Issue imperative commands without persisted steps",
+            "tradeoff": "A retry cannot reliably distinguish a completed action from one that was never applied."
+          }
+        ]
+      }
+    },
+    {
+      "id": "cdb_22_connect_console_gateway",
+      "stepNumber": 22,
+      "phase": "Connect provisioning, recovery, and backup flows",
+      "type": "add_connection",
+      "title": "Route the console through the authenticated API edge",
+      "content": "The console submits tenant-scoped requests over TLS and receives operation IDs plus status links. Client disconnects do not cancel an accepted operation; users can reconnect and inspect the same server-side state.",
+      "connection": {
+        "edgeId": "cdb_e01_console_gateway",
+        "sourceNodeId": "cdb_admin_console",
+        "targetNodeId": "cdb_api_gateway",
+        "connectionType": "http",
+        "label": "TLS administration requests",
+        "description": "Tenant-scoped console commands and status reads; accepted commands return durable operation IDs."
+      }
+    },
+    {
+      "id": "cdb_23_connect_gateway_auth",
+      "stepNumber": 23,
+      "phase": "Connect provisioning, recovery, and backup flows",
+      "type": "add_connection",
+      "title": "Authorize the caller before dispatch",
+      "content": "Resolve identity and tenant-scoped roles before the API accepts a cluster mutation. Do not trust tenant identifiers supplied only in a request body; derive the caller's allowed scope from authenticated claims and policy.",
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "cdb_e02_gateway_auth",
+        "sourceNodeId": "cdb_api_gateway",
+        "targetNodeId": "cdb_auth_service",
+        "connectionType": "api-call",
+        "label": "Identity and tenant policy check",
+        "description": "Authentication, tenant role resolution, cluster ownership, and operation-level authorization."
+      }
+    },
+    {
+      "id": "cdb_24_connect_gateway_control_api",
+      "stepNumber": 24,
+      "phase": "Connect provisioning, recovery, and backup flows",
+      "type": "add_connection",
+      "title": "Send validated operations to the control API",
+      "content": "Forward only validated, authorized requests with tenant scope, idempotency key, and request correlation ID. Keep reads and mutations auditable and apply the same authorization checks when an operation is resumed by a worker.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:8", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "cdb_e03_gateway_control_api",
+        "sourceNodeId": "cdb_api_gateway",
+        "targetNodeId": "cdb_control_api",
+        "connectionType": "api-call",
+        "label": "Authorized cluster lifecycle API",
+        "description": "Versioned create, configure, scale, backup, restore, failover, and upgrade intents."
+      }
+    },
+    {
+      "id": "cdb_25_connect_control_metadata",
+      "stepNumber": 25,
+      "phase": "Connect provisioning, recovery, and backup flows",
+      "type": "add_connection",
+      "title": "Commit desired state and operation identity atomically",
+      "content": "Persist the tenant-scoped desired revision, idempotency record, operation state, and outbox event in one consensus-backed transaction. This is the authoritative acceptance point for cluster provisioning and configuration and prevents a queue failure from losing the requested change.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "cdb_e04_control_metadata",
+        "sourceNodeId": "cdb_control_api",
+        "targetNodeId": "cdb_metadata_store",
+        "connectionType": "database-connection",
+        "label": "Quorum-committed desired revision",
+        "description": "Atomic operation, tenant-scoped desired state, idempotency record, and outbox write."
+      }
+    },
+    {
+      "id": "cdb_26_connect_metadata_outbox",
+      "stepNumber": 26,
+      "phase": "Connect provisioning, recovery, and backup flows",
+      "type": "add_connection",
+      "title": "Read only committed outbox entries",
+      "content": "The publisher observes an outbox event only after the metadata transaction commits. It retries broker publication until acknowledged; duplicate deliveries are expected and safe because operation and desired revision are stable identifiers.",
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:2"],
+      "connection": {
+        "edgeId": "cdb_e05_metadata_outbox",
+        "sourceNodeId": "cdb_metadata_store",
+        "targetNodeId": "cdb_outbox_publisher",
+        "connectionType": "database-connection",
+        "label": "Committed outbox records",
+        "description": "Publisher reads durable events from the same store/transaction that accepted desired state."
+      }
+    },
+    {
+      "id": "cdb_27_connect_outbox_queue",
+      "stepNumber": 27,
+      "phase": "Connect provisioning, recovery, and backup flows",
+      "type": "add_connection",
+      "title": "Deliver idempotent work to the durable queue",
+      "content": "Publish operation ID, tenant ID, cluster ID, desired revision, and trace context. Avoid embedding credentials or unbounded cluster configuration in queue messages; workers fetch authorized state by reference.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:8", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "cdb_e06_outbox_queue",
+        "sourceNodeId": "cdb_outbox_publisher",
+        "targetNodeId": "cdb_command_queue",
+        "connectionType": "message-queue",
+        "label": "Versioned operation command",
+        "description": "Durably enqueued tenant-scoped work referenced by operation and desired-revision IDs."
+      }
+    },
+    {
+      "id": "cdb_28_connect_queue_reconcilers",
+      "stepNumber": 28,
+      "phase": "Connect provisioning, recovery, and backup flows",
+      "type": "add_connection",
+      "title": "Claim work under bounded leases",
+      "content": "Reconciliation workers consume commands with bounded concurrency, renew cluster-scoped leases, and reject stale fencing epochs. They resume safe checkpoints and expose queue age and retry state. This path executes cluster provisioning and configuration, automatic failover and recovery, and rolling upgrades without blocking the API request.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "cdb_e07_queue_reconcilers",
+        "sourceNodeId": "cdb_command_queue",
+        "targetNodeId": "cdb_reconcilers",
+        "connectionType": "message-queue",
+        "label": "Leased, retryable cluster operations",
+        "description": "Bounded work claims carry operation IDs and desired revisions; stale epochs are rejected."
+      }
+    },
+    {
+      "id": "cdb_29_connect_reconcilers_adapter",
+      "stepNumber": 29,
+      "phase": "Connect provisioning, recovery, and backup flows",
+      "type": "add_connection",
+      "title": "Apply the next safe workflow action",
+      "content": "Workers load the latest authorized desired state, compare it with observed topology, and call one idempotent adapter action at a time. Check quorum before replacing a replica or proceeding with rolling upgrades; checkpoint the result before moving to the next step to minimize downtime while maintaining data consistency.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "cdb_e08_reconcilers_adapter",
+        "sourceNodeId": "cdb_reconcilers",
+        "targetNodeId": "cdb_cluster_adapter",
+        "connectionType": "api-call",
+        "label": "Fenced, checkpointed cluster action",
+        "description": "Idempotent node, replica, configuration, or upgrade action with current epoch and preconditions."
+      }
+    },
+    {
+      "id": "cdb_30_connect_adapter_cluster",
+      "stepNumber": 30,
+      "phase": "Connect provisioning, recovery, and backup flows",
+      "type": "add_connection",
+      "title": "Manage topology through the database control interface",
+      "content": "The adapter applies scaling (add/remove nodes), replica placement, configuration, safe rolling-upgrade steps, and recovery through supported cluster APIs. The distributed database's own replication protocol manages member agreement; control-plane changes are gated on that protocol's quorum and current observed topology.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "cdb_e09_adapter_cluster",
+        "sourceNodeId": "cdb_cluster_adapter",
+        "targetNodeId": "cdb_database_cluster",
+        "connectionType": "api-call",
+        "label": "Versioned topology and replica policy",
+        "description": "Provider adapter requests bounded, quorum-safe changes and reads back the applied revision."
+      }
+    },
+    {
+      "id": "cdb_31_connect_agent_events",
+      "stepNumber": 31,
+      "phase": "Connect provisioning, recovery, and backup flows",
+      "type": "add_connection",
+      "title": "Stream health, topology, and diagnostic events",
+      "content": "Agents publish authenticated health monitoring and diagnostics with sequence numbers and event timestamps. Consumers compare event time and heartbeat freshness; delayed or duplicate reports remain visible and cannot independently authorize a failover.",
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "cdb_e10_agent_events",
+        "sourceNodeId": "cdb_cluster_agent",
+        "targetNodeId": "cdb_event_stream",
+        "connectionType": "message-queue",
+        "label": "Versioned cluster health events",
+        "description": "Authenticated topology, member health, diagnostics, and applied-revision reports."
+      }
+    },
+    {
+      "id": "cdb_32_connect_events_failover",
+      "stepNumber": 32,
+      "phase": "Connect provisioning, recovery, and backup flows",
+      "type": "add_connection",
+      "title": "Correlate events before declaring a failure",
+      "content": "The controller consumes replayable events and corroborates them with fresh probes and database quorum status. It turns health monitoring and diagnostics into an explicit recovery decision, preserving an unknown state when a network partition prevents safe confirmation.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "cdb_e11_events_failover",
+        "sourceNodeId": "cdb_event_stream",
+        "targetNodeId": "cdb_failover_controller",
+        "connectionType": "message-queue",
+        "label": "Replayable failure and topology signals",
+        "description": "Ordered per-cluster signals are correlated with quorum and freshness before recovery is scheduled."
+      }
+    },
+    {
+      "id": "cdb_33_connect_failover_metadata",
+      "stepNumber": 33,
+      "phase": "Connect provisioning, recovery, and backup flows",
+      "type": "add_connection",
+      "title": "Commit recovery ownership and fencing epoch",
+      "content": "Before any recovery command is issued, the controller commits its lease, new fencing epoch, diagnosis, and operation state through metadata consensus. This prevents a stale controller on the other side of a network partition from issuing a conflicting promotion and preserves data consistency.",
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:2", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "cdb_e12_failover_metadata",
+        "sourceNodeId": "cdb_failover_controller",
+        "targetNodeId": "cdb_metadata_store",
+        "connectionType": "database-connection",
+        "label": "Quorum lease, diagnosis, and fencing epoch",
+        "description": "Consensus-backed ownership must commit before a failover action can be enqueued."
+      }
+    },
+    {
+      "id": "cdb_34_connect_failover_queue",
+      "stepNumber": 34,
+      "phase": "Connect provisioning, recovery, and backup flows",
+      "type": "add_connection",
+      "title": "Schedule recovery through the same durable workflow",
+      "content": "After the quorum-backed recovery decision is committed, enqueue a deduplicated operation for the standard reconciler. Automatic failover and recovery uses the same checkpoints, tenant authorization, retry visibility, and fencing checks as operator-initiated maintenance.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "cdb_e13_failover_queue",
+        "sourceNodeId": "cdb_failover_controller",
+        "targetNodeId": "cdb_command_queue",
+        "connectionType": "message-queue",
+        "label": "Deduplicated recovery operation",
+        "description": "Recovery is durable and replayable, not a one-off side effect in the detector."
+      }
+    },
+    {
+      "id": "cdb_35_connect_cluster_backup",
+      "stepNumber": 35,
+      "phase": "Connect provisioning, recovery, and backup flows",
+      "type": "add_connection",
+      "title": "Request a consistency-aware database snapshot",
+      "content": "The backup worker calls the database's supported snapshot/export API with a tenant-authorized operation and captures a consistent snapshot boundary. Bound concurrency and report progress so long-running snapshots do not create unobserved load spikes or block cluster lifecycle work.",
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "cdb_e14_cluster_backup",
+        "sourceNodeId": "cdb_database_cluster",
+        "targetNodeId": "cdb_backup_workers",
+        "connectionType": "data-flow",
+        "label": "Consistent snapshot export",
+        "description": "Authorized snapshot stream and boundary metadata for a resumable backup operation."
+      }
+    },
+    {
+      "id": "cdb_36_connect_backup_store",
+      "stepNumber": 36,
+      "phase": "Connect provisioning, recovery, and backup flows",
+      "type": "add_connection",
+      "title": "Persist and verify backup artifacts",
+      "content": "Write encrypted snapshot chunks and a versioned manifest, validate checksums before marking the backup complete, and record the object version in the operation state. Enforce tenant scope and the configured lifecycle policy at every object access.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "cdb_e15_backup_store",
+        "sourceNodeId": "cdb_backup_workers",
+        "targetNodeId": "cdb_snapshot_store",
+        "connectionType": "data-flow",
+        "label": "Encrypted snapshot and verified manifest",
+        "description": "Checksummed, versioned artifacts with tenant/cluster ownership and operation metadata."
+      }
+    },
+    {
+      "id": "cdb_37_connect_store_restore",
+      "stepNumber": 37,
+      "phase": "Connect provisioning, recovery, and backup flows",
+      "type": "add_connection",
+      "title": "Read a verified snapshot for restore",
+      "content": "A separately authorized restore operation selects a specific immutable object version, checks manifest and checksums, verifies tenant ownership, and records the source snapshot before sending any data to a cluster. A restore must not silently overwrite a different tenant's cluster.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:2"],
+      "connection": {
+        "edgeId": "cdb_e16_store_restore",
+        "sourceNodeId": "cdb_snapshot_store",
+        "targetNodeId": "cdb_backup_workers",
+        "connectionType": "data-flow",
+        "label": "Selected snapshot version for restore",
+        "description": "Tenant-authorized object version plus verified manifest, never an ambiguous latest-object read."
+      }
+    },
+    {
+      "id": "cdb_38_connect_restore_adapter",
+      "stepNumber": 38,
+      "phase": "Connect provisioning, recovery, and backup flows",
+      "type": "add_connection",
+      "title": "Restore through the fenced cluster adapter",
+      "content": "The backup workflow validates target cluster ownership and restore preconditions, then delegates the restore step to the same adapter/lease mechanism used for all cluster changes. Record a recoverable checkpoint and the exact snapshot version so an interrupted restore can be diagnosed and resumed safely.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:1", "legacy-constraint:1", "legacy-constraint:2"],
+      "connection": {
+        "edgeId": "cdb_e17_restore_adapter",
+        "sourceNodeId": "cdb_backup_workers",
+        "targetNodeId": "cdb_cluster_adapter",
+        "connectionType": "api-call",
+        "label": "Authorized, checkpointed restore action",
+        "description": "Restore applies a verified snapshot under current ownership, fencing, and cluster safety checks."
+      }
+    },
+    {
+      "id": "cdb_39_connect_gateway_monitoring",
+      "stepNumber": 39,
+      "phase": "Connect provisioning, recovery, and backup flows",
+      "type": "add_connection",
+      "title": "Observe API saturation and authorization outcomes",
+      "content": "Export request rates, validation failures, tenant throttling, authentication outcomes, and client-visible operation acceptance latency. Keep sensitive tenant and cluster dimensions access-controlled and bounded.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "cdb_e18_gateway_monitoring",
+        "sourceNodeId": "cdb_api_gateway",
+        "targetNodeId": "cdb_control_monitoring",
+        "connectionType": "data-flow",
+        "label": "Ingress and tenant-policy telemetry",
+        "description": "API saturation, request outcomes, throttling, and operation-acceptance measurements."
+      }
+    },
+    {
+      "id": "cdb_40_connect_reconciler_monitoring",
+      "stepNumber": 40,
+      "phase": "Connect provisioning, recovery, and backup flows",
+      "type": "add_connection",
+      "title": "Track queue lag and workflow progress",
+      "content": "Measure command age and depth, reconcile lag by operation class, lease contention, retries, failed transitions, per-tenant concurrency, and time spent in each checkpoint. Alert before backlog threatens the agreed freshness or recovery objective; numeric thresholds require workload tests and product SLOs.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:4", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "cdb_e19_reconciler_monitoring",
+        "sourceNodeId": "cdb_reconcilers",
+        "targetNodeId": "cdb_control_monitoring",
+        "connectionType": "data-flow",
+        "label": "Reconciliation lag and operation telemetry",
+        "description": "Queue age, checkpoint duration, worker saturation, lease contention, and retry/error measurements."
+      }
+    },
+    {
+      "id": "cdb_41_connect_cluster_monitoring",
+      "stepNumber": 41,
+      "phase": "Connect provisioning, recovery, and backup flows",
+      "type": "add_connection",
+      "title": "Expose replica health and data-plane diagnostics",
+      "content": "Collect replica count and freshness, quorum status, replication lag where applicable, node resource pressure, and database-reported repair or snapshot state. This makes health monitoring and diagnostics useful for humans and safe automation while retaining the database engine as the authority on its own consensus health.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "cdb_e20_cluster_monitoring",
+        "sourceNodeId": "cdb_database_cluster",
+        "targetNodeId": "cdb_control_monitoring",
+        "connectionType": "data-flow",
+        "label": "Replica, quorum, and repair telemetry",
+        "description": "Database-reported health and replication diagnostics; not a substitute for its consensus protocol."
+      }
+    },
+    {
+      "id": "cdb_42_connect_failover_monitoring",
+      "stepNumber": 42,
+      "phase": "Connect provisioning, recovery, and backup flows",
+      "type": "add_connection",
+      "title": "Audit automated recovery decisions",
+      "content": "Record the evidence, freshness, quorum result, lease owner, fencing epoch, rejected unsafe actions, and final recovery outcome. Make the reason for a delayed or blocked failover visible to operators so a safety refusal is not mistaken for a silent control-plane failure.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "cdb_e21_failover_monitoring",
+        "sourceNodeId": "cdb_failover_controller",
+        "targetNodeId": "cdb_control_monitoring",
+        "connectionType": "data-flow",
+        "label": "Fenced failover audit and outcome",
+        "description": "Decision evidence, lease/epoch, safety refusals, and recovery completion state."
+      }
+    },
+    {
+      "id": "cdb_43_connect_metadata_monitoring",
+      "stepNumber": 43,
+      "phase": "Connect provisioning, recovery, and backup flows",
+      "type": "add_connection",
+      "title": "Alert on consensus and metadata pressure",
+      "content": "Track quorum availability, leader changes, replication health, transaction conflicts, write latency, and metadata capacity. Alert when the control plane cannot safely commit state; do not report a failed quorum as a successful operation merely to preserve apparent availability.",
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "cdb_e22_metadata_monitoring",
+        "sourceNodeId": "cdb_metadata_store",
+        "targetNodeId": "cdb_control_monitoring",
+        "connectionType": "data-flow",
+        "label": "Consensus health and metadata pressure",
+        "description": "Quorum, leader, replication, transaction, latency, and capacity signals for safe operations."
+      }
+    },
+    {
+      "id": "cdb_44_partition_policy",
+      "stepNumber": 44,
+      "phase": "Prove partition behavior and operational readiness",
+      "type": "decision_point",
+      "title": "Define what happens when quorum is unavailable",
+      "content": "During a network partition, the metadata consensus group commits only on a majority. A minority partition may serve read-only or cached diagnostics with an explicit staleness label, but it must not accept conflicting desired-state writes, transfer a lease, or promote a database member based only on a timeout. If the data-plane database retains its own quorum, client data traffic continues; otherwise it follows that engine's consistency policy. Recovery begins after quorum and fencing ownership are re-established.",
+      "requirementIds": ["legacy-constraint:2", "legacy-constraint:3"],
+      "decision": {
+        "question": "Should a minority control-plane partition accept mutations to keep the API available?",
+        "chosen": "No. Reject or defer mutations without metadata quorum, show the current authority/freshness to users, and preserve the independent database data-plane path.",
+        "chosenReason": "Control-plane write availability is secondary to preventing divergent cluster intent and unsafe failover during a partition.",
+        "alternatives": [
+          {
+            "option": "Accept writes independently in each partition and merge later",
+            "tradeoff": "Conflicting cluster topology and promotion decisions may be impossible to merge safely."
+          },
+          {
+            "option": "Treat every missed heartbeat as a dead database member",
+            "tradeoff": "A network partition can trigger duplicate leaders or remove healthy replicas, violating consistency and uptime."
+          }
+        ]
+      }
+    },
+    {
+      "id": "cdb_45_scale_trigger",
+      "stepNumber": 45,
+      "phase": "Prove partition behavior and operational readiness",
+      "type": "scale_trigger",
+      "title": "Scale from measured cluster and workflow pressure",
+      "content": "The stated scale target is thousands of clusters, with no exact number or churn rate. Measure active clusters and members, command/event throughput, oldest queue age, reconciler saturation, metadata quorum/write pressure, agent freshness, backup bandwidth, and per-tenant fairness. Partition or add worker capacity when queue age or saturation approaches an agreed SLO; avoid scaling from raw cluster count alone, because a quiet cluster and a rolling-upgrade storm have different costs.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:4", "legacy-constraint:5"],
+      "scaleTrigger": {
+        "metric": "Active clusters and members, oldest command age, operation throughput, reconciler saturation, metadata quorum/write pressure, event lag, agent freshness, backup bandwidth, and tenant fairness",
+        "action": "Add or partition stateless reconciler and adapter capacity, tune queue partitions after load tests, and throttle noisy tenants or maintenance bursts before shared metadata or cluster resources saturate.",
+        "impact": "Supports thousands of clusters with controlled resource utilization while tying capacity decisions to observed work and agreed service objectives."
+      }
+    },
+    {
+      "id": "cdb_46_failure_drills",
+      "stepNumber": 46,
+      "phase": "Prove partition behavior and operational readiness",
+      "type": "explanation",
+      "title": "Test the failure paths before calling recovery automatic",
+      "content": "Exercise API retries with the same and conflicting idempotency keys; outbox publisher crash before/after broker acknowledgment; duplicate and reordered commands; worker death mid-upgrade; stale lease and fencing epoch; metadata quorum loss and re-election; isolated cluster-agent partitions; simultaneous replica failures; queue backlog across tenants; backup checksum failure; partial restore; and object-store unavailability. Verify observed state converges after recovery, tenant boundaries hold, no unsafe leader is accepted, and downtime/recovery measurements meet targets agreed with stakeholders.",
+      "requirementIds": []
+    },
+    {
+      "id": "cdb_47_review_summary",
+      "stepNumber": 47,
+      "phase": "Prove partition behavior and operational readiness",
+      "type": "explanation",
+      "title": "Review the complete control loop against the brief",
+      "content": "The canvas now shows tenant-authenticated declarative requests, consensus-backed desired state and outbox, durable commands, idempotent reconcilers and cluster adapters, an independently consistent database data plane, health-driven fenced failover, versioned backup/restore, and operational telemetry. Before implementation or publication, agree exact cluster/member scale, SLOs, failure domains, restore objectives, retention, tenant policy, provider/engine support, and upgrade compatibility. Validate that provisioning/configuration, automatic failover/recovery, add/remove-node scaling, health diagnostics, replication management, backup/restore, rolling upgrades, multi-tenancy, downtime, consistency, partition, resource, and thousands-of-clusters constraints each have an observable test.",
+      "requirementIds": []
+    }
+  ]
+}

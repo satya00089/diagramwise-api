@@ -1,0 +1,522 @@
+{
+  "problem_id": "cloud_aws_008",
+  "version": "1.0-review-draft",
+  "requirementRevision": null,
+  "totalSteps": 36,
+  "phases": [
+    {
+      "name": "Frame the problem and unknowns",
+      "stepRange": [1, 4],
+      "description": "Carry the exact brief into the design while separating its scale and deployment goals from the unstated workload shape, numeric SLOs, topology, and implementation choices."
+    },
+    {
+      "name": "Choose a runtime and image path",
+      "stepRange": [5, 14],
+      "description": "Build an explicitly provisional AWS container path from existing catalog components; these proposed choices do not establish capacity, reliability, or zero-downtime behavior."
+    },
+    {
+      "name": "Route, discover, and secure service calls",
+      "stepRange": [15, 24],
+      "description": "Use the existing service-mesh component to express discovery, mutual TLS, tracing, and circuit-breaker behavior without inventing service topology or policy thresholds."
+    },
+    {
+      "name": "Protect health and deployment behavior",
+      "stepRange": [25, 26],
+      "description": "Treat zero downtime as an acceptance target while leaving rollout mechanics and approval policy to the interview."
+    },
+    {
+      "name": "Observe and validate the stated scale",
+      "stepRange": [27, 36],
+      "description": "Add existing CloudWatch, logging, and X-Ray components, then validate the stated scale goals while keeping traffic shape and service-level objectives open."
+    }
+  ],
+  "steps": [
+    {
+      "id": "aws008_brief",
+      "stepNumber": 1,
+      "phase": "Frame the problem and unknowns",
+      "title": "Preserve the frozen problem brief",
+      "type": "explanation",
+      "content": "Problem: Design a Container-Based Microservices Architecture. Slug: design-a-container-based-microservices-architecture. Description: Design a container-based microservices platform with service discovery, independent auto-scaling, service mesh for communication, and centralized logging. Metadata: Hard; AWS - Containers; infra; 60-90 minutes. Requirements: Deploy multiple microservices; Service discovery and routing; Auto-scale services independently; Implement health checks; Manage container images; Handle service-to-service communication; Monitor distributed traces; Implement circuit breakers. Constraints: Support 100+ microservices; Handle 50k requests per second; Zero-downtime deployments; Maintain service isolation; Implement security between services. Hints: ECS/EKS for container orchestration; ECR for container registry; Application Load Balancer for routing; App Mesh for service mesh; CloudWatch Container Insights; X-Ray for distributed tracing. Tags: aws, ecs, eks, kubernetes, microservices, containers. Companies: Amazon, Airbnb, Lyft. The supplied record says has_guided_walkthrough=false; this local review draft does not change that availability flag. Treat the stated scale and zero-downtime constraints as goals to validate, not proven service guarantees.",
+      "requirementIds": []
+    },
+    {
+      "id": "aws008_load_shape",
+      "stepNumber": 2,
+      "phase": "Frame the problem and unknowns",
+      "title": "Clarify what the 50k requests per second means",
+      "type": "decision_point",
+      "content": "The brief gives a system-wide target of 50k requests per second and support for 100+ microservices. It does not say whether 50k is peak or sustained, how long a peak lasts, the burst profile, payload size, request mix, fan-out, read/write mix, or traffic distribution and arrival rate per service. Do not divide traffic evenly or infer replica counts. Ask for representative workload traces and define the load-test window and measurement boundary before sizing.",
+      "decision": {
+        "question": "What workload evidence is needed before sizing services independently?",
+        "chosen": "Keep both supplied scale figures as test targets; request peak-versus-sustained traffic, burst duration, payload and request mix, and per-service fan-out before estimating capacity.",
+        "chosenReason": "The global request rate alone does not determine per-service load, compute, network, or autoscaling behavior.",
+        "alternatives": [
+          {"option": "Split 50k requests evenly across 100 services", "tradeoff": "The prompt does not state an even traffic distribution, and a hot service can become the bottleneck."},
+          {"option": "Choose fixed replica counts from the global rate", "tradeoff": "Replica needs depend on service cost, concurrency, dependencies, and burst shape, none of which are provided."}
+        ]
+      },
+      "requirementIds": ["legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "aws008_runtime_choice",
+      "stepNumber": 3,
+      "phase": "Frame the problem and unknowns",
+      "title": "Make the orchestration choice explicit and provisional",
+      "type": "decision_point",
+      "content": "The brief names ECS/EKS without specifying team expertise, Kubernetes dependencies, portability needs, or operational ownership. This draft uses the existing Kubernetes/EKS catalog option only to make the example graph concrete; compare ECS before treating the platform choice as settled. No cluster, account, availability-zone, or service topology is inferred.",
+      "decision": {
+        "question": "Should the design standardize on ECS or EKS?",
+        "chosen": "Use EKS as a replaceable walkthrough candidate and decide only after comparing workload fit, team operations, and required ecosystem integrations with ECS.",
+        "chosenReason": "The choice affects service discovery, deployment, mesh integration, scaling controls, and operations, while the brief does not supply the deciding inputs.",
+        "alternatives": [
+          {"option": "Choose ECS immediately", "tradeoff": "It may simplify operations for some teams, but the workload and operator constraints needed to justify it are unknown."},
+          {"option": "Treat EKS as a requirement", "tradeoff": "The brief permits ECS or EKS; assuming Kubernetes expertise or a need for Kubernetes APIs would be unsupported."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-constraint:1"]
+    },
+    {
+      "id": "aws008_open_inputs",
+      "stepNumber": 4,
+      "phase": "Frame the problem and unknowns",
+      "title": "Keep the missing service-level decisions visible",
+      "type": "explanation",
+      "content": "The brief supplies no numeric availability or uptime objective, end-to-end or per-service latency target, error-rate budget, recovery-time objective (RTO), recovery-point objective (RPO), or SLO for individual services. Zero-downtime deployments are a release goal, not an availability SLO. Ask for failure-domain expectations, service ownership and dependency topology, retention/privacy rules, and deployment approval policy; do not invent values. The graph is an aggregate platform view, not a map of named services or dependencies.",
+      "requirementIds": []
+    },
+    {
+      "id": "aws008_client",
+      "stepNumber": 5,
+      "phase": "Choose a runtime and image path",
+      "title": "Represent the external API caller",
+      "type": "add_component",
+      "content": "Start with the callers that send requests to the platform. Their identity, client mix, retry behavior, and geographic distribution are not defined by the brief and should be clarified rather than encoded as assumed traffic policy.",
+      "component": {
+        "nodeId": "aws008_clients",
+        "componentType": "web-app",
+        "label": "External API Clients",
+        "description": "Aggregate callers for the platform request path; client mix remains unspecified.",
+        "position": {"x": 0, "y": 300},
+        "properties": {"componentName": "External API Clients", "purpose": "Represent callers entering the container platform without assuming a specific client, identity provider, or traffic distribution."},
+        "highlightReason": "The existing Web App catalog component provides a supported client-side entry point without adding a new node type."
+      },
+      "requirementIds": []
+    },
+    {
+      "id": "aws008_alb",
+      "stepNumber": 6,
+      "phase": "Choose a runtime and image path",
+      "title": "Add the hinted Layer 7 Application Load Balancer",
+      "type": "add_component",
+      "content": "Use the existing Load Balancer component to represent the hinted Application Load Balancer at the north-south entry boundary. The route rules, listener behavior, authentication integration, and target strategy depend on the API and runtime choices and remain open.",
+      "component": {
+        "nodeId": "aws008_alb",
+        "componentType": "loadbalancer",
+        "label": "Application Load Balancer",
+        "description": "HTTP application entry and routing boundary; listener and route policy are not specified.",
+        "position": {"x": 420, "y": 300},
+        "properties": {"componentName": "AWS Application Load Balancer", "purpose": "Route inbound application traffic toward healthy service targets after the API routes and runtime integration are defined.", "type": "Layer 7 (Application)"},
+        "highlightReason": "The catalog Load Balancer supports Layer 7 routing and the ALB hint without inventing route rules."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4"]
+    },
+    {
+      "id": "aws008_client_alb",
+      "stepNumber": 7,
+      "phase": "Choose a runtime and image path",
+      "title": "Route client requests to the application edge",
+      "type": "add_connection",
+      "content": "The caller reaches the Layer 7 entry point. Validate route matching, request limits, authentication, and error behavior against the API contract; the brief does not define them.",
+      "connection": {"edgeId": "aws008_client_to_alb", "sourceNodeId": "aws008_clients", "targetNodeId": "aws008_alb", "connectionType": "http", "label": "Inbound API requests", "description": "External clients enter through the application routing boundary"},
+      "requirementIds": ["legacy-requirement:2"]
+    },
+    {
+      "id": "aws008_edge_questions",
+      "stepNumber": 8,
+      "phase": "Choose a runtime and image path",
+      "title": "Ask which routing and health contract the edge needs",
+      "type": "decision_point",
+      "content": "Confirm host/path routing, listener protocol, identity and authorization responsibilities, and how target health maps to readiness. Do not add exact route names, health intervals, thresholds, or an edge availability target without requirements evidence.",
+      "decision": {
+        "question": "What should be fixed before configuring ALB listeners and target health?",
+        "chosen": "Treat the ALB as the entry component, then define routes and health semantics with the API owners and selected ECS/EKS integration.",
+        "chosenReason": "The brief names ALB but does not specify API shape, identity, listener policy, or health thresholds.",
+        "alternatives": [
+          {"option": "Hard-code a path map and health interval now", "tradeoff": "Those details would be invented and could conflict with the actual API or rollout behavior."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4"]
+    },
+    {
+      "id": "aws008_docker_ecr",
+      "stepNumber": 9,
+      "phase": "Choose a runtime and image path",
+      "title": "Build container images and use the ECR catalog option",
+      "type": "add_component",
+      "content": "Represent the image build and registry boundary with the existing Docker component configured for AWS ECR. Build and publish versioned images, and deploy by immutable digest where the selected release process supports it; do not assume an image retention period or approval workflow.",
+      "component": {
+        "nodeId": "aws008_images",
+        "componentType": "docker",
+        "label": "Container Images and Amazon ECR",
+        "description": "Build and registry boundary for versioned service images.",
+        "position": {"x": 520, "y": 650},
+        "properties": {"componentName": "Container Build and Amazon ECR", "purpose": "Build service images and publish versioned artifacts to ECR; pin deployed artifacts by digest when the release workflow is selected.", "registry": "AWS ECR", "orchestration": "Kubernetes"},
+        "highlightReason": "The existing Docker catalog component exposes AWS ECR as a supported registry option."
+      },
+      "requirementIds": ["legacy-requirement:5"]
+    },
+    {
+      "id": "aws008_orchestrator",
+      "stepNumber": 10,
+      "phase": "Choose a runtime and image path",
+      "title": "Add the provisional EKS orchestration boundary",
+      "type": "add_component",
+      "content": "Use the existing Container Orchestrator component with Kubernetes as the explicitly provisional EKS candidate. This is a proposed runtime, not evidence that 100+ services or 50k requests per second are supported. It represents scheduling and service-level desired state, not a specified cluster count, node shape, availability-zone layout, or service topology.",
+      "component": {
+        "nodeId": "aws008_runtime",
+        "componentType": "container-orchestrator",
+        "label": "EKS Candidate: Container Orchestration",
+        "description": "Provisional Kubernetes/EKS runtime boundary; cluster and service topology remain open.",
+        "position": {"x": 1050, "y": 300},
+        "properties": {"componentName": "EKS Runtime Candidate", "purpose": "Schedule container services and apply independent per-service desired state and autoscaling policies after workload shape and platform choice are confirmed.", "platform": "Kubernetes", "autoscaling": true},
+        "highlightReason": "The existing Container Orchestrator catalog component supports both Kubernetes and ECS; this draft makes the EKS candidate explicit without fixing topology."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3"]
+    },
+    {
+      "id": "aws008_service_fleet",
+      "stepNumber": 11,
+      "phase": "Choose a runtime and image path",
+      "title": "Show one aggregate service-workload template",
+      "type": "add_component",
+      "content": "This single Backend Server node is a reusable service template, not one service and not proof that 100+ services or 50k requests per second are supported. It does not claim a service count or dependency graph. Define ownership, APIs, resource requests, and dependencies separately for each service during discovery.",
+      "component": {
+        "nodeId": "aws008_services",
+        "componentType": "backend-server",
+        "label": "Microservice Workloads (Aggregate Template)",
+        "description": "One illustrative service template; actual service count, boundaries, and dependencies remain interview questions.",
+        "position": {"x": 1580, "y": 300},
+        "properties": {"componentName": "Microservice Workload Template", "purpose": "Represent repeatable independently deployed services without asserting a named service topology or replica count.", "architecture": "Microservices", "retry": false},
+        "highlightReason": "The existing Backend Server catalog component explicitly supports microservice application logic."
+      },
+      "requirementIds": ["legacy-requirement:1"]
+    },
+    {
+      "id": "aws008_registry_pull",
+      "stepNumber": 12,
+      "phase": "Choose a runtime and image path",
+      "title": "Pull the selected immutable image into the runtime",
+      "type": "add_connection",
+      "content": "The runtime obtains service images from ECR. Bind deployment records to the intended image digest and ensure the workload identity can pull only the required repositories; image scanning, signing, and promotion policy need owner decisions.",
+      "connection": {"edgeId": "aws008_ecr_to_runtime", "sourceNodeId": "aws008_images", "targetNodeId": "aws008_runtime", "connectionType": "data-flow", "label": "Versioned image pull", "description": "Container runtime retrieves the selected service artifact from ECR"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5"]
+    },
+    {
+      "id": "aws008_runtime_deploys",
+      "stepNumber": 13,
+      "phase": "Choose a runtime and image path",
+      "title": "Apply desired state independently per service",
+      "type": "add_connection",
+      "content": "This proposed control path gives each service its own workload and scaling definition. Keep desired state separate so services need not scale in lockstep; the connection does not establish 100+ service capacity or zero-downtime rollout behavior, which require workload and deployment tests.",
+      "connection": {"edgeId": "aws008_runtime_to_services", "sourceNodeId": "aws008_runtime", "targetNodeId": "aws008_services", "connectionType": "api-call", "label": "Per-service desired state", "description": "Scheduling and deployment control for independently managed service workloads"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3"]
+    },
+    {
+      "id": "aws008_service_autoscaling",
+      "stepNumber": 14,
+      "phase": "Choose a runtime and image path",
+      "title": "Scale each service from its own measured signals",
+      "type": "scale_trigger",
+      "content": "Independent autoscaling is a stated requirement; CPU, memory, request concurrency, queue depth, and dependency saturation are candidate signals, not a selected policy. The brief provides no per-service arrival rates, thresholds, minimums, maximums, or warm-capacity policy. Load-test the proposed signals and bounds against measured service profiles; doing so is necessary to validate, but does not guarantee, the 100+ service or 50k requests-per-second goals.",
+      "scaleTrigger": {"metric": "Measured per-service request load, concurrency or queue depth, resource saturation, and downstream pressure", "action": "Load-test representative service profiles, then define and validate independent scaling signals and bounds with each service owner", "impact": "Supports independent scaling while leaving the 100+ service and 50k requests-per-second goals as unproven acceptance targets until tested."},
+      "requirementIds": ["legacy-requirement:3"]
+    },
+    {
+      "id": "aws008_mesh",
+      "stepNumber": 15,
+      "phase": "Route, discover, and secure service calls",
+      "title": "Add the existing service-mesh component as a candidate",
+      "type": "add_component",
+      "content": "The catalog Service Mesh component supports mTLS, tracing, and circuit-breaker controls. Istio is used here as a concrete catalog-compatible candidate for the provisional Kubernetes runtime, not as a requirement. Confirm platform compatibility, ownership, and operational cost before selecting a mesh.",
+      "component": {
+        "nodeId": "aws008_mesh",
+        "componentType": "service-mesh",
+        "label": "Service Mesh (Istio Candidate)",
+        "description": "Candidate policy at service-to-service boundaries; provider selection remains subject to platform and operations review.",
+        "position": {"x": 2030, "y": 300},
+        "properties": {"componentName": "Service Mesh Candidate", "purpose": "Provide service discovery and communication policy with mutual TLS, distributed-trace propagation, and per-service circuit-breaker behavior; finalize provider and policy after platform review.", "provider": "Istio", "mtls": true, "tracing": true, "circuitBreaker": true, "retryPolicy": false, "trafficSplitting": false},
+        "highlightReason": "The existing Service Mesh catalog component has editable provider, mTLS, tracing, circuit-breaker, and retry controls."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "aws008_app_mesh_lifecycle",
+      "stepNumber": 16,
+      "phase": "Route, discover, and secure service calls",
+      "title": "Do not implement the stale App Mesh hint as a new deployment",
+      "type": "explanation",
+      "content": "The frozen brief lists App Mesh as a hint, but AWS's current App Mesh documentation states that support was discontinued on September 30, 2026 and that App Mesh resources and console access are no longer available after that date. This draft therefore does not configure App Mesh. Reconfirm an actively supported mesh or platform-native alternative with the team; the Istio node above is only a catalog-compatible discussion candidate. Source: https://docs.aws.amazon.com/app-mesh/latest/userguide/meshes.html",
+      "requirementIds": []
+    },
+    {
+      "id": "aws008_discovery",
+      "stepNumber": 17,
+      "phase": "Route, discover, and secure service calls",
+      "title": "Resolve services by stable logical identity",
+      "type": "decision_point",
+      "content": "With the EKS candidate, Kubernetes service discovery is one possible mechanism; ECS would have a different integration path. Define stable service identity and health-aware resolution without inventing names, namespaces, network boundaries, or a service dependency graph.",
+      "decision": {
+        "question": "How should a caller find a healthy instance of a logical service?",
+        "chosen": "Use the discovery mechanism native to the finally selected runtime and mesh, and validate resolution against the service ownership and topology established in the interview.",
+        "chosenReason": "The requirement asks for discovery and routing, but the platform and service topology are not yet fixed.",
+        "alternatives": [
+          {"option": "Hard-code endpoint addresses between services", "tradeoff": "Addresses change as independently scaled workloads are replaced and do not provide a healthy logical service identity."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2"]
+    },
+    {
+      "id": "aws008_service_mesh_request",
+      "stepNumber": 18,
+      "phase": "Route, discover, and secure service calls",
+      "title": "Send logical service calls through mesh policy",
+      "type": "add_connection",
+      "content": "Represent an east-west call leaving a source service's mesh proxy. The service-workload node is a collapsed template instantiated for distinct source and destination services; this edge is not a claim that one service calls itself or that the mesh is a centralized network hop. Discovery, authorization, and route policy must be completed from the real topology.",
+      "connection": {"edgeId": "aws008_services_to_mesh", "sourceNodeId": "aws008_services", "targetNodeId": "aws008_mesh", "connectionType": "http", "label": "Logical service calls", "description": "Aggregate east-west request path; actual service relationships are not specified"},
+      "requirementIds": ["legacy-requirement:6"]
+    },
+    {
+      "id": "aws008_mesh_routing",
+      "stepNumber": 19,
+      "phase": "Route, discover, and secure service calls",
+      "title": "Return requests to discovered service destinations",
+      "type": "add_connection",
+      "content": "The mesh forwards the call to a distinct destination service's proxy after logical destination resolution. The aggregate workload node appears again to represent that different service instance; it is a many-to-many abstraction, not a self-call. Concrete discovery and policy depend on the chosen runtime and topology.",
+      "connection": {"edgeId": "aws008_mesh_to_services", "sourceNodeId": "aws008_mesh", "targetNodeId": "aws008_services", "connectionType": "http", "label": "Resolved destination and policy", "description": "Mesh-routed request reaches a healthy logical service destination"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6"]
+    },
+    {
+      "id": "aws008_alb_services",
+      "stepNumber": 20,
+      "phase": "Route, discover, and secure service calls",
+      "title": "Forward edge traffic to the selected service targets",
+      "type": "add_connection",
+      "content": "The ALB forwards an accepted request to a healthy ingress/service target using the route configuration selected for the runtime. Whether the design needs an ingress controller, gateway, or another integration depends on ECS/EKS choice and is not asserted as a separate component here.",
+      "connection": {"edgeId": "aws008_alb_to_services", "sourceNodeId": "aws008_alb", "targetNodeId": "aws008_services", "connectionType": "http", "label": "Routed application traffic", "description": "North-south request path to the runtime's selected healthy service target"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4"]
+    },
+    {
+      "id": "aws008_health_checks",
+      "stepNumber": 21,
+      "phase": "Route, discover, and secure service calls",
+      "title": "Separate startup, readiness, liveness, and target health",
+      "type": "decision_point",
+      "content": "For each service, define what it means to be started, ready for traffic, and irrecoverably unhealthy. Ensure dependency failures do not cause restart loops and that a process is not admitted to traffic before it can serve. These are proposed reliability controls, not a numeric availability SLO or a zero-downtime guarantee. Exact probe paths, thresholds, intervals, and grace periods remain workload-specific questions.",
+      "decision": {
+        "question": "Which health signal should control restarts versus traffic admission?",
+        "chosen": "Use distinct runtime liveness/readiness semantics and an edge target-health contract, then validate the interaction during startup, dependency degradation, and shutdown.",
+        "chosenReason": "A single health check can either route traffic too early or restart a service for a dependency failure it cannot repair.",
+        "alternatives": [
+          {"option": "Use one check for every service and every health decision", "tradeoff": "Startup, readiness, and process recovery are different states and can need different behavior."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3"]
+    },
+    {
+      "id": "aws008_health_feedback",
+      "stepNumber": 22,
+      "phase": "Route, discover, and secure service calls",
+      "title": "Feed service health back to the routing boundary",
+      "type": "add_connection",
+      "content": "The runtime and service health contract determine when a target can receive traffic. Exercise startup, draining, and unhealthy-target behavior; do not claim zero downtime from the presence of a health check alone.",
+      "connection": {"edgeId": "aws008_services_to_alb_health", "sourceNodeId": "aws008_services", "targetNodeId": "aws008_alb", "connectionType": "data-flow", "label": "Readiness and target health", "description": "Health outcomes inform whether the edge should route requests to a service target"},
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3"]
+    },
+    {
+      "id": "aws008_mtls",
+      "stepNumber": 23,
+      "phase": "Route, discover, and secure service calls",
+      "title": "Authenticate service identities and encrypt east-west traffic",
+      "type": "explanation",
+      "content": "Use workload identities and mutual TLS for service-to-service authentication and encryption, then authorize allowed callers and destinations explicitly. Those controls address inter-service security and contribute to service isolation, but mTLS alone does not isolate processes, resources, or network paths. It is not a substitute for application authorization, secret handling, or least-privilege runtime permissions. Identity issuance, trust boundaries, and policy ownership still need agreement.",
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "aws008_circuit_breakers",
+      "stepNumber": 24,
+      "phase": "Route, discover, and secure service calls",
+      "title": "Apply circuit breakers at dependency boundaries",
+      "type": "explanation",
+      "content": "A circuit breaker is one proposed failure-containment control for repeated calls to an unhealthy dependency; it is not an availability guarantee. Select failure classification, thresholds, open duration, and fallback from each service contract and observed failure behavior; none of those values are specified in the brief.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8"]
+    },
+    {
+      "id": "aws008_rollout_target",
+      "stepNumber": 25,
+      "phase": "Protect health and deployment behavior",
+      "title": "Treat zero downtime as an acceptance target, not a guarantee",
+      "type": "decision_point",
+      "content": "Zero-downtime deployment is a stated release acceptance goal, but the brief does not define its measurement window, allowed failed requests, or rollout method. Rolling, canary, and blue/green are implementation options, not guarantees. Validate readiness, graceful draining, contract compatibility, rollback, and sufficient capacity under load for the selected method.",
+      "decision": {
+        "question": "Which rollout method should meet the zero-downtime constraint?",
+        "chosen": "Keep rollout strategy open until service startup time, compatibility, traffic behavior, and operational ownership are known; require measured readiness and rollback tests for the selected method.",
+        "chosenReason": "The constraint states an outcome, not a particular release mechanism or deployment approval policy.",
+        "alternatives": [
+          {"option": "Mandate rolling deployments for every service", "tradeoff": "Some services may need different traffic shifting or rollback behavior; the prompt provides no evidence for a universal strategy."},
+          {"option": "Assume blue/green is always zero downtime", "tradeoff": "It still depends on health, state compatibility, target switching, and enough validated capacity."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3"]
+    },
+    {
+      "id": "aws008_approval_policy",
+      "stepNumber": 26,
+      "phase": "Protect health and deployment behavior",
+      "title": "Ask who approves or automatically promotes a release",
+      "type": "decision_point",
+      "content": "The problem says zero-downtime deployments but does not say whether production promotion is manual, policy-gated, or automatic. Ask who owns approval, what evidence is required, who can halt a rollout, and how rollback authority works. Do not silently encode automatic production approval.",
+      "decision": {
+        "question": "What is the production deployment approval policy?",
+        "chosen": "Leave approval and promotion policy as an explicit product and operations decision; gate implementation on an owner-defined answer.",
+        "chosenReason": "Approval authority is a governance choice absent from the frozen brief.",
+        "alternatives": [
+          {"option": "Assume every validated build deploys to production automatically", "tradeoff": "This creates an unrequested authority and risk policy."},
+          {"option": "Assume every release requires a named human approver", "tradeoff": "This also invents a workflow and may contradict the team's actual delivery model."}
+        ]
+      },
+      "requirementIds": ["legacy-constraint:3"]
+    },
+    {
+      "id": "aws008_logs",
+      "stepNumber": 27,
+      "phase": "Observe and validate the stated scale",
+      "title": "Add centralized CloudWatch log processing",
+      "type": "add_component",
+      "content": "Use the existing Log Processing component with CloudWatch as the pipeline to represent centralized container and service logs. Emit structured records with service identity and trace correlation while minimizing sensitive payloads. Retention, redaction rules, and access policy remain owner decisions.",
+      "component": {
+        "nodeId": "aws008_logs",
+        "componentType": "log-processing",
+        "label": "Centralized Logs (CloudWatch)",
+        "description": "Service and container log aggregation; retention and access rules are open.",
+        "position": {"x": 2080, "y": 680},
+        "properties": {"componentName": "CloudWatch Centralized Logs", "purpose": "Aggregate structured service and container logs with service identity and trace correlation while excluding unnecessary sensitive payloads.", "pipeline": "CloudWatch"},
+        "highlightReason": "The existing Log Processing catalog component supports CloudWatch and avoids inventing a logging node type."
+      },
+      "requirementIds": []
+    },
+    {
+      "id": "aws008_monitoring",
+      "stepNumber": 28,
+      "phase": "Observe and validate the stated scale",
+      "title": "Observe the container platform with CloudWatch",
+      "type": "add_component",
+      "content": "Use CloudWatch metrics and alerting for the platform and the hinted Container Insights view. Instrument per-service request rates, errors, saturation, restart and rollout health, and dependency signals. Alert conditions and operational ownership must be set from agreed service objectives, not invented here.",
+      "component": {
+        "nodeId": "aws008_monitoring",
+        "componentType": "monitoring",
+        "label": "CloudWatch Container Insights",
+        "description": "Platform and per-service metrics and alerting; no thresholds or retention period are assumed.",
+        "position": {"x": 2650, "y": 680},
+        "properties": {"componentName": "CloudWatch Container Insights", "purpose": "Observe container, service, rollout, and dependency metrics and alert on owner-defined conditions.", "stack": "CloudWatch", "metrics": true, "alerts": true},
+        "highlightReason": "The existing Monitoring component supports CloudWatch metrics and alerting, matching the supplied Container Insights hint."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4"]
+    },
+    {
+      "id": "aws008_tracing",
+      "stepNumber": 29,
+      "phase": "Observe and validate the stated scale",
+      "title": "Add AWS X-Ray distributed tracing",
+      "type": "add_component",
+      "content": "Use the existing Distributed Tracing component with AWS X-Ray as the hinted tracing destination. Propagate trace context across service calls and correlate traces with service version and request outcomes. Sampling policy, sensitive-field handling, and retention are not specified and must be decided with measured cost and diagnostic needs.",
+      "component": {
+        "nodeId": "aws008_tracing",
+        "componentType": "tracing",
+        "label": "AWS X-Ray Distributed Tracing",
+        "description": "Cross-service request traces with sampling and retention left configurable.",
+        "position": {"x": 2640, "y": 320},
+        "properties": {"componentName": "AWS X-Ray", "purpose": "Collect correlated distributed traces across service boundaries and versions; determine sampling, sensitive-field handling, and retention from the workload and owners.", "platform": "AWS X-Ray"},
+        "highlightReason": "The existing Distributed Tracing component lists AWS X-Ray as a supported platform."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7"]
+    },
+    {
+      "id": "aws008_services_to_logs",
+      "stepNumber": 30,
+      "phase": "Observe and validate the stated scale",
+      "title": "Send service logs to the centralized pipeline",
+      "type": "add_connection",
+      "content": "Forward service and container logs with stable service identity and deployment version. Redact secrets and sensitive payloads before export, then enforce per-service log access so centralized observability does not silently cross service-isolation boundaries. Trace correlation is useful metadata here, but logs are not distributed traces.",
+      "connection": {"edgeId": "aws008_services_to_logs", "sourceNodeId": "aws008_services", "targetNodeId": "aws008_logs", "connectionType": "data-flow", "label": "Structured service logs", "description": "Service and container logs flow to the centralized CloudWatch pipeline"},
+      "requirementIds": ["legacy-constraint:4"]
+    },
+    {
+      "id": "aws008_logs_to_monitoring",
+      "stepNumber": 31,
+      "phase": "Observe and validate the stated scale",
+      "title": "Correlate log events with operational signals",
+      "type": "add_connection",
+      "content": "Make log-derived events searchable alongside service metrics and alerts without making logs the only source of health truth. Agree on retention, redaction, access, and cost controls before production use.",
+      "connection": {"edgeId": "aws008_logs_to_monitoring", "sourceNodeId": "aws008_logs", "targetNodeId": "aws008_monitoring", "connectionType": "data-flow", "label": "Operational log signals", "description": "Central log events correlate with platform and service metrics"},
+      "requirementIds": []
+    },
+    {
+      "id": "aws008_runtime_to_monitoring",
+      "stepNumber": 32,
+      "phase": "Observe and validate the stated scale",
+      "title": "Export runtime and health metrics",
+      "type": "add_connection",
+      "content": "Collect service-level scaling, health, placement, and deployment metrics. This telemetry can inform independent scaling and health review, but it does not implement those controls, prove 100+ service capacity, or monitor distributed traces.",
+      "connection": {"edgeId": "aws008_runtime_to_monitoring", "sourceNodeId": "aws008_runtime", "targetNodeId": "aws008_monitoring", "connectionType": "data-flow", "label": "Container and service metrics", "description": "Runtime, health, autoscaling, and rollout signals for CloudWatch observation"},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4"]
+    },
+    {
+      "id": "aws008_services_to_tracing",
+      "stepNumber": 33,
+      "phase": "Observe and validate the stated scale",
+      "title": "Instrument each service boundary for distributed traces",
+      "type": "add_connection",
+      "content": "Create trace spans at service ingress and egress and propagate the agreed trace context. Validate traces across synchronous and asynchronous work if such paths exist; the prompt does not specify an asynchronous topology.",
+      "connection": {"edgeId": "aws008_services_to_tracing", "sourceNodeId": "aws008_services", "targetNodeId": "aws008_tracing", "connectionType": "data-flow", "label": "Service spans and trace context", "description": "Service-level spans are exported to AWS X-Ray"},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7"]
+    },
+    {
+      "id": "aws008_mesh_to_tracing",
+      "stepNumber": 34,
+      "phase": "Observe and validate the stated scale",
+      "title": "Capture mesh-level request and resilience context",
+      "type": "add_connection",
+      "content": "Where supported by the selected mesh, correlate proxy-level route, retry, and circuit-breaker outcomes with application spans. Keep sampling and data retention configurable; the brief gives no sampling percentage or retention period.",
+      "connection": {"edgeId": "aws008_mesh_to_tracing", "sourceNodeId": "aws008_mesh", "targetNodeId": "aws008_tracing", "connectionType": "data-flow", "label": "Mesh spans and route outcomes", "description": "Service-mesh telemetry joins distributed traces for cross-service diagnosis"},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "aws008_scale_test",
+      "stepNumber": 35,
+      "phase": "Observe and validate the stated scale",
+      "title": "Load-test the 50k requests-per-second target",
+      "type": "scale_trigger",
+      "content": "Test representative request mixes and realistic per-service fan-out up to the stated 50k requests per second only after clarifying whether that figure is peak or sustained and defining the test duration and success criteria. Observe edge rejection, per-service saturation, queueing, mesh overhead, dependency limits, health outcomes, and autoscaling lag. This validates a scale target; it does not supply an unstated latency, availability, or error-rate SLO, nor prove the draft already meets the target.",
+      "scaleTrigger": {"metric": "Observed end-to-end throughput, per-service latency and errors, saturation, queueing, scaling lag, and dependency headroom under the agreed workload", "action": "Run repeatable load and failure tests using the agreed traffic shape; adjust only the measured bottleneck and rerun the same workload", "impact": "Turns the 50k requests-per-second constraint into evidence while exposing hot services and cascading bottlenecks."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:2"]
+    },
+    {
+      "id": "aws008_scale_services",
+      "stepNumber": 36,
+      "phase": "Observe and validate the stated scale",
+      "title": "Validate 100+ services without assuming a topology",
+      "type": "decision_point",
+      "content": "Exercise the control plane, discovery, policy distribution, telemetry cardinality, trace propagation, deployment workflows, and operator experience at the stated 100+ service target. Confirm whether this means deployed services, independently scaling services, or another service-count definition. Do not assign each service a replica count or invent dependency edges; passing this representative test is evidence for the target, not a guarantee under every workload.",
+      "decision": {
+        "question": "What does the 100+ microservice support target include operationally?",
+        "chosen": "Agree the service-count definition and test representative service lifecycle, discovery, scaling, rollout, metrics, and distributed-trace propagation at that scale.",
+        "chosenReason": "A service count alone does not establish topology, workload skew, control-plane load, or operator capacity.",
+        "alternatives": [
+          {"option": "Assume 100 identical services with a fixed replica count", "tradeoff": "This invents both service shape and capacity and can mask the actual operating bottlenecks."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:1"]
+    }
+  ]
+}

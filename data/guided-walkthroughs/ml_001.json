@@ -1,0 +1,902 @@
+{
+  "problem_id": "ml_001",
+  "version": "1.0.0-review-draft",
+  "totalSteps": 46,
+  "requirementRevision": null,
+  "phases": [
+    {
+      "name": "Frame the contract",
+      "stepRange": [1, 3],
+      "description": "Resolve the strict latency target, hybrid strategy, and unstated traffic assumptions before drawing the serving path."
+    },
+    {
+      "name": "Add online serving components",
+      "stepRange": [4, 10],
+      "description": "Build the request path from the client through a personalized, two-stage recommendation service."
+    },
+    {
+      "name": "Add feedback and model lifecycle components",
+      "stepRange": [11, 20],
+      "description": "Separate the fast preference-update stream from model training, experimentation, and operations."
+    },
+    {
+      "name": "Connect request-time serving",
+      "stepRange": [21, 27],
+      "description": "Connect the latency-critical request, retrieval, ranking, and response path."
+    },
+    {
+      "name": "Connect feedback and model release",
+      "stepRange": [28, 42],
+      "description": "Capture interactions asynchronously, refresh online preferences, and release compatible model and index versions."
+    },
+    {
+      "name": "Close the measurement loop",
+      "stepRange": [43, 46],
+      "description": "Observe the end-to-end latency, freshness, model behavior, and CTR experiment without inventing targets."
+    }
+  ],
+  "steps": [
+    {
+      "id": "rec_brief",
+      "stepNumber": 1,
+      "phase": "Frame the contract",
+      "title": "Honor the stricter live latency constraint",
+      "type": "explanation",
+      "content": "The brief describes sub-100ms predictions, while its explicit constraint requires recommendation latency under 50ms. Treat under 50ms as the controlling end-to-end target unless the interviewer clarifies otherwise. The brief also fixes the scale at 10M+ users and 1M+ items, preference freshness within 5 minutes, CTR improvement above 20% versus baseline, and sparse user-item interactions."
+    },
+    {
+      "id": "rec_hybrid_choice",
+      "stepNumber": 2,
+      "phase": "Frame the contract",
+      "title": "Combine collaborative and content-based retrieval",
+      "type": "decision_point",
+      "content": "A single collaborative strategy is weak for sparse histories and new items; a content-only strategy misses behavior shared by similar users. Use both to retrieve candidates, then rank one merged pool. Keep cold-start fallbacks inside the same serving contract.",
+      "decision": {
+        "question": "How should the system retrieve candidates when interaction history is sparse?",
+        "chosen": "Hybrid collaborative-filtering and content-based retrieval followed by a ranking stage",
+        "chosenReason": "Behavioral embeddings capture collaborative preference while item metadata gives new or rarely seen items a retrieval path; a second-stage ranker compares candidates using current context.",
+        "alternatives": [
+          {
+            "option": "Collaborative filtering only",
+            "tradeoff": "Efficient for established interactions, but weak for sparse histories and cold-start items."
+          },
+          {
+            "option": "Content-based retrieval only",
+            "tradeoff": "Can use item metadata immediately, but does not use cross-user interaction patterns."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "rec_open_assumptions",
+      "stepNumber": 3,
+      "phase": "Frame the contract",
+      "title": "Keep unspecified workload and experiment details open",
+      "type": "explanation",
+      "content": "Clarify request rate, active-user distribution, region count, availability, retention, and which latency percentile is measured; do not invent QPS or an event-volume target from user and item cardinality alone. Interpret CTR improvement above 20% as relative lift over a randomized baseline only as a stated assumption, and confirm whether the requirement instead means percentage points. The 5-minute preference bound is a freshness requirement, not a promise to retrain model weights on every event. Keep the design provider-neutral."
+    },
+    {
+      "id": "rec_client",
+      "stepNumber": 4,
+      "phase": "Add online serving components",
+      "title": "Represent the recommendation consumer",
+      "type": "add_component",
+      "content": "The client requests a personalized feed with user identity, context, and an optional cursor. It reports an impression only when recommendations are actually shown and sends subsequent clicks as separate interaction events.",
+      "component": {
+        "nodeId": "rec_client",
+        "componentType": "web-app",
+        "label": "Recommendation Client",
+        "description": "Requests a personalized feed and reports displayed impressions and user interactions.",
+        "position": {"x": 0, "y": 80},
+        "properties": {
+          "componentName": "Recommendation Client",
+          "purpose": "Requests a personalized feed with user and request context; emits an impression only after display and sends clicks as distinct events."
+        },
+        "highlightReason": "The design serves personalized recommendations in real time and needs trustworthy exposure events for feedback and CTR measurement.",
+        "requirementIds": ["legacy-requirement:3", "legacy-requirement:5"]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5"]
+    },
+    {
+      "id": "rec_gateway",
+      "stepNumber": 5,
+      "phase": "Add online serving components",
+      "title": "Protect and validate both API paths",
+      "type": "add_component",
+      "content": "Use one established API boundary for feed requests and interaction ingestion. Validate identity and payloads, enforce request limits, and require stable event IDs so downstream consumers can deduplicate retries.",
+      "component": {
+        "nodeId": "rec_gateway",
+        "componentType": "api-gateway",
+        "label": "Recommendation API Gateway",
+        "description": "Validates and routes recommendation requests and interaction events.",
+        "position": {"x": 280, "y": 80},
+        "properties": {
+          "componentName": "Recommendation API Gateway",
+          "purpose": "Authenticate and validate feed and event requests, apply bounded request controls, and preserve an idempotency key when forwarding interaction events."
+        },
+        "highlightReason": "A shared, explicit API boundary makes personalized reads and feedback writes independently observable and controllable.",
+        "requirementIds": ["legacy-requirement:3", "legacy-requirement:5"]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5"]
+    },
+    {
+      "id": "rec_orchestrator",
+      "stepNumber": 6,
+      "phase": "Add online serving components",
+      "title": "Keep strategy fusion and response policy in one service",
+      "type": "add_component",
+      "content": "The serving orchestrator reads the cache and current features, calls retrieval and ranking, removes ineligible or duplicate items, and applies controlled diversity and novelty. It supports multiple recommendation strategies and returns explainable recommendations using evidence such as item attributes or observed preference matches, not an ungrounded generated explanation.",
+      "component": {
+        "nodeId": "rec_orchestrator",
+        "componentType": "backend-server",
+        "label": "Recommendation Orchestrator",
+        "description": "Fuses strategies, applies eligibility and diversity policy, and returns grounded explanations.",
+        "position": {"x": 560, "y": 80},
+        "properties": {
+          "componentName": "Recommendation Orchestrator",
+          "purpose": "Serve personalized recommendations in real-time under 50ms end-to-end: cache-aside lookup, parallel current-feature and model calls, candidate fusion, eligibility/deduplication, diversity and novelty reranking, then a response with explainable evidence. Fall back to context, explicit preferences, and eligible popular items for cold-start users; never wait for asynchronous analytics."
+        },
+        "highlightReason": "This is the latency-critical boundary that combines multiple recommendation strategies, handles cold-start, and returns explainable diverse results.",
+        "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1"]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1"]
+    },
+    {
+      "id": "rec_cache",
+      "stepNumber": 7,
+      "phase": "Add online serving components",
+      "title": "Cache only version-aware recommendation responses",
+      "type": "add_component",
+      "content": "Use a bounded cache-aside response path for repeated feed requests. Key entries by user, request context, experiment assignment, and active model/index version; preference updates must invalidate or version-bypass affected entries within the 5-minute freshness bound.",
+      "component": {
+        "nodeId": "rec_cache",
+        "componentType": "cache",
+        "label": "Recommendation Response Cache",
+        "description": "Caches response payloads without hiding preference or model-version changes.",
+        "position": {"x": 840, "y": -100},
+        "properties": {
+          "componentName": "Recommendation Response Cache",
+          "purpose": "Use bounded cache-aside entries keyed by user, context, experiment, and model/index version; invalidate or bypass stale user entries when the preference stream advances."
+        },
+        "highlightReason": "A cache can protect the under-50ms path only when its key and invalidation preserve personalization freshness.",
+        "requirementIds": ["legacy-requirement:3", "legacy-constraint:3"]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:3"]
+    },
+    {
+      "id": "rec_features",
+      "stepNumber": 8,
+      "phase": "Add online serving components",
+      "title": "Read current user and item features online",
+      "type": "add_component",
+      "content": "Keep low-latency serving features separate from the full sparse interaction history. Include current user preference aggregates, request context, and item attributes with event-time and feature-version metadata so the ranker can detect stale or missing values.",
+      "component": {
+        "nodeId": "rec_features",
+        "componentType": "feature-store",
+        "label": "Online User and Item Feature Store",
+        "description": "Serves low-latency, freshness-versioned features to retrieval and ranking.",
+        "position": {"x": 840, "y": 80},
+        "properties": {
+          "componentName": "Online User and Item Feature Store",
+          "purpose": "Serve online user preference aggregates, request context, and item features with event-time and feature-version metadata; keep feature freshness within 5 minutes and do not materialize a dense user-item matrix."
+        },
+        "highlightReason": "Online features provide current personalization while keeping sparse history out of the synchronous read path.",
+        "requirementIds": ["legacy-requirement:3", "legacy-constraint:3", "legacy-constraint:5"]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "rec_serving",
+      "stepNumber": 9,
+      "phase": "Add online serving components",
+      "title": "Deploy retrieval and ranking behind a bounded inference API",
+      "type": "add_component",
+      "content": "The inference boundary uses one compatible, approved model bundle: retrieve with collaborative and content signals, then apply a separate ranking model using current features. Keep the candidate count and work bounded by measured latency; the prompt does not specify a candidate count or per-stage budget.",
+      "component": {
+        "nodeId": "rec_serving",
+        "componentType": "model-serving",
+        "label": "Recommendation Model Serving",
+        "description": "Runs approved retrieval and second-stage ranking artifacts for online requests.",
+        "position": {"x": 1120, "y": 80},
+        "properties": {
+          "componentName": "Recommendation Model Serving",
+          "purpose": "Serve a pinned compatible collaborative retriever, content retriever, and second-stage ranker. Bound inference and ANN work to the end-to-end under-50ms target; use the same model/index version and return scores plus evidence for grounded explanations."
+        },
+        "highlightReason": "A dedicated inference boundary makes the real-time retrieval and ranking contract explicit without inventing stage-level latency numbers.",
+        "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:1"]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "rec_ann_index",
+      "stepNumber": 10,
+      "phase": "Add online serving components",
+      "title": "Retrieve item vectors through an approximate-nearest-neighbor index",
+      "type": "add_component",
+      "content": "Index versioned item embeddings for fast ANN lookup at the stated 1M+ item scale. Keep collaborative and content-based vector spaces distinguishable, and publish an index only with the compatible model version; the exact vector dimensions and traffic rate remain unspecified.",
+      "component": {
+        "nodeId": "rec_ann_index",
+        "componentType": "vector-database",
+        "label": "Versioned Item ANN Index",
+        "description": "Stores item embeddings for collaborative and content-based candidate retrieval.",
+        "position": {"x": 1400, "y": 80},
+        "properties": {
+          "componentName": "Versioned Item ANN Index",
+          "purpose": "Serve approximate-nearest-neighbor lookup over versioned item embeddings at 1M+ items; separate collaborative and content-based spaces and atomically activate only an index compatible with the approved model bundle.",
+          "indexType": "HNSW"
+        },
+        "highlightReason": "The ANN index provides the fast similarity-search path required by two-tower candidate retrieval at the stated catalog size.",
+        "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:2"]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:2"]
+    },
+    {
+      "id": "rec_events",
+      "stepNumber": 11,
+      "phase": "Add feedback and model lifecycle components",
+      "title": "Durably accept impression and interaction events",
+      "type": "add_component",
+      "content": "Buffer validated impression and click events outside the response path. Preserve event IDs, user/item IDs, event time, displayed item order, experiment assignment, and served model version so retries can be deduplicated and feedback can be joined to what was actually shown.",
+      "component": {
+        "nodeId": "rec_events",
+        "componentType": "queue",
+        "label": "Recommendation Interaction Queue",
+        "description": "Buffers idempotent exposure and interaction events for independent consumers.",
+        "position": {"x": 280, "y": 400},
+        "properties": {
+          "componentName": "Recommendation Interaction Queue",
+          "purpose": "Durably buffer validated impression and click events with event IDs, event time, displayed items, experiment assignment, and model version; consumers deduplicate retries."
+        },
+        "highlightReason": "A durable asynchronous boundary captures user interactions for model feedback without adding analytics or writes to the recommendation latency path.",
+        "requirementIds": ["legacy-requirement:5"]
+      },
+      "requirementIds": ["legacy-requirement:5"]
+    },
+    {
+      "id": "rec_preference_stream",
+      "stepNumber": 12,
+      "phase": "Add feedback and model lifecycle components",
+      "title": "Update online preferences before the freshness deadline",
+      "type": "add_component",
+      "content": "Consume events idempotently, update user preference aggregates and feature versions, and invalidate that user's cached response. Keep the end-to-end preference update within 5 minutes; this stream updates online features and does not imply retraining model weights for every interaction.",
+      "component": {
+        "nodeId": "rec_preference_stream",
+        "componentType": "stream-processor",
+        "label": "Preference and Feature Update Stream",
+        "description": "Reconciles interactions into online preferences and cache invalidations.",
+        "position": {"x": 560, "y": 400},
+        "properties": {
+          "componentName": "Preference and Feature Update Stream",
+          "purpose": "Deduplicate interaction events and update online user preference features plus their version within 5 minutes; invalidate affected cached recommendations. This is online preference learning, not a claim that model weights retrain on each event."
+        },
+        "highlightReason": "This explicit asynchronous path meets the five-minute preference freshness constraint while protecting the synchronous response budget.",
+        "requirementIds": ["legacy-requirement:5", "legacy-constraint:3"]
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "rec_interaction_store",
+      "stepNumber": 13,
+      "phase": "Add feedback and model lifecycle components",
+      "title": "Keep replayable sparse interaction and item history",
+      "type": "add_component",
+      "content": "Persist deduplicated user-item events and item metadata for model feedback and reproducible training across 10M+ users and 1M+ items. Partition or shard by measured access patterns; store observed interactions, not a dense 10M-by-1M matrix.",
+      "component": {
+        "nodeId": "rec_interaction_store",
+        "componentType": "database",
+        "label": "Interaction and Item Store",
+        "description": "Persists sparse user-item events and versioned item metadata for training.",
+        "position": {"x": 840, "y": 520},
+        "properties": {
+          "componentName": "Interaction and Item Store",
+          "purpose": "Support 10M+ users and 1M+ items by persisting deduplicated sparse user-item interactions, event-time context, and versioned item metadata for replay and training; partition from measured access patterns and never allocate a dense user-by-item matrix.",
+          "type": "NoSQL"
+        },
+        "highlightReason": "Durable sparse interaction history supplies model feedback and avoids materializing the prohibitively large dense matrix implied by catalog cardinality.",
+        "requirementIds": ["legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:5"]
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "rec_training",
+      "stepNumber": 14,
+      "phase": "Add feedback and model lifecycle components",
+      "title": "Train from time-consistent interaction and catalog snapshots",
+      "type": "add_component",
+      "content": "Train collaborative, content-based, and ranking artifacts from replayable interactions, item metadata, and point-in-time features. Use time-aware validation and compare the candidate against the incumbent; no retraining cadence, event retention, or deployment frequency is supplied, so confirm those with product and data owners.",
+      "component": {
+        "nodeId": "rec_training",
+        "componentType": "model-training",
+        "label": "Hybrid Recommendation Training",
+        "description": "Builds retrieval and ranking artifacts from sparse behavior and item content.",
+        "position": {"x": 1120, "y": 520},
+        "properties": {
+          "componentName": "Hybrid Recommendation Training",
+          "purpose": "Train collaborative filtering, content-based retrieval, and second-stage ranking from sparse observed interactions, item metadata, and point-in-time features; validate temporally against an incumbent before promotion.",
+          "computeType": "Distributed"
+        },
+        "highlightReason": "Separate training allows rich offline learning while the online preference stream still meets its five-minute freshness bound.",
+        "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:5"]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "rec_collaborative_model",
+      "stepNumber": 15,
+      "phase": "Add feedback and model lifecycle components",
+      "title": "Learn collaborative user and item embeddings",
+      "type": "add_component",
+      "content": "Use implicit-feedback collaborative filtering with two-tower user and item embeddings learned from observed sparse user-item interactions. Keep the representation sparse during training rather than constructing a dense user-item matrix.",
+      "component": {
+        "nodeId": "rec_collaborative_model",
+        "componentType": "ml-model",
+        "label": "Collaborative Two-Tower Retriever",
+        "description": "Learns user and item embeddings from sparse interaction feedback.",
+        "position": {"x": 1400, "y": 360},
+        "properties": {
+          "componentName": "Collaborative Two-Tower Retriever",
+          "purpose": "Implement collaborative filtering with two-tower user and item embeddings learned from observed sparse user-item interactions; use the user embedding to retrieve similar item vectors without materializing a dense matrix.",
+          "modelType": "Recommendation"
+        },
+        "highlightReason": "This learned retrieval artifact directly addresses collaborative filtering, two-tower retrieval, embeddings, and sparse interaction data.",
+        "requirementIds": ["legacy-requirement:1", "legacy-constraint:5"]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "rec_content_model",
+      "stepNumber": 16,
+      "phase": "Add feedback and model lifecycle components",
+      "title": "Give new items a content-based retrieval path",
+      "type": "add_component",
+      "content": "Build item representations from available metadata so a new item can enter candidate retrieval before it has interaction history. For a cold-start user, the orchestrator can use request context, explicit preferences, and eligible popular candidates while behavioral signals accumulate.",
+      "component": {
+        "nodeId": "rec_content_model",
+        "componentType": "ml-model",
+        "label": "Content-Based Item Retriever",
+        "description": "Embeds item attributes to retrieve relevant new and established catalog items.",
+        "position": {"x": 1400, "y": 520},
+        "properties": {
+          "componentName": "Content-Based Item Retriever",
+          "purpose": "Build content-based recommendation vectors from item attributes so new items can be retrieved before interaction history exists; combine with request-context and explicit-preference fallback for cold-start users.",
+          "modelType": "Recommendation"
+        },
+        "highlightReason": "Content-based retrieval gives new items a cold-start path while preserving the separate collaborative signal.",
+        "requirementIds": ["legacy-requirement:2", "legacy-requirement:4"]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4"]
+    },
+    {
+      "id": "rec_ranker_model",
+      "stepNumber": 17,
+      "phase": "Add feedback and model lifecycle components",
+      "title": "Score the merged candidate set as a second stage",
+      "type": "add_component",
+      "content": "Rank the bounded union of collaborative and content-based candidates using current user, item, and request features. Keep diversity and novelty as explicit post-score policy in the orchestrator so their effect can be measured separately from relevance scoring.",
+      "component": {
+        "nodeId": "rec_ranker_model",
+        "componentType": "ml-model",
+        "label": "Personalized Recommendation Ranker",
+        "description": "Scores fused candidates using online user, item, and context features.",
+        "position": {"x": 1400, "y": 680},
+        "properties": {
+          "componentName": "Personalized Recommendation Ranker",
+          "purpose": "Apply the second-stage ranking model to the fused candidate set using current user, item, and request features; expose scores and feature evidence for policy and grounded explanations.",
+          "modelType": "Recommendation"
+        },
+        "highlightReason": "An explicit ranking artifact makes the two-stage design and its feature inputs testable.",
+        "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:8"]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:8"]
+    },
+    {
+      "id": "rec_registry",
+      "stepNumber": 18,
+      "phase": "Add feedback and model lifecycle components",
+      "title": "Promote model and index versions as one compatible release",
+      "type": "add_component",
+      "content": "Track the collaborative retriever, content retriever, ranker, feature definitions, and ANN index as a versioned release bundle. Promotion requires a compatible set and measured evaluation evidence; rollback restores the prior model/index bundle rather than mixing versions.",
+      "component": {
+        "nodeId": "rec_registry",
+        "componentType": "model-registry",
+        "label": "Recommendation Model Registry",
+        "description": "Versions and gates compatible retrieval, ranking, and index artifacts.",
+        "position": {"x": 1680, "y": 520},
+        "properties": {
+          "componentName": "Recommendation Model Registry",
+          "purpose": "Version collaborative and content retrievers, ranker, feature definitions, and ANN index as a compatible release bundle; record evaluation evidence, gate promotion, and preserve the last known-good bundle for rollback."
+        },
+        "highlightReason": "Versioning models with their index prevents mixed embeddings and inference artifacts from silently corrupting recommendations.",
+        "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6"]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6"]
+    },
+    {
+      "id": "rec_experiment_analytics",
+      "stepNumber": 19,
+      "phase": "Add feedback and model lifecycle components",
+      "title": "Measure CTR against an explicit randomized baseline",
+      "type": "add_component",
+      "content": "Join impressions to clicks using the served item list, user assignment, and model version. Compare randomized treatment and baseline CTR; treat above 20% as an assumed relative lift target, not a percentage-point increase, and clarify the metric definition and experiment protocol before declaring success.",
+      "component": {
+        "nodeId": "rec_experiment_analytics",
+        "componentType": "analytics",
+        "label": "CTR Experiment Analytics",
+        "description": "Measures impression-to-click outcomes by stable experiment and model version.",
+        "position": {"x": 840, "y": 360},
+        "properties": {
+          "componentName": "CTR Experiment Analytics",
+          "purpose": "Join displayed impressions and clicks by randomized user assignment and model version; measure CTR versus baseline and test the brief's above 20% relative lift assumption, explicitly distinguishing it from percentage-point improvement."
+        },
+        "highlightReason": "CTR cannot be validated from model scores alone; the experiment needs a trustworthy impression denominator and a named baseline.",
+        "requirementIds": ["legacy-constraint:4"]
+      },
+      "requirementIds": ["legacy-constraint:4"]
+    },
+    {
+      "id": "rec_monitoring",
+      "stepNumber": 20,
+      "phase": "Add feedback and model lifecycle components",
+      "title": "Observe service quality and recommendation behavior",
+      "type": "add_component",
+      "content": "Monitor end-to-end latency against the under-50ms target, preference event-to-feature lag against 5 minutes, cache invalidation, candidate coverage, model/index version agreement, and experiment outcomes. Ask which latency percentile and operational availability target the product requires rather than inventing them.",
+      "component": {
+        "nodeId": "rec_monitoring",
+        "componentType": "monitoring",
+        "label": "Recommendation Quality and SLO Monitoring",
+        "description": "Observes latency, freshness, coverage, version health, and experiment outcomes.",
+        "position": {"x": 1960, "y": 80},
+        "properties": {
+          "componentName": "Recommendation Quality and SLO Monitoring",
+          "purpose": "Measure end-to-end latency against under 50ms, event-to-feature freshness against 5 minutes, cache invalidation, candidate coverage, model/index compatibility, and CTR experiment results; confirm the required latency percentile and availability target with owners."
+        },
+        "highlightReason": "Reliability requires measuring the actual latency and preference-freshness constraints as well as recommendation quality.",
+        "requirementIds": ["legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4"]
+      },
+      "requirementIds": ["legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "rec_edge_client_gateway",
+      "stepNumber": 21,
+      "phase": "Connect request-time serving",
+      "title": "Route feed requests through the API boundary",
+      "type": "add_connection",
+      "content": "The request carries user identity and current context; the gateway validates it before invoking the serving path.",
+      "connection": {
+        "edgeId": "rec_e_client_gateway",
+        "sourceNodeId": "rec_client",
+        "targetNodeId": "rec_gateway",
+        "connectionType": "http",
+        "label": "Personalized feed request",
+        "description": "The client requests recommendations with authenticated user and request context."
+      },
+      "requirementIds": ["legacy-requirement:3"]
+    },
+    {
+      "id": "rec_edge_gateway_service",
+      "stepNumber": 22,
+      "phase": "Connect request-time serving",
+      "title": "Invoke the recommendation orchestrator",
+      "type": "add_connection",
+      "content": "Keep validation and request controls at the gateway, and route the validated feed request to the orchestrator.",
+      "connection": {
+        "edgeId": "rec_e_gateway_orchestrator",
+        "sourceNodeId": "rec_gateway",
+        "targetNodeId": "rec_orchestrator",
+        "connectionType": "api-call",
+        "label": "Validated recommendation request",
+        "description": "The gateway forwards an authenticated, validated feed query to the latency-critical orchestrator."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:1"]
+    },
+    {
+      "id": "rec_edge_service_cache",
+      "stepNumber": 23,
+      "phase": "Connect request-time serving",
+      "title": "Use a bounded cache-aside response path",
+      "type": "add_connection",
+      "content": "The orchestrator checks the version-aware response cache and writes successful responses with the same user, context, experiment, and model/index key. A cache hit returns through the orchestrator; preference events invalidate or version-bypass stale entries.",
+      "connection": {
+        "edgeId": "rec_e_orchestrator_cache",
+        "sourceNodeId": "rec_orchestrator",
+        "targetNodeId": "rec_cache",
+        "connectionType": "data-flow",
+        "label": "Cache-aside lookup and response write",
+        "description": "Read and populate bounded recommendation responses keyed by user, context, experiment, and compatible model/index versions."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "rec_edge_service_features",
+      "stepNumber": 24,
+      "phase": "Connect request-time serving",
+      "title": "Fetch current ranking features",
+      "type": "add_connection",
+      "content": "Read the current feature version on a cache miss and attach freshness metadata to the rank request; do not scan the full interaction ledger in the synchronous path.",
+      "connection": {
+        "edgeId": "rec_e_orchestrator_features",
+        "sourceNodeId": "rec_orchestrator",
+        "targetNodeId": "rec_features",
+        "connectionType": "api-call",
+        "label": "Current user and item features",
+        "description": "Fetch low-latency preference, item, and context features with event-time and feature-version metadata."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "rec_edge_service_serving",
+      "stepNumber": 25,
+      "phase": "Connect request-time serving",
+      "title": "Call the pinned retrieval and ranking bundle",
+      "type": "add_connection",
+      "content": "Send request context and online features to inference. The orchestrator keeps its work bounded by the end-to-end under-50ms constraint and does not wait on event analytics or training.",
+      "connection": {
+        "edgeId": "rec_e_orchestrator_serving",
+        "sourceNodeId": "rec_orchestrator",
+        "targetNodeId": "rec_serving",
+        "connectionType": "api-call",
+        "label": "Retrieve and rank candidates",
+        "description": "Invoke the approved collaborative/content retrieval and second-stage ranking bundle with current request features."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "rec_edge_serving_index",
+      "stepNumber": 26,
+      "phase": "Connect request-time serving",
+      "title": "Perform approximate-nearest-neighbor candidate lookup",
+      "type": "add_connection",
+      "content": "Query the matching ANN namespace for collaborative and content-based candidates. The exact candidate count and stage timeout are workload decisions to validate against the under-50ms end-to-end constraint, not values to guess here.",
+      "connection": {
+        "edgeId": "rec_e_serving_ann",
+        "sourceNodeId": "rec_serving",
+        "targetNodeId": "rec_ann_index",
+        "connectionType": "api-call",
+        "label": "Versioned ANN candidate query",
+        "description": "Search the active item-vector namespaces with the matching retriever version and bounded query work."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "rec_edge_serving_response",
+      "stepNumber": 27,
+      "phase": "Connect request-time serving",
+      "title": "Return ranked items with grounded explanation evidence",
+      "type": "add_connection",
+      "content": "Return the ordered candidates, scores, model/index version, and explanation evidence to the orchestrator. It applies diversity and novelty policy, formats only supported reasons, and returns the personalized response to the client.",
+      "connection": {
+        "edgeId": "rec_e_serving_orchestrator",
+        "sourceNodeId": "rec_serving",
+        "targetNodeId": "rec_orchestrator",
+        "connectionType": "data-flow",
+        "label": "Ranked candidates and reason evidence",
+        "description": "Return scores and model-derived evidence so the orchestrator can apply diversity, novelty, and explainable response policy."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "rec_edge_gateway_events",
+      "stepNumber": 28,
+      "phase": "Connect feedback and model release",
+      "title": "Publish only displayed impressions and actual interactions",
+      "type": "add_connection",
+      "content": "The client reports an impression only after display and later sends clicks or other supported interactions separately. The gateway validates the event envelope and forwards its stable event ID for idempotent consumption.",
+      "connection": {
+        "edgeId": "rec_e_gateway_events",
+        "sourceNodeId": "rec_gateway",
+        "targetNodeId": "rec_events",
+        "connectionType": "message-queue",
+        "label": "Impression and click events",
+        "description": "Durably enqueue validated impression and click events with user, item, timestamp, experiment, and model-version context."
+      },
+      "requirementIds": ["legacy-requirement:5"]
+    },
+    {
+      "id": "rec_edge_events_stream",
+      "stepNumber": 29,
+      "phase": "Connect feedback and model release",
+      "title": "Consume interaction events asynchronously",
+      "type": "add_connection",
+      "content": "The stream consumer retries safely and deduplicates by event ID. Backlog and processing lag must leave enough margin to update preferences within 5 minutes.",
+      "connection": {
+        "edgeId": "rec_e_events_stream",
+        "sourceNodeId": "rec_events",
+        "targetNodeId": "rec_preference_stream",
+        "connectionType": "message-queue",
+        "label": "Idempotent interaction stream",
+        "description": "Deliver replayable interaction events to the preference updater with retry and event-ID deduplication."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "rec_edge_stream_features",
+      "stepNumber": 30,
+      "phase": "Connect feedback and model release",
+      "title": "Materialize preference changes into online features",
+      "type": "add_connection",
+      "content": "Update the user's feature version from new interactions within 5 minutes and expose event-time freshness to serving. Monitor end-to-end lag rather than assuming that queue acceptance means the preference is already visible.",
+      "connection": {
+        "edgeId": "rec_e_stream_features",
+        "sourceNodeId": "rec_preference_stream",
+        "targetNodeId": "rec_features",
+        "connectionType": "data-flow",
+        "label": "Preference feature updates within 5 minutes",
+        "description": "Apply deduplicated interactions to versioned online user features and publish event-time freshness."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "rec_edge_stream_cache",
+      "stepNumber": 31,
+      "phase": "Connect feedback and model release",
+      "title": "Invalidate responses made stale by new preferences",
+      "type": "add_connection",
+      "content": "Invalidate the affected user's recommendation cache entry when the preference version advances. If invalidation is delayed, the response key/version policy must prevent stale recommendations from surviving beyond the five-minute freshness bound.",
+      "connection": {
+        "edgeId": "rec_e_stream_cache",
+        "sourceNodeId": "rec_preference_stream",
+        "targetNodeId": "rec_cache",
+        "connectionType": "data-flow",
+        "label": "User preference version and cache invalidation",
+        "description": "Advance the user preference version and evict or bypass recommendation responses made stale by new interactions."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:3"]
+    },
+    {
+      "id": "rec_edge_events_store",
+      "stepNumber": 32,
+      "phase": "Connect feedback and model release",
+      "title": "Persist replayable interaction history",
+      "type": "add_connection",
+      "content": "Persist deduplicated observations and displayed exposures separately so offline training and CTR analysis can distinguish an opportunity from a click. Keep sparse rows and event time; do not expand them into a dense matrix.",
+      "connection": {
+        "edgeId": "rec_e_events_store",
+        "sourceNodeId": "rec_events",
+        "targetNodeId": "rec_interaction_store",
+        "connectionType": "data-flow",
+        "label": "Sparse interaction and exposure ledger",
+        "description": "Append deduplicated user-item observations, impressions, clicks, and event-time context for replay and learning."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "rec_edge_store_training",
+      "stepNumber": 33,
+      "phase": "Connect feedback and model release",
+      "title": "Supply time-consistent data to model training",
+      "type": "add_connection",
+      "content": "Training reads replayable interaction and item snapshots with point-in-time feature definitions. Keep online feature freshness and offline model-training cadence as separate contracts.",
+      "connection": {
+        "edgeId": "rec_e_store_training",
+        "sourceNodeId": "rec_interaction_store",
+        "targetNodeId": "rec_training",
+        "connectionType": "database-connection",
+        "label": "Sparse event and item training snapshots",
+        "description": "Read deduplicated user-item history and versioned item metadata for temporally valid model training."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "rec_edge_training_cf",
+      "stepNumber": 34,
+      "phase": "Connect feedback and model release",
+      "title": "Train the collaborative filtering artifact",
+      "type": "add_connection",
+      "content": "Train user and item embeddings from sparse observed interactions; the learning pipeline must not allocate a dense 10M-by-1M matrix.",
+      "connection": {
+        "edgeId": "rec_e_training_cf",
+        "sourceNodeId": "rec_training",
+        "targetNodeId": "rec_collaborative_model",
+        "connectionType": "data-flow",
+        "label": "Sparse collaborative training data",
+        "description": "Fit the two-tower collaborative model and its versioned user/item embedding representation from observed events."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "rec_edge_training_content",
+      "stepNumber": 35,
+      "phase": "Connect feedback and model release",
+      "title": "Train content representations for the catalog",
+      "type": "add_connection",
+      "content": "Use versioned item metadata to build content-based representations, including for new items that have no interactions yet.",
+      "connection": {
+        "edgeId": "rec_e_training_content",
+        "sourceNodeId": "rec_training",
+        "targetNodeId": "rec_content_model",
+        "connectionType": "data-flow",
+        "label": "Item metadata and content training data",
+        "description": "Build and validate content-based item vectors so cold-start items can participate in retrieval."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4"]
+    },
+    {
+      "id": "rec_edge_training_ranker",
+      "stepNumber": 36,
+      "phase": "Connect feedback and model release",
+      "title": "Train ranking from candidate outcomes and online features",
+      "type": "add_connection",
+      "content": "Train and validate the second-stage ranker against temporally held-out outcomes using feature definitions aligned with online serving.",
+      "connection": {
+        "edgeId": "rec_e_training_ranker",
+        "sourceNodeId": "rec_training",
+        "targetNodeId": "rec_ranker_model",
+        "connectionType": "data-flow",
+        "label": "Candidate outcomes and point-in-time features",
+        "description": "Fit the ranking model using candidate exposure, interaction outcomes, and serving-compatible feature snapshots."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6"]
+    },
+    {
+      "id": "rec_edge_cf_registry",
+      "stepNumber": 37,
+      "phase": "Connect feedback and model release",
+      "title": "Register the collaborative model with evaluation evidence",
+      "type": "add_connection",
+      "content": "Record the collaborative model artifact, embedding schema, training data revision, and evaluation results together so it can be promoted or rolled back deliberately.",
+      "connection": {
+        "edgeId": "rec_e_cf_registry",
+        "sourceNodeId": "rec_collaborative_model",
+        "targetNodeId": "rec_registry",
+        "connectionType": "data-flow",
+        "label": "Versioned collaborative retriever",
+        "description": "Register the retriever with embedding schema, training provenance, and validation evidence."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6"]
+    },
+    {
+      "id": "rec_edge_content_registry",
+      "stepNumber": 38,
+      "phase": "Connect feedback and model release",
+      "title": "Register the content retriever as a compatible artifact",
+      "type": "add_connection",
+      "content": "Version the content encoder with the item metadata schema and vector space used to build its ANN namespace.",
+      "connection": {
+        "edgeId": "rec_e_content_registry",
+        "sourceNodeId": "rec_content_model",
+        "targetNodeId": "rec_registry",
+        "connectionType": "data-flow",
+        "label": "Versioned content retriever",
+        "description": "Register the content model with its metadata schema, vector-space identity, and cold-start evaluation evidence."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4"]
+    },
+    {
+      "id": "rec_edge_ranker_registry",
+      "stepNumber": 39,
+      "phase": "Connect feedback and model release",
+      "title": "Register the second-stage ranker",
+      "type": "add_connection",
+      "content": "Keep the ranker's feature contract and evaluation evidence with the two retrieval artifacts it expects.",
+      "connection": {
+        "edgeId": "rec_e_ranker_registry",
+        "sourceNodeId": "rec_ranker_model",
+        "targetNodeId": "rec_registry",
+        "connectionType": "data-flow",
+        "label": "Versioned ranking artifact",
+        "description": "Register the ranker with its serving feature contract and compatible retriever bundle."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6"]
+    },
+    {
+      "id": "rec_edge_registry_serving",
+      "stepNumber": 40,
+      "phase": "Connect feedback and model release",
+      "title": "Deploy one approved, compatible inference bundle",
+      "type": "add_connection",
+      "content": "Serving switches atomically to the approved retrievers and ranker. If an artifact or index is unavailable or incompatible, retain the last known-good bundle rather than mixing versions.",
+      "connection": {
+        "edgeId": "rec_e_registry_serving",
+        "sourceNodeId": "rec_registry",
+        "targetNodeId": "rec_serving",
+        "connectionType": "data-flow",
+        "label": "Approved retrieval and ranking release",
+        "description": "Deploy a validated compatible model bundle and preserve rollback to the previous release."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6"]
+    },
+    {
+      "id": "rec_edge_registry_index",
+      "stepNumber": 41,
+      "phase": "Connect feedback and model release",
+      "title": "Activate matching item-vector namespaces",
+      "type": "add_connection",
+      "content": "Publish the item vectors only after validation and switch the index pointer with its matching model bundle. Keep the prior index available for rollback until the new bundle is known good.",
+      "connection": {
+        "edgeId": "rec_e_registry_ann",
+        "sourceNodeId": "rec_registry",
+        "targetNodeId": "rec_ann_index",
+        "connectionType": "data-flow",
+        "label": "Validated versioned item-vector index",
+        "description": "Activate collaborative and content vector namespaces only with their matching approved encoders."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:2"]
+    },
+    {
+      "id": "rec_edge_events_analytics",
+      "stepNumber": 42,
+      "phase": "Connect feedback and model release",
+      "title": "Keep CTR measurement off the response path",
+      "type": "add_connection",
+      "content": "Analyze impressions and clicks asynchronously by randomized assignment, baseline, item exposure, and served model version. Experiment analytics must not delay a recommendation response.",
+      "connection": {
+        "edgeId": "rec_e_events_analytics",
+        "sourceNodeId": "rec_events",
+        "targetNodeId": "rec_experiment_analytics",
+        "connectionType": "message-queue",
+        "label": "Experiment exposure and outcome stream",
+        "description": "Provide displayed impressions and subsequent clicks for baseline CTR and treatment-lift analysis."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "rec_edge_service_monitoring",
+      "stepNumber": 43,
+      "phase": "Close the measurement loop",
+      "title": "Measure end-to-end recommendation latency",
+      "type": "add_connection",
+      "content": "Instrument the full request from gateway through cache, feature fetch, retrieval, ranking, policy, and response. Report the latency distribution against under 50ms and confirm which percentile the product intends.",
+      "connection": {
+        "edgeId": "rec_e_orchestrator_monitoring",
+        "sourceNodeId": "rec_orchestrator",
+        "targetNodeId": "rec_monitoring",
+        "connectionType": "data-flow",
+        "label": "End-to-end latency and response quality",
+        "description": "Measure full-path latency, cache behavior, candidate coverage, fallback use, and grounded explanation availability."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "rec_edge_serving_monitoring",
+      "stepNumber": 44,
+      "phase": "Close the measurement loop",
+      "title": "Watch inference and index health",
+      "type": "add_connection",
+      "content": "Track retrieval and ranking latency, model/index version agreement, errors, and candidate coverage. A fast but empty or stale result is not a successful recommendation response.",
+      "connection": {
+        "edgeId": "rec_e_serving_monitoring",
+        "sourceNodeId": "rec_serving",
+        "targetNodeId": "rec_monitoring",
+        "connectionType": "data-flow",
+        "label": "Inference, version, and candidate metrics",
+        "description": "Observe model errors, retrieval coverage, index health, and compatible artifact versions."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "rec_edge_stream_monitoring",
+      "stepNumber": 45,
+      "phase": "Close the measurement loop",
+      "title": "Alert on preference freshness before it breaches five minutes",
+      "type": "add_connection",
+      "content": "Measure event-time-to-feature visibility and cache invalidation lag end to end. Alert and recover before user preferences exceed the five-minute bound; queue depth alone is not a freshness measurement.",
+      "connection": {
+        "edgeId": "rec_e_stream_monitoring",
+        "sourceNodeId": "rec_preference_stream",
+        "targetNodeId": "rec_monitoring",
+        "connectionType": "data-flow",
+        "label": "Event-to-feature freshness and processing lag",
+        "description": "Measure actual event-time freshness, consumer lag, deduplication failures, and cache invalidation completion."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "rec_edge_analytics_monitoring",
+      "stepNumber": 46,
+      "phase": "Close the measurement loop",
+      "title": "Validate the CTR target with an explicit experiment",
+      "type": "add_connection",
+      "content": "Report treatment and baseline CTR with exposure counts, model versions, and uncertainty. Declare the brief's above-20% target met only under the agreed definition and experiment protocol; model offline metrics alone do not establish CTR improvement.",
+      "connection": {
+        "edgeId": "rec_e_analytics_monitoring",
+        "sourceNodeId": "rec_experiment_analytics",
+        "targetNodeId": "rec_monitoring",
+        "connectionType": "data-flow",
+        "label": "Baseline CTR and experiment lift",
+        "description": "Expose the agreed CTR calculation, baseline comparison, exposure counts, and model-version attribution for review."
+      },
+      "requirementIds": ["legacy-constraint:4"]
+    }
+  ]
+}

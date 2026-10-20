@@ -1,0 +1,787 @@
+{
+  "problem_id": "mlops_012",
+  "version": "1.0",
+  "totalSteps": 42,
+  "phases": [
+    {
+      "name": "Read the brief and separate facts from assumptions",
+      "stepRange": [1, 3],
+      "description": "Preserve the supplied scope, treat vendor and implementation hints as optional, and identify the workload details that still need clarification."
+    },
+    {
+      "name": "Place the control plane and GPU capacity",
+      "stepRange": [4, 14],
+      "description": "Build a tenant-aware job admission path, fair scheduler, heterogeneous GPU pools, durable state, checkpoint storage, and operational reporting with existing catalog components."
+    },
+    {
+      "name": "Connect scheduling, recovery, and reporting paths",
+      "stepRange": [15, 34],
+      "description": "Wire job admission through authorization and queues to gang placement, then connect interruption recovery, telemetry, and team cost reporting."
+    },
+    {
+      "name": "Make the measurable policies explicit",
+      "stepRange": [35, 40],
+      "description": "Apply the stated utilization, scheduling-latency, fleet-size, and team-fairness targets without inventing extra service levels."
+    },
+    {
+      "name": "Review the design and open decisions",
+      "stepRange": [41, 42],
+      "description": "Check that the graph covers the brief and identify workload and policy choices that should be confirmed before sizing or implementation."
+    }
+  ],
+  "steps": [
+    {
+      "id": "mlops012_scope_snapshot",
+      "stepNumber": 1,
+      "phase": "Read the brief and separate facts from assumptions",
+      "title": "Start with the exact problem statement",
+      "type": "explanation",
+      "content": "PROBLEM BRIEF\nTitle: Design a GPU Cluster Management System for ML Training\nDescription: Design a GPU cluster management system that handles job scheduling, resource allocation, multi-tenancy, preemption, and cost optimization for ML training workloads.\nCategory: MLOps - Infrastructure\nDifficulty: Very Hard\nEstimated time: 90+ minutes\n\nRequirements:\n- Schedule training jobs across GPU nodes\n- Implement fair-share resource allocation\n- Support job preemption and priority queues\n- Handle multi-tenancy with resource quotas\n- Track GPU utilization and idle resources\n- Implement gang scheduling for distributed training\n- Support spot/preemptible instance integration\n- Provide cost allocation and chargeback reports\n\nConstraints:\n- GPU utilization above 80% cluster-wide\n- Job scheduling latency under 30 seconds\n- Support 1000+ GPUs across multiple node types\n- Handle heterogeneous GPU hardware (A100, H100, etc.)\n- Fair resource allocation across 50+ teams\n\nSupplied hints (implementation suggestions, not additional requirements):\n- Use Kubernetes with GPU operator for orchestration\n- Implement Volcano or Kueue for batch scheduling\n- Use topology-aware scheduling for NVLink/NVSwitch\n- Implement bin-packing for efficient resource utilization\n- Use autoscaler with cloud provider GPU pools\n- Implement job-level monitoring with GPU metrics",
+      "requirementIds": []
+    },
+    {
+      "id": "mlops012_facts_vs_hints",
+      "stepNumber": 2,
+      "phase": "Read the brief and separate facts from assumptions",
+      "title": "Keep acceptance criteria distinct from technology hints",
+      "type": "explanation",
+      "content": "The eight requirements and five constraints define what the design must address. Kubernetes, Volcano, Kueue, topology-aware placement, bin-packing, and cloud GPU pools are suggestions rather than mandatory products. The architecture uses the existing Kubernetes and GPU catalog components to express those capabilities without committing to a scheduler vendor or cloud provider.",
+      "requirementIds": []
+    },
+    {
+      "id": "mlops012_unknowns",
+      "stepNumber": 3,
+      "phase": "Read the brief and separate facts from assumptions",
+      "title": "Clarify the workload before fixing capacity policy",
+      "type": "explanation",
+      "content": "The prompt does not specify job arrival patterns, GPU-hours per team, training duration, accelerator memory profiles, regional layout, permitted GPU mixing within a gang, queue classes, preemption budgets, checkpoint cost, or how utilization and scheduling latency are measured. Confirm these before choosing team weights, pool sizes, autoscaling thresholds, or a production topology. The design below preserves the stated targets and makes those assumptions visible rather than adding new numeric commitments.",
+      "requirementIds": ["legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlops012_admission_decision",
+      "stepNumber": 4,
+      "phase": "Place the control plane and GPU capacity",
+      "title": "Separate admission from GPU placement",
+      "type": "decision_point",
+      "content": "Accept and validate a job once, persist its identity and requested resources, then enqueue it for scheduling. Keep the API responsive while the scheduler waits for a complete gang or eligible capacity; do not make a long-running training job part of the synchronous submission request.",
+      "decision": {
+        "question": "Should the job submission API reserve GPUs synchronously?",
+        "chosen": "Persist an idempotent job request and let the scheduler make placement decisions asynchronously.",
+        "chosenReason": "This keeps admission separate from queue delay and makes priority, fair-share, preemption, and gang placement explicit control-plane decisions.",
+        "alternatives": [
+          {
+            "option": "Hold the submission request open until every GPU is reserved",
+            "tradeoff": "The API inherits queue delays and client retries can create duplicate or partially reserved work."
+          },
+          {
+            "option": "Start each distributed worker as soon as one GPU is available",
+            "tradeoff": "Partial placement can strand accelerators while the rest of the training gang waits."
+          }
+        ]
+      },
+      "requirementIds": []
+    },
+    {
+      "id": "mlops012_add_gateway",
+      "stepNumber": 5,
+      "phase": "Place the control plane and GPU capacity",
+      "title": "Add the job admission API",
+      "type": "add_component",
+      "content": "Provide a stable endpoint for job submission, cancellation, status, and quota-aware validation. Require an idempotency key for submissions so client retries do not create duplicate training runs.",
+      "component": {
+        "nodeId": "mlops012_gateway",
+        "componentType": "api-gateway",
+        "label": "Training Job API",
+        "description": "Validates and admits idempotent job submissions, cancellation requests, and status queries.",
+        "position": {"x": 80, "y": 270},
+        "properties": {
+          "componentName": "Training Job API",
+          "purpose": "Expose job submit, cancel, and status operations; validate resource requests and idempotency keys before admission.",
+          "inputValidation": true,
+          "authentication": "OAuth 2.0",
+          "rateLimiting": true,
+          "deduplication": true
+        },
+        "highlightReason": "Every run enters through one validated, retry-safe admission boundary."
+      },
+      "requirementIds": ["legacy-requirement:4"]
+    },
+    {
+      "id": "mlops012_add_identity",
+      "stepNumber": 6,
+      "phase": "Place the control plane and GPU capacity",
+      "title": "Add tenant identity and quota context",
+      "type": "add_component",
+      "content": "Resolve the caller to a team and workload identity before a job consumes capacity. The scheduler receives a verified tenant, queue class, and quota context rather than trusting team labels supplied in a request.",
+      "component": {
+        "nodeId": "mlops012_identity",
+        "componentType": "auth-service",
+        "label": "Team Identity and Policy",
+        "description": "Authenticates users and workloads and resolves their team, roles, and quota policy.",
+        "position": {"x": 300, "y": 70},
+        "properties": {
+          "componentName": "Team Identity and Policy",
+          "purpose": "Resolve trusted user and workload identities to teams, roles, queue permissions, and resource quota policy.",
+          "oauth": true,
+          "sessions": "database",
+          "mfa": true
+        },
+        "highlightReason": "Multi-tenancy requires authenticated ownership and enforceable resource boundaries."
+      },
+      "requirementIds": ["legacy-requirement:4"]
+    },
+    {
+      "id": "mlops012_add_queue",
+      "stepNumber": 7,
+      "phase": "Place the control plane and GPU capacity",
+      "title": "Add durable priority queues",
+      "type": "add_component",
+      "content": "Keep pending jobs durable and partition scheduling policy by priority and team. A preempted job returns with its checkpoint reference and original ownership, not as a new untracked run.",
+      "component": {
+        "nodeId": "mlops012_queue",
+        "componentType": "queue",
+        "label": "Team and Priority Queues",
+        "description": "Durably holds eligible jobs and requeues checkpointed work after preemption or capacity interruption.",
+        "position": {"x": 530, "y": 260},
+        "properties": {
+          "componentName": "Team and Priority Queues",
+          "purpose": "Maintain durable per-team and priority-class backlog; requeue interrupted jobs with the same run identity and checkpoint reference.",
+          "durable": true,
+          "backoff": "exponential"
+        },
+        "highlightReason": "Priority ordering and resumable requeue are explicit parts of the scheduling contract."
+      },
+      "requirementIds": ["legacy-requirement:3"]
+    },
+    {
+      "id": "mlops012_add_scheduler",
+      "stepNumber": 8,
+      "phase": "Place the control plane and GPU capacity",
+      "title": "Add the fair-share cluster scheduler",
+      "type": "add_component",
+      "content": "Use the orchestration control plane to coordinate queue selection, quota checks, gang admission, accelerator topology, and node-pool lifecycle. Treat on-demand and spot/preemptible capacity as explicit pool classes with node labels, admission rules, and interruption deadlines. On an interruption notice, stop new placement, checkpoint before the drain deadline, release the reservation, and requeue the job under its priority and fair-share policy; allow on-demand fallback only when the tenant quota and cost policy permit it.",
+      "component": {
+        "nodeId": "mlops012_scheduler",
+        "componentType": "kubernetes",
+        "label": "GPU Job Scheduler",
+        "description": "Coordinates fair-share admission, quota enforcement, gang placement, preemption, and GPU pool lifecycle.",
+        "position": {"x": 770, "y": 270},
+        "properties": {
+          "componentName": "GPU Job Scheduler",
+          "purpose": "Coordinate durable job queues, team quota policy, fair-share weights, priority and preemption, all-or-nothing gang placement, accelerator topology, and autoscaling. Treat cluster-wide active GPU utilization above 80% as a measured objective: use topology-aware bin packing, safe backfill, and capacity compaction while preserving the under-30-second scheduling target and team fairness. Model on-demand versus spot/preemptible pools explicitly through capacity labels and admission policy; consume interruption notices, block new placement on draining nodes, checkpoint before the deadline, release reservations, and requeue or use quota-approved on-demand fallback without blocking scheduler decisions.",
+          "distribution": "Vanilla",
+          "managed": true
+        },
+        "highlightReason": "One policy-aware scheduler arbitrates scarce accelerators across teams and node types."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlops012_add_a100_pool",
+      "stepNumber": 9,
+      "phase": "Place the control plane and GPU capacity",
+      "title": "Add the A100 accelerator pool",
+      "type": "add_component",
+      "content": "Represent A100 capacity as its own schedulable pool with accelerator memory, fabric topology, health, and availability labels. Include a capacity-class label distinguishing on-demand from spot/preemptible nodes and publish interruption notices with the drain deadline so the scheduler can stop placement and checkpoint affected gangs. A distributed job asks for a compatible pool and gang shape; the scheduler does not silently mix generations when the workload is not validated for it.",
+      "component": {
+        "nodeId": "mlops012_a100_pool",
+        "componentType": "gpu-cluster",
+        "label": "A100 GPU Pool",
+        "description": "Schedulable A100 nodes with health, capacity, and interconnect topology reported to the control plane.",
+        "position": {"x": 1050, "y": 120},
+        "properties": {
+          "componentName": "A100 GPU Pool",
+          "purpose": "Expose A100 capacity as a distinct pool; publish free GPUs, memory, node health, NVLink/NVSwitch topology, and an explicit on-demand/spot-preemptible capacity class. Emit interruption notices and drain deadlines before reclaim so the scheduler can stop new placement and checkpoint affected jobs.",
+          "gpuType": "NVIDIA A100"
+        },
+        "highlightReason": "Separate pool identity lets placement account for accelerator generation and topology."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "mlops012_add_h100_pool",
+      "stepNumber": 10,
+      "phase": "Place the control plane and GPU capacity",
+      "title": "Add the H100 accelerator pool",
+      "type": "add_component",
+      "content": "Keep H100 capacity separately identifiable from A100 capacity. Placement selects a compatible pool using the job's declared hardware and communication requirements, while the overall fleet policy can balance work across both pools. Label spot/preemptible capacity separately and send interruption notices and deadlines through the same recovery path as on the A100 pool.",
+      "component": {
+        "nodeId": "mlops012_h100_pool",
+        "componentType": "gpu-cluster",
+        "label": "H100 GPU Pool",
+        "description": "A distinct H100 node pool whose capacity and topology can be selected without conflating A100 resources.",
+        "position": {"x": 1050, "y": 410},
+        "properties": {
+          "componentName": "H100 GPU Pool",
+          "purpose": "Expose H100 capacity as a distinct pool; publish free GPUs, memory, node health, interconnect topology, and an explicit on-demand/spot-preemptible capacity class. Emit interruption notices and drain deadlines before reclaim so the scheduler can stop new placement and checkpoint affected jobs.",
+          "gpuType": "NVIDIA H100"
+        },
+        "highlightReason": "The separate H100 pool makes the required heterogeneous hardware explicit in the graph."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "mlops012_add_job_state",
+      "stepNumber": 11,
+      "phase": "Place the control plane and GPU capacity",
+      "title": "Add authoritative job and quota state",
+      "type": "add_component",
+      "content": "Persist job specifications, ownership, priority, quota usage, placement state, preemption history, and checkpoint manifests. Use conditional state transitions so retries and concurrent scheduler replicas cannot claim the same job or double-charge a reservation.",
+      "component": {
+        "nodeId": "mlops012_job_state",
+        "componentType": "database",
+        "label": "Job, Quota, and Run State",
+        "description": "Stores authoritative job lifecycle, team ownership, resource reservations, and accounting inputs.",
+        "position": {"x": 520, "y": 560},
+        "properties": {
+          "componentName": "Job, Quota, and Run State",
+          "purpose": "Persist job specifications, tenant ownership, quota and reservation state, run lifecycle, preemption history, and checkpoint manifests with conditional transitions and audit history.",
+          "type": "RDBMS",
+          "engine": "postgresql",
+          "workload": "OLTP",
+          "encryption": true,
+          "rbac": true,
+          "auditLog": true
+        },
+        "highlightReason": "The scheduler needs one authoritative, auditable view of ownership and resource reservations."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:8"]
+    },
+    {
+      "id": "mlops012_add_checkpoint_store",
+      "stepNumber": 12,
+      "phase": "Place the control plane and GPU capacity",
+      "title": "Add durable checkpoint storage",
+      "type": "add_component",
+      "content": "Write versioned, checksummed training checkpoints and manifests outside the lifetime of a GPU instance. The scheduler can use the last committed manifest when a spot interruption or higher-priority job requires a worker to leave the pool.",
+      "component": {
+        "nodeId": "mlops012_checkpoint_store",
+        "componentType": "object-storage",
+        "label": "Checkpoint and Manifest Store",
+        "description": "Keeps durable, versioned checkpoint objects and committed manifests for resumable training jobs.",
+        "position": {"x": 1320, "y": 570},
+        "properties": {
+          "componentName": "Checkpoint and Manifest Store",
+          "purpose": "Store immutable checkpoint shards and a committed run manifest so interrupted jobs can resume from a verified consistent checkpoint.",
+          "versioning": true,
+          "checksumValidation": true
+        },
+        "highlightReason": "Preemption is safe only when recovery state survives loss of the compute node."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7"]
+    },
+    {
+      "id": "mlops012_add_monitoring",
+      "stepNumber": 13,
+      "phase": "Place the control plane and GPU capacity",
+      "title": "Add cluster and scheduler telemetry",
+      "type": "add_component",
+      "content": "Collect GPU-active and idle capacity, queue age, scheduling latency, gang placement outcomes, preemption and interruption events, checkpoint progress, and team-level allocation. Keep per-pool and cluster-wide views so the fleet target cannot hide an underused accelerator type.",
+      "component": {
+        "nodeId": "mlops012_monitoring",
+        "componentType": "monitoring",
+        "label": "GPU Fleet Observability",
+        "description": "Tracks accelerator utilization, idle capacity, scheduling delay, queue health, and interruption signals.",
+        "position": {"x": 1320, "y": 270},
+        "properties": {
+          "componentName": "GPU Fleet Observability",
+          "purpose": "Measure active, allocated, idle, unhealthy, and maintenance GPU capacity by pool and cluster using a documented denominator; track queue wait, scheduling latency, gang outcomes, preemption, checkpoint recovery, and team allocation. Alert when measured cluster-wide active GPU utilization is not above 80%; feed sustained idle/fragmented capacity to safe bin packing, backfill, or approved pool compaction, but do not count recovered utilization as success if the under-30-second scheduling or fair-share targets regress.",
+          "stack": "Prometheus + Grafana",
+          "metrics": true,
+          "alerts": true
+        },
+        "highlightReason": "Utilization and scheduling targets need observable definitions at both pool and fleet level."
+      },
+      "requirementIds": ["legacy-requirement:5"]
+    },
+    {
+      "id": "mlops012_add_chargeback",
+      "stepNumber": 14,
+      "phase": "Place the control plane and GPU capacity",
+      "title": "Add team cost allocation and chargeback",
+      "type": "add_component",
+      "content": "Attribute accelerator time, pool type, reserved versus active capacity, preemption, and storage to the verified team and run. Produce explainable reports from recorded allocation events rather than dividing the cloud invoice by team after the fact.",
+      "component": {
+        "nodeId": "mlops012_chargeback",
+        "componentType": "analytics",
+        "label": "Team Cost and Utilization Reports",
+        "description": "Aggregates attributable GPU, reservation, interruption, and checkpoint usage into team chargeback reports.",
+        "position": {"x": 1640, "y": 270},
+        "properties": {
+          "componentName": "Team Cost and Utilization Reports",
+          "purpose": "Aggregate auditable per-run GPU time, accelerator class, reserved and active capacity, preemption, and checkpoint storage into team-level cost allocation and chargeback reports.",
+          "realTime": true
+        },
+        "highlightReason": "Chargeback requires cost inputs to remain attributable to a team, run, and accelerator pool."
+      },
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "mlops012_edge_gateway_identity",
+      "stepNumber": 15,
+      "phase": "Connect scheduling, recovery, and reporting paths",
+      "title": "Resolve identity before admitting work",
+      "type": "add_connection",
+      "content": "The API delegates authentication and authorization to the tenant policy service before the request can enter a scheduling queue.",
+      "connection": {
+        "edgeId": "mlops012_gateway_identity",
+        "sourceNodeId": "mlops012_gateway",
+        "targetNodeId": "mlops012_identity",
+        "connectionType": "api-call",
+        "label": "Authenticate user and workload",
+        "description": "Resolve verified identity, team membership, roles, and permitted job operations."
+      },
+      "requirementIds": ["legacy-requirement:4"]
+    },
+    {
+      "id": "mlops012_edge_gateway_queue",
+      "stepNumber": 16,
+      "phase": "Connect scheduling, recovery, and reporting paths",
+      "title": "Enqueue validated training requests",
+      "type": "add_connection",
+      "content": "After admission, publish the job ID, idempotency key, verified tenant, priority class, and resource request to the durable queue.",
+      "connection": {
+        "edgeId": "mlops012_gateway_queue",
+        "sourceNodeId": "mlops012_gateway",
+        "targetNodeId": "mlops012_queue",
+        "connectionType": "api-call",
+        "label": "Validated job and priority",
+        "description": "Submit a durable run request with verified ownership and the declared accelerator and gang requirements."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3"]
+    },
+    {
+      "id": "mlops012_edge_gateway_state",
+      "stepNumber": 17,
+      "phase": "Connect scheduling, recovery, and reporting paths",
+      "title": "Persist the accepted run before scheduling",
+      "type": "add_connection",
+      "content": "Record the accepted job, ownership, resource request, and idempotency result so API retries and scheduler restarts refer to the same run.",
+      "connection": {
+        "edgeId": "mlops012_gateway_job_state",
+        "sourceNodeId": "mlops012_gateway",
+        "targetNodeId": "mlops012_job_state",
+        "connectionType": "data-flow",
+        "label": "Accepted job and ownership",
+        "description": "Persist the canonical job specification and idempotent admission state."
+      },
+      "requirementIds": ["legacy-requirement:4"]
+    },
+    {
+      "id": "mlops012_edge_identity_scheduler",
+      "stepNumber": 18,
+      "phase": "Connect scheduling, recovery, and reporting paths",
+      "title": "Pass trusted team policy to scheduling",
+      "type": "add_connection",
+      "content": "The scheduler consumes verified team identity, role, queue class, and the current quota policy; request-supplied team identifiers are not authoritative.",
+      "connection": {
+        "edgeId": "mlops012_identity_scheduler",
+        "sourceNodeId": "mlops012_identity",
+        "targetNodeId": "mlops012_scheduler",
+        "connectionType": "data-flow",
+        "label": "Verified team and quota context",
+        "description": "Provide trusted tenant policy for quota enforcement and fair-share accounting."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlops012_edge_queue_scheduler",
+      "stepNumber": 19,
+      "phase": "Connect scheduling, recovery, and reporting paths",
+      "title": "Select eligible work by priority and fair share",
+      "type": "add_connection",
+      "content": "The scheduler considers queue priority together with team entitlement, quota, and aging so a single busy team cannot monopolize accelerators or indefinitely starve lower-priority work.",
+      "connection": {
+        "edgeId": "mlops012_queue_scheduler",
+        "sourceNodeId": "mlops012_queue",
+        "targetNodeId": "mlops012_scheduler",
+        "connectionType": "data-flow",
+        "label": "Eligible jobs and team fair share",
+        "description": "Present priority-ordered jobs with team ownership, wait age, quota, and reservation state."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlops012_edge_state_scheduler",
+      "stepNumber": 20,
+      "phase": "Connect scheduling, recovery, and reporting paths",
+      "title": "Coordinate reservations against authoritative state",
+      "type": "add_connection",
+      "content": "Before placement or preemption, read and conditionally update the canonical job and quota state so retries cannot create conflicting reservations.",
+      "connection": {
+        "edgeId": "mlops012_state_scheduler",
+        "sourceNodeId": "mlops012_job_state",
+        "targetNodeId": "mlops012_scheduler",
+        "connectionType": "data-flow",
+        "label": "Run state and quota reservations",
+        "description": "Read and transition job lifecycle, quota usage, reservation, and recovery metadata."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4"]
+    },
+    {
+      "id": "mlops012_edge_scheduler_a100",
+      "stepNumber": 21,
+      "phase": "Connect scheduling, recovery, and reporting paths",
+      "title": "Place compatible gangs on A100 capacity",
+      "type": "add_connection",
+      "content": "The scheduler reserves a complete compatible gang using the A100 pool's available device count, memory, and fabric topology before any worker starts.",
+      "connection": {
+        "edgeId": "mlops012_scheduler_a100",
+        "sourceNodeId": "mlops012_scheduler",
+        "targetNodeId": "mlops012_a100_pool",
+        "connectionType": "api-call",
+        "label": "A100 gang placement and reservation",
+        "description": "Request an all-or-nothing placement matching the job's accelerator, memory, and interconnect requirements."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6"]
+    },
+    {
+      "id": "mlops012_edge_scheduler_h100",
+      "stepNumber": 22,
+      "phase": "Connect scheduling, recovery, and reporting paths",
+      "title": "Place compatible gangs on H100 capacity",
+      "type": "add_connection",
+      "content": "Keep H100 selection explicit and independent from A100 placement. The same scheduler policy supports both pools while each training run is assigned only to a hardware profile it can use.",
+      "connection": {
+        "edgeId": "mlops012_scheduler_h100",
+        "sourceNodeId": "mlops012_scheduler",
+        "targetNodeId": "mlops012_h100_pool",
+        "connectionType": "api-call",
+        "label": "H100 gang placement and reservation",
+        "description": "Reserve an eligible H100 gang using device capacity and pool-local topology."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "mlops012_edge_a100_interruptions",
+      "stepNumber": 23,
+      "phase": "Connect scheduling, recovery, and reporting paths",
+      "title": "Return A100 health and interruption events",
+      "type": "add_connection",
+      "content": "Publish the A100 node's capacity class, provider interruption notice, drain deadline, and health state to the scheduler. The scheduler removes the node from new gang placements, starts a durable checkpoint before reclaim, releases the reservation, and requeues or performs quota-approved fallback.",
+      "connection": {
+        "edgeId": "mlops012_a100_scheduler_events",
+        "sourceNodeId": "mlops012_a100_pool",
+        "targetNodeId": "mlops012_scheduler",
+        "connectionType": "event-stream",
+        "label": "A100 health and interruption events",
+        "description": "Publish A100 capacity class, spot/preemptible interruption notice, drain deadline, and health changes so the scheduler can checkpoint, release capacity, and requeue safely."
+      },
+      "requirementIds": ["legacy-requirement:7"]
+    },
+    {
+      "id": "mlops012_edge_h100_interruptions",
+      "stepNumber": 24,
+      "phase": "Connect scheduling, recovery, and reporting paths",
+      "title": "Return H100 health and interruption events",
+      "type": "add_connection",
+      "content": "Keep H100 interruption and health signals pool-specific. Include the spot/preemptible capacity class and reclaim deadline so the scheduler can exclude the node from new gang placements, checkpoint the run, and release or requeue the reservation using the correct accelerator and tenant policy.",
+      "connection": {
+        "edgeId": "mlops012_h100_scheduler_events",
+        "sourceNodeId": "mlops012_h100_pool",
+        "targetNodeId": "mlops012_scheduler",
+        "connectionType": "event-stream",
+        "label": "H100 health and interruption events",
+        "description": "Publish H100 capacity class, spot/preemptible interruption notice, drain deadline, and health changes for checkpoint, reservation release, and safe requeue."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "mlops012_edge_a100_checkpoints",
+      "stepNumber": 25,
+      "phase": "Connect scheduling, recovery, and reporting paths",
+      "title": "Persist checkpoints from A100 jobs",
+      "type": "add_connection",
+      "content": "Write checkpoint shards with run identity, step, and a verifiable manifest before the scheduler releases or reclaims an A100 reservation.",
+      "connection": {
+        "edgeId": "mlops012_a100_checkpoint_store",
+        "sourceNodeId": "mlops012_a100_pool",
+        "targetNodeId": "mlops012_checkpoint_store",
+        "connectionType": "data-flow",
+        "label": "A100 checkpoint shards and manifest",
+        "description": "Persist resumable training state and commit a checksum-verified checkpoint manifest."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7"]
+    },
+    {
+      "id": "mlops012_edge_h100_checkpoints",
+      "stepNumber": 26,
+      "phase": "Connect scheduling, recovery, and reporting paths",
+      "title": "Persist checkpoints from H100 jobs",
+      "type": "add_connection",
+      "content": "Use the same durable checkpoint contract for H100 jobs while retaining accelerator metadata needed to validate restore compatibility.",
+      "connection": {
+        "edgeId": "mlops012_h100_checkpoint_store",
+        "sourceNodeId": "mlops012_h100_pool",
+        "targetNodeId": "mlops012_checkpoint_store",
+        "connectionType": "data-flow",
+        "label": "H100 checkpoint shards and manifest",
+        "description": "Persist verified resumable state with the source pool and run compatibility metadata."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7"]
+    },
+    {
+      "id": "mlops012_edge_checkpoint_scheduler",
+      "stepNumber": 27,
+      "phase": "Connect scheduling, recovery, and reporting paths",
+      "title": "Restore only committed checkpoint manifests",
+      "type": "add_connection",
+      "content": "On retry or preemption recovery, resolve the last committed checkpoint manifest, validate its checksums and compatibility, then enqueue the same run for a new gang placement.",
+      "connection": {
+        "edgeId": "mlops012_checkpoint_scheduler",
+        "sourceNodeId": "mlops012_checkpoint_store",
+        "targetNodeId": "mlops012_scheduler",
+        "connectionType": "data-flow",
+        "label": "Verified checkpoint and resume point",
+        "description": "Provide the last committed compatible manifest for resumable placement."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7"]
+    },
+    {
+      "id": "mlops012_edge_scheduler_queue_requeue",
+      "stepNumber": 28,
+      "phase": "Connect scheduling, recovery, and reporting paths",
+      "title": "Requeue work after preemption",
+      "type": "add_connection",
+      "content": "When a higher-priority job needs capacity or a spot interruption arrives, checkpoint at a safe boundary, release the allocation, and return the run with its original priority and resume point.",
+      "connection": {
+        "edgeId": "mlops012_scheduler_queue_requeue",
+        "sourceNodeId": "mlops012_scheduler",
+        "targetNodeId": "mlops012_queue",
+        "connectionType": "event-stream",
+        "label": "Checkpointed preemption and requeue",
+        "description": "Return an interrupted run to its eligible queue with ownership, priority, and resume manifest intact."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7"]
+    },
+    {
+      "id": "mlops012_edge_a100_metrics",
+      "stepNumber": 29,
+      "phase": "Connect scheduling, recovery, and reporting paths",
+      "title": "Measure A100 active and idle capacity",
+      "type": "add_connection",
+      "content": "Report per-device active, allocated, idle, unhealthy, and maintenance state; keep observed utilization distinct from scheduler reservation so stranded allocations remain visible.",
+      "connection": {
+        "edgeId": "mlops012_a100_metrics",
+        "sourceNodeId": "mlops012_a100_pool",
+        "targetNodeId": "mlops012_monitoring",
+        "connectionType": "event-stream",
+        "label": "A100 utilization and idle capacity",
+        "description": "Stream per-GPU state and pool health for utilization and capacity analysis."
+      },
+      "requirementIds": ["legacy-requirement:5"]
+    },
+    {
+      "id": "mlops012_edge_h100_metrics",
+      "stepNumber": 30,
+      "phase": "Connect scheduling, recovery, and reporting paths",
+      "title": "Measure H100 active and idle capacity",
+      "type": "add_connection",
+      "content": "Keep H100 metrics separate from A100 metrics before computing the cluster-wide target, allowing operators to detect an imbalance hidden by an aggregate.",
+      "connection": {
+        "edgeId": "mlops012_h100_metrics",
+        "sourceNodeId": "mlops012_h100_pool",
+        "targetNodeId": "mlops012_monitoring",
+        "connectionType": "event-stream",
+        "label": "H100 utilization and idle capacity",
+        "description": "Stream H100 device state and pool health with accelerator identity preserved."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "mlops012_edge_scheduler_metrics",
+      "stepNumber": 31,
+      "phase": "Connect scheduling, recovery, and reporting paths",
+      "title": "Measure queueing and placement decisions",
+      "type": "add_connection",
+      "content": "Record enqueue time, scheduling decision time, gang placement outcome, quota wait, and preemption reason so job scheduling latency can be distinguished from image startup and training initialization.",
+      "connection": {
+        "edgeId": "mlops012_scheduler_metrics",
+        "sourceNodeId": "mlops012_scheduler",
+        "targetNodeId": "mlops012_monitoring",
+        "connectionType": "event-stream",
+        "label": "Queue wait, placement, and gang outcomes",
+        "description": "Publish timestamps and decisions needed to measure scheduling latency and fairness."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6"]
+    },
+    {
+      "id": "mlops012_edge_queue_metrics",
+      "stepNumber": 32,
+      "phase": "Connect scheduling, recovery, and reporting paths",
+      "title": "Observe backlog by priority and team",
+      "type": "add_connection",
+      "content": "Track queue age and eligibility by team and priority class so the fairness policy can identify starvation as well as high-priority delay.",
+      "connection": {
+        "edgeId": "mlops012_queue_metrics",
+        "sourceNodeId": "mlops012_queue",
+        "targetNodeId": "mlops012_monitoring",
+        "connectionType": "event-stream",
+        "label": "Backlog age and team allocation",
+        "description": "Expose queue delay, priority, and tenant allocation for operational review."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3"]
+    },
+    {
+      "id": "mlops012_edge_metrics_chargeback",
+      "stepNumber": 33,
+      "phase": "Connect scheduling, recovery, and reporting paths",
+      "title": "Attribute measured usage to each team",
+      "type": "add_connection",
+      "content": "Send run-level GPU time, accelerator class, allocation state, interruptions, and checkpoint storage to reporting with the verified team and run identity preserved.",
+      "connection": {
+        "edgeId": "mlops012_metrics_chargeback",
+        "sourceNodeId": "mlops012_monitoring",
+        "targetNodeId": "mlops012_chargeback",
+        "connectionType": "event-stream",
+        "label": "Attributed run and accelerator usage",
+        "description": "Materialize auditable per-team cost inputs from scheduler and pool telemetry."
+      },
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "mlops012_edge_chargeback_state",
+      "stepNumber": 34,
+      "phase": "Connect scheduling, recovery, and reporting paths",
+      "title": "Store chargeback results with run lineage",
+      "type": "add_connection",
+      "content": "Persist report rows with team, run, accelerator type, time window, and the metering basis so teams can reconcile costs to the work they submitted.",
+      "connection": {
+        "edgeId": "mlops012_chargeback_state",
+        "sourceNodeId": "mlops012_chargeback",
+        "targetNodeId": "mlops012_job_state",
+        "connectionType": "data-flow",
+        "label": "Team chargeback and run lineage",
+        "description": "Store attributable cost summaries against canonical team and run identifiers."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-requirement:4"]
+    },
+    {
+      "id": "mlops012_update_utilization_policy",
+      "stepNumber": 35,
+      "phase": "Make the measurable policies explicit",
+      "title": "Define the cluster-wide utilization measurement",
+      "type": "update_component",
+      "content": "Make the stated utilization target measurable across both accelerator pools. Count active GPU work separately from reservations, and define treatment of unhealthy and maintenance capacity before publishing the fleet aggregate.",
+      "componentUpdate": {
+        "nodeId": "mlops012_monitoring",
+        "properties": {
+          "purpose": "Measure active, allocated, idle, unhealthy, and maintenance GPU capacity by accelerator pool and cluster using a documented denominator. Alert when active utilization is not above 80% cluster-wide, report pool-level distributions so the aggregate cannot hide underused hardware, and drive only safe bin packing, backfill, or approved pool compaction while guarding the under-30-second scheduling and fair-share targets.",
+          "metrics": true,
+          "alerts": true
+        }
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:1"]
+    },
+    {
+      "id": "mlops012_update_scheduler_policy",
+      "stepNumber": 36,
+      "phase": "Make the measurable policies explicit",
+      "title": "Apply scheduling latency and team fairness policies",
+      "type": "update_component",
+      "content": "Measure from validated queue admission to a scheduling decision and preserve the stated under-30-second target. Enforce team fair share across 50+ teams with explicit weights, quotas, aging, and bounded borrowing; confirm the exact weighting and quota-reset rules with users before rollout.",
+      "componentUpdate": {
+        "nodeId": "mlops012_scheduler",
+        "properties": {
+          "purpose": "Coordinate priority queues, team quota enforcement, and fair-share allocation across 50+ teams using explicit weights, queue aging, and bounded borrowing. Measure the stated job scheduling latency target of under 30 seconds from validated admission to placement decision; report queue wait separately from provisioning and training startup. Enforce all-or-nothing gang placement and topology-compatible scheduling across distinct A100 and H100 pools."
+        }
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlops012_update_gpu_capacity",
+      "stepNumber": 37,
+      "phase": "Make the measurable policies explicit",
+      "title": "Plan capacity across distinct GPU types",
+      "type": "update_component",
+      "content": "Treat the A100 and H100 pools as parts of one fleet with separate health and capacity signals. Validate support for 1,000+ GPUs across multiple node types without assuming an unprovided split between pools or mixing device generations in a gang by default.",
+      "componentUpdate": {
+        "nodeId": "mlops012_h100_pool",
+        "properties": {
+          "purpose": "Expose H100 capacity as one distinct pool in a fleet designed to support 1,000+ GPUs across multiple node types together with the A100 pool. Publish free GPUs, memory, node health, and interconnect topology for compatible gang placement; do not assume an unprovided capacity split or mix generations in a gang without workload validation."
+        }
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "mlops012_gang_policy",
+      "stepNumber": 38,
+      "phase": "Make the measurable policies explicit",
+      "title": "Reserve distributed training gangs atomically",
+      "type": "decision_point",
+      "content": "A distributed run should start only after the scheduler can place its required worker group with compatible accelerators and communication topology. If capacity is incomplete, leave the gang pending or select another compatible pool; do not hold a partial allocation indefinitely.",
+      "decision": {
+        "question": "How should distributed workers acquire GPUs?",
+        "chosen": "Reserve the required compatible gang atomically and start workers only after placement succeeds.",
+        "chosenReason": "This prevents partial gang placement from stranding GPUs and makes topology and capacity constraints visible to queue scheduling.",
+        "alternatives": [
+          {
+            "option": "Start workers as GPUs become available",
+            "tradeoff": "Partial gangs can consume scarce accelerators without making training progress."
+          },
+          {
+            "option": "Require every job to use one fixed accelerator type",
+            "tradeoff": "The policy is simpler but cannot use validated capacity across heterogeneous pools."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "mlops012_preemption_policy",
+      "stepNumber": 39,
+      "phase": "Make the measurable policies explicit",
+      "title": "Make preemption resumable and accountable",
+      "type": "decision_point",
+      "content": "Use cooperative checkpoint boundaries where possible. On a spot interruption or priority preemption, record the reason and deadline, commit a verified checkpoint, release the GPU reservation, and return the same run to its eligible queue. Define grace periods and retry limits from workload behavior rather than inventing them here.",
+      "decision": {
+        "question": "What should happen when an allocated GPU is reclaimed?",
+        "chosen": "Checkpoint when safe, preserve the run identity and priority, release capacity, and requeue from the last committed manifest.",
+        "chosenReason": "This supports both priority-based preemption and spot capacity without treating an interrupted run as a new job.",
+        "alternatives": [
+          {
+            "option": "Terminate the job and discard its progress",
+            "tradeoff": "Recovery is simple, but expensive training work is lost and chargeback cannot distinguish completed from wasted capacity."
+          },
+          {
+            "option": "Keep the interrupted allocation until it returns",
+            "tradeoff": "Unavailable or reclaimed capacity cannot be relied on, and higher-priority work may remain blocked."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7"]
+    },
+    {
+      "id": "mlops012_scale_trigger",
+      "stepNumber": 40,
+      "phase": "Make the measurable policies explicit",
+      "title": "Scale from backlog and usable capacity signals",
+      "type": "scale_trigger",
+      "content": "Drive pool expansion from eligible queue demand, quota headroom, and accelerator compatibility; scale-in only when workloads can finish or checkpoint safely. Validate that utilization improves without violating the stated scheduling-latency and fairness targets.",
+      "scaleTrigger": {
+        "metric": "Eligible queued GPU demand, scheduling latency, pool utilization, and team quota headroom",
+        "action": "Add or remove capacity within the approved accelerator pools and placement policies.",
+        "impact": "The scheduler can respond to backlog while preserving gang feasibility, tenant fairness, and safe recovery."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "mlops012_open_policy_questions",
+      "stepNumber": 41,
+      "phase": "Review the design and open decisions",
+      "title": "Confirm the policy definitions with stakeholders",
+      "type": "explanation",
+      "content": "Before implementation, agree on whether utilization means active compute or allocated devices, which capacity is excluded from the denominator, and where scheduling latency starts and ends. Also confirm team weights, quota periods, priority classes, aging and borrowing rules, gang compatibility across GPU generations, checkpoint cadence, spot-interruption grace periods, and chargeback treatment for idle reservations.",
+      "requirementIds": []
+    },
+    {
+      "id": "mlops012_review",
+      "stepNumber": 42,
+      "phase": "Review the design and open decisions",
+      "title": "Review the control plane, recovery, and cost paths",
+      "type": "conclusion",
+      "content": "The design connects validated multi-tenant admission to durable priority queues, fair-share and quota enforcement, topology-aware gang placement on separate A100 and H100 pools, checkpoint-backed preemption and spot recovery, cluster-wide GPU utilization and idle-capacity measurement, and attributable team chargeback. It preserves the stated 80% utilization, under-30-second scheduling, 1,000+ GPU, heterogeneous-hardware, and 50+ team targets without inventing a workload size or a pool split. The remaining decisions are measurable policy definitions and workload-specific capacity inputs.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

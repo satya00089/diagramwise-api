@@ -1,0 +1,801 @@
+{
+  "problem_id": "cloud_azure_011",
+  "version": "1.0.0-review-draft",
+  "totalSteps": 43,
+  "phases": [
+    {
+      "name": "Define participants, trust boundaries, and workload targets",
+      "stepRange": [1, 10],
+      "description": "Interpret multi-party computation literally, state what a TEE does and does not protect, and establish authenticated participant ingress without inventing traffic targets."
+    },
+    {
+      "name": "Separate job metadata from encrypted participant inputs",
+      "stepRange": [11, 20],
+      "description": "Keep job control and scheduling separate from owner-encrypted inputs, then place one attested MPC peer in each participant trust domain."
+    },
+    {
+      "name": "Attest execution and gate scoped key release",
+      "stepRange": [21, 32],
+      "description": "Verify each confidential runtime remotely and use owner-controlled Azure Key Vault Secure Key Release policies before any input key reaches a TEE."
+    },
+    {
+      "name": "Release minimized results and prove security and compliance objectives",
+      "stepRange": [33, 43],
+      "description": "Persist only approved outputs and operational metadata, audit sensitive control-plane decisions, and define measurable performance and compliance acceptance tests."
+    }
+  ],
+  "steps": [
+    {
+      "id": "azure011-brief",
+      "stepNumber": 1,
+      "phase": "Define participants, trust boundaries, and workload targets",
+      "title": "Start from the live brief, not an assumed deployment",
+      "type": "explanation",
+      "content": "The live problem asks for protection of data during processing, hardware-based trusted execution, enclave integrity verification, secure key management, sensitive workload processing, remote attestation, confidentiality, and regulatory compliance. Its constraints are zero data exposure during computation, multi-party computation, minimal performance overhead, insider-threat protection, and GDPR/HIPAA compliance. It supplies no request rate, participant count, data volume, latency SLO, or availability target; those remain interview questions rather than invented design inputs."
+    },
+    {
+      "id": "azure011-threat-model",
+      "stepNumber": 2,
+      "phase": "Define participants, trust boundaries, and workload targets",
+      "title": "Make the confidentiality claim precise",
+      "type": "explanation",
+      "content": "Literal zero exposure is not achievable while a program computes: approved code must see values in its protected execution context, and a TEE alone does not prevent a compromised approved workload, side-channel leakage, or an over-revealing result. This draft interprets the target as preventing other participants, host operators, and ordinary control-plane operators from reading another party's raw input. It combines cryptographic MPC across independent data owners with a TEE as defense in depth, and requires output minimization and an explicit threat-model review."
+    },
+    {
+      "id": "azure011-mpc-choice",
+      "stepNumber": 3,
+      "phase": "Define participants, trust boundaries, and workload targets",
+      "title": "Choose distributed MPC, with a TEE at each peer",
+      "type": "decision_point",
+      "content": "Treat the phrase multi-party computation as a cryptographic protocol in which independent owners retain local inputs and exchange protocol shares; do not relabel centralized confidential computing as MPC. Run one protocol peer per participating owner in an attested confidential VM. Confirm the threat model, protocol, collusion threshold, and permitted result with all owners before implementation.",
+      "decision": {
+        "question": "Where is trust placed while owners jointly compute over private inputs?",
+        "chosen": "Distributed cryptographic MPC across owner-specific peers, with hardware TEEs as an additional isolation layer",
+        "chosenReason": "This preserves the literal multi-party requirement and avoids collecting plaintext inputs in one central service. A TEE reduces exposure to the host but does not replace the MPC protocol or owner-held keys.",
+        "alternatives": [
+          {
+            "option": "One centralized confidential VM receives every party's plaintext",
+            "tradeoff": "Simpler and potentially faster, but it is a trusted-compute design rather than cryptographic MPC and concentrates data exposure."
+          },
+          {
+            "option": "Cryptographic MPC without confidential VMs",
+            "tradeoff": "Can meet a distributed-input threat model, but gives up the requested hardware-protected execution and may expose protocol state to host operators."
+          }
+        ]
+      }
+    },
+    {
+      "id": "azure011-scale-participants",
+      "stepNumber": 4,
+      "phase": "Define participants, trust boundaries, and workload targets",
+      "title": "Discover the MPC scale envelope before sizing",
+      "type": "scale_trigger",
+      "content": "MPC communication and completion time depend on the protocol and number of participants. Neither is specified in the brief, so do not choose a peer count or performance promise yet.",
+      "scaleTrigger": {
+        "metric": "Participants per job, bytes exchanged per protocol round, and end-to-end job latency (targets TBD)",
+        "action": "Benchmark representative workloads at owner-agreed participant counts and data shapes; define the minimum supported quorum and completion SLO before capacity planning.",
+        "impact": "MPC round trips and cross-owner network cost can dominate compute. The results determine peer placement, concurrency limits, and whether the selected protocol can meet the brief's low-overhead constraint."
+      },
+      "requirementIds": ["legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "azure011-participants",
+      "stepNumber": 5,
+      "phase": "Define participants, trust boundaries, and workload targets",
+      "title": "Represent independently governed data owners",
+      "type": "add_component",
+      "content": "Model each organization that contributes an input as an independent trust domain. Each owner prepares its input or protocol share locally, keeps its own authorization and key policy, and can approve the exact workload and output contract.",
+      "component": {
+        "nodeId": "azure011_data_owners",
+        "componentType": "custom-component",
+        "label": "Participant Data-Owner Systems (per party)",
+        "description": "Independent systems and security domains that contribute private inputs to an agreed MPC job.",
+        "position": {"x": 40, "y": 250},
+        "properties": {
+          "componentName": "Participant Data-Owner Systems (per party)",
+          "subtitle": "Owner identity, input preparation, and approval remain independent",
+          "componentType": "Multi-party data owners",
+          "technology": "Participant-controlled systems and Azure tenant boundaries (inventory TBD)",
+          "purpose": "Validate and prepare each owner's input locally, create protocol shares using the selected cryptographic MPC implementation, encrypt each share for its authorized peer, and retain ownership of source data and key policy. Do not send raw source records to the shared control plane or a central plaintext store.",
+          "notes": "The component catalog has no participant/data-owner trust-domain type. Confirm owner count, jurisdictions, schemas, consent, and the protocol's collusion threshold."
+        },
+        "highlightReason": "Independent owner boundaries are necessary for the brief's multi-party computation and insider-threat constraints."
+      },
+      "requirementIds": ["legacy-constraint:2", "legacy-constraint:4", "legacy-requirement:5"]
+    },
+    {
+      "id": "azure011-api",
+      "stepNumber": 6,
+      "phase": "Define participants, trust boundaries, and workload targets",
+      "title": "Add a narrow authenticated job-ingress boundary",
+      "type": "add_component",
+      "content": "Expose only job submission, owner enrollment, and status operations here. Large input shares use a separate encrypted upload path; this gateway should not proxy or log sensitive payloads.",
+      "component": {
+        "nodeId": "azure011_api_gateway",
+        "componentType": "api-gateway",
+        "label": "Azure API Management (service fit to verify)",
+        "description": "Validates and routes metadata-only participant requests.",
+        "position": {"x": 300, "y": 250},
+        "properties": {
+          "componentName": "Azure API Management (service fit to verify)",
+          "purpose": "Validate job and participant request schemas, authenticate callers, enforce owner-scoped authorization and rate limits, and route metadata-only requests to the job control plane. Redact request bodies and secrets from access logs; confirm the selected Azure tier, region, identity integration, and quotas before relying on it.",
+          "inputValidation": true,
+          "authentication": "OAuth 2.0",
+          "rateLimiting": true,
+          "tlsTermination": true
+        },
+        "highlightReason": "A controlled ingress prevents anonymous or malformed requests from creating compute jobs or reading another owner's status."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "azure011-participant-submit",
+      "stepNumber": 7,
+      "phase": "Define participants, trust boundaries, and workload targets",
+      "title": "Submit job intent without sending private inputs",
+      "type": "add_connection",
+      "content": "A participant submits a signed job request, declared purpose, and approved protocol/version. The request carries references and policy metadata only; raw input and secret shares do not pass through the API gateway.",
+      "connection": {
+        "edgeId": "azure011_owners_to_api",
+        "sourceNodeId": "azure011_data_owners",
+        "targetNodeId": "azure011_api_gateway",
+        "connectionType": "HTTPS metadata request",
+        "label": "Submit authorized job metadata",
+        "description": "TLS-protected owner request with job intent and no raw input payload."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "azure011-identity",
+      "stepNumber": 8,
+      "phase": "Define participants, trust boundaries, and workload targets",
+      "title": "Establish human and workload identity separately",
+      "type": "add_component",
+      "content": "Use tenant identity for humans and managed workload identities for services. Apply least privilege per owner, job, and key; require stronger approval for changing release policies or deploying a new workload measurement.",
+      "component": {
+        "nodeId": "azure011_identity",
+        "componentType": "auth-service",
+        "label": "Microsoft Entra ID and Owner Authorization",
+        "description": "Authenticates people and workloads and enforces owner-scoped policy.",
+        "position": {"x": 300, "y": 470},
+        "properties": {
+          "componentName": "Microsoft Entra ID and Owner Authorization",
+          "purpose": "Authenticate participant users and service identities, map them to owner-scoped job permissions, and enforce least privilege. Use managed identities for Azure service calls; keep human approval and workload identity distinct, and audit privileged policy changes.",
+          "oauth": true,
+          "mfa": true
+        },
+        "highlightReason": "Identity and authorization reduce unauthorized job access and insider misuse but do not replace enclave attestation or key-release policy."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "azure011-api-auth-check",
+      "stepNumber": 9,
+      "phase": "Define participants, trust boundaries, and workload targets",
+      "title": "Authenticate the caller before routing",
+      "type": "add_connection",
+      "content": "The gateway validates the caller token and owner/job scope before forwarding a request. Authentication failure, missing owner consent, or an expired workload identity must fail closed.",
+      "connection": {
+        "edgeId": "azure011_api_to_identity",
+        "sourceNodeId": "azure011_api_gateway",
+        "targetNodeId": "azure011_identity",
+        "connectionType": "OAuth 2.0 token validation",
+        "label": "Authenticate and authorize caller",
+        "description": "Resolve tenant, principal, owner membership, and permitted job actions."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:4"]
+    },
+    {
+      "id": "azure011-auth-context",
+      "stepNumber": 10,
+      "phase": "Define participants, trust boundaries, and workload targets",
+      "title": "Return scoped authorization, not broad service credentials",
+      "type": "add_connection",
+      "content": "Return only the validated identity and policy decision needed for this request. Do not pass user tokens, HSM credentials, or long-lived secrets into job payloads.",
+      "connection": {
+        "edgeId": "azure011_identity_to_api",
+        "sourceNodeId": "azure011_identity",
+        "targetNodeId": "azure011_api_gateway",
+        "connectionType": "Signed identity claims",
+        "label": "Return owner-scoped authorization",
+        "description": "Short-lived validated principal and policy context; no key material."
+      },
+      "requirementIds": ["legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "azure011-control-plane",
+      "stepNumber": 11,
+      "phase": "Separate job metadata from encrypted participant inputs",
+      "title": "Keep orchestration outside the data trust boundary",
+      "type": "add_component",
+      "content": "The control plane coordinates participant consent, job state, peer placement, and retries. It sees identifiers and encrypted object references only; it never receives plaintext input, secret shares, or released keys.",
+      "component": {
+        "nodeId": "azure011_job_control",
+        "componentType": "backend-server",
+        "label": "MPC Job Control Plane",
+        "description": "Coordinates metadata, consent, peer placement, and job lifecycle.",
+        "position": {"x": 570, "y": 250},
+        "properties": {
+          "componentName": "MPC Job Control Plane",
+          "purpose": "Validate that all required owners approved the same job, protocol version, code measurement, and output contract; create an idempotent job; schedule peer work; and track status. Store only identifiers, policy decisions, and encrypted-share references. Never inspect input shares, key material, or intermediate MPC values."
+        },
+        "highlightReason": "Separating coordination from data processing limits exposure to control-plane operators and simplifies recovery without making the scheduler a plaintext processor."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "azure011-api-to-control",
+      "stepNumber": 12,
+      "phase": "Separate job metadata from encrypted participant inputs",
+      "title": "Route only validated job metadata to orchestration",
+      "type": "add_connection",
+      "content": "Pass a short-lived owner-scoped authorization result and an idempotency key. The control plane rechecks consent and policy rather than trusting a client-supplied owner ID.",
+      "connection": {
+        "edgeId": "azure011_api_to_control",
+        "sourceNodeId": "azure011_api_gateway",
+        "targetNodeId": "azure011_job_control",
+        "connectionType": "Authenticated internal API",
+        "label": "Create authorized MPC job",
+        "description": "Validated job metadata, owner scope, and idempotency key only."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:4"]
+    },
+    {
+      "id": "azure011-queue",
+      "stepNumber": 13,
+      "phase": "Separate job metadata from encrypted participant inputs",
+      "title": "Queue bounded, metadata-only work",
+      "type": "add_component",
+      "content": "A durable queue absorbs bursts and supports retryable scheduling. Queue records contain a job ID, owner set, protocol/version, and opaque share references—not private inputs or key material.",
+      "component": {
+        "nodeId": "azure011_job_queue",
+        "componentType": "queue",
+        "label": "MPC Job Queue",
+        "description": "Durable scheduling of metadata-only MPC jobs.",
+        "position": {"x": 820, "y": 250},
+        "properties": {
+          "componentName": "MPC Job Queue",
+          "purpose": "Buffer authorized job metadata, enforce per-owner and per-protocol concurrency limits, and support bounded retries. Put only job IDs and opaque references in messages; never place plaintext, secret shares, attestation tokens, or keys in the queue.",
+          "durable": true,
+          "backoff": "exponential"
+        },
+        "highlightReason": "Backpressure and bounded retries protect expensive confidential peers without expanding the data-access boundary."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "azure011-control-to-queue",
+      "stepNumber": 14,
+      "phase": "Separate job metadata from encrypted participant inputs",
+      "title": "Schedule an idempotent MPC session",
+      "type": "add_connection",
+      "content": "Publish a job envelope only after required owner approvals and policy checks are complete. Retries use the same job identity and cannot silently widen participant scope.",
+      "connection": {
+        "edgeId": "azure011_control_to_queue",
+        "sourceNodeId": "azure011_job_control",
+        "targetNodeId": "azure011_job_queue",
+        "connectionType": "Durable job envelope",
+        "label": "Enqueue approved session metadata",
+        "description": "Idempotent job ID, participant set, protocol digest, and opaque input references."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "azure011-share-store",
+      "stepNumber": 15,
+      "phase": "Separate job metadata from encrypted participant inputs",
+      "title": "Stage only owner-encrypted inputs and shares",
+      "type": "add_component",
+      "content": "Use logically separate owner-controlled Azure Blob containers/accounts for encrypted inputs or protocol shares. Enforce owner-specific access, retention, and deletion; do not treat storage encryption at rest as a substitute for owner-side encryption or TEE-bound key release.",
+      "component": {
+        "nodeId": "azure011_share_store",
+        "componentType": "object-storage",
+        "label": "Owner-Scoped Azure Blob Share Stores",
+        "description": "Per-owner encrypted input/share objects and opaque job references.",
+        "position": {"x": 570, "y": 500},
+        "properties": {
+          "componentName": "Owner-Scoped Azure Blob Share Stores",
+          "purpose": "Represent separate owner-controlled containers or accounts for encrypted source inputs and MPC shares. Enforce tenant-scoped access, integrity/checksum validation, version and retention policy, and deletion evidence. Store no plaintext; release object decryption keys only to the specifically attested peer authorized by that data owner.",
+          "provider": "Azure Blob",
+          "versioning": true,
+          "checksumValidation": true
+        },
+        "highlightReason": "Per-owner encrypted staging separates large-data transfer from job metadata and keeps raw records outside shared control-plane services."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "azure011-owner-upload",
+      "stepNumber": 16,
+      "phase": "Separate job metadata from encrypted participant inputs",
+      "title": "Upload encrypted shares directly from each owner",
+      "type": "add_connection",
+      "content": "Each data owner prepares and encrypts its input or share locally, then uploads it to its own scoped store using a short-lived authorization. This path keeps plaintext out of the API gateway and central coordinator.",
+      "connection": {
+        "edgeId": "azure011_owners_to_share_store",
+        "sourceNodeId": "azure011_data_owners",
+        "targetNodeId": "azure011_share_store",
+        "connectionType": "Owner-scoped encrypted object upload",
+        "label": "Upload encrypted input/share",
+        "description": "Direct upload of owner-encrypted data into that owner's isolated storage boundary."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "azure011-control-to-store",
+      "stepNumber": 17,
+      "phase": "Separate job metadata from encrypted participant inputs",
+      "title": "Pass opaque references and owner policy",
+      "type": "add_connection",
+      "content": "The control plane records object IDs, checksums, owner, retention, and consent status. It does not obtain storage credentials that can decrypt every participant's data.",
+      "connection": {
+        "edgeId": "azure011_control_to_share_store",
+        "sourceNodeId": "azure011_job_control",
+        "targetNodeId": "azure011_share_store",
+        "connectionType": "Scoped object reference",
+        "label": "Register encrypted-share reference",
+        "description": "Metadata-only registration and owner-specific access policy; no payload read."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "azure011-owner-boundary-choice",
+      "stepNumber": 18,
+      "phase": "Separate job metadata from encrypted participant inputs",
+      "title": "Keep one peer and key boundary per participant",
+      "type": "decision_point",
+      "content": "Represent the peer fleet and share stores as logical groups replicated in each owner's approved Azure trust domain. Do not put all parties' plaintext or long-lived keys into a centrally administered subscription. Cross-tenant placement and private connectivity are deployment decisions still to validate.",
+      "decision": {
+        "question": "Where should each MPC party's compute peer and decryption authority live?",
+        "chosen": "One owner-scoped confidential peer and key-release policy per participating party, coordinated by a metadata-only control plane",
+        "chosenReason": "This preserves independent ownership and keeps one operator from trivially collecting all private inputs or keys. The final tenant/network topology must be agreed by the participants.",
+        "alternatives": [
+          {
+            "option": "Place every peer and key vault in one service-owned tenant",
+            "tradeoff": "Easier networking and operations, but increases central administrator power and may violate participant isolation or residency requirements."
+          },
+          {
+            "option": "Let each owner run compute without a shared job protocol",
+            "tradeoff": "Stronger operational independence but makes protocol versioning, coordinated completion, and support harder."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "azure011-share-ingest-scale",
+      "stepNumber": 19,
+      "phase": "Separate job metadata from encrypted participant inputs",
+      "title": "Scale ingestion by encrypted bytes and owner quotas",
+      "type": "scale_trigger",
+      "content": "Data sizes and participant upload rates are absent from the brief. Measure per-owner object bytes, upload completion, checksum failures, and staged-data age before setting storage or concurrency limits.",
+      "scaleTrigger": {
+        "metric": "Encrypted bytes per job and per owner, upload completion time, and staged-object age (targets TBD)",
+        "action": "Set owner-approved quotas and retention after observing representative workloads; use resumable uploads and checksum verification for large objects.",
+        "impact": "Storage and transfer costs grow with encrypted inputs and protocol shares. Limits and cleanup protect cost and privacy without changing the compute trust model."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "azure011-confidential-mpc-peers",
+      "stepNumber": 20,
+      "phase": "Separate job metadata from encrypted participant inputs",
+      "title": "Run each MPC peer in a hardware-backed confidential VM",
+      "type": "add_component",
+      "content": "Deploy the approved protocol peer in a confidential VM with a measured boot and a supported TEE. The logical pool represents separate peers in participant trust domains; each peer loads only its owner's share, exchanges protocol messages over authenticated encrypted channels, and emits only the agreed result. It must not log shares or plaintext.",
+      "component": {
+        "nodeId": "azure011_confidential_mpc_peers",
+        "componentType": "custom-component",
+        "label": "Azure Confidential VM MPC Peer Fleet (per owner)",
+        "description": "Owner-isolated MPC peers running inside hardware-backed TEEs.",
+        "position": {"x": 1080, "y": 350},
+        "properties": {
+          "componentName": "Azure Confidential VM MPC Peer Fleet (per owner)",
+          "subtitle": "One peer per owner; TEE SKU and protocol TBD",
+          "componentType": "Confidential MPC execution runtime",
+          "technology": "Azure Confidential VM (supported TEE/SKU/region TBD) plus an owner-approved MPC implementation",
+          "purpose": "Run one protocol peer in each participating owner's confidential VM, with local input shares decrypted only inside the attested TEE. Protect in-use memory from host-level inspection, exchange only protocol messages with the other peers, enforce signed workload/configuration measurements, suppress sensitive logs, and publish only the agreed output. Confidential VMs add defense in depth; they do not themselves implement MPC or protect against malicious approved code, side channels, or output inference.",
+          "notes": "The catalog has no confidential-compute or MPC-peer component. Select one compatible TEE profile and validate current Azure SKU, region, firmware, guest, and attestation support. Do not rely on AKS Confidential Containers for a production SLA without confirming its current availability/support status."
+        },
+        "highlightReason": "A hardware-backed TEE protects data in use from host inspection while the cryptographic MPC protocol prevents any one peer from receiving every party's raw input."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "azure011-queue-to-peer",
+      "stepNumber": 21,
+      "phase": "Attest execution and gate scoped key release",
+      "title": "Dispatch an approved job to its owner-scoped peer",
+      "type": "add_connection",
+      "content": "A peer claims an authorized job envelope and verifies its participant set, protocol digest, and opaque share references before doing work. Queue delivery starts a session but does not grant access to any input or key.",
+      "connection": {
+        "edgeId": "azure011_queue_to_peer",
+        "sourceNodeId": "azure011_job_queue",
+        "targetNodeId": "azure011_confidential_mpc_peers",
+        "connectionType": "Authorized metadata-only dispatch",
+        "label": "Dispatch approved job to MPC peers",
+        "description": "Job ID and policy references only; peer still requires fresh attestation and owner key release."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "azure011-attestation",
+      "stepNumber": 22,
+      "phase": "Attest execution and gate scoped key release",
+      "title": "Add a remote verifier for hardware evidence",
+      "type": "add_component",
+      "content": "Use Microsoft Azure Attestation (MAA) as the candidate verifier for the selected Azure TEE. It must validate the evidence and issue signed claims that a key release policy can evaluate; confirm the supported TEE profile, authority, policy, region, and operational dependencies before production.",
+      "component": {
+        "nodeId": "azure011_maa",
+        "componentType": "custom-component",
+        "label": "Microsoft Azure Attestation (MAA)",
+        "description": "Verifies TEE evidence and issues signed attestation claims.",
+        "position": {"x": 1340, "y": 180},
+        "properties": {
+          "componentName": "Microsoft Azure Attestation (MAA)",
+          "subtitle": "Authority, TEE profile, and policy require validation",
+          "componentType": "Remote hardware attestation service",
+          "technology": "Microsoft Azure Attestation",
+          "purpose": "Verify hardware-backed evidence from each confidential peer and issue a signed token containing claims required by the owner-approved release policy. Reject unknown or revoked measurements and fail closed if the authority, policy, or verifier is unavailable.",
+          "notes": "The catalog has no remote-attestation service type. Pin the approved authority and policy version; never trust an unsigned client assertion or a generic VM health check as enclave proof."
+        },
+        "highlightReason": "Remote attestation supplies evidence that the peer is running the expected trusted execution configuration before owner keys are released."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "azure011-peer-attests",
+      "stepNumber": 23,
+      "phase": "Attest execution and gate scoped key release",
+      "title": "Request attestation before loading a participant share",
+      "type": "add_connection",
+      "content": "On startup and after any relevant measurement change, the peer obtains hardware evidence and requests verification. Do this before fetching a decryption key or reading an owner's encrypted share.",
+      "connection": {
+        "edgeId": "azure011_peer_to_maa",
+        "sourceNodeId": "azure011_confidential_mpc_peers",
+        "targetNodeId": "azure011_maa",
+        "connectionType": "TEE evidence verification request",
+        "label": "Verify peer and workload measurement",
+        "description": "Fresh hardware evidence and the expected workload/configuration identity are checked by the approved attestation authority."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "azure011-maa-token",
+      "stepNumber": 24,
+      "phase": "Attest execution and gate scoped key release",
+      "title": "Return signed, policy-evaluable attestation claims",
+      "type": "add_connection",
+      "content": "The peer receives a signed MAA token only after evidence validation. It presents that token directly to the corresponding owner's Key Vault Secure Key Release operation; the token is not a substitute for key authorization or owner consent.",
+      "connection": {
+        "edgeId": "azure011_maa_to_peer",
+        "sourceNodeId": "azure011_maa",
+        "targetNodeId": "azure011_confidential_mpc_peers",
+        "connectionType": "Signed MAA attestation token",
+        "label": "Return verified TEE claims",
+        "description": "Short-lived signed evidence result for the selected TEE and approved workload measurements."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "azure011-key-vault",
+      "stepNumber": 25,
+      "phase": "Attest execution and gate scoped key release",
+      "title": "Keep owner keys in Azure Key Vault HSM custody",
+      "type": "add_component",
+      "content": "Represent a separate owner-controlled Azure Key Vault Premium or Managed HSM boundary for each party. Use an explicit Secure Key Release policy on purpose-scoped keys; this is not a shared plaintext key service or a general secret-fetch path.",
+      "component": {
+        "nodeId": "azure011_key_vault",
+        "componentType": "secrets-manager",
+        "label": "Participant Azure Key Vault / Managed HSM",
+        "description": "Per-owner HSM-backed key custody and attestation-gated Secure Key Release.",
+        "position": {"x": 1340, "y": 500},
+        "properties": {
+          "componentName": "Participant Azure Key Vault / Managed HSM",
+          "purpose": "Represent a separate vault or Managed HSM controlled by each input owner. Keep owner keys HSM-protected and use Azure Key Vault Secure Key Release (SKR) with an owner-approved release policy tied to Microsoft Azure Attestation claims, workload identity, and the selected TEE measurements. Release only a purpose-scoped processing key to its matching attested peer; log approvals and denials, and define rotation, recovery, and revocation.",
+          "provider": "Azure Key Vault",
+          "audit": true
+        },
+        "highlightReason": "Hardware-backed custody and an attestation-claim release policy gate each owner's key independently of control-plane access."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "azure011-skr-request",
+      "stepNumber": 26,
+      "phase": "Attest execution and gate scoped key release",
+      "title": "Request only the owner's scoped key after verification",
+      "type": "add_connection",
+      "content": "The peer calls the owner's Secure Key Release endpoint with its authorized workload identity and the signed MAA token. The release policy, not the job scheduler, decides whether this exact measured peer may receive the purpose-scoped key.",
+      "connection": {
+        "edgeId": "azure011_peer_to_key_vault",
+        "sourceNodeId": "azure011_confidential_mpc_peers",
+        "targetNodeId": "azure011_key_vault",
+        "connectionType": "Attestation-gated SKR request",
+        "label": "Request owner key with MAA claims",
+        "description": "Owner-scoped managed identity plus a signed MAA token evaluated against the key's Secure Key Release policy."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "azure011-skr-response",
+      "stepNumber": 27,
+      "phase": "Attest execution and gate scoped key release",
+      "title": "Release or deny the key without a plaintext broker",
+      "type": "add_connection",
+      "content": "Azure Key Vault validates the MAA token against the configured release policy and the caller's release permission. On success, return the protected key only to the attested TEE using the supported Secure Key Release flow; on any mismatch or outage, deny release. Do not add an intermediary that can see plaintext keys.",
+      "connection": {
+        "edgeId": "azure011_key_vault_to_peer",
+        "sourceNodeId": "azure011_key_vault",
+        "targetNodeId": "azure011_confidential_mpc_peers",
+        "connectionType": "Policy-validated Secure Key Release",
+        "label": "Release wrapped key to attested peer or deny",
+        "description": "The HSM-backed service evaluates identity and attestation claims; the authorized peer uses the released key only inside its TEE."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "azure011-fetch-shares",
+      "stepNumber": 28,
+      "phase": "Attest execution and gate scoped key release",
+      "title": "Read ciphertext only after attestation and key authorization",
+      "type": "add_connection",
+      "content": "After its evidence is accepted and the owner key is released, each peer fetches only its authorized encrypted share. Decrypt and use that share inside the measured TEE, then exchange only the MPC protocol messages required by the agreed computation.",
+      "connection": {
+        "edgeId": "azure011_share_store_to_peer",
+        "sourceNodeId": "azure011_share_store",
+        "targetNodeId": "azure011_confidential_mpc_peers",
+        "connectionType": "Owner-scoped encrypted share read",
+        "label": "Fetch ciphertext into authorized peer",
+        "description": "The matching peer retrieves ciphertext after attestation and owner key release; plaintext stays within its TEE."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "azure011-skr-policy",
+      "stepNumber": 29,
+      "phase": "Attest execution and gate scoped key release",
+      "title": "Pin the release policy to approved code and TEE claims",
+      "type": "explanation",
+      "content": "An owner approves the TEE authority, required claims, workload signer/measurement, protocol digest, key purpose, identity, and revocation procedure. A changed binary, guest image, policy, or TEE profile must be explicitly reviewed and re-attested. Azure Key Vault SKR is the release gate; do not assume a generic Azure role assignment alone proves enclave integrity."
+    },
+    {
+      "id": "azure011-fail-closed",
+      "stepNumber": 30,
+      "phase": "Attest execution and gate scoped key release",
+      "title": "Fail closed on stale evidence or policy mismatch",
+      "type": "decision_point",
+      "content": "Define how the system reacts to a failed quote, a revoked measurement, an unavailable attestation authority, an owner withdrawal, or a participant leaving mid-protocol. Abort the session, avoid key release, erase volatile share material where possible, and record a metadata-only audit event. Recovery must create a fresh authorized session rather than replaying a partial MPC transcript.",
+      "decision": {
+        "question": "What happens when any peer cannot prove its approved runtime state?",
+        "chosen": "Fail closed for the entire affected session; do not release that owner's key or publish a partial result",
+        "chosenReason": "Confidentiality and owner consent take precedence over availability. The exact MPC protocol must define safe abort and restart semantics.",
+        "alternatives": [
+          {
+            "option": "Continue with a reduced participant set automatically",
+            "tradeoff": "May violate the protocol's collusion threshold, owner consent, or statistical privacy policy."
+          },
+          {
+            "option": "Reuse a prior attestation token or partial transcript",
+            "tradeoff": "Can bind a key to stale measurements or leak state across sessions; only consider reuse if the protocol and owner policy explicitly prove it safe."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "azure011-attestation-scale",
+      "stepNumber": 31,
+      "phase": "Attest execution and gate scoped key release",
+      "title": "Scale the attestation and key-release control path",
+      "type": "scale_trigger",
+      "content": "Attestation and key release are security-critical dependencies. A larger peer fleet can amplify cold-start load or service throttling; no rate or latency target is specified.",
+      "scaleTrigger": {
+        "metric": "Attestation success/denial rate, verifier latency, key-release latency, and throttling by owner (targets TBD)",
+        "action": "Load-test cold starts and re-attestation, use only documented safe caching semantics, and agree owner-specific rate limits and recovery objectives.",
+        "impact": "If the trust service cannot keep up, jobs wait or fail closed; do not bypass attestation or cache authorization beyond its policy lifetime to improve throughput."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "azure011-peer-interpretation",
+      "stepNumber": 32,
+      "phase": "Attest execution and gate scoped key release",
+      "title": "Treat the worker node as a replicated peer group",
+      "type": "explanation",
+      "content": "This single canvas node represents one confidential peer per participating owner, not one VM holding every share. Peers exchange authenticated encrypted MPC protocol messages directly; the selected protocol must state its collusion threshold, dropout behavior, integrity checks, and allowed output. No protocol or peer count is supplied by the brief, so these remain owner-approved decisions."
+    },
+    {
+      "id": "azure011-result-store",
+      "stepNumber": 33,
+      "phase": "Release minimized results and prove security and compliance objectives",
+      "title": "Persist only authorized aggregate output and job metadata",
+      "type": "add_component",
+      "content": "Keep status, owner approvals, protocol/version digests, and audit references separate from private inputs. Persist a result only after all required peers complete and the agreed disclosure policy permits it; restrict small-cohort or repeated-query outputs that could reveal source records.",
+      "component": {
+        "nodeId": "azure011_result_store",
+        "componentType": "database",
+        "label": "Job Metadata and Approved Result Store",
+        "description": "Stores job lifecycle metadata and owner-approved aggregate outputs only.",
+        "position": {"x": 1620, "y": 360},
+        "properties": {
+          "componentName": "Job Metadata and Approved Result Store",
+          "purpose": "Persist job IDs, participant consent references, protocol and workload digests, lifecycle status, and only approved aggregate results. Apply least-privilege access, encryption, retention/deletion, residency, backup, and audit controls after access patterns and regulatory obligations are agreed. Never persist raw inputs, secret shares, enclave memory, or released keys."
+        },
+        "highlightReason": "Data minimization and controlled result release are necessary because an aggregate can still disclose private information."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "azure011-control-to-results",
+      "stepNumber": 34,
+      "phase": "Release minimized results and prove security and compliance objectives",
+      "title": "Record consent and lifecycle metadata",
+      "type": "add_connection",
+      "content": "Persist who approved the job, the exact protocol/workload version, state transitions, and opaque input references. Apply owner-specific read access, retention, and deletion controls.",
+      "connection": {
+        "edgeId": "azure011_control_to_results",
+        "sourceNodeId": "azure011_job_control",
+        "targetNodeId": "azure011_result_store",
+        "connectionType": "Metadata transaction",
+        "label": "Write consent and job lifecycle",
+        "description": "Auditable metadata only, with owner scope and data-retention attributes."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "azure011-peer-to-results",
+      "stepNumber": 35,
+      "phase": "Release minimized results and prove security and compliance objectives",
+      "title": "Return a policy-checked result, never peer inputs",
+      "type": "add_connection",
+      "content": "Peers submit only the agreed aggregate after protocol completion and participant-threshold checks. The control plane verifies the result's release policy and records the MPC run digest; no peer uploads source data or intermediate shares.",
+      "connection": {
+        "edgeId": "azure011_peer_to_results",
+        "sourceNodeId": "azure011_confidential_mpc_peers",
+        "targetNodeId": "azure011_result_store",
+        "connectionType": "Approved aggregate and completion proof",
+        "label": "Persist minimized MPC result",
+        "description": "Owner-authorized output and run metadata only, subject to disclosure and retention policy."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "azure011-monitoring",
+      "stepNumber": 36,
+      "phase": "Release minimized results and prove security and compliance objectives",
+      "title": "Add operational telemetry without sensitive payloads",
+      "type": "add_component",
+      "content": "Collect identity decisions, job lifecycle, attestation outcomes, key release/denial, peer health, and aggregate performance. Exclude raw inputs, protocol shares, keys, full MAA tokens, and high-cardinality identifiers from ordinary logs; define a separately controlled audit trail.",
+      "component": {
+        "nodeId": "azure011_monitoring",
+        "componentType": "monitoring",
+        "label": "Security, Audit, and MPC Operations Monitoring",
+        "description": "Observes trust decisions, job health, and performance without collecting secrets.",
+        "position": {"x": 1620, "y": 600},
+        "properties": {
+          "componentName": "Security, Audit, and MPC Operations Monitoring",
+          "purpose": "Collect metadata-only metrics and access-controlled audit events for identity decisions, owner approvals, job lifecycle, attestation success/failure, Secure Key Release grants/denials, peer health, MPC round latency, and approved-result release. Redact tokens and identifiers, prohibit payload/key logging, define immutable retention and access separation, and validate Azure Monitor or another Azure-compatible backend before selection.",
+          "metrics": true,
+          "alerts": true
+        },
+        "highlightReason": "Compliance and insider controls need an auditable trail, while observability must not become a second path for sensitive-data exposure."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "azure011-control-to-monitor",
+      "stepNumber": 37,
+      "phase": "Release minimized results and prove security and compliance objectives",
+      "title": "Audit authorization and job-policy changes",
+      "type": "add_connection",
+      "content": "Send principal, policy version, approval decision, and job state as protected audit metadata. Separate audit-reader permission from job operator and key custodian roles.",
+      "connection": {
+        "edgeId": "azure011_control_to_monitor",
+        "sourceNodeId": "azure011_job_control",
+        "targetNodeId": "azure011_monitoring",
+        "connectionType": "Redacted security audit events",
+        "label": "Audit approvals and job state",
+        "description": "Owner-scoped control-plane events with no source data or secrets."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "azure011-peer-to-monitor",
+      "stepNumber": 38,
+      "phase": "Release minimized results and prove security and compliance objectives",
+      "title": "Observe peer health and performance safely",
+      "type": "add_connection",
+      "content": "Export redacted health and timing signals from each peer. Never emit private input, decrypted values, shares, keys, or full attestation tokens as logs or metric labels.",
+      "connection": {
+        "edgeId": "azure011_peer_to_monitor",
+        "sourceNodeId": "azure011_confidential_mpc_peers",
+        "targetNodeId": "azure011_monitoring",
+        "connectionType": "Redacted TEE and MPC telemetry",
+        "label": "Report peer health and round timings",
+        "description": "Aggregated utilization, protocol timings, and sanitized failures only."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "azure011-maa-to-monitor",
+      "stepNumber": 39,
+      "phase": "Release minimized results and prove security and compliance objectives",
+      "title": "Record attestation outcomes and policy version",
+      "type": "add_connection",
+      "content": "Record whether the expected policy accepted or rejected a peer and which policy version was applied. Do not copy signed tokens or raw hardware evidence into general-purpose telemetry.",
+      "connection": {
+        "edgeId": "azure011_maa_to_monitor",
+        "sourceNodeId": "azure011_maa",
+        "targetNodeId": "azure011_monitoring",
+        "connectionType": "Attestation decision audit",
+        "label": "Audit verifier outcome",
+        "description": "Policy version, decision, and correlation ID; evidence and tokens remain access-controlled."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "azure011-keyvault-to-monitor",
+      "stepNumber": 40,
+      "phase": "Release minimized results and prove security and compliance objectives",
+      "title": "Audit key release and denial decisions",
+      "type": "add_connection",
+      "content": "Capture owner, key purpose, policy version, caller identity, decision, and timestamp under a restricted audit policy. Do not log key material or permit ordinary job operators to alter release policy and erase its history.",
+      "connection": {
+        "edgeId": "azure011_key_vault_to_monitor",
+        "sourceNodeId": "azure011_key_vault",
+        "targetNodeId": "azure011_monitoring",
+        "connectionType": "HSM key-release audit metadata",
+        "label": "Audit Secure Key Release decisions",
+        "description": "Protected grant/deny audit events without key bytes or full attestation tokens."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "azure011-insider-compliance",
+      "stepNumber": 41,
+      "phase": "Release minimized results and prove security and compliance objectives",
+      "title": "Turn insider and regulatory goals into controls",
+      "type": "decision_point",
+      "content": "GDPR and HIPAA are not satisfied by selecting an Azure service or encryption option alone. Confirm the applicable data roles, lawful basis/consent, residency, retention/deletion, access review, incident response, audit evidence, contractual terms/BAA where applicable, and owner obligations with qualified privacy and compliance stakeholders.",
+      "decision": {
+        "question": "How do we demonstrate that privileged operators cannot silently access data or broaden processing?",
+        "chosen": "Separate owner approval, platform operation, key custody, and audit review; require measured-workload approval and preserve protected key-release/access decisions",
+        "chosenReason": "TEEs and MPC constrain data access, while least privilege, dual control, revocation, output governance, and evidence address administrative misuse and compliance accountability.",
+        "alternatives": [
+          {
+            "option": "Give platform administrators both deployment and key-policy ownership",
+            "tradeoff": "Operationally simpler but makes an insider or compromised admin able to widen the trust boundary without independent review."
+          },
+          {
+            "option": "Treat encryption and Azure hosting as proof of GDPR/HIPAA compliance",
+            "tradeoff": "Ignores data-processing roles, purpose limitation, residency, retention, contractual requirements, and auditable operating procedures."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "azure011-overhead-scale",
+      "stepNumber": 42,
+      "phase": "Release minimized results and prove security and compliance objectives",
+      "title": "Measure overhead against an owner-approved baseline",
+      "type": "scale_trigger",
+      "content": "The brief says performance overhead should be minimal but gives no numerical ceiling. Compare the full MPC-plus-TEE path against an agreed non-confidential baseline using representative inputs, participant counts, failure cases, and cold starts.",
+      "scaleTrigger": {
+        "metric": "Relative end-to-end latency, CPU/memory overhead, bytes per MPC round, and cost per completed job (acceptance thresholds TBD)",
+        "action": "Agree the baseline and maximum acceptable overhead with workload owners, profile cryptographic rounds separately from TEE startup/attestation, and tune concurrency or protocol only after the privacy threshold remains satisfied.",
+        "impact": "The measured bottleneck guides peer sizing and protocol selection; relaxing the participant threshold or confidentiality policy to improve speed requires explicit owner approval."
+      },
+      "requirementIds": ["legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "azure011-acceptance",
+      "stepNumber": 43,
+      "phase": "Release minimized results and prove security and compliance objectives",
+      "title": "Prove the threat model with negative tests",
+      "type": "explanation",
+      "content": "Before production, test that an unapproved image, stale/revoked measurement, wrong owner identity, altered policy, missing participant, repeated job, expired upload grant, and attestation or Key Vault outage cannot release a key or publish a partial result. Test that logs, storage, control-plane databases, and operator diagnostics contain no raw inputs or shares. Verify the selected TEE/region and current Azure service support, define GDPR/HIPAA evidence with the responsible stakeholders, and set numeric scale and overhead objectives from measured workload data."
+    }
+  ]
+}

@@ -1,0 +1,357 @@
+{
+  "problem_id": "6901ef1b9420d83630aca88a",
+  "version": "1.0-review",
+  "totalSteps": 57,
+  "requirementRevision": null,
+  "phases": [
+    {"name": "Authenticate and accept a wire command", "stepRange": [1, 9], "description": "Define the authenticated API boundary and one durable idempotency identity per transfer intent."},
+    {"name": "Verify ownership, policy, and real-time risk", "stepRange": [10, 26], "description": "Check account ownership, limits, KYC/AML, sanctions, and fraud before allowing rail dispatch."},
+    {"name": "Commit and dispatch domestic and international wires", "stepRange": [27, 44], "description": "Atomically record the intent and outbox, then dispatch through idempotent rail adapters and expose honest status."},
+    {"name": "Track outcomes, audit, and recover", "stepRange": [45, 57], "description": "Reconcile uncertain rail results, archive audit evidence, and protect the no-loss path with monitoring and managed keys."}
+  ],
+  "steps": [
+    {
+      "id": "wire_01", "stepNumber": 1, "phase": "Authenticate and accept a wire command", "title": "Read the frozen wire-transfer brief", "type": "explanation",
+      "content": "The frozen brief requires domestic and international initiation, account verification, transaction limits, fraud prevention, AML/KYC, status tracking, idempotent API calls, and an audit trail. Its constraints are ACID guarantees, high security and encryption, regulatory compliance, real-time fraud detection, and zero tolerance for data loss. It gives no throughput, latency target, jurisdictions, rail contracts, currencies, retention term, or recovery target. Treat those as decisions requiring bank and compliance-owner approval, not as promises supplied by the brief. An accepted request is not a settled wire.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "wire_02", "stepNumber": 2, "phase": "Authenticate and accept a wire command", "title": "Add the bank client", "type": "add_component",
+      "content": "The authorized customer or bank operator submits a wire instruction with a stable idempotency key and reads status by the returned transfer ID. The client does not decide whether a wire has settled.",
+      "component": {"nodeId": "wire_client", "componentType": "web-app", "label": "Bank Client", "description": "Authorized transfer initiation and status reads", "position": {"x": 0, "y": 280}, "properties": {"componentName": "Bank Client", "purpose": "Submit domestic or international wire instructions with a stable idempotency key; display pending, review, failed, and confirmed states from the server, never infer settlement from a timeout."}, "highlightReason": "The existing Web App component represents the customer or operator entry point."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-requirement:7"]
+    },
+    {
+      "id": "wire_03", "stepNumber": 3, "phase": "Authenticate and accept a wire command", "title": "Add the protected API boundary", "type": "add_component",
+      "content": "Validate the instruction shape, authenticate each request, enforce transport encryption and quotas, and pass a request correlation ID. Neither the gateway nor an in-memory cache is the idempotency authority.",
+      "component": {"nodeId": "wire_gateway", "componentType": "api-gateway", "label": "Wire API Gateway", "description": "Authenticated and encrypted request boundary", "position": {"x": 300, "y": 280}, "properties": {"componentName": "Wire API Gateway", "purpose": "Require TLS, validate request shape and authorization context, bound request rates, reject raw secrets in logs, and route initiation and status requests with a correlation ID.", "inputValidation": true, "authentication": "JWT", "rateLimiting": true, "tlsTermination": true}, "highlightReason": "The existing API Gateway is the entry and policy enforcement point."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:2"]
+    },
+    {
+      "id": "wire_04", "stepNumber": 4, "phase": "Authenticate and accept a wire command", "title": "Route initiate and status calls", "type": "add_connection",
+      "content": "POST /wires includes the same idempotency key on retries. GET /wires/{id} is authorized to the owning principal and returns a server-side state, including an explicit unknown or pending outcome.",
+      "connection": {"edgeId": "wire_client_gateway", "sourceNodeId": "wire_client", "targetNodeId": "wire_gateway", "connectionType": "http", "label": "Initiate + status over TLS", "description": "Authenticated calls carry a stable idempotency key and correlation ID"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:2"]
+    },
+    {
+      "id": "wire_05", "stepNumber": 5, "phase": "Authenticate and accept a wire command", "title": "Add identity and step-up authentication", "type": "add_component",
+      "content": "Verify the principal and permitted account scope. Require step-up MFA for the bank-approved high-risk or high-value policy; MFA does not replace transaction authorization or KYC.",
+      "component": {"nodeId": "wire_auth", "componentType": "auth-service", "label": "Identity + MFA", "description": "Principal, account scope, and step-up proof", "position": {"x": 300, "y": 40}, "properties": {"componentName": "Identity + MFA", "purpose": "Issue and verify short-lived principal and account-scope claims, require policy-triggered MFA, and record actor and step-up proof without storing credentials in wire events.", "mfa": true}, "highlightReason": "The existing Auth Service matches identity and MFA controls."},
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:2"]
+    },
+    {
+      "id": "wire_06", "stepNumber": 6, "phase": "Authenticate and accept a wire command", "title": "Validate identity on every command", "type": "add_connection",
+      "content": "The gateway verifies identity, token audience, account scope, and step-up claims for initiation. A status read has its own authorization check; possession of a transfer ID is insufficient.",
+      "connection": {"edgeId": "wire_gateway_auth", "sourceNodeId": "wire_gateway", "targetNodeId": "wire_auth", "connectionType": "api-call", "label": "Identity + MFA decision", "description": "Validate principal, account scope, and policy-required step-up"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:2"]
+    },
+    {
+      "id": "wire_07", "stepNumber": 7, "phase": "Authenticate and accept a wire command", "title": "Add the wire command and status service", "type": "add_component",
+      "content": "Normalize beneficiary, amount, currency, destination country, and domestic or international route. Reject conflicting reuses of an idempotency key. Do not respond with SETTLED until a verified rail outcome is committed.",
+      "component": {"nodeId": "wire_api", "componentType": "backend-server", "label": "Wire Command + Status Service", "description": "Idempotent initiation and authoritative status", "position": {"x": 620, "y": 280}, "properties": {"componentName": "Wire Command + Status Service", "purpose": "Validate domestic and international instructions; bind principal, source account, beneficiary, amount, currency and payload hash to a scoped idempotency key; call all pre-dispatch gates; commit an intent or durable rejection; return a transfer ID and truthful status. GET status reads the authoritative ledger with account authorization."}, "highlightReason": "The existing Backend Server is the application command and query boundary."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-requirement:7"]
+    },
+    {
+      "id": "wire_08", "stepNumber": 8, "phase": "Authenticate and accept a wire command", "title": "Forward validated requests", "type": "add_connection",
+      "content": "Only a validated identity context and typed wire instruction reach the command service. The service rechecks resource authorization and never trusts a client-supplied status.",
+      "connection": {"edgeId": "wire_gateway_api", "sourceNodeId": "wire_gateway", "targetNodeId": "wire_api", "connectionType": "http", "label": "Authorized wire command + status", "description": "Forward account-scoped initiation and read requests with correlation ID"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:2"]
+    },
+    {
+      "id": "wire_09", "stepNumber": 9, "phase": "Authenticate and accept a wire command", "title": "Choose durable idempotency semantics", "type": "decision_point",
+      "content": "Scope the idempotency key to principal and operation, hash the full normalized instruction, and reserve it under a unique constraint in the same ACID transaction as the intent. Concurrent identical requests return the same transfer ID and state; a reused key with a different payload conflicts. A timeout is resolved by key lookup before a new attempt.",
+      "decision": {"question": "Where is duplicate transfer prevention enforced?", "chosen": "Durable unique idempotency record and wire intent in one ledger transaction", "chosenReason": "A process crash, retry, or concurrent request cannot turn one logical instruction into two dispatchable wires.", "alternatives": [{"option": "Gateway cache only", "tradeoff": "Expiry, failover, and concurrency can allow a second money movement."}, {"option": "New key on every retry", "tradeoff": "Turns a lost response into a duplicate transfer."}]},
+      "componentUpdate": {"nodeId": "wire_api", "properties": {"purpose": "Validate domestic and international instructions; bind principal, source account, beneficiary, amount, currency and payload hash to a scoped idempotency key; resolve concurrent retries through the ledger's unique record; call all pre-dispatch gates; commit an intent or durable rejection; return a transfer ID and truthful status. GET status reads the authoritative ledger with account authorization."}},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "wire_10", "stepNumber": 10, "phase": "Verify ownership, policy, and real-time risk", "title": "Add the authoritative ACID ledger", "type": "add_component",
+      "content": "Use a relational OLTP ledger for accounts, transfer intents, idempotency records, funds holds/postings, versioned status, decision references, and an outbox. Transactional invariants balance entries per currency; immutable corrections are new reversal entries, never edits to posted history.",
+      "component": {"nodeId": "wire_ledger", "componentType": "database", "label": "ACID Wire Ledger + Outbox", "description": "Accounts, intents, postings, statuses, and durable outbox", "position": {"x": 1030, "y": 280}, "properties": {"componentName": "ACID Wire Ledger + Outbox", "purpose": "Authoritative ACID account and transfer state: unique scoped idempotency key plus payload hash, atomic limit/funds reservation, balanced immutable postings, monotonic status versions, denied-attempt evidence, policy and risk references, and transactional outbox. Acknowledgement follows durable commit; no rail success is invented from dispatch alone.", "encryption": true, "rbac": true}, "highlightReason": "The existing Database component can model a transactional relational ledger without a custom node."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "wire_11", "stepNumber": 11, "phase": "Verify ownership, policy, and real-time risk", "title": "Add account and beneficiary verification", "type": "add_component",
+      "content": "Check source-account ownership, active/unfrozen state, sufficient available funds, and beneficiary/routing details. External beneficiary-bank ownership cannot be assumed verified merely because a format check passed.",
+      "component": {"nodeId": "wire_accounts", "componentType": "backend-server", "label": "Account Verification", "description": "Source ownership and beneficiary validation", "position": {"x": 760, "y": -60}, "properties": {"componentName": "Account Verification", "purpose": "Check principal-to-source-account ownership, account status and available funds from authoritative records; validate beneficiary and routing fields for the selected domestic or international rail; distinguish format validation from external account ownership confirmation."}, "highlightReason": "The existing Backend Server represents account verification logic."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "wire_12", "stepNumber": 12, "phase": "Verify ownership, policy, and real-time risk", "title": "Invoke account checks before dispatch", "type": "add_connection",
+      "content": "The command service passes authenticated source account and beneficiary data to verification before a dispatchable intent is committed.",
+      "connection": {"edgeId": "wire_api_accounts", "sourceNodeId": "wire_api", "targetNodeId": "wire_accounts", "connectionType": "api-call", "label": "Verify account + beneficiary", "description": "Reject unowned, frozen, insufficient, or malformed accounts before rail dispatch"},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:1"]
+    },
+    {
+      "id": "wire_13", "stepNumber": 13, "phase": "Verify ownership, policy, and real-time risk", "title": "Read authoritative account state", "type": "add_connection",
+      "content": "Read versioned account state from the ledger. Recheck balance and hold conditions inside the final transaction so concurrent wires cannot race on a stale preflight read.",
+      "connection": {"edgeId": "wire_accounts_ledger", "sourceNodeId": "wire_accounts", "targetNodeId": "wire_ledger", "connectionType": "database-connection", "label": "Owner, status + funds", "description": "Preflight account state; final funds reservation is checked atomically at commit"},
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:1"]
+    },
+    {
+      "id": "wire_14", "stepNumber": 14, "phase": "Verify ownership, policy, and real-time risk", "title": "Add transaction limits and controls", "type": "add_component",
+      "content": "Apply bank-configured per-transfer, daily, velocity, corridor, and role limits. A precheck improves feedback, but the final counter and funds reservation must be atomic with the wire intent.",
+      "component": {"nodeId": "wire_limits", "componentType": "backend-server", "label": "Limits + Controls", "description": "Per-wire and aggregate controls", "position": {"x": 760, "y": 60}, "properties": {"componentName": "Limits + Controls", "purpose": "Evaluate bank-approved amount, daily aggregate, velocity, corridor and role controls; expose the policy version and denial reason. Reserve limits and funds with the intent in one ACID transaction so concurrent wires cannot exceed controls."}, "highlightReason": "A Backend Server can express policy checks without inventing a limit-service catalog type."},
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "wire_15", "stepNumber": 15, "phase": "Verify ownership, policy, and real-time risk", "title": "Gate the command on limits", "type": "add_connection",
+      "content": "Run controls before dispatch. A limit failure is a durable rejection with an audit reference, not an accepted wire awaiting settlement.",
+      "connection": {"edgeId": "wire_api_limits", "sourceNodeId": "wire_api", "targetNodeId": "wire_limits", "connectionType": "api-call", "label": "Limit decision", "description": "Apply amount, daily, velocity, and corridor controls to the normalized instruction"},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8"]
+    },
+    {
+      "id": "wire_16", "stepNumber": 16, "phase": "Verify ownership, policy, and real-time risk", "title": "Use committed counters for concurrency", "type": "add_connection",
+      "content": "Read prior activity and pass a versioned limit decision to the ledger. The final transaction conditionally reserves the limit bucket and source funds; retrying the same intent does not reserve twice.",
+      "connection": {"edgeId": "wire_limits_ledger", "sourceNodeId": "wire_limits", "targetNodeId": "wire_ledger", "connectionType": "database-connection", "label": "Versioned limit state", "description": "Atomic final reservation prevents concurrent wires from bypassing aggregate limits"},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:1"]
+    },
+    {
+      "id": "wire_17", "stepNumber": 17, "phase": "Verify ownership, policy, and real-time risk", "title": "Add compliance screening", "type": "add_component",
+      "content": "Apply jurisdiction-approved KYC, AML and sanctions rules to originator, beneficiary, corridor, and transaction context. A possible match enters review; a prohibited match blocks dispatch. Rules, retention, and escalation paths need compliance-owner signoff.",
+      "component": {"nodeId": "wire_compliance", "componentType": "backend-server", "label": "KYC + AML Screening", "description": "Versioned compliance decision and review", "position": {"x": 760, "y": 440}, "properties": {"componentName": "KYC + AML Screening", "purpose": "Apply approved jurisdiction-specific KYC, AML, sanctions, and corridor rules before dispatch; produce allow, reject, or manual-review with policy version, reason codes, and evidence reference. Fail closed or hold when required data or screening is unavailable."}, "highlightReason": "The existing Backend Server supports this policy and review role."},
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:2"]
+    },
+    {
+      "id": "wire_18", "stepNumber": 18, "phase": "Verify ownership, policy, and real-time risk", "title": "Screen before a dispatchable intent", "type": "add_connection",
+      "content": "Pass a minimized originator and beneficiary context for screening. Do not route a held or prohibited wire to a bank rail.",
+      "connection": {"edgeId": "wire_api_compliance", "sourceNodeId": "wire_api", "targetNodeId": "wire_compliance", "connectionType": "api-call", "label": "AML, KYC + sanctions decision", "description": "Block or hold based on versioned compliance policy before rail dispatch"},
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "wire_19", "stepNumber": 19, "phase": "Verify ownership, policy, and real-time risk", "title": "Add restricted KYC evidence", "type": "add_component",
+      "content": "Separate sensitive identity evidence from routine wire records. Grant least-privilege access, encrypt it, and apply jurisdiction-approved retention and legal hold rules rather than an invented global period.",
+      "component": {"nodeId": "wire_kyc", "componentType": "database", "label": "Restricted KYC Records", "description": "Identity verification and screening evidence", "position": {"x": 1050, "y": 500}, "properties": {"componentName": "Restricted KYC Records", "purpose": "Store encrypted, access-audited customer identity evidence and screening references with jurisdiction-approved retention and legal holds; expose only minimum necessary attributes to screening, not raw documents to rail dispatch.", "encryption": true, "rbac": true, "auditLog": true}, "highlightReason": "The existing Database component can represent a restricted evidence store."},
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "wire_20", "stepNumber": 20, "phase": "Verify ownership, policy, and real-time risk", "title": "Read approved identity evidence", "type": "add_connection",
+      "content": "The compliance service requests only current verified identity and screening facts, recording evidence and rule versions for review.",
+      "connection": {"edgeId": "wire_compliance_kyc", "sourceNodeId": "wire_compliance", "targetNodeId": "wire_kyc", "connectionType": "database-connection", "label": "Minimal KYC facts", "description": "Least-privilege evidence lookup with policy and access audit"},
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "wire_21", "stepNumber": 21, "phase": "Verify ownership, policy, and real-time risk", "title": "Compare against transaction history", "type": "add_connection",
+      "content": "Use prior committed transfer history for AML velocity and pattern checks. Keep the evidence reference and policy version, but do not copy full KYC documents into the ledger.",
+      "connection": {"edgeId": "wire_compliance_ledger", "sourceNodeId": "wire_compliance", "targetNodeId": "wire_ledger", "connectionType": "database-connection", "label": "AML history lookup", "description": "Risk-minimized transaction history and versioned decision reference"},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "wire_22", "stepNumber": 22, "phase": "Verify ownership, policy, and real-time risk", "title": "Add the synchronous fraud gate", "type": "add_component",
+      "content": "Score the wire before it can be dispatched, using account history, velocity, beneficiary novelty and approved device/context signals. Return allow, review, or reject with reasons and feature age; the model cannot post money.",
+      "component": {"nodeId": "wire_risk", "componentType": "backend-server", "label": "Real-time Fraud Gate", "description": "Pre-dispatch risk policy and fallback", "position": {"x": 760, "y": 660}, "properties": {"componentName": "Real-time Fraud Gate", "purpose": "Synchronously combine deterministic rules and a versioned fraud model before dispatch; return allow, manual-review, or reject with reason codes, model and feature versions. Missing or stale risk evidence holds the wire rather than silently approving it."}, "highlightReason": "The existing Backend Server models risk-policy orchestration."},
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:4"]
+    },
+    {
+      "id": "wire_23", "stepNumber": 23, "phase": "Verify ownership, policy, and real-time risk", "title": "Require fraud screening before dispatch", "type": "add_connection",
+      "content": "The command service waits for the real-time decision or records REVIEW if the bounded fraud call is unavailable. It never treats a timeout as an approval.",
+      "connection": {"edgeId": "wire_api_risk", "sourceNodeId": "wire_api", "targetNodeId": "wire_risk", "connectionType": "api-call", "label": "Pre-dispatch fraud decision", "description": "Allow, review, or reject before a dispatchable ledger state exists"},
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:4"]
+    },
+    {
+      "id": "wire_24", "stepNumber": 24, "phase": "Verify ownership, policy, and real-time risk", "title": "Add a versioned fraud model serving endpoint", "type": "add_component",
+      "content": "The model supplies a score and reason codes from approved minimized features. Rules and review remain the policy authority, especially during model outage or drift.",
+      "component": {"nodeId": "wire_fraud_model", "componentType": "model-serving", "label": "Fraud Model Serving", "description": "Versioned real-time fraud score", "position": {"x": 1070, "y": 690}, "properties": {"componentName": "Fraud Model Serving", "purpose": "Serve a versioned fraud score with reason codes and feature freshness for a pre-dispatch decision; never write balances or independently approve a regulated transfer."}, "highlightReason": "Model Serving is an existing catalog component for online inference."},
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:4"]
+    },
+    {
+      "id": "wire_25", "stepNumber": 25, "phase": "Verify ownership, policy, and real-time risk", "title": "Request a bounded risk score", "type": "add_connection",
+      "content": "Record model version, feature timestamp, score, and decision reference. A model error routes to review or rejection under policy; it never implicitly becomes allow.",
+      "connection": {"edgeId": "wire_risk_model", "sourceNodeId": "wire_risk", "targetNodeId": "wire_fraud_model", "connectionType": "api-call", "label": "Versioned fraud score", "description": "Bounded real-time inference with model and feature provenance"},
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:4"]
+    },
+    {
+      "id": "wire_26", "stepNumber": 26, "phase": "Verify ownership, policy, and real-time risk", "title": "Use history for fraud velocity", "type": "add_connection",
+      "content": "Read committed account and beneficiary history for velocity and novelty features. The ledger remains the source of truth; a cache cannot authorize a wire against stale funds or limits.",
+      "connection": {"edgeId": "wire_risk_ledger", "sourceNodeId": "wire_risk", "targetNodeId": "wire_ledger", "connectionType": "database-connection", "label": "Fraud history + velocity", "description": "Versioned committed history supports pre-dispatch fraud checks"},
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "wire_27", "stepNumber": 27, "phase": "Commit and dispatch domestic and international wires", "title": "Choose a fail-closed pre-dispatch policy", "type": "decision_point",
+      "content": "No dispatchable intent exists until ownership, limits, compliance, and fraud decisions are complete. Unknown or ambiguous outcomes become a durable REVIEW or PENDING state with a case reference. A reviewer may release only under an approved, audited procedure.",
+      "decision": {"question": "What happens when screening is unavailable or inconclusive?", "chosen": "Hold the wire for reviewed resolution and block rail dispatch", "chosenReason": "Automatic approval would violate the real-time fraud and regulatory gates; a durable hold preserves an honest status and evidence trail.", "alternatives": [{"option": "Fail open and send the wire", "tradeoff": "Can move funds without required fraud or compliance clearance."}, {"option": "Drop the request without a record", "tradeoff": "Loses audit and status evidence for an attempted transaction."}]},
+      "componentUpdate": {"nodeId": "wire_risk", "properties": {"purpose": "Synchronously combine deterministic rules and a versioned fraud model before dispatch; return allow, manual-review, or reject with reason codes, model and feature versions. Missing, stale, or inconclusive risk evidence creates a durable hold and blocks the rail until approved review resolves it."}},
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "wire_28", "stepNumber": 28, "phase": "Commit and dispatch domestic and international wires", "title": "Commit one intent and its evidence", "type": "add_connection",
+      "content": "In one ACID transaction, conditionally reserve the idempotency key, recheck funds and limits, store the wire intent and state, append audit and outbox records, then commit before acknowledging. A denied attempt also gets a durable audit outcome; if durable commit fails, return a retryable error without claiming acceptance.",
+      "connection": {"edgeId": "wire_api_ledger", "sourceNodeId": "wire_api", "targetNodeId": "wire_ledger", "connectionType": "database-connection", "label": "ACID intent + idempotency + outbox", "description": "Atomic reservation, state, audit reference, and dispatch outbox before acknowledgement"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "wire_29", "stepNumber": 29, "phase": "Commit and dispatch domestic and international wires", "title": "Choose local ACID and durable outbox boundaries", "type": "decision_point",
+      "content": "The bank rail cannot participate in the ledger transaction. Commit the local intent, hold/posting, status, and dispatch event atomically; relay after commit. A failed or reversed external leg needs a new compensating ledger entry and reconciliation, never editing posted history or claiming cross-system ACID.",
+      "decision": {"question": "How are a local ACID commit and an external rail operation coordinated?", "chosen": "Transactional outbox plus idempotent dispatch, reconciliation, and compensating entries", "chosenReason": "It closes the crash gap between ledger commit and publish while acknowledging that the external rail is outside the database transaction.", "alternatives": [{"option": "Write the rail first, then the ledger", "tradeoff": "A crash can move funds without a local authoritative record."}, {"option": "Assume one distributed ACID transaction across all banks", "tradeoff": "External clearing rails do not provide that atomic boundary."}]},
+      "componentUpdate": {"nodeId": "wire_ledger", "properties": {"wal": true, "pitr": true, "backups": true, "multiAZ": true, "auditLog": true}},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "wire_30", "stepNumber": 30, "phase": "Commit and dispatch domestic and international wires", "title": "Add the committed-outbox relay", "type": "add_component",
+      "content": "Poll committed outbox rows and publish at least once. Mark publication progress only after durable queue acceptance; restart or replay uses the same event ID.",
+      "component": {"nodeId": "wire_relay", "componentType": "processing-worker", "label": "Outbox Relay", "description": "Durable publish after ledger commit", "position": {"x": 1320, "y": 280}, "properties": {"componentName": "Outbox Relay", "purpose": "Read committed ledger outbox rows, publish stable event IDs at least once, checkpoint only after durable queue or archive acknowledgement, and retry without losing or duplicating a logical transfer."}, "highlightReason": "The existing Processing Worker supports a replayable relay."},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:5", "legacy-constraint:1"]
+    },
+    {
+      "id": "wire_31", "stepNumber": 31, "phase": "Commit and dispatch domestic and international wires", "title": "Read only committed outbox events", "type": "add_connection",
+      "content": "The relay never publishes a rolled-back transfer. A crash after queue publish but before marking the outbox complete produces a duplicate event ID, which consumers deduplicate.",
+      "connection": {"edgeId": "wire_ledger_relay", "sourceNodeId": "wire_ledger", "targetNodeId": "wire_relay", "connectionType": "data-flow", "label": "Committed outbox events", "description": "Stable IDs permit replay after a crash without losing an accepted wire"},
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "wire_32", "stepNumber": 32, "phase": "Commit and dispatch domestic and international wires", "title": "Add a durable dispatch queue", "type": "add_component",
+      "content": "Buffer rail work after the ACID commit. Preserve transfer ID, version, route, and event ID; alert on oldest-message age and dead letters. Queue delivery can repeat, so the dispatcher must be idempotent.",
+      "component": {"nodeId": "wire_queue", "componentType": "queue", "label": "Durable Rail Dispatch Queue", "description": "Replayable transfer commands and backpressure", "position": {"x": 1600, "y": 280}, "properties": {"componentName": "Durable Rail Dispatch Queue", "purpose": "Hold committed, approved wire dispatch events with transfer ID, state version and stable event ID; absorb bursts and rail outages; retain retry and dead-letter evidence. Never mistake enqueue for settlement.", "durable": true}, "highlightReason": "The existing Queue represents durable asynchronous dispatch."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "wire_33", "stepNumber": 33, "phase": "Commit and dispatch domestic and international wires", "title": "Publish without a commit-to-queue gap", "type": "add_connection",
+      "content": "Publish the committed outbox event and acknowledge only after durable queue receipt. On failure the outbox remains pending for replay; on duplicate receipt the event ID identifies the same transfer.",
+      "connection": {"edgeId": "wire_relay_queue", "sourceNodeId": "wire_relay", "targetNodeId": "wire_queue", "connectionType": "message-queue", "label": "Approved wire event", "description": "At-least-once publish with stable event ID and bounded backpressure"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "wire_34", "stepNumber": 34, "phase": "Commit and dispatch domestic and international wires", "title": "Add idempotent rail dispatch", "type": "add_component",
+      "content": "Consume only approved transfer versions. Persist a stable rail operation ID before external submission. On timeout, query by that reference or reconcile; never send a new payment merely because the response was lost.",
+      "component": {"nodeId": "wire_dispatch", "componentType": "processing-worker", "label": "Rail Dispatch Worker", "description": "Idempotent domestic and international routing", "position": {"x": 1900, "y": 280}, "properties": {"componentName": "Rail Dispatch Worker", "purpose": "Route approved domestic and international wires with stable per-transfer rail operation IDs, deduplicate queue events, verify signed rail callbacks, persist monotonic outcomes, and reconcile ambiguous timeouts before any replay. Never blindly resubmit a money movement."}, "highlightReason": "The existing Processing Worker fits queued and retryable rail dispatch."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "wire_35", "stepNumber": 35, "phase": "Commit and dispatch domestic and international wires", "title": "Consume approved committed work", "type": "add_connection",
+      "content": "The dispatcher checks current ledger version before submitting. Duplicate or stale queue deliveries are no-ops; a held or reversed wire cannot be sent by an old message.",
+      "connection": {"edgeId": "wire_queue_dispatch", "sourceNodeId": "wire_queue", "targetNodeId": "wire_dispatch", "connectionType": "message-queue", "label": "Approved transfer command", "description": "Deduplicate by transfer ID and state version before any rail call"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "wire_36", "stepNumber": 36, "phase": "Commit and dispatch domestic and international wires", "title": "Add the domestic clearing adapter", "type": "add_component",
+      "content": "The domestic adapter validates local routing and rail-specific limits, transmits a stable instruction reference, and returns an accepted or confirmed outcome according to the actual rail contract.",
+      "component": {"nodeId": "wire_domestic", "componentType": "payment-service", "label": "Domestic Rail Adapter", "description": "Local clearing submission and outcome", "position": {"x": 2210, "y": 120}, "properties": {"componentName": "Domestic Rail Adapter", "purpose": "Submit domestic wires through a bank-approved clearing integration with a stable operation reference; distinguish accepted, pending, rejected and confirmed settlement outcomes. Rail protocol and deadlines require bank approval."}, "highlightReason": "The existing Payment Service can represent a bank-rail integration without a custom component."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "wire_37", "stepNumber": 37, "phase": "Commit and dispatch domestic and international wires", "title": "Submit domestic instructions", "type": "add_connection",
+      "content": "Send only approved domestic wires with the persisted operation reference. Retry only when the rail contract guarantees idempotent lookup or submission by that same reference.",
+      "connection": {"edgeId": "wire_dispatch_domestic", "sourceNodeId": "wire_dispatch", "targetNodeId": "wire_domestic", "connectionType": "api-call", "label": "Domestic wire submission", "description": "Stable rail reference and contract-specific retry semantics"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "wire_38", "stepNumber": 38, "phase": "Commit and dispatch domestic and international wires", "title": "Add the international rail adapter", "type": "add_component",
+      "content": "Validate beneficiary bank identifiers, destination country, currency, sanctions context and any required FX quote before a dispatchable intent is committed. The adapter rechecks rail-specific fields and preserves the accepted quote and fees if conversion applies; no particular corridor or rail is mandated by the brief.",
+      "component": {"nodeId": "wire_international", "componentType": "payment-service", "label": "International Rail Adapter", "description": "Cross-border submission and outcome", "position": {"x": 2210, "y": 440}, "properties": {"componentName": "International Rail Adapter", "purpose": "Submit approved cross-border wires through bank-approved correspondent or network integration; validate beneficiary and country/currency routing, bind any required FX quote and fees, reuse stable operation references, and distinguish pending from confirmed settlement."}, "highlightReason": "The existing Payment Service also covers an international bank-rail adapter."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "wire_39", "stepNumber": 39, "phase": "Commit and dispatch domestic and international wires", "title": "Submit cross-border instructions", "type": "add_connection",
+      "content": "Send the approved international instruction with preserved quote, fees, beneficiary context, and stable operation reference. A correspondent acknowledgement is not final settlement.",
+      "connection": {"edgeId": "wire_dispatch_international", "sourceNodeId": "wire_dispatch", "targetNodeId": "wire_international", "connectionType": "api-call", "label": "International wire submission", "description": "Approved corridor and stable reference; pending until confirmed outcome"},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-requirement:7"]
+    },
+    {
+      "id": "wire_40", "stepNumber": 40, "phase": "Commit and dispatch domestic and international wires", "title": "Ingest domestic rail outcomes", "type": "add_connection",
+      "content": "Authenticate rail callbacks or signed reports, deduplicate by provider event ID, and retain the raw reference for reconciliation. Delayed or reordered outcomes cannot regress a terminal state.",
+      "connection": {"edgeId": "wire_domestic_dispatch", "sourceNodeId": "wire_domestic", "targetNodeId": "wire_dispatch", "connectionType": "api-call", "label": "Domestic outcome", "description": "Verified callback or report with operation ID and monotonic state transition"},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "wire_41", "stepNumber": 41, "phase": "Commit and dispatch domestic and international wires", "title": "Ingest international rail outcomes", "type": "add_connection",
+      "content": "Treat correspondent acknowledgements as PENDING unless the actual contract confirms settlement. Preserve country, currency, provider reference, and event sequence for compliance and repair.",
+      "connection": {"edgeId": "wire_international_dispatch", "sourceNodeId": "wire_international", "targetNodeId": "wire_dispatch", "connectionType": "api-call", "label": "International outcome", "description": "Verified, deduplicated callback or settlement report with finality semantics"},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "wire_42", "stepNumber": 42, "phase": "Commit and dispatch domestic and international wires", "title": "Commit rail outcomes and new audit events", "type": "add_connection",
+      "content": "Atomically advance the transfer state by version, post final or compensating ledger entries, record a signed-outcome reference, and append a status/audit outbox event. Never overwrite immutable postings or mark an unknown rail outcome as failed and safely retryable.",
+      "connection": {"edgeId": "wire_dispatch_ledger", "sourceNodeId": "wire_dispatch", "targetNodeId": "wire_ledger", "connectionType": "database-connection", "label": "Versioned rail outcome + posting", "description": "ACID state transition, immutable ledger entry, and audit outbox"},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "wire_43", "stepNumber": 43, "phase": "Commit and dispatch domestic and international wires", "title": "Scale on backlog without duplicate money movement", "type": "scale_trigger",
+      "content": "Scale dispatch workers only when durable queue age and rail capacity justify it. Partition or lease by transfer ID and keep ledger-version checks so competing workers cannot dispatch the same operation twice. Backpressure leaves accepted wires durably pending, never silently dropped.",
+      "scaleTrigger": {"metric": "Oldest approved dispatch event age and rail error/timeout rate", "action": "Add bounded workers per rail while preserving stable operation IDs, per-transfer leases, and provider quotas", "impact": "Absorbs bursts and isolates slow rails; finality still depends on rail confirmation and reconciliation."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "wire_44", "stepNumber": 44, "phase": "Commit and dispatch domestic and international wires", "title": "Read authoritative transfer status", "type": "add_connection",
+      "content": "GET status returns versioned RECEIVED, REVIEW, PENDING_RAIL, SETTLED, FAILED, or REVERSED states as appropriate. A timeout or missing callback remains PENDING/UNKNOWN until reconciled. Enforce owner and support-role authorization on every read.",
+      "connection": {"edgeId": "wire_api_status_ledger", "sourceNodeId": "wire_api", "targetNodeId": "wire_ledger", "connectionType": "database-connection", "label": "Authorized status lookup", "description": "Read durable state, finality evidence, and version by transfer ID"},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:2", "legacy-constraint:2"]
+    },
+    {
+      "id": "wire_45", "stepNumber": 45, "phase": "Track outcomes, audit, and recover", "title": "Add rail reconciliation", "type": "add_component",
+      "content": "Compare provider reports and queryable rail references to ledger states. Repair missing, duplicate, delayed, or mismatched outcomes by reviewed compensating entries; do not blindly resend on an ambiguous timeout.",
+      "component": {"nodeId": "wire_reconcile", "componentType": "processing-worker", "label": "Rail Reconciliation", "description": "Provider-to-ledger matching and repair cases", "position": {"x": 1910, "y": 620}, "properties": {"componentName": "Rail Reconciliation", "purpose": "Match signed domestic/international settlement reports and stable operation references against ledger postings; surface unknown, duplicate, delayed and amount/currency mismatches; open auditable repair cases and post approved compensating entries instead of erasing history or blind resubmission."}, "highlightReason": "The existing Processing Worker can model repeatable reconciliation jobs."},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "wire_46", "stepNumber": 46, "phase": "Track outcomes, audit, and recover", "title": "Supply references for reconciliation", "type": "add_connection",
+      "content": "Pass each submitted operation reference and last known provider outcome to reconciliation. The worker can independently query or ingest the actual rail's signed report.",
+      "connection": {"edgeId": "wire_dispatch_reconcile", "sourceNodeId": "wire_dispatch", "targetNodeId": "wire_reconcile", "connectionType": "data-flow", "label": "Submitted rail references", "description": "Track ambiguous timeouts and delayed settlement evidence"},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "wire_47", "stepNumber": 47, "phase": "Track outcomes, audit, and recover", "title": "Reconcile against immutable ledger state", "type": "add_connection",
+      "content": "Match by transfer and rail operation IDs, amounts, currency, and state version. Escalate gaps before retry or reversal. A repair is a new audited transition with an outbox event.",
+      "connection": {"edgeId": "wire_reconcile_ledger", "sourceNodeId": "wire_reconcile", "targetNodeId": "wire_ledger", "connectionType": "database-connection", "label": "Match, investigate + compensate", "description": "Detect discrepancies and append reviewed, versioned corrective entries"},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "wire_48", "stepNumber": 48, "phase": "Track outcomes, audit, and recover", "title": "Add protected audit evidence archive", "type": "add_component",
+      "content": "Archive immutable, integrity-checked event envelopes for every attempted transaction, status change, screening decision, privileged review, and repair. Exclude secrets and unnecessary identity documents; apply approved residency, retention, legal hold and access review by jurisdiction.",
+      "component": {"nodeId": "wire_archive", "componentType": "cold-storage", "label": "Protected Audit Archive", "description": "Integrity-checked transaction and decision history", "position": {"x": 1630, "y": -40}, "properties": {"componentName": "Protected Audit Archive", "purpose": "Retain encrypted, integrity-checked and access-audited envelopes for initiations, denials, AML/KYC and fraud decisions, rail outcomes, status versions, reviewer actions and repairs. Apply compliance-approved jurisdictional retention, residency and legal holds; never archive credentials or full KYC documents in routine wire events.", "encryption": true}, "highlightReason": "Cold Storage is the existing catalog role for long-lived protected audit evidence."},
+      "requirementIds": ["legacy-requirement:8", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "wire_49", "stepNumber": 49, "phase": "Track outcomes, audit, and recover", "title": "Export committed audit events", "type": "add_connection",
+      "content": "The outbox relay publishes privacy-minimized, hash-linked audit envelopes after commit. Archive acknowledgement is tracked separately from queue publish so a failed archive write remains retryable and visible.",
+      "connection": {"edgeId": "wire_relay_archive", "sourceNodeId": "wire_relay", "targetNodeId": "wire_archive", "connectionType": "data-flow", "label": "Committed audit envelope", "description": "Retry until archive acknowledgement; preserve event ID and hash chain"},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "wire_50", "stepNumber": 50, "phase": "Track outcomes, audit, and recover", "title": "Add financial and operational monitoring", "type": "add_component",
+      "content": "Alert on ledger imbalance, missing outbox or archive acknowledgements, queue age, stuck review/pending wires, rail timeouts, fraud fallback, reconciliation gaps, and restore failures. Avoid sensitive payloads in metrics.",
+      "component": {"nodeId": "wire_monitor", "componentType": "monitoring", "label": "Wire Invariant Monitoring", "description": "No-loss and risk-gate alerts", "position": {"x": 1320, "y": -80}, "properties": {"componentName": "Wire Invariant Monitoring", "purpose": "Alert on unbalanced postings, failed ACID commits, outbox and archive lag, oldest queue age, stuck PENDING/REVIEW wires, fraud-screening outage, rail ambiguity, reconciliation mismatches, backup and restore verification; never log raw KYC data or secrets."}, "highlightReason": "The existing Monitoring component exposes financial invariants and recovery signals."},
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "wire_51", "stepNumber": 51, "phase": "Track outcomes, audit, and recover", "title": "Alert on ledger and outbox invariants", "type": "add_connection",
+      "content": "Any missing committed event, out-of-balance posting, broken backup/restore check, or unacknowledged audit export opens an incident. Multi-AZ replication, WAL, PITR and tested restoration reduce loss risk but need measured recovery evidence.",
+      "connection": {"edgeId": "wire_ledger_monitor", "sourceNodeId": "wire_ledger", "targetNodeId": "wire_monitor", "connectionType": "data-flow", "label": "Ledger + outbox invariants", "description": "Detect imbalance, stuck states, audit lag, and restore failures"},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "wire_52", "stepNumber": 52, "phase": "Track outcomes, audit, and recover", "title": "Alert on durable dispatch lag", "type": "add_connection",
+      "content": "Measure oldest-message age, retry rate, dead letters, and per-rail backpressure. Pause unsafe dispatch and reconcile before redrive; redrive retains the same transfer and rail operation IDs.",
+      "connection": {"edgeId": "wire_queue_monitor", "sourceNodeId": "wire_queue", "targetNodeId": "wire_monitor", "connectionType": "data-flow", "label": "Queue age + retry signals", "description": "Detect unprocessed accepted wires and unsafe replay before data loss"},
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "wire_53", "stepNumber": 53, "phase": "Track outcomes, audit, and recover", "title": "Add managed secrets and encryption keys", "type": "add_component",
+      "content": "Use managed keys for encrypted ledger, KYC and audit data, and short-lived credentials for gateway and rail adapters. Rotate keys with audit and dual control; never place credentials in wire payloads, event buses or logs.",
+      "component": {"nodeId": "wire_keys", "componentType": "secrets-manager", "label": "Keys + Secrets Manager", "description": "Encryption and short-lived integration credentials", "position": {"x": 690, "y": -280}, "properties": {"componentName": "Keys + Secrets Manager", "purpose": "Manage and rotate encryption keys and scoped rail/API credentials with audited least-privilege access; support TLS and encrypted ledger, KYC and audit evidence without exposing secrets to events or logs.", "rotation": true, "encryption": true, "audit": true}, "highlightReason": "The existing Secrets Manager fits key and credential lifecycle control."},
+      "requirementIds": ["legacy-constraint:2"]
+    },
+    {
+      "id": "wire_54", "stepNumber": 54, "phase": "Track outcomes, audit, and recover", "title": "Protect gateway credentials", "type": "add_connection",
+      "content": "The gateway retrieves scoped authentication and TLS material through managed access; rotate and audit privileged reads.",
+      "connection": {"edgeId": "wire_keys_gateway", "sourceNodeId": "wire_keys", "targetNodeId": "wire_gateway", "connectionType": "api-call", "label": "TLS + authentication secrets", "description": "Short-lived scoped credentials with rotation and access audit"},
+      "requirementIds": ["legacy-constraint:2"]
+    },
+    {
+      "id": "wire_55", "stepNumber": 55, "phase": "Track outcomes, audit, and recover", "title": "Protect financial records", "type": "add_connection",
+      "content": "Encrypt ledger storage and backups, separate key administration from wire operations, and audit decrypt privileges. Key access failure fails closed for new money movement.",
+      "connection": {"edgeId": "wire_keys_ledger", "sourceNodeId": "wire_keys", "targetNodeId": "wire_ledger", "connectionType": "api-call", "label": "Ledger encryption keys", "description": "Managed key access for data, backups, and restricted operations"},
+      "requirementIds": ["legacy-constraint:2"]
+    },
+    {
+      "id": "wire_56", "stepNumber": 56, "phase": "Track outcomes, audit, and recover", "title": "Protect rail credentials", "type": "add_connection",
+      "content": "The dispatcher uses scoped, rotated rail credentials. Signed response verification and least-privilege key access prevent an unauthenticated callback from altering financial status.",
+      "connection": {"edgeId": "wire_keys_dispatch", "sourceNodeId": "wire_keys", "targetNodeId": "wire_dispatch", "connectionType": "api-call", "label": "Rail credentials + verification keys", "description": "Scoped secret retrieval and callback verification"},
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:2"]
+    },
+    {
+      "id": "wire_57", "stepNumber": 57, "phase": "Track outcomes, audit, and recover", "title": "Review the unproven operational guarantees", "type": "explanation",
+      "content": "Exercise account ownership and verification failures, unauthorized status reads, duplicate requests and concurrent limits, KYC/sanctions review outcomes, model outages, crashes before and after ledger commit, outbox replay, queue redrive, rail timeouts and late callbacks, regional recovery, backup restoration, and audit-archive failure. Verify no acknowledged intent or confirmed outcome disappears and no retry creates a second wire. The brief's zero-tolerance-for-data-loss constraint is a required acceptance goal, not a mathematically proven property of this diagram. The bank must approve jurisdictions, rails, retention, recovery objectives and any quantitative fraud-response target before production use.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

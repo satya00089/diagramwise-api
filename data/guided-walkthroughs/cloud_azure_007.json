@@ -1,0 +1,859 @@
+{
+  "problem_id": "cloud_azure_007",
+  "version": "1.0",
+  "totalSteps": 44,
+  "phases": [
+    {
+      "name": "Set the release contract and source boundary",
+      "stepRange": [1, 8],
+      "description": "Separate stated release constraints from assumptions, then connect the source repository to Azure Pipelines and its build workers."
+    },
+    {
+      "name": "Build once and enforce verification gates",
+      "stepRange": [9, 20],
+      "description": "Run parallel automated tests, coverage and code-quality checks, image security scanning, container publishing, and reviewed Terraform plans."
+    },
+    {
+      "name": "Promote the same release through environments",
+      "stepRange": [21, 33],
+      "description": "Separate CI from controlled deployment promotion and roll one immutable image through development, staging, and production AKS targets."
+    },
+    {
+      "name": "Switch traffic safely, observe, and recover",
+      "stepRange": [34, 44],
+      "description": "Keep blue serving while green is validated, gate traffic changes on health, record approvals and deployment history, and retain a fast rollback path."
+    }
+  ],
+  "steps": [
+    {
+      "id": "cicd_01",
+      "stepNumber": 1,
+      "phase": "Set the release contract and source boundary",
+      "title": "Separate the brief from sizing assumptions",
+      "type": "explanation",
+      "content": "The brief requires automated build and tests, multiple environments, blue-green deployment, IaC, performance monitoring, rollback, and code-quality gates. Its stated constraints are deployment under 10 minutes, zero downtime, automated-test coverage greater than 80%, multistage approvals, and maintained deployment history. It does not define repository size, test-suite duration, application traffic, latency SLOs, or environment topology; measure these instead of inventing capacity claims.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "cicd_02",
+      "stepNumber": 2,
+      "phase": "Set the release contract and source boundary",
+      "title": "Define what the 10-minute target measures",
+      "type": "decision_point",
+      "content": "The brief states a deployment-time target under ten minutes, but does not define the clock boundary. Record queue time, automated build and verification, rollout, and each approval wait separately; do not silently stop the clock before a required approval. Confirm the start and end events with stakeholders, then assess the under-ten-minute target against that definition. Until then, do not claim end-to-end compliance.",
+      "decision": {
+        "question": "How should the under-10-minute deployment target coexist with multistage manual approvals?",
+        "chosen": "Keep the stated under-ten-minute deployment target, record automated execution and approval wait separately, and confirm the clock boundary before claiming the target is met.",
+        "chosenReason": "This preserves the brief's target without assuming that multistage approval wait is excluded from deployment time.",
+        "alternatives": [
+          {"option": "Count only the final AKS rollout", "tradeoff": "Hides slow builds, tests, or quality gates that users experience as part of delivery."},
+          {"option": "Treat approval waiting as zero", "tradeoff": "Makes the end-to-end target misleading and cannot be guaranteed by pipeline automation."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "cicd_03",
+      "stepNumber": 3,
+      "phase": "Set the release contract and source boundary",
+      "title": "Add the source repository",
+      "type": "add_component",
+      "content": "Use the existing GitHub catalog component as the source-repository example and connect it to Azure Pipelines. This is an explicit source-host assumption because the brief names Azure Pipelines but does not require Azure Repos; replacing the Git host changes the trigger integration, not the release gates.",
+      "component": {
+        "nodeId": "cicd_source",
+        "componentType": "github",
+        "label": "Application Source Repository",
+        "description": "Reviewed application and pipeline definitions",
+        "position": {"x": 0, "y": 220},
+        "properties": {
+          "componentName": "GitHub Enterprise Repository",
+          "purpose": "Store application source, versioned pipeline YAML, test definitions, and Terraform modules. Protect the main branch with reviewed pull requests and required passing status checks; do not store deployment secrets in repository files.",
+          "plan": "Enterprise",
+          "repositories": 1,
+          "actions": false,
+          "packages": false
+        },
+        "highlightReason": "GitHub is already a supported version-control component; the problem allows GitHub and does not mandate Azure Repos."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:8"]
+    },
+    {
+      "id": "cicd_04",
+      "stepNumber": 4,
+      "phase": "Set the release contract and source boundary",
+      "title": "Add Azure Pipelines as the CI orchestrator",
+      "type": "add_component",
+      "content": "The existing CI/CD Pipeline component directly supports Azure DevOps. Use pull-request validation and a main-branch run after merge; make the stage order explicit so image publication and environment promotion cannot bypass test or quality failures.",
+      "component": {
+        "nodeId": "cicd_pipeline",
+        "componentType": "ci-cd-pipeline",
+        "label": "Azure Pipelines — CI",
+        "description": "PR validation, build orchestration, and release handoff",
+        "position": {"x": 340, "y": 220},
+        "properties": {
+          "componentName": "Azure Pipelines CI",
+          "purpose": "Run PR validation and post-merge CI. Order stages as checkout -> parallel build/test/quality/security -> publish one immutable image digest -> hand off to controlled CD. Fail closed on any required gate; use federated workload identity rather than long-lived cloud credentials.",
+          "platform": "Azure DevOps",
+          "stages": "checkout -> build -> parallel tests/quality/security -> publish immutable image -> promote",
+          "triggers": "Pull Request"
+        },
+        "highlightReason": "The catalog CI/CD Pipeline exposes Azure DevOps as a supported platform and models the requested automation."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:8"]
+    },
+    {
+      "id": "cicd_05",
+      "stepNumber": 5,
+      "phase": "Set the release contract and source boundary",
+      "title": "Trigger validation from reviewed source changes",
+      "type": "add_connection",
+      "content": "A pull request starts validation against the proposed commit; a merge to the protected branch starts the release candidate run. Record the exact commit SHA so later deployment and rollback history can be traced to source.",
+      "connection": {
+        "edgeId": "cicd_source_pipeline",
+        "sourceNodeId": "cicd_source",
+        "targetNodeId": "cicd_pipeline",
+        "connectionType": "webhook-trigger",
+        "label": "PR + protected-branch events",
+        "description": "Source commit and review state trigger Azure Pipelines validation"
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "cicd_06",
+      "stepNumber": 6,
+      "phase": "Set the release contract and source boundary",
+      "title": "Add isolated build workers",
+      "type": "add_component",
+      "content": "Use the existing Build Server type for Azure Pipelines agents. Prefer ephemeral or isolated workers, parallel jobs, and dependency/build caches; never let an untrusted pull-request job reuse production deployment credentials.",
+      "component": {
+        "nodeId": "cicd_build",
+        "componentType": "build-server",
+        "label": "Azure Pipelines Build Agents",
+        "description": "Parallel, isolated application and image builds",
+        "position": {"x": 680, "y": 220},
+        "properties": {
+          "componentName": "Azure Pipelines Hosted Build Agents",
+          "purpose": "Build the application and OCI image on isolated hosted agents. Enable dependency and layer caching, parallelize independent jobs, pin toolchains, and publish timing by stage. Treat the job count as a tunable setting, not a workload-derived capacity promise.",
+          "type": "Docker Image",
+          "parallelJobs": 8,
+          "cacheEnabled": true
+        },
+        "highlightReason": "Build Server is the existing palette component for automated compilation and image-build workers."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:1"]
+    },
+    {
+      "id": "cicd_07",
+      "stepNumber": 7,
+      "phase": "Set the release contract and source boundary",
+      "title": "Dispatch the pipeline jobs to build agents",
+      "type": "add_connection",
+      "content": "Azure Pipelines schedules the build and verification jobs on the worker pool. Use parallelism for independent suites, but preserve required gates: a faster run must not skip tests or lower the agreed coverage threshold.",
+      "connection": {
+        "edgeId": "cicd_pipeline_build",
+        "sourceNodeId": "cicd_pipeline",
+        "targetNodeId": "cicd_build",
+        "connectionType": "pipeline-job-dispatch",
+        "label": "Build + verification jobs",
+        "description": "Pipeline schedules isolated, cache-aware build workers"
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "cicd_08",
+      "stepNumber": 8,
+      "phase": "Set the release contract and source boundary",
+      "title": "Build once and promote the same image digest",
+      "type": "decision_point",
+      "content": "Do not rebuild an image separately for development, staging, and production. Build once from the reviewed commit, identify it by immutable digest, and promote that exact artifact after each environment gate. This makes production rollback and deployment history refer to a verifiable artifact rather than a mutable tag.",
+      "decision": {
+        "question": "Should each environment rebuild the container or promote one tested artifact?",
+        "chosen": "Build one image after required gates, store its immutable digest, and promote the same digest through every environment.",
+        "chosenReason": "The artifact that passed tests is the artifact deployed, and the digest provides a stable rollback and audit identity.",
+        "alternatives": [
+          {"option": "Rebuild independently in every environment", "tradeoff": "Different bytes can reach production even when source revisions appear identical."},
+          {"option": "Promote a mutable latest tag", "tradeoff": "A tag can move, so history may not identify the exact image that ran."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "cicd_09",
+      "stepNumber": 9,
+      "phase": "Build once and enforce verification gates",
+      "title": "Add automated test suites and a strict coverage threshold",
+      "type": "add_component",
+      "content": "Use the existing Automated Testing component for unit, integration, end-to-end, and selected performance tests. The requirement is strictly greater than 80%, so configure an 81% minimum rather than accepting 80%; publish the coverage report and fail the pipeline when the threshold or required suite fails. Azure Test Plans can hold test cases and traceability while the pipeline executes the automated suites.",
+      "component": {
+        "nodeId": "cicd_tests",
+        "componentType": "automated-testing",
+        "label": "Azure Test Plans + Automated Suites",
+        "description": "Parallel tests with an enforced coverage floor",
+        "position": {"x": 1020, "y": 0},
+        "properties": {
+          "componentName": "Azure Test Plans + CI Test Suites",
+          "purpose": "Run unit, integration, API-contract, and release smoke tests in parallel; map test cases to requirements in Azure Test Plans. Publish coverage per commit and block promotion below 81% so the stated >80% constraint is met.",
+          "testTypes": "All",
+          "coverageThreshold": 81,
+          "parallelExecution": true
+        },
+        "highlightReason": "Automated Testing is an existing DevOps component with explicit test-type, parallel-execution, and coverage-threshold properties."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:3"]
+    },
+    {
+      "id": "cicd_10",
+      "stepNumber": 10,
+      "phase": "Build once and enforce verification gates",
+      "title": "Run tests and collect coverage from the build",
+      "type": "add_connection",
+      "content": "The build job supplies the tested revision and artifacts to the suite. Preserve test results and coverage as pipeline artifacts so reviewers can see which commit passed and why a gate blocked promotion.",
+      "connection": {
+        "edgeId": "cicd_build_tests",
+        "sourceNodeId": "cicd_build",
+        "targetNodeId": "cicd_tests",
+        "connectionType": "test-execution",
+        "label": "Parallel tests + coverage report",
+        "description": "Automated suites validate the built revision and publish coverage"
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:3"]
+    },
+    {
+      "id": "cicd_11",
+      "stepNumber": 11,
+      "phase": "Build once and enforce verification gates",
+      "title": "Add a blocking code-quality gate",
+      "type": "add_component",
+      "content": "Use the existing Code Quality component for lint, static analysis, and maintainability policy. A failed gate must stop artifact publication or environment promotion; make thresholds visible rather than treating a green build as proof of quality.",
+      "component": {
+        "nodeId": "cicd_quality",
+        "componentType": "code-quality",
+        "label": "Code Quality Gate",
+        "description": "Static analysis and merge-blocking quality rules",
+        "position": {"x": 1020, "y": 220},
+        "properties": {
+          "componentName": "SonarQube + Lint Quality Gate",
+          "purpose": "Run static analysis and lint on the changed revision; block merge or release on failed quality-gate rules, new blocker/critical findings, or coverage below the pipeline threshold. Preserve the report with the build record.",
+          "tools": "SonarQube",
+          "gates": true,
+          "thresholds": "Coverage >=81%; no new blocker/critical quality findings"
+        },
+        "highlightReason": "Code Quality is a native catalog type that exposes tools, quality-gate enablement, and thresholds."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "cicd_12",
+      "stepNumber": 12,
+      "phase": "Build once and enforce verification gates",
+      "title": "Make quality results a release input",
+      "type": "add_connection",
+      "content": "Run the quality checks against the same commit that produced the test report and image candidate. A failed static-analysis gate cannot be waived by a successful deployment approval.",
+      "connection": {
+        "edgeId": "cicd_build_quality",
+        "sourceNodeId": "cicd_build",
+        "targetNodeId": "cicd_quality",
+        "connectionType": "static-analysis",
+        "label": "Lint + static-analysis report",
+        "description": "Quality checks evaluate the exact release-candidate revision"
+      },
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "cicd_13",
+      "stepNumber": 13,
+      "phase": "Build once and enforce verification gates",
+      "title": "Scan the candidate container before release",
+      "type": "add_component",
+      "content": "Use the existing Security Scanning component for a container-image scan. Pin scanner rules and fail on high-severity vulnerabilities; document any approved exception with an owner and expiry instead of silently allowing a vulnerable image through.",
+      "component": {
+        "nodeId": "cicd_security",
+        "componentType": "security-scanning",
+        "label": "Container Image Security Scan",
+        "description": "Trivy scan blocks vulnerable image promotion",
+        "position": {"x": 1020, "y": 440},
+        "properties": {
+          "componentName": "Trivy Container Scan",
+          "purpose": "Scan the built container and its dependencies before publication/promotion. Fail on high-severity findings; attach the scan report and any time-bounded, approved exception to the commit and image digest.",
+          "scanType": "Container",
+          "tool": "Trivy",
+          "failOnVulnerabilities": true
+        },
+        "highlightReason": "Security Scanning is a supported DevOps palette component with a native Container scan type and Trivy option."
+      },
+      "requirementIds": ["legacy-requirement:1"]
+    },
+    {
+      "id": "cicd_14",
+      "stepNumber": 14,
+      "phase": "Build once and enforce verification gates",
+      "title": "Block release on a failed image scan",
+      "type": "add_connection",
+      "content": "The build produces an image candidate for scanning. A clean scan is a required gate before that image digest becomes eligible for environment promotion; keep the scan result associated with the digest in the release record.",
+      "connection": {
+        "edgeId": "cicd_build_security",
+        "sourceNodeId": "cicd_build",
+        "targetNodeId": "cicd_security",
+        "connectionType": "image-security-scan",
+        "label": "Candidate image + scan policy",
+        "description": "Trivy evaluates the built image before it is released"
+      },
+      "requirementIds": ["legacy-requirement:1"]
+    },
+    {
+      "id": "cicd_15",
+      "stepNumber": 15,
+      "phase": "Build once and enforce verification gates",
+      "title": "Use Azure Container Registry for immutable images",
+      "type": "add_component",
+      "content": "The Docker catalog component has an explicit ACR registry option, so use it for image build/publish rather than creating an unsupported registry node. Push only after required tests and scans pass, tag with the commit for discoverability, and promote by digest rather than tag.",
+      "component": {
+        "nodeId": "cicd_registry",
+        "componentType": "docker",
+        "label": "Azure Container Registry (ACR)",
+        "description": "Private store for the verified OCI release image",
+        "position": {"x": 1360, "y": 220},
+        "properties": {
+          "componentName": "Azure Container Registry",
+          "purpose": "Store the verified OCI image with immutable digest identity, restricted push/pull roles, retention for supported rollback, and vulnerability-scan metadata. AKS obtains pull access through managed identity; do not embed registry passwords in manifests.",
+          "version": "Pinned build tooling",
+          "registry": "ACR",
+          "orchestration": "Kubernetes"
+        },
+        "highlightReason": "Docker is an existing catalog component whose registry property explicitly supports ACR and Kubernetes orchestration."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:7"]
+    },
+    {
+      "id": "cicd_16",
+      "stepNumber": 16,
+      "phase": "Build once and enforce verification gates",
+      "title": "Publish only the gate-approved image",
+      "type": "add_connection",
+      "content": "After tests, quality checks, and image scanning pass, publish the image digest to ACR. The pipeline stage ordering is the enforcement mechanism; do not treat this connection as permission to publish before gates complete.",
+      "connection": {
+        "edgeId": "cicd_build_registry",
+        "sourceNodeId": "cicd_build",
+        "targetNodeId": "cicd_registry",
+        "connectionType": "verified-image-publish",
+        "label": "Gate-approved image digest",
+        "description": "Only a candidate that passed required checks is stored for promotion"
+      },
+      "requirementIds": ["legacy-requirement:1"]
+    },
+    {
+      "id": "cicd_17",
+      "stepNumber": 17,
+      "phase": "Build once and enforce verification gates",
+      "title": "Add versioned infrastructure definitions",
+      "type": "add_component",
+      "content": "Infrastructure as Code is already modeled in the DevOps palette. Use Terraform modules for AKS, ACR, identities, network policy, and monitoring configuration; plan on pull requests and apply only through the gated environment stages.",
+      "component": {
+        "nodeId": "cicd_iac",
+        "componentType": "infrastructure-as-code",
+        "label": "Terraform Infrastructure",
+        "description": "Reviewed, reusable Azure environment definitions",
+        "position": {"x": 680, "y": 560},
+        "properties": {
+          "componentName": "Terraform Azure Modules",
+          "purpose": "Version AKS, ACR, managed identities, network controls, and monitoring resources as reusable modules. Produce a reviewable plan on pull requests; apply a saved, approved plan with least-privilege workload identity and environment-specific inputs.",
+          "tool": "Terraform",
+          "stateManagement": "Azure Blob",
+          "modules": true
+        },
+        "highlightReason": "Infrastructure as Code is an existing palette component with Terraform and Azure Blob state options."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "cicd_18",
+      "stepNumber": 18,
+      "phase": "Build once and enforce verification gates",
+      "title": "Plan infrastructure changes from the pipeline",
+      "type": "add_connection",
+      "content": "Azure Pipelines runs Terraform validation and plan from the versioned source. Keep remote state in Azure Blob with access control and locking; require review of destructive or unexpected changes before any environment apply.",
+      "connection": {
+        "edgeId": "cicd_pipeline_iac",
+        "sourceNodeId": "cicd_pipeline",
+        "targetNodeId": "cicd_iac",
+        "connectionType": "iac-plan",
+        "label": "Validate + review Terraform plan",
+        "description": "Infrastructure plans are versioned, reviewed, and applied by gated stages"
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "cicd_19",
+      "stepNumber": 19,
+      "phase": "Build once and enforce verification gates",
+      "title": "Choose one IaC tool and make state durable",
+      "type": "decision_point",
+      "content": "The catalog also supports ARM Templates, but this walkthrough chooses Terraform rather than mixing deployment tools. Store remote state in Azure Blob, protect it with least-privilege access and state locking, and promote reviewed plans through the same approval boundaries as application releases.",
+      "decision": {
+        "question": "How should Azure infrastructure be defined and state managed?",
+        "chosen": "Use reusable Terraform modules with an Azure Blob remote backend and locking; apply an approved saved plan per environment.",
+        "chosenReason": "One versioned toolchain gives reviewable plans and consistent promotion while keeping state durable and access-controlled.",
+        "alternatives": [
+          {"option": "Use ARM/Bicep templates", "tradeoff": "A valid Azure-native choice, but mixing it with Terraform here would split plan and state workflows."},
+          {"option": "Use local Terraform state", "tradeoff": "State is difficult to share safely across agents and can be lost with an ephemeral worker."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "cicd_20",
+      "stepNumber": 20,
+      "phase": "Build once and enforce verification gates",
+      "title": "Protect the time budget without weakening gates",
+      "type": "explanation",
+      "content": "Measure queue time, each automated stage, rollout, and approval waits against the agreed deployment-time clock. Use hosted capacity, cached dependencies and image layers, parallel independent tests, and bounded timeouts to approach the stated under-10-minute target. If the full required path cannot meet the budget, optimize the stages and approval workflow or revisit feasibility with stakeholders; do not skip required tests or accept coverage at 80% to manufacture a green result.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "cicd_21",
+      "stepNumber": 21,
+      "phase": "Promote the same release through environments",
+      "title": "Add a separate deployment-promotion workflow",
+      "type": "add_component",
+      "content": "Use the existing Deployment Pipeline component for environment progression, distinct from CI job execution. Define development, staging, and production as ordered stages; stage and production use approvals and health checks, while every stage deploys the same ACR digest.",
+      "component": {
+        "nodeId": "cicd_deployment",
+        "componentType": "deployment-pipeline",
+        "label": "Azure DevOps Environment Promotion",
+        "description": "Ordered dev, staging, and production release stages",
+        "position": {"x": 1700, "y": 220},
+        "properties": {
+          "componentName": "Azure Pipelines CD Environments",
+          "purpose": "Promote the same verified image digest and approved IaC plan through dev -> staging -> production. Use automatic health gates in dev, a staging verification/owner gate, and explicit production approval plus health checks. Record commit, digest, environment, approvers, gate outcomes, timestamps, and rollback outcome under the deployment-history retention policy.",
+          "strategy": "Blue-Green",
+          "environments": "dev, staging, production",
+          "rollbackEnabled": true
+        },
+        "highlightReason": "Deployment Pipeline is an existing component with native Blue-Green strategy, environment, and rollback properties."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "cicd_22",
+      "stepNumber": 22,
+      "phase": "Promote the same release through environments",
+      "title": "Hand a completed CI run to controlled CD",
+      "type": "add_connection",
+      "content": "Only a CI run with passing required gates can create a promotion candidate. Carry its commit, test/quality/security evidence, immutable image digest, and approved infrastructure plan into the deployment workflow.",
+      "connection": {
+        "edgeId": "cicd_pipeline_deployment",
+        "sourceNodeId": "cicd_pipeline",
+        "targetNodeId": "cicd_deployment",
+        "connectionType": "release-candidate-handoff",
+        "label": "Verified release candidate",
+        "description": "CI passes provenance and immutable artifact identity to CD"
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2"]
+    },
+    {
+      "id": "cicd_23",
+      "stepNumber": 23,
+      "phase": "Promote the same release through environments",
+      "title": "Require automated-test evidence before promotion",
+      "type": "add_connection",
+      "content": "Test results and the coverage report are machine-checked by the release gate. A failed or missing suite, or coverage at or below 80%, blocks the candidate before it can enter an environment.",
+      "connection": {
+        "edgeId": "cicd_tests_deployment",
+        "sourceNodeId": "cicd_tests",
+        "targetNodeId": "cicd_deployment",
+        "connectionType": "test-gate-result",
+        "label": "Passing tests + coverage >80%",
+        "description": "Test and coverage evidence is required for environment promotion"
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3"]
+    },
+    {
+      "id": "cicd_24",
+      "stepNumber": 24,
+      "phase": "Promote the same release through environments",
+      "title": "Require code-quality evidence before promotion",
+      "type": "add_connection",
+      "content": "A release approval cannot override a failed mandatory quality policy by itself. Any exception should use a separately authorized, auditable process with an owner and expiry.",
+      "connection": {
+        "edgeId": "cicd_quality_deployment",
+        "sourceNodeId": "cicd_quality",
+        "targetNodeId": "cicd_deployment",
+        "connectionType": "quality-gate-result",
+        "label": "Required quality gate passed",
+        "description": "Code-quality status gates release eligibility"
+      },
+      "requirementIds": ["legacy-requirement:8"]
+    },
+    {
+      "id": "cicd_25",
+      "stepNumber": 25,
+      "phase": "Promote the same release through environments",
+      "title": "Require a clean image-security result",
+      "type": "add_connection",
+      "content": "Only the image digest associated with a passing scan can be promoted. Persist the scan report and exception approvals alongside the release record so the gate is reproducible later.",
+      "connection": {
+        "edgeId": "cicd_security_deployment",
+        "sourceNodeId": "cicd_security",
+        "targetNodeId": "cicd_deployment",
+        "connectionType": "security-gate-result",
+        "label": "Approved image scan result",
+        "description": "High-severity findings block deployment of the candidate digest"
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "cicd_26",
+      "stepNumber": 26,
+      "phase": "Promote the same release through environments",
+      "title": "Apply only the reviewed infrastructure plan",
+      "type": "add_connection",
+      "content": "CD receives the exact saved Terraform plan that was reviewed. Re-plan and re-review if the source, state, or environment inputs change rather than applying stale infrastructure intent.",
+      "connection": {
+        "edgeId": "cicd_iac_deployment",
+        "sourceNodeId": "cicd_iac",
+        "targetNodeId": "cicd_deployment",
+        "connectionType": "approved-iac-plan",
+        "label": "Reviewed plan -> gated apply",
+        "description": "Environment infrastructure changes require an approved, current Terraform plan"
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "cicd_27",
+      "stepNumber": 27,
+      "phase": "Promote the same release through environments",
+      "title": "Resolve the immutable release from ACR",
+      "type": "add_connection",
+      "content": "CD pulls the image by digest and deploys that same artifact through every stage. Grant each AKS identity only the registry pull rights it needs; keep the digest and stage outcome in release history.",
+      "connection": {
+        "edgeId": "cicd_registry_deployment",
+        "sourceNodeId": "cicd_registry",
+        "targetNodeId": "cicd_deployment",
+        "connectionType": "immutable-artifact-promotion",
+        "label": "Verified ACR image digest",
+        "description": "CD promotes the exact image that passed CI gates"
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "cicd_28",
+      "stepNumber": 28,
+      "phase": "Promote the same release through environments",
+      "title": "Add the development AKS target",
+      "type": "add_component",
+      "content": "Use the existing Kubernetes component and choose AKS from its supported distribution options. Development is the first deployment target for integration and smoke validation; its exact size is not specified by the brief and must be selected from measured workload.",
+      "component": {
+        "nodeId": "cicd_aks_dev",
+        "componentType": "kubernetes",
+        "label": "AKS — Development",
+        "description": "First isolated environment for release-candidate checks",
+        "position": {"x": 2040, "y": 0},
+        "properties": {
+          "componentName": "AKS Development Environment",
+          "purpose": "Run the promoted image in an isolated development target; execute deployment smoke checks and validate configuration before staging. Size nodes and quotas from observed test workload rather than the catalog default.",
+          "version": "Pinned supported AKS version",
+          "distribution": "AKS",
+          "managed": true
+        },
+        "highlightReason": "Kubernetes is an existing component with AKS as a supported managed distribution."
+      },
+      "requirementIds": ["legacy-requirement:2"]
+    },
+    {
+      "id": "cicd_29",
+      "stepNumber": 29,
+      "phase": "Promote the same release through environments",
+      "title": "Deploy to development first",
+      "type": "add_connection",
+      "content": "The development stage deploys the immutable digest automatically after CI gates pass, then checks readiness and application smoke tests. A failed health check stops progression to staging.",
+      "connection": {
+        "edgeId": "cicd_deployment_aks_dev",
+        "sourceNodeId": "cicd_deployment",
+        "targetNodeId": "cicd_aks_dev",
+        "connectionType": "environment-deployment",
+        "label": "Auto deploy + smoke gate",
+        "description": "Development validation precedes promotion to staging"
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4"]
+    },
+    {
+      "id": "cicd_30",
+      "stepNumber": 30,
+      "phase": "Promote the same release through environments",
+      "title": "Add the staging AKS target",
+      "type": "add_component",
+      "content": "Represent staging separately from development so deployment configuration, test evidence, and approval context are environment-specific. Use production-like configuration and synthetic load without sharing production credentials or customer data.",
+      "component": {
+        "nodeId": "cicd_aks_staging",
+        "componentType": "kubernetes",
+        "label": "AKS — Staging",
+        "description": "Production-like pre-release verification target",
+        "position": {"x": 2040, "y": 250},
+        "properties": {
+          "componentName": "AKS Staging Environment",
+          "purpose": "Run the same immutable image with production-like deployment settings; execute end-to-end, compatibility, and bounded performance smoke checks before production approval. Keep identities and secrets isolated from development and production.",
+          "version": "Pinned supported AKS version",
+          "distribution": "AKS",
+          "managed": true
+        },
+        "highlightReason": "The native Kubernetes component can represent a distinct AKS environment without inventing a provider-specific palette node."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4"]
+    },
+    {
+      "id": "cicd_31",
+      "stepNumber": 31,
+      "phase": "Promote the same release through environments",
+      "title": "Promote only after staging checks pass",
+      "type": "add_connection",
+      "content": "After staging health, compatibility, and performance checks pass, require the designated staging owner approval before production becomes eligible. The manual approval wait is visible separately from automated execution time.",
+      "connection": {
+        "edgeId": "cicd_deployment_aks_staging",
+        "sourceNodeId": "cicd_deployment",
+        "targetNodeId": "cicd_aks_staging",
+        "connectionType": "staging-promotion",
+        "label": "Promote after dev + staging checks",
+        "description": "Staging results and owner approval are required before production"
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "cicd_32",
+      "stepNumber": 32,
+      "phase": "Promote the same release through environments",
+      "title": "Add the production AKS target",
+      "type": "add_component",
+      "content": "Production is a separate AKS environment with stricter identity, network, quota, and change controls. Within it, keep the current blue deployment serving while a green deployment of the candidate digest starts and becomes ready; do not direct traffic to an unready revision.",
+      "component": {
+        "nodeId": "cicd_aks_prod",
+        "componentType": "kubernetes",
+        "label": "AKS — Production (Blue + Green)",
+        "description": "Production cluster with isolated blue and green workload slots",
+        "position": {"x": 2040, "y": 520},
+        "properties": {
+          "componentName": "AKS Production Environment",
+          "purpose": "Run separate blue and green Deployments/Services in production; blue continues serving while green is deployed, warmed, and checked. Use readiness probes, disruption budgets, least-privilege workload identities, and isolated environment configuration. Node count and topology remain workload-sizing decisions.",
+          "version": "Pinned supported AKS version",
+          "distribution": "AKS",
+          "managed": true
+        },
+        "highlightReason": "The existing managed Kubernetes component supports AKS; blue and green are workload slots within this production target, not invented node types."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:2"]
+    },
+    {
+      "id": "cicd_33",
+      "stepNumber": 33,
+      "phase": "Promote the same release through environments",
+      "title": "Deploy production only after its approval gate",
+      "type": "add_connection",
+      "content": "The production stage requires its authorized change approver and a successful staging record. It deploys the exact same digest into the green slot while blue remains healthy and routable.",
+      "connection": {
+        "edgeId": "cicd_deployment_aks_prod",
+        "sourceNodeId": "cicd_deployment",
+        "targetNodeId": "cicd_aks_prod",
+        "connectionType": "approved-production-deployment",
+        "label": "Approved digest -> green slot",
+        "description": "Production deployment starts only after multistage gates pass"
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "cicd_34",
+      "stepNumber": 34,
+      "phase": "Switch traffic safely, observe, and recover",
+      "title": "Use readiness-gated blue-green traffic switching",
+      "type": "decision_point",
+      "content": "Blue stays live while green starts and passes readiness, smoke, and compatibility checks. Shift production traffic only after green is healthy; retain blue through an agreed observation window. This avoids an in-place replacement gap, but zero downtime still depends on compatible schema changes, readiness behavior, and healthy capacity.",
+      "decision": {
+        "question": "When should production traffic move from blue to green?",
+        "chosen": "Keep blue serving, validate green with readiness and smoke checks, switch the stable service/ingress selector after the health gate, verify traffic convergence, and retain blue as the rollback candidate.",
+        "chosenReason": "The old version remains available until the candidate is proven ready. This supports the zero-downtime goal, but the actual result depends on readiness, capacity, compatibility, and traffic convergence.",
+        "alternatives": [
+          {"option": "Replace blue pods in place", "tradeoff": "A bad rollout can remove the only healthy version before the candidate is ready."},
+          {"option": "Switch traffic immediately after scheduling", "tradeoff": "A scheduled pod may not yet be ready or able to serve real requests."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:2"]
+    },
+    {
+      "id": "cicd_35",
+      "stepNumber": 35,
+      "phase": "Switch traffic safely, observe, and recover",
+      "title": "Add the production traffic switch",
+      "type": "add_component",
+      "content": "Use the existing Layer 7 Load Balancer component to represent the stable ingress/service routing boundary in front of the production AKS workloads. The controller routes to the active healthy slot; do not expose a direct route to a candidate before approval and readiness checks pass.",
+      "component": {
+        "nodeId": "cicd_ingress",
+        "componentType": "loadbalancer",
+        "label": "AKS Ingress — Active Slot Router",
+        "description": "Stable production endpoint for blue-green traffic changes",
+        "position": {"x": 1700, "y": 560},
+        "properties": {
+          "componentName": "Production Ingress / Service Selector",
+          "purpose": "Keep one stable production endpoint and route only to ready endpoints in the active blue or green slot. Change the selector after health gates pass and keep the previous healthy slot available for a selector rollback without rebuilding; measure routing convergence and recovery time.",
+          "type": "Layer 7 (Application)",
+          "algorithm": "weighted-round-robin",
+          "sslTermination": true,
+          "stickiness": false,
+          "healthCheck": true,
+          "healthCheckInterval": 10
+        },
+        "highlightReason": "Load Balancer is a supported Layer 7 component with health checks and traffic-routing properties; it represents the stable ingress boundary."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:2"]
+    },
+    {
+      "id": "cicd_36",
+      "stepNumber": 36,
+      "phase": "Switch traffic safely, observe, and recover",
+      "title": "Route production traffic to the active healthy slot",
+      "type": "add_connection",
+      "content": "The ingress boundary sends requests to the currently selected production Service. Readiness checks exclude unhealthy pods; after the controlled switch, the previous slot remains available until the observation policy permits cleanup.",
+      "connection": {
+        "edgeId": "cicd_ingress_aks_prod",
+        "sourceNodeId": "cicd_ingress",
+        "targetNodeId": "cicd_aks_prod",
+        "connectionType": "healthy-slot-routing",
+        "label": "Stable endpoint -> ready blue/green slot",
+        "description": "Ingress directs traffic only to the selected healthy production deployment"
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:2"]
+    },
+    {
+      "id": "cicd_37",
+      "stepNumber": 37,
+      "phase": "Switch traffic safely, observe, and recover",
+      "title": "Add Azure performance and rollout monitoring",
+      "type": "add_component",
+      "content": "Use the existing Monitoring component with Azure Monitor selected. Instrument both application performance and release health.",
+      "component": {
+        "nodeId": "cicd_monitor",
+      "componentType": "monitoring",
+        "label": "Azure Monitor + Application Insights",
+        "description": "Application SLO and deployment-health telemetry",
+        "position": {"x": 2380, "y": 260},
+    "properties": {
+      "componentName": "Azure Monitor + Application Insights",
+      "purpose": "Collect request rate, p95/p99 latency, error rate, saturation, pod readiness, probe failures, and release/version tags across environments. Compare green against blue during the observation window; alert and trigger rollback when approved SLO or health thresholds regress. Exclude secrets and sensitive payloads from telemetry. Set numeric SLO thresholds from product requirements and baseline measurements.",
+      "stack": "Azure Monitor"
+    },
+    "highlightReason": "The existing Monitoring component now exposes Azure Monitor as a selectable stack."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:2"]
+    },
+    {
+      "id": "cicd_38",
+      "stepNumber": 38,
+      "phase": "Switch traffic safely, observe, and recover",
+      "title": "Observe production performance during the rollout",
+      "type": "add_connection",
+      "content": "Send production request and health signals to Azure Monitor with deployment-version tags. Compare the green candidate with the blue baseline during the observation window; a traffic switch is not considered successful merely because pods started.",
+      "connection": {
+        "edgeId": "cicd_aks_prod_monitor",
+        "sourceNodeId": "cicd_aks_prod",
+        "targetNodeId": "cicd_monitor",
+        "connectionType": "application-telemetry",
+        "label": "Latency, errors, saturation + readiness",
+        "description": "Production telemetry is segmented by active release version"
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:2"]
+    },
+    {
+      "id": "cicd_39",
+      "stepNumber": 39,
+      "phase": "Switch traffic safely, observe, and recover",
+      "title": "Observe development health and test outcomes",
+      "type": "add_connection",
+      "content": "Collect application request, latency, and error signals alongside deployment and test health from development so regressions are caught before staging. Keep environment labels on telemetry to prevent test traffic from being mistaken for production performance.",
+      "connection": {
+        "edgeId": "cicd_aks_dev_monitor",
+        "sourceNodeId": "cicd_aks_dev",
+        "targetNodeId": "cicd_monitor",
+        "connectionType": "environment-health-telemetry",
+        "label": "Development health + smoke results",
+        "description": "Development signals are tagged separately from production"
+      },
+      "requirementIds": ["legacy-requirement:6"]
+    },
+    {
+      "id": "cicd_40",
+      "stepNumber": 40,
+      "phase": "Switch traffic safely, observe, and recover",
+      "title": "Observe staging performance before approval",
+      "type": "add_connection",
+      "content": "Staging emits compatibility and bounded performance-test results with its environment identity. Make the staging owner review those results before approving production promotion.",
+      "connection": {
+        "edgeId": "cicd_aks_staging_monitor",
+        "sourceNodeId": "cicd_aks_staging",
+        "targetNodeId": "cicd_monitor",
+        "connectionType": "staging-performance-telemetry",
+        "label": "Staging latency + compatibility results",
+        "description": "Staging evidence is available to the production approval gate"
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "cicd_41",
+      "stepNumber": 41,
+      "phase": "Switch traffic safely, observe, and recover",
+      "title": "Record rollout timing and health against the release",
+      "type": "add_connection",
+      "content": "Azure Monitor correlates rollout events with application metrics. Emit stage start/end, automated execution duration, approval wait, health-gate outcome, active digest, and traffic-switch time so both the 10-minute target and approval workflow can be audited.",
+      "connection": {
+        "edgeId": "cicd_deployment_monitor",
+        "sourceNodeId": "cicd_deployment",
+        "targetNodeId": "cicd_monitor",
+        "connectionType": "release-event-telemetry",
+        "label": "Stage, approval + rollout events",
+        "description": "Release events are correlated with performance and health signals"
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "cicd_42",
+      "stepNumber": 42,
+      "phase": "Switch traffic safely, observe, and recover",
+      "title": "Use multistage approvals and durable deployment history",
+      "type": "decision_point",
+      "content": "Development can progress automatically after CI gates; staging requires its verification and owner check; production requires an authorized change approver after staging evidence. Keep approvers separate from the pipeline identity. For every stage, retain commit, image digest, IaC plan/run, approver, gate reports, timestamps, outcome, and rollback action under the organization’s audit retention policy.",
+      "decision": {
+        "question": "Where should human approvals and release history live?",
+        "chosen": "Use environment-scoped Azure DevOps checks at staging and production, with role separation, and retain run/deployment metadata and evidence according to the configured audit policy.",
+        "chosenReason": "Approvals become explicit stage gates and the history can identify who approved which exact source and artifact in each environment.",
+        "alternatives": [
+          {"option": "One approval before the whole pipeline", "tradeoff": "It does not provide distinct environment-level control or staging evidence review."},
+          {"option": "Keep only the latest release record", "tradeoff": "A rollback or incident investigation may lose the prior digest, approver, and gate evidence."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "cicd_43",
+      "stepNumber": 43,
+      "phase": "Switch traffic safely, observe, and recover",
+      "title": "Rollback by switching back to the last healthy digest",
+      "type": "decision_point",
+      "content": "If green fails before traffic moves, leave traffic on blue. If health regresses after the switch, initiate a selector rollback to blue, then verify that routing and application health recover before declaring rollback complete. Keep the previous image digest and compatible configuration available; treat database changes as backward-compatible expand/contract migrations so application rollback remains safe. Measure the recovery duration because the brief gives no rollback-time target.",
+      "decision": {
+        "question": "How does the system recover from a bad production release?",
+        "chosen": "Abort before traffic moves when green is unhealthy; after a regression, route back to the retained blue deployment and record the rollback against the failed release.",
+        "chosenReason": "A known previous version remains available, and its image digest identifies the recovery candidate.",
+        "alternatives": [
+          {"option": "Rebuild the previous source revision during the incident", "tradeoff": "Build delay and changed dependencies make the recovery artifact less predictable."},
+          {"option": "Delete blue after switching", "tradeoff": "Removes the direct path to the previous version before the new version is proven stable."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "cicd_44",
+      "stepNumber": 44,
+      "phase": "Switch traffic safely, observe, and recover",
+      "title": "Review the end-to-end release contract",
+      "type": "conclusion",
+      "content": "The flow is source review -> Azure Pipelines build and parallel verification -> immutable ACR image -> reviewed Terraform and controlled CD -> dev -> staging -> approved production blue-green switch. Tests enforce coverage above 80%; Azure Monitor observes performance and rollout health; approvals and full deployment evidence are retained; an unhealthy release returns traffic to the previous digest. Validate the under-10-minute execution boundary and actual environment sizing with measured runs before claiming the target is met.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

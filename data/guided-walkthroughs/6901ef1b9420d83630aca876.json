@@ -1,0 +1,1002 @@
+{
+  "problem_id": "6901ef1b9420d83630aca876",
+  "version": "1.0.0-review-draft",
+  "totalSteps": 50,
+  "requirementRevision": null,
+  "phases": [
+    {
+      "name": "Client Access and Read Plane",
+      "stepRange": [1, 15],
+      "description": "Separate static delivery, ordinary API reads, and long-lived real-time connections."
+    },
+    {
+      "name": "Exchange Ingestion and Price Integrity",
+      "stepRange": [16, 27],
+      "description": "Normalize and validate multi-exchange events before updating read models or distributing quotes."
+    },
+    {
+      "name": "History, Search, and User State",
+      "stepRange": [28, 35],
+      "description": "Serve current snapshots and historical charts while keeping search and user-owned data on suitable stores."
+    },
+    {
+      "name": "Alerts, Operations, and Open Decisions",
+      "stepRange": [36, 50],
+      "description": "Complete alert delivery and observability, then make capacity and market-data assumptions explicit."
+    }
+  ],
+  "steps": [
+    {
+      "id": "stock-intro",
+      "stepNumber": 1,
+      "phase": "Client Access and Read Plane",
+      "title": "Start with the brief, not an invented capacity plan",
+      "type": "explanation",
+      "content": "The brief requires worldwide stock viewing, multiple exchanges, price updates under one second, history, alerts, symbol search, watchlists, and millions of concurrent users. It does not specify symbols, event rates, DAU/RPS, regions, availability, retention, data entitlements, or quote currencies. Treat those as discovery questions; do not present a guessed fleet size as a proven capacity plan.",
+      "requirementIds": []
+    },
+    {
+      "id": "stock-web-client",
+      "stepNumber": 2,
+      "phase": "Client Access and Read Plane",
+      "title": "Add the web experience",
+      "type": "add_component",
+      "content": "The browser renders quote snapshots, charts, search results, watchlists, and alert state. It opens a WebSocket only for symbols the user is viewing or has subscribed to; it must display quote time and market status rather than implying every cached value is current.",
+      "component": {
+        "nodeId": "stock_web_app",
+        "componentType": "web-app",
+        "label": "Web App",
+        "description": "Browser client for worldwide quotes, charts, search, watchlists, and live subscriptions.",
+        "position": { "x": 80, "y": 100 },
+        "properties": {
+          "componentName": "Web App",
+          "purpose": "Renders timestamped quote snapshots and charts, manages user watchlists, and opens scoped real-time subscriptions.",
+          "framework": "React",
+          "cdn": true,
+          "ssl": true
+        },
+        "data": { "originalComponentId": "web-app", "semanticRole": "frontend" },
+        "highlightReason": "This is the primary interactive client and must distinguish live prices from stale or closed-market values."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:8"]
+    },
+    {
+      "id": "stock-cdn",
+      "stepNumber": 3,
+      "phase": "Client Access and Read Plane",
+      "title": "Deliver static assets at the edge",
+      "type": "add_component",
+      "content": "Use the existing CDN catalog component for static application bundles and images. Keep personalized watchlists and live quote responses out of shared edge caching unless their cache keys and freshness rules are explicitly safe.",
+      "component": {
+        "nodeId": "stock_cdn",
+        "componentType": "cdn",
+        "label": "Static Asset CDN",
+        "description": "Global edge delivery for versioned web assets; dynamic quote data is not shared-cached.",
+        "position": { "x": 360, "y": 20 },
+        "properties": {
+          "componentName": "Static Asset CDN",
+          "purpose": "Caches versioned static bundles globally while bypassing personalized and real-time quote responses.",
+          "provider": "AWS CloudFront",
+          "ttl": 3600,
+          "cacheInvalidation": true
+        },
+        "data": { "originalComponentId": "cdn", "semanticRole": "cdn" },
+        "highlightReason": "Edge delivery reduces static-content latency without weakening quote freshness or user-data isolation."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "stock-web-cdn-edge",
+      "stepNumber": 4,
+      "phase": "Client Access and Read Plane",
+      "title": "Connect the browser to static delivery",
+      "type": "add_connection",
+      "content": "The CDN serves versioned static assets to browsers. API and WebSocket traffic follows the explicit application path below rather than being treated as cacheable static content.",
+      "connection": {
+        "edgeId": "stock_web_to_cdn",
+        "sourceNodeId": "stock_web_app",
+        "targetNodeId": "stock_cdn",
+        "connectionType": "http",
+        "label": "Versioned static assets",
+        "description": "Browser downloads immutable application assets from nearby CDN points of presence."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "stock-mobile-client",
+      "stepNumber": 5,
+      "phase": "Client Access and Read Plane",
+      "title": "Add the mobile client",
+      "type": "add_component",
+      "content": "The mobile application uses the same quote, search, chart, watchlist, and alert contracts. If it is offline, it may show a previously received quote only with its as-of time and a clear stale/offline state.",
+      "component": {
+        "nodeId": "stock_mobile_app",
+        "componentType": "mobile-app",
+        "label": "Mobile App",
+        "description": "iOS and Android experience with timestamped quotes and scoped subscriptions.",
+        "position": { "x": 80, "y": 350 },
+        "properties": {
+          "componentName": "Mobile App",
+          "purpose": "Shows quote freshness and market status, supports watchlists, and can present a clearly labeled offline snapshot.",
+          "stack": "React Native",
+          "pushNotifications": true,
+          "offlineSupport": true
+        },
+        "data": { "originalComponentId": "mobile-app", "semanticRole": "frontend" },
+        "highlightReason": "Mobile users need the same correct quote semantics, including during network loss and market closures."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:8"]
+    },
+    {
+      "id": "stock-api-gateway",
+      "stepNumber": 6,
+      "phase": "Client Access and Read Plane",
+      "title": "Create a validated, authenticated entry point",
+      "type": "add_component",
+      "content": "Use the catalog API Gateway for request validation, TLS, authentication for user-specific operations, and abuse-aware rate limits. Public quote visibility and protected watchlist/alert operations may have different authorization policies; confirm that product decision before implementation.",
+      "component": {
+        "nodeId": "stock_api_gateway",
+        "componentType": "api-gateway",
+        "label": "API and WebSocket Gateway",
+        "description": "Entry point for quote/search APIs and authorized WebSocket connection setup.",
+        "position": { "x": 390, "y": 220 },
+        "properties": {
+          "componentName": "API and WebSocket Gateway",
+          "purpose": "Validates requests, applies TLS and rate limits, authorizes user-scoped operations, and routes API or socket handshakes.",
+          "inputValidation": true,
+          "authentication": "JWT",
+          "rateLimiting": true,
+          "tlsTermination": true
+        },
+        "data": { "originalComponentId": "api-gateway", "semanticRole": "api-gateway" },
+        "highlightReason": "A common entry point applies consistent validation and protects the personalized APIs and connection setup."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "stock-web-api-edge",
+      "stepNumber": 7,
+      "phase": "Client Access and Read Plane",
+      "title": "Route browser API and subscription setup",
+      "type": "add_connection",
+      "content": "The browser requests snapshots, search, charts, watchlist changes, and authenticated socket setup through the gateway. Keep the API contract versioned and return source timestamp, venue, currency, and freshness status with a quote.",
+      "connection": {
+        "edgeId": "stock_web_to_gateway",
+        "sourceNodeId": "stock_web_app",
+        "targetNodeId": "stock_api_gateway",
+        "connectionType": "http",
+        "label": "Quote, search, account, and socket setup",
+        "description": "HTTPS requests and authorized WebSocket upgrade/setup flow; quote payloads carry source time and freshness metadata."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:4"]
+    },
+    {
+      "id": "stock-mobile-api-edge",
+      "stepNumber": 8,
+      "phase": "Client Access and Read Plane",
+      "title": "Use the same contracts from mobile",
+      "type": "add_connection",
+      "content": "Mobile and web clients use the same versioned API semantics so timestamps, exchange identifiers, and stale-data handling do not diverge by platform.",
+      "connection": {
+        "edgeId": "stock_mobile_to_gateway",
+        "sourceNodeId": "stock_mobile_app",
+        "targetNodeId": "stock_api_gateway",
+        "connectionType": "http",
+        "label": "HTTPS APIs and socket setup",
+        "description": "Mobile calls share validation, authorization, throttling, and quote freshness metadata with the web client."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:8"]
+    },
+    {
+      "id": "stock-global-lb",
+      "stepNumber": 9,
+      "phase": "Client Access and Read Plane",
+      "title": "Route long-lived connections across regions",
+      "type": "add_component",
+      "content": "Use the catalog's Global load-balancer option to route socket connections to healthy regional fleets. The topology is intended to scale horizontally, but the prompt supplies no region count, connection churn, messages-per-user, or egress model; capacity remains to be measured.",
+      "component": {
+        "nodeId": "stock_global_lb",
+        "componentType": "loadbalancer",
+        "label": "Global WebSocket Load Balancer",
+        "description": "Health-aware global routing to regional real-time connection fleets.",
+        "position": { "x": 700, "y": 390 },
+        "properties": {
+          "componentName": "Global WebSocket Load Balancer",
+          "purpose": "Routes new long-lived connections to healthy nearby regional fleets; does not assume session stickiness for ordinary APIs.",
+          "type": "Global",
+          "algorithm": "least-connections",
+          "sslTermination": true,
+          "stickiness": false,
+          "healthCheck": true
+        },
+        "data": { "originalComponentId": "loadbalancer", "semanticRole": "load-balancer" },
+        "highlightReason": "Global connection routing and health checks are necessary for a worldwide, horizontally scalable socket tier."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "stock-ws-fleet",
+      "stepNumber": 10,
+      "phase": "Client Access and Read Plane",
+      "title": "Separate WebSocket fan-out from request handling",
+      "type": "add_component",
+      "content": "The real-time tier holds client sockets, validates symbol subscriptions, coalesces superseded updates under load, and sends only relevant quote changes. It must recover a fresh snapshot after reconnect; do not size the fleet from the catalog's illustrative defaults.",
+      "component": {
+        "nodeId": "stock_realtime_fleet",
+        "componentType": "frontend-server",
+        "label": "Regional WebSocket Fleets",
+        "description": "Horizontally scaled regional workers for long-lived quote subscriptions.",
+        "position": { "x": 1010, "y": 390 },
+        "properties": {
+          "componentName": "Regional WebSocket Fleets",
+          "purpose": "Maintains client sockets, enforces subscription limits, coalesces stale queued updates, and resumes from a current snapshot after reconnect.",
+          "inMemoryConnections": true,
+          "websockets": true
+        },
+        "data": { "originalComponentId": "frontend-server", "semanticRole": "backend" },
+        "highlightReason": "A dedicated socket tier isolates millions of long-lived connections from ordinary API request pools."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "stock-gateway-lb-edge",
+      "stepNumber": 11,
+      "phase": "Client Access and Read Plane",
+      "title": "Route socket handshakes to the global fleet",
+      "type": "add_connection",
+      "content": "The gateway authenticates and validates the connection request, then the global load balancer selects a healthy regional socket fleet.",
+      "connection": {
+        "edgeId": "stock_gateway_to_global_lb",
+        "sourceNodeId": "stock_api_gateway",
+        "targetNodeId": "stock_global_lb",
+        "connectionType": "api-call",
+        "label": "Authorized socket handoff",
+        "description": "Gateway-approved connection setup is routed to a healthy, nearby WebSocket region."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "stock-lb-ws-edge",
+      "stepNumber": 12,
+      "phase": "Client Access and Read Plane",
+      "title": "Establish the long-lived socket",
+      "type": "add_connection",
+      "content": "The regional worker owns the actual socket and applies per-user and per-symbol subscription limits. A disconnect is recoverable by reconnecting and fetching an authoritative snapshot.",
+      "connection": {
+        "edgeId": "stock_lb_to_realtime_fleet",
+        "sourceNodeId": "stock_global_lb",
+        "targetNodeId": "stock_realtime_fleet",
+        "connectionType": "data-flow",
+        "label": "WebSocket connection",
+        "description": "Long-lived socket traffic terminates on a regional worker; failover requires reconnect and snapshot resynchronization."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "stock-quote-api",
+      "stepNumber": 13,
+      "phase": "Client Access and Read Plane",
+      "title": "Add the quote and user-state API",
+      "type": "add_component",
+      "content": "Keep ordinary snapshot, history, search orchestration, watchlist, and alert-rule APIs off the socket workers. Return exact source timestamps, exchange/venue, currency, and a freshness or market-closed state; user-specific writes require authorization.",
+      "component": {
+        "nodeId": "stock_quote_api",
+        "componentType": "backend-server",
+        "label": "Quote and User API",
+        "description": "Stateless APIs for quote snapshots, charts, search, watchlists, and alert rules.",
+        "position": { "x": 700, "y": 120 },
+        "properties": {
+          "componentName": "Quote and User API",
+          "purpose": "Serves quote snapshots and chart queries, orchestrates symbol search, and validates watchlist and alert-rule operations.",
+          "architecture": "Microservices",
+          "caching": true,
+          "retry": true
+        },
+        "data": { "originalComponentId": "backend-server", "semanticRole": "backend" },
+        "highlightReason": "Separating stateless APIs from socket workers lets request reads scale independently from concurrent connections."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "stock-gateway-api-edge",
+      "stepNumber": 14,
+      "phase": "Client Access and Read Plane",
+      "title": "Route ordinary API requests",
+      "type": "add_connection",
+      "content": "The gateway sends quote, search, chart, and user-state API calls to a horizontally scaled backend pool. The backend uses purpose-specific read models rather than scanning historical data for every latest-price request.",
+      "connection": {
+        "edgeId": "stock_gateway_to_quote_api",
+        "sourceNodeId": "stock_api_gateway",
+        "targetNodeId": "stock_quote_api",
+        "connectionType": "api-call",
+        "label": "Validated REST requests",
+        "description": "Gateway routes snapshot, history, search, watchlist, and alert-rule API requests to stateless application workers."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "stock-read-contract",
+      "stepNumber": 15,
+      "phase": "Client Access and Read Plane",
+      "title": "Define what a displayed price means",
+      "type": "explanation",
+      "content": "A quote response should identify instrument, venue, currency, exchange event time, ingest time, sequence/version, and freshness. Preserve source precision (for example, scaled integer or decimal values); never silently merge venues or currencies. The exact consolidated-quote policy and redistribution rights are open product/data decisions.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "stock-market-feed-adapters",
+      "stepNumber": 16,
+      "phase": "Exchange Ingestion and Price Integrity",
+      "title": "Represent licensed exchange feeds",
+      "type": "add_component",
+      "content": "The catalog has no dedicated exchange/market-data feed component, so use its supported custom component as a named adapter boundary. Adapters isolate vendor protocols and entitlements, validate instrument mapping, retain source sequence/timestamps, and emit normalized events; the actual providers and exchange coverage are assumptions to confirm.",
+      "component": {
+        "nodeId": "stock_market_feed_adapters",
+        "componentType": "custom-component",
+        "label": "Exchange Feed Adapters",
+        "description": "Provider-neutral adapters for licensed global exchange or market-data vendor feeds.",
+        "position": { "x": 80, "y": 700 },
+        "properties": {
+          "componentName": "Exchange Feed Adapters",
+          "subtitle": "Multi-exchange market data ingestion",
+          "purpose": "Connects to entitled feeds, tracks heartbeats and source sequences, detects gaps, and normalizes venue events without discarding original timestamps or precision.",
+          "componentType": "External Market Data Feed Adapter",
+          "technology": "Provider-specific feed connectors"
+        },
+        "data": { "originalComponentId": "custom-component", "semanticRole": "external-api" },
+        "highlightReason": "No dedicated exchange-feed component exists in the catalog; the existing custom component is the explicit, reusable fallback."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "stock-market-broker",
+      "stepNumber": 17,
+      "phase": "Exchange Ingestion and Price Integrity",
+      "title": "Buffer and replay incoming feed events",
+      "type": "add_component",
+      "content": "Use the existing durable message-broker component to absorb bursts and decouple vendor connections from consumers. Partitioning must preserve per-instrument ordering while monitoring skew; partition count, retention, and hot-symbol strategy require measured event rates.",
+      "component": {
+        "nodeId": "stock_market_broker",
+        "componentType": "message-broker",
+        "label": "Durable Market Event Log",
+        "description": "Partitioned, replicated log for normalized exchange events and replay after consumer recovery.",
+        "position": { "x": 390, "y": 700 },
+        "properties": {
+          "componentName": "Durable Market Event Log",
+          "purpose": "Buffers normalized events by exchange and instrument, supports replay after gaps or consumer restarts, and isolates bursty feed ingestion from downstream services.",
+          "partitions": 64,
+          "replication": 3,
+          "durable": true,
+          "retention": 24
+        },
+        "data": { "originalComponentId": "message-broker", "semanticRole": "message-broker" },
+        "highlightReason": "Durable buffering and replay help handle feed bursts, consumer lag, and market-open volatility."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "stock-feed-broker-edge",
+      "stepNumber": 18,
+      "phase": "Exchange Ingestion and Price Integrity",
+      "title": "Publish normalized feed events",
+      "type": "add_connection",
+      "content": "Adapters publish events with a stable event ID, exchange/instrument key, venue sequence, source event time, receive time, currency, and correction/cancel indicator where supplied by the feed.",
+      "connection": {
+        "edgeId": "stock_feed_to_broker",
+        "sourceNodeId": "stock_market_feed_adapters",
+        "targetNodeId": "stock_market_broker",
+        "connectionType": "message-queue",
+        "label": "Normalized, sequenced feed events",
+        "description": "Durable events retain exchange identity, source timestamps, sequence/version, currency, and correction metadata for replay and validation."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "stock-stream-processor",
+      "stepNumber": 19,
+      "phase": "Exchange Ingestion and Price Integrity",
+      "title": "Validate ordering and normalize prices",
+      "type": "add_component",
+      "content": "Process each instrument's feed in event time: validate sequence progression, deduplicate retries, detect gaps, handle corrections, and prevent an older event from overwriting a newer quote. Preserve venue and currency; publish stale/gap status and trigger replay or reconciliation instead of inventing a price. The brief's under-one-second constraint is an end-to-end target, not a measured result.",
+      "component": {
+        "nodeId": "stock_stream_processor",
+        "componentType": "stream-processor",
+        "label": "Quote Validation and Stream Processor",
+        "description": "Stateful per-instrument normalization, sequence checks, correction handling, and read-model updates.",
+        "position": { "x": 700, "y": 700 },
+        "properties": {
+          "componentName": "Quote Validation and Stream Processor",
+          "purpose": "Deduplicates and orders events per instrument, detects feed gaps and corrections, preserves exact price precision, and emits freshness-aware quote updates.",
+          "engine": "Apache Flink",
+          "throughput": 100000,
+          "stateful": true
+        },
+        "data": { "originalComponentId": "stream-processor", "semanticRole": "analytics" },
+        "highlightReason": "Sequence-aware stateful processing protects price accuracy while enabling a sub-second delivery path."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "stock-broker-processor-edge",
+      "stepNumber": 20,
+      "phase": "Exchange Ingestion and Price Integrity",
+      "title": "Consume events with replay capability",
+      "type": "add_connection",
+      "content": "Consumers checkpoint offsets only after their state and output handling are recoverable. Use idempotent writes and replay; do not claim end-to-end exactly-once behavior unless the selected source, processor, and sinks prove it.",
+      "connection": {
+        "edgeId": "stock_broker_to_processor",
+        "sourceNodeId": "stock_market_broker",
+        "targetNodeId": "stock_stream_processor",
+        "connectionType": "message-queue",
+        "label": "Ordered partitions and replay",
+        "description": "Processor consumes keyed partitions, tracks offsets, and replays after gaps or recovery with idempotent output handling."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "stock-latest-cache",
+      "stepNumber": 21,
+      "phase": "Exchange Ingestion and Price Integrity",
+      "title": "Add a latest-quote read model",
+      "type": "add_component",
+      "content": "Use the catalog Redis cache for hot current snapshots, keyed by canonical instrument and venue (or by the explicitly chosen consolidated-quote key). Store price, source time, sequence/version, currency, and freshness state together. Cache retention is not a freshness promise; APIs must calculate age and mark halted or stale quotes honestly.",
+      "component": {
+        "nodeId": "stock_latest_quote_cache",
+        "componentType": "cache",
+        "label": "Latest Quote Cache",
+        "description": "Replicated in-memory read model for current, versioned quote snapshots.",
+        "position": { "x": 1020, "y": 120 },
+        "properties": {
+          "componentName": "Latest Quote Cache",
+          "purpose": "Stores hot snapshots with source timestamp, sequence/version, venue, currency, and freshness metadata; consumers never treat TTL as proof a quote is live.",
+          "engine": "redis",
+          "cacheStrategy": "write-through",
+          "ttl": 86400,
+          "inMemory": true,
+          "replication": true
+        },
+        "data": { "originalComponentId": "cache", "semanticRole": "cache" },
+        "highlightReason": "The read-optimized latest-price model avoids repeatedly scanning history and supports high-throughput quote reads."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "stock-processor-cache-edge",
+      "stepNumber": 22,
+      "phase": "Exchange Ingestion and Price Integrity",
+      "title": "Atomically advance the latest snapshot",
+      "type": "add_connection",
+      "content": "Update a symbol's cached version only when the incoming source sequence is newer or a valid correction supersedes it. Keep a freshness marker so clients can distinguish a delayed feed from a current quote.",
+      "connection": {
+        "edgeId": "stock_processor_to_latest_cache",
+        "sourceNodeId": "stock_stream_processor",
+        "targetNodeId": "stock_latest_quote_cache",
+        "connectionType": "data-flow",
+        "label": "Validated latest quote state",
+        "description": "Version-checked writes update quote values and source-time/freshness metadata without allowing older events to overwrite newer state."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "stock-history-store",
+      "stepNumber": 23,
+      "phase": "Exchange Ingestion and Price Integrity",
+      "title": "Store history for chart queries",
+      "type": "add_component",
+      "content": "Use the existing Database component configured as a time-series store for immutable ticks or derived bars. Partition by instrument and time window, preserve venue/currency and correction provenance, and define retention/rollups only after chart ranges and legal obligations are clarified.",
+      "component": {
+        "nodeId": "stock_history_store",
+        "componentType": "database",
+        "label": "Historical Price Time-Series Store",
+        "description": "Append-oriented history for price charts, with instrument/time access patterns.",
+        "position": { "x": 1020, "y": 760 },
+        "properties": {
+          "componentName": "Historical Price Time-Series Store",
+          "purpose": "Stores timestamped ticks or bars partitioned by instrument and time, retaining venue, currency, precision, and correction provenance for chart queries.",
+          "type": "Time-Series",
+          "engine": "cassandra",
+          "workload": "Hybrid",
+          "sharding": "Hash-based"
+        },
+        "data": { "originalComponentId": "database", "semanticRole": "database" },
+        "highlightReason": "Historical chart ranges have different write and query patterns from the latest-price cache and user account records."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "stock-processor-history-edge",
+      "stepNumber": 24,
+      "phase": "Exchange Ingestion and Price Integrity",
+      "title": "Persist validated history asynchronously",
+      "type": "add_connection",
+      "content": "Write validated events or bar-building inputs to history without putting historical persistence on the client-facing socket path. Define late-event and correction behavior so a replay can repair affected bars.",
+      "connection": {
+        "edgeId": "stock_processor_to_history",
+        "sourceNodeId": "stock_stream_processor",
+        "targetNodeId": "stock_history_store",
+        "connectionType": "database-connection",
+        "label": "Validated ticks and bar inputs",
+        "description": "Asynchronous, idempotent persistence records source time, venue, currency, and correction/version information for historical charts."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "stock-price-pubsub",
+      "stepNumber": 25,
+      "phase": "Exchange Ingestion and Price Integrity",
+      "title": "Fan out validated quote changes",
+      "type": "add_component",
+      "content": "Use the supported Pub/Sub component for regional price topics. Route only symbols with active subscribers to relevant socket fleets rather than broadcasting every global quote to every connected client. Durable/replay requirements for alerts must be confirmed against the chosen broker semantics.",
+      "component": {
+        "nodeId": "stock_price_pubsub",
+        "componentType": "pubsub",
+        "label": "Regional Quote Pub/Sub",
+        "description": "Topic fan-out for validated quote changes to subscribed real-time and alert consumers.",
+        "position": { "x": 1320, "y": 450 },
+        "properties": {
+          "componentName": "Regional Quote Pub/Sub",
+          "purpose": "Routes versioned quote events to regional consumers with active symbol subscriptions; isolates consumers and avoids global all-symbol broadcast.",
+          "topics": 20,
+          "fanout": true,
+          "ordering": true,
+          "durable": true
+        },
+        "data": { "originalComponentId": "pubsub", "semanticRole": "message-broker" },
+        "highlightReason": "Regional topic fan-out decouples ingestion from millions of client sockets and alert consumers."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "stock-processor-pubsub-edge",
+      "stepNumber": 26,
+      "phase": "Exchange Ingestion and Price Integrity",
+      "title": "Publish accepted quote versions",
+      "type": "add_connection",
+      "content": "Publish only validated quote versions, with instrument key, venue, exchange time, sequence, currency, and freshness/correction state. Consumers can detect missed versions and request a snapshot or replay.",
+      "connection": {
+        "edgeId": "stock_processor_to_pubsub",
+        "sourceNodeId": "stock_stream_processor",
+        "targetNodeId": "stock_price_pubsub",
+        "connectionType": "message-queue",
+        "label": "Versioned quote events",
+        "description": "Validated quote changes are published to regional topics with ordering and resynchronization metadata."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "stock-pubsub-ws-edge",
+      "stepNumber": 27,
+      "phase": "Exchange Ingestion and Price Integrity",
+      "title": "Deliver only subscribed updates to sockets",
+      "type": "add_connection",
+      "content": "Regional workers consume the quote topics needed by their local subscribers. Under pressure, coalesce obsolete intermediate updates but preserve the newest version and signal clients to resynchronize if a gap is detected.",
+      "connection": {
+        "edgeId": "stock_pubsub_to_realtime_fleet",
+        "sourceNodeId": "stock_price_pubsub",
+        "targetNodeId": "stock_realtime_fleet",
+        "connectionType": "data-flow",
+        "label": "Regional WebSocket fan-out",
+        "description": "Only relevant quote updates reach socket workers; version gaps trigger a snapshot resync instead of silent loss."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "stock-ws-cache-edge",
+      "stepNumber": 28,
+      "phase": "History, Search, and User State",
+      "title": "Resynchronize from an authoritative snapshot",
+      "type": "add_connection",
+      "content": "After connection or detected sequence gaps, the socket tier reads the latest versioned snapshot before resuming incremental delivery. Include the exchange timestamp and freshness marker in both snapshot and stream messages.",
+      "connection": {
+        "edgeId": "stock_realtime_to_latest_cache",
+        "sourceNodeId": "stock_realtime_fleet",
+        "targetNodeId": "stock_latest_quote_cache",
+        "connectionType": "database-connection",
+        "label": "Reconnect and gap-recovery snapshot",
+        "description": "A reconnecting client obtains current version and freshness metadata before consuming further quote events."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "stock-api-cache-edge",
+      "stepNumber": 29,
+      "phase": "History, Search, and User State",
+      "title": "Serve high-volume latest-price reads",
+      "type": "add_connection",
+      "content": "The quote API reads hot snapshots from the cache and returns their venue, currency, source time, sequence, and freshness. Apply request coalescing and bounded batching for multi-symbol watchlists; do not hide cache misses or stale values.",
+      "connection": {
+        "edgeId": "stock_quote_api_to_latest_cache",
+        "sourceNodeId": "stock_quote_api",
+        "targetNodeId": "stock_latest_quote_cache",
+        "connectionType": "database-connection",
+        "label": "Latest quote snapshot reads",
+        "description": "Read-optimized batched lookups avoid querying historical storage for current prices and expose quote age to clients."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "stock-api-history-edge",
+      "stepNumber": 30,
+      "phase": "History, Search, and User State",
+      "title": "Query historical ranges separately",
+      "type": "add_connection",
+      "content": "Chart requests query the history store by instrument and time range, with bounded resolution/rollups for long ranges. Keep current-price reads on the latest cache and define retention and adjustment policy as open data decisions.",
+      "connection": {
+        "edgeId": "stock_quote_api_to_history",
+        "sourceNodeId": "stock_quote_api",
+        "targetNodeId": "stock_history_store",
+        "connectionType": "database-connection",
+        "label": "Instrument and time-range chart queries",
+        "description": "Historical reads use time-bounded partitions and appropriate rollups rather than scanning the live quote model."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "stock-user-state-store",
+      "stepNumber": 31,
+      "phase": "History, Search, and User State",
+      "title": "Persist watchlists, rules, and exchange reference data",
+      "type": "add_component",
+      "content": "Use the catalog Database component for transactional user-owned state: watchlists, alert definitions, idempotency records, instrument/venue metadata, and exchange calendars/time zones. Partition or index by user and instrument according to measured access patterns; define account/privacy retention separately.",
+      "component": {
+        "nodeId": "stock_user_state_db",
+        "componentType": "database",
+        "label": "Watchlist and Exchange Reference DB",
+        "description": "Transactional store for user watchlists, alert rules, symbol/venue metadata, and exchange calendars.",
+        "position": { "x": 1020, "y": 230 },
+        "properties": {
+          "componentName": "Watchlist and Exchange Reference DB",
+          "purpose": "Stores user-scoped watchlists and alert rules plus canonical symbol, venue, trading-calendar, and timezone reference records.",
+          "type": "RDBMS",
+          "engine": "postgresql",
+          "workload": "OLTP",
+          "sharding": "Hash-based"
+        },
+        "data": { "originalComponentId": "database", "semanticRole": "database" },
+        "highlightReason": "Durable user state and exchange-calendar/reference data have transactional access patterns distinct from quote history."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "stock-api-user-db-edge",
+      "stepNumber": 32,
+      "phase": "History, Search, and User State",
+      "title": "Read and update authorized user state",
+      "type": "add_connection",
+      "content": "Persist watchlist edits and alert-rule changes transactionally under the authenticated user. Resolve exchange calendars and venue time zones from maintained reference data, not from a hard-coded server-local clock.",
+      "connection": {
+        "edgeId": "stock_quote_api_to_user_state_db",
+        "sourceNodeId": "stock_quote_api",
+        "targetNodeId": "stock_user_state_db",
+        "connectionType": "database-connection",
+        "label": "Watchlists, alert rules, and market reference",
+        "description": "Authorized transactions persist user state and retrieve canonical venue calendars and timezone metadata."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "stock-symbol-search",
+      "stepNumber": 33,
+      "phase": "History, Search, and User State",
+      "title": "Index searchable instruments",
+      "type": "add_component",
+      "content": "Use the existing Search component for symbol and company-name lookup. Index canonical symbol, company name, venue, and supported aliases; search results must preserve exchange identity where symbols collide.",
+      "component": {
+        "nodeId": "stock_symbol_search",
+        "componentType": "search",
+        "label": "Symbol and Company Search",
+        "description": "Search index for canonical symbols, company names, aliases, and venue-qualified results.",
+        "position": { "x": 1320, "y": 100 },
+        "properties": {
+          "componentName": "Symbol and Company Search",
+          "purpose": "Indexes symbol, company name, aliases, and venue so ambiguous symbols return exchange-qualified matches.",
+          "engine": "elasticsearch",
+          "replicas": 2,
+          "indexing": true,
+          "shards": 5
+        },
+        "data": { "originalComponentId": "search", "semanticRole": "search-engine" },
+        "highlightReason": "A dedicated index supports low-latency symbol/name search without loading the transactional store for each query."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "stock-api-search-edge",
+      "stepNumber": 34,
+      "phase": "History, Search, and User State",
+      "title": "Resolve search queries through the index",
+      "type": "add_connection",
+      "content": "The API sends normalized symbol/name queries to the index and returns venue-qualified matches. Keep the canonical symbol/venue mapping in reference data and refresh the search index from authoritative changes.",
+      "connection": {
+        "edgeId": "stock_quote_api_to_symbol_search",
+        "sourceNodeId": "stock_quote_api",
+        "targetNodeId": "stock_symbol_search",
+        "connectionType": "api-call",
+        "label": "Symbol and company-name queries",
+        "description": "Search results include canonical instrument and venue identity and are refreshed from authoritative symbol reference data."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "stock-time-and-watchlist-notes",
+      "stepNumber": 35,
+      "phase": "History, Search, and User State",
+      "title": "Treat time zones and market status as data",
+      "type": "explanation",
+      "content": "Store event instants in UTC while retaining venue identity and its exchange-local calendar/time zone. Model holidays, daylight-saving transitions, halts, and pre/post-market sessions explicitly. When a market is closed, show the last quote as-of its source time; do not label it live. Watchlist ordering and cross-venue duplicate-symbol behavior need product decisions.",
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "stock-alert-evaluator",
+      "stepNumber": 36,
+      "phase": "Alerts, Operations, and Open Decisions",
+      "title": "Evaluate user alert rules off the socket path",
+      "type": "add_component",
+      "content": "A separate evaluator consumes validated quote events, loads the relevant user rules, and checks threshold/condition transitions. Deduplicate by alert-rule and quote-event version so retries do not send duplicate notifications; persist delivery state or use an outbox before acknowledging work.",
+      "component": {
+        "nodeId": "stock_alert_evaluator",
+        "componentType": "backend-server",
+        "label": "Price Alert Evaluator",
+        "description": "Asynchronous rule evaluation and idempotent notification scheduling.",
+        "position": { "x": 1620, "y": 510 },
+        "properties": {
+          "componentName": "Price Alert Evaluator",
+          "purpose": "Evaluates user rules against versioned quotes, deduplicates retries, and records delivery state without blocking quote ingestion or socket fan-out.",
+          "architecture": "Microservices",
+          "retry": true,
+          "bulkOps": true
+        },
+        "data": { "originalComponentId": "backend-server", "semanticRole": "backend" },
+        "highlightReason": "Isolated asynchronous evaluation protects the low-latency quote path and gives alert delivery an independent retry boundary."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "stock-pubsub-alert-edge",
+      "stepNumber": 37,
+      "phase": "Alerts, Operations, and Open Decisions",
+      "title": "Feed validated changes to the alert evaluator",
+      "type": "add_connection",
+      "content": "The evaluator consumes the same validated versions used by clients, but it has independent lag monitoring and replay. Alert semantics during closed markets, corrections, and price gaps require explicit product policy.",
+      "connection": {
+        "edgeId": "stock_pubsub_to_alert_evaluator",
+        "sourceNodeId": "stock_price_pubsub",
+        "targetNodeId": "stock_alert_evaluator",
+        "connectionType": "message-queue",
+        "label": "Validated price events for rules",
+        "description": "Independent alert consumption supports retries and replay without delaying real-time quote delivery."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "stock-alert-state-edge",
+      "stepNumber": 38,
+      "phase": "Alerts, Operations, and Open Decisions",
+      "title": "Load rules and persist idempotent delivery state",
+      "type": "add_connection",
+      "content": "Read rules scoped to the authenticated account and persist a stable event/rule delivery key before retryable notification work is acknowledged. Define retention and user controls for alert history.",
+      "connection": {
+        "edgeId": "stock_alert_evaluator_to_user_state_db",
+        "sourceNodeId": "stock_alert_evaluator",
+        "targetNodeId": "stock_user_state_db",
+        "connectionType": "database-connection",
+        "label": "Alert rules and deduplication state",
+        "description": "Evaluator reads user rules and records idempotent delivery status and audit metadata."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:8"]
+    },
+    {
+      "id": "stock-notification-service",
+      "stepNumber": 39,
+      "phase": "Alerts, Operations, and Open Decisions",
+      "title": "Deliver alert notifications through supported channels",
+      "type": "add_component",
+      "content": "Use the catalog Notification Service for push and email delivery. Respect user preferences, quiet hours, rate limits, and provider retries; channel selection, alert thresholds, and delivery guarantees are not specified by the brief and remain policy decisions.",
+      "component": {
+        "nodeId": "stock_notification_service",
+        "componentType": "notification-service",
+        "label": "Price Alert Notifications",
+        "description": "Push and email delivery for deduplicated user price alerts.",
+        "position": { "x": 1920, "y": 320 },
+        "properties": {
+          "componentName": "Price Alert Notifications",
+          "purpose": "Delivers authorized alert transitions through user-selected channels with retry, rate-limit, and duplicate-suppression controls.",
+          "channels": "Push + Email",
+          "fanout": true,
+          "batching": true
+        },
+        "data": { "originalComponentId": "notification-service", "semanticRole": "backend" },
+        "highlightReason": "The existing notification component reuses catalog channel and fan-out properties for asynchronous alerts."
+      },
+      "requirementIds": ["legacy-requirement:4"]
+    },
+    {
+      "id": "stock-alert-notification-edge",
+      "stepNumber": 40,
+      "phase": "Alerts, Operations, and Open Decisions",
+      "title": "Send notifications after durable evaluation",
+      "type": "add_connection",
+      "content": "Only a deduplicated, policy-approved alert transition enters notification delivery. Retry transient provider failures without repeating a successfully delivered alert.",
+      "connection": {
+        "edgeId": "stock_alert_to_notifications",
+        "sourceNodeId": "stock_alert_evaluator",
+        "targetNodeId": "stock_notification_service",
+        "connectionType": "api-call",
+        "label": "Idempotent alert delivery request",
+        "description": "Evaluator submits a durable, preference-checked alert request with an idempotency key."
+      },
+      "requirementIds": ["legacy-requirement:4"]
+    },
+    {
+      "id": "stock-notification-mobile-edge",
+      "stepNumber": 41,
+      "phase": "Alerts, Operations, and Open Decisions",
+      "title": "Reach the user's selected channel",
+      "type": "add_connection",
+      "content": "The notification service uses configured provider integrations to reach the mobile push channel or other user-selected destination. Provider credentials and delivery receipts are operational concerns, not embedded in client-visible quote data.",
+      "connection": {
+        "edgeId": "stock_notifications_to_mobile",
+        "sourceNodeId": "stock_notification_service",
+        "targetNodeId": "stock_mobile_app",
+        "connectionType": "data-flow",
+        "label": "Push alert to opted-in user",
+        "description": "User-selected alert notifications arrive through the mobile push channel and link back to the current quote."
+      },
+      "requirementIds": ["legacy-requirement:4"]
+    },
+    {
+      "id": "stock-monitoring",
+      "stepNumber": 42,
+      "phase": "Alerts, Operations, and Open Decisions",
+      "title": "Observe freshness and delivery, not just uptime",
+      "type": "add_component",
+      "content": "Use the catalog Monitoring component for feed heartbeats, sequence gaps, broker/processor lag, cache age, end-to-end update latency, socket reconnects, dropped/coalesced messages, search latency, and alert delivery outcomes. Thresholds and retention need explicit SLO and compliance decisions.",
+      "component": {
+        "nodeId": "stock_monitoring",
+        "componentType": "monitoring",
+        "label": "Market Data Observability",
+        "description": "Metrics and alerts for feed health, quote freshness, pipeline lag, sockets, and notifications.",
+        "position": { "x": 1620, "y": 780 },
+        "properties": {
+          "componentName": "Market Data Observability",
+          "purpose": "Tracks source feed heartbeats, sequence gaps, processing lag, quote age, end-to-end latency, socket health, and alert delivery outcomes.",
+          "stack": "Prometheus + Grafana",
+          "metrics": true,
+          "alerts": true,
+          "retention": 30
+        },
+        "data": { "originalComponentId": "monitoring", "semanticRole": "monitoring" },
+        "highlightReason": "A green service health check is insufficient if the displayed quote is late, incorrect, or missing."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "stock-feed-monitor-edge",
+      "stepNumber": 43,
+      "phase": "Alerts, Operations, and Open Decisions",
+      "title": "Monitor exchange connectivity",
+      "type": "add_connection",
+      "content": "Alert on disconnected feeds, stale heartbeats, sequence gaps, rejected instruments, and entitlement errors before clients rely on stale values.",
+      "connection": {
+        "edgeId": "stock_feed_to_monitoring",
+        "sourceNodeId": "stock_market_feed_adapters",
+        "targetNodeId": "stock_monitoring",
+        "connectionType": "data-flow",
+        "label": "Feed health and sequence-gap metrics",
+        "description": "Per-venue heartbeat, disconnect, entitlement, and sequence-gap telemetry surfaces data-quality failures."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "stock-broker-monitor-edge",
+      "stepNumber": 44,
+      "phase": "Alerts, Operations, and Open Decisions",
+      "title": "Track burst buffering and consumer lag",
+      "type": "add_connection",
+      "content": "Observe per-partition lag and skew, especially at market open and for unusually active instruments. Capacity alerts should precede retention exhaustion.",
+      "connection": {
+        "edgeId": "stock_broker_to_monitoring",
+        "sourceNodeId": "stock_market_broker",
+        "targetNodeId": "stock_monitoring",
+        "connectionType": "data-flow",
+        "label": "Partition lag and broker health",
+        "description": "Broker metrics reveal burst accumulation, hot partitions, replication health, and replay backlog."
+      },
+      "requirementIds": ["legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "stock-processor-monitor-edge",
+      "stepNumber": 45,
+      "phase": "Alerts, Operations, and Open Decisions",
+      "title": "Measure the price-update latency budget",
+      "type": "add_connection",
+      "content": "Correlate source and delivery timestamps to measure end-to-end latency, including feed, queue, processing, cache, fan-out, and client delivery. The brief sets a target below one second; its percentile and measurement boundary must be agreed and load-tested.",
+      "connection": {
+        "edgeId": "stock_processor_to_monitoring",
+        "sourceNodeId": "stock_stream_processor",
+        "targetNodeId": "stock_monitoring",
+        "connectionType": "data-flow",
+        "label": "End-to-end latency and data-quality metrics",
+        "description": "Correlated timestamps, duplicate/gap counts, correction lag, and processor backlog measure the stated sub-second target."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "stock-cache-monitor-edge",
+      "stepNumber": 46,
+      "phase": "Alerts, Operations, and Open Decisions",
+      "title": "Alert on stale snapshots and cache pressure",
+      "type": "add_connection",
+      "content": "Track quote age by venue/instrument, cache hit rate, replication health, and eviction. If the source feed stops, mark prices stale or halted rather than extending a false live status.",
+      "connection": {
+        "edgeId": "stock_cache_to_monitoring",
+        "sourceNodeId": "stock_latest_quote_cache",
+        "targetNodeId": "stock_monitoring",
+        "connectionType": "data-flow",
+        "label": "Quote age, hit rate, and eviction metrics",
+        "description": "Freshness and cache-pressure telemetry distinguish a healthy cache from a cache serving old data."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "stock-gateway-monitor-edge",
+      "stepNumber": 47,
+      "phase": "Alerts, Operations, and Open Decisions",
+      "title": "Observe client request pressure",
+      "type": "add_connection",
+      "content": "Measure request rate, throttling, authorization failures, and API latency separately from streaming delivery so read overload does not hide a degraded live feed.",
+      "connection": {
+        "edgeId": "stock_gateway_to_monitoring",
+        "sourceNodeId": "stock_api_gateway",
+        "targetNodeId": "stock_monitoring",
+        "connectionType": "data-flow",
+        "label": "API latency, throttling, and auth metrics",
+        "description": "Gateway telemetry helps tune high-volume reads and detect abusive or failing client traffic."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "stock-ws-monitor-edge",
+      "stepNumber": 48,
+      "phase": "Alerts, Operations, and Open Decisions",
+      "title": "Measure connection and fan-out behavior",
+      "type": "add_connection",
+      "content": "Watch active sockets, connection churn, per-user subscription counts, outbound bytes, queue depth, coalesced updates, reconnect success, and regional imbalance. Use representative load tests to determine actual node and network capacity.",
+      "connection": {
+        "edgeId": "stock_realtime_to_monitoring",
+        "sourceNodeId": "stock_realtime_fleet",
+        "targetNodeId": "stock_monitoring",
+        "connectionType": "data-flow",
+        "label": "Socket count, fan-out, and reconnect metrics",
+        "description": "Connection and egress measurements provide evidence for regional fleet autoscaling and million-user capacity."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "stock-alert-monitor-edge",
+      "stepNumber": 49,
+      "phase": "Alerts, Operations, and Open Decisions",
+      "title": "Monitor alert lag and delivery outcomes",
+      "type": "add_connection",
+      "content": "Track evaluator backlog, duplicate suppression, retry counts, provider failures, and time from triggering quote to user notification. Alert thresholds and acceptable notification delay are not specified and must be agreed.",
+      "connection": {
+        "edgeId": "stock_alerts_to_monitoring",
+        "sourceNodeId": "stock_alert_evaluator",
+        "targetNodeId": "stock_monitoring",
+        "connectionType": "data-flow",
+        "label": "Alert evaluation and delivery metrics",
+        "description": "Independent alert telemetry detects delayed, duplicated, or undeliverable price notifications."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "stock-assumptions-close",
+      "stepNumber": 50,
+      "phase": "Alerts, Operations, and Open Decisions",
+      "title": "Review assumptions before sizing or claiming reliability",
+      "type": "explanation",
+      "content": "Design assumptions: licensed provider adapters expose usable sequence/time metadata; prices remain venue- and currency-qualified unless a consolidation policy is chosen; Redis is a rebuildable latest-value read model; a durable event log supports recovery; and regional socket fleets scale horizontally. Open questions: exact exchanges and entitlements, quote/consolidation policy, symbol count and event rates, DAU/RPS and connection churn, target regions/availability, latency percentile, history granularity/retention, calendar source, alert semantics/channels, privacy obligations, and tested recovery objectives. The 64 broker partitions, 100,000 events/sec processor setting, 24-hour event retention, and 30-day monitoring retention are illustrative catalog settings, not derived requirements or validated capacity claims.",
+      "requirementIds": []
+    }
+  ]
+}

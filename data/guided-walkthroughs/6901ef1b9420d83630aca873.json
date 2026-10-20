@@ -1,0 +1,467 @@
+{
+  "problem_id": "6901ef1b9420d83630aca873",
+  "version": "1.0-review-draft",
+  "requirementRevision": null,
+  "totalSteps": 32,
+  "phases": [
+    {
+      "name": "Define health and failure semantics",
+      "stepRange": [1, 5],
+      "description": "Separate the frozen brief from provisional heartbeat, scale, retention, consistency, and discovery choices. Define what the system can and cannot infer about a partition."
+    },
+    {
+      "name": "Discover nodes and ingest low-overhead signals",
+      "stepRange": [6, 13],
+      "description": "Represent host agents, discovery, a durable telemetry stream, and bounded consumers using existing generic catalog components."
+    },
+    {
+      "name": "Evaluate health, retain history, and alert",
+      "stepRange": [14, 27],
+      "description": "Build current health and topology views, retain historical metrics, evaluate thresholds with anti-flap policy, and route actionable notifications."
+    },
+    {
+      "name": "Connect the operator view and verify failure behavior",
+      "stepRange": [28, 32],
+      "description": "Serve topology, current state, and history through a bounded read path; then check partition ambiguity, degradation, recovery, and scale evidence."
+    }
+  ],
+  "steps": [
+    {
+      "id": "cluster_health_01",
+      "stepNumber": 1,
+      "phase": "Define health and failure semantics",
+      "title": "Start from the exact brief and label design assumptions",
+      "type": "explanation",
+      "content": "Frozen prompt description: Design a monitoring system to track health, performance, and availability of distributed clusters. Requirements: monitor node health and availability; collect CPU, memory, and disk metrics; detect node failures and network partitions; alert on threshold violations; visualize cluster topology; retain historical metrics and trends; support thousands of nodes; and auto-discover new nodes. Constraints: real-time health status, low monitoring overhead, tolerate monitoring-system failures, accurate failure detection, and minimize false positives. These are the supplied facts. Draft assumptions, not prompt facts: use stable cluster/node IDs; agents emit compact heartbeats and sampled metrics; a discovery adapter reads the cluster runtime's membership API (runtime unspecified); start load tests at 3,000 nodes as one concrete interpretation of 'thousands'; use a 5-second heartbeat and mark a node suspect only after three missed intervals; provisionally retain 30 days of history; and use a replicated durable event stream with bounded local buffering. The freshness, retention, membership source, topology semantics, failure budget, and scale target all require product confirmation. None of these choices is a measured SLO or reliability guarantee.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "cluster_health_02",
+      "stepNumber": 2,
+      "phase": "Define health and failure semantics",
+      "title": "Make health states distinguish failure from uncertainty",
+      "type": "decision_point",
+      "content": "Use explicit states such as Healthy, Degraded, Suspect, Unreachable, Partitioned/Unknown, and Recovering rather than turning one missed heartbeat into a definitive failure. The three-missed-heartbeat threshold is only a starting test assumption; tune it against detection delay and false-positive measurements. A partition can make a healthy node unreachable from one observer, so retain observer/source and last-seen timestamps and reconcile with independent membership or peer evidence before paging. Define whether operators need per-node, per-service, or quorum health and what 'real-time' means before setting a production threshold.",
+      "decision": {
+        "question": "When should missing telemetry become an actionable node failure?",
+        "chosen": "First mark the node suspect; require a configurable sustained timeout and corroborating membership or reachability evidence before an Unreachable alert, while preserving an Unknown/Partitioned state when evidence conflicts.",
+        "chosenReason": "This exposes uncertainty and trades a small, measurable detection delay for fewer false declarations during packet loss or observer failure.",
+        "alternatives": [
+          {"option": "Declare failure after one missed heartbeat", "tradeoff": "Fast but sensitive to transient packet loss, pauses, and overloaded agents."},
+          {"option": "Wait for every peer to agree", "tradeoff": "Can delay detection or fail to converge during a real network partition."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "cluster_health_03",
+      "stepNumber": 3,
+      "phase": "Define health and failure semantics",
+      "title": "Choose bounded telemetry and alert contracts",
+      "type": "explanation",
+      "content": "Each sample should carry cluster_id, node_id, boot/incarnation ID, sequence or event ID, observed_at, CPU, memory, disk, and source. Heartbeats and sampled metrics should be independently identifiable so a stale metric cannot refresh liveness. Deduplicate retries by event ID, reject old incarnations, cap label cardinality, and make threshold windows, missing-data behavior, deduplication, and recovery notifications configurable. Threshold values, sample cadence, and alert routing policy are open product decisions; do not infer them from the brief.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "cluster_health_04",
+      "stepNumber": 4,
+      "phase": "Define health and failure semantics",
+      "title": "Treat host overhead as a budget to measure",
+      "type": "explanation",
+      "content": "Keep the agent asynchronous and resource-bounded: batch small samples, use jittered schedules, avoid high-cardinality labels, and apply backpressure rather than unbounded buffering. Prefer OS counters already available to the agent and make expensive probes opt-in. Measure agent CPU, memory, network bytes, dropped samples, and collection lag under representative node workloads; the brief gives no numeric overhead ceiling.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:2"]
+    },
+    {
+      "id": "cluster_health_05",
+      "stepNumber": 5,
+      "phase": "Define health and failure semantics",
+      "title": "Separate current state from historical evidence",
+      "type": "decision_point",
+      "content": "Keep the latest per-node health/topology snapshot optimized for dashboard reads, while storing time-series samples for trend queries. The current snapshot is a rebuildable projection, not the only evidence of a node's history. Define retention, resolution/downsampling, clock-skew handling, and the consistency visible to operators before deployment.",
+      "decision": {
+        "question": "Should every dashboard read scan raw historical samples?",
+        "chosen": "No. Read current health and topology from bounded current-state stores; query the historical store only for time-range trends and expose its as-of/freshness point.",
+        "chosenReason": "It isolates low-latency operational reads from long-range scans and makes freshness visible.",
+        "alternatives": [
+          {"option": "Use the time-series store for all current-state and topology queries", "tradeoff": "Mixes high-cardinality time scans with node-status reads and can make the operator view unpredictable."},
+          {"option": "Keep no history and derive trends from the latest snapshot", "tradeoff": "Cannot answer historical metrics and trends required by the brief."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "cluster_health_06",
+      "stepNumber": 6,
+      "phase": "Discover nodes and ingest low-overhead signals",
+      "title": "Represent the monitored node fleet and its lightweight agents",
+      "type": "add_component",
+      "content": "Use one generic server component to represent the agent fleet, not one canvas object per machine. The 3,000 instances value is a provisional test point for the open-ended 'thousands' requirement, not a supplied limit. Each agent reports its own incarnation and sampled CPU, memory, disk, and heartbeat data; it does not decide cluster-wide health.",
+      "component": {
+        "nodeId": "cluster_health_agents",
+        "componentType": "backend-server",
+        "label": "Node Agents (representative fleet)",
+        "description": "Bounded host-side heartbeat and CPU, memory, and disk sampling",
+        "position": {"x": 0, "y": 360},
+        "properties": {"componentName": "Node Agents", "purpose": "Emit low-overhead, versioned liveness and sampled host metrics; 3,000 instances is a provisional scale-test point.", "instances": 3000, "retry": true, "bulkOps": true},
+        "highlightReason": "Reuses the generic Backend Server catalog entry to represent deployable agents without introducing a new component type."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:2"]
+    },
+    {
+      "id": "cluster_health_07",
+      "stepNumber": 7,
+      "phase": "Discover nodes and ingest low-overhead signals",
+      "title": "Add a runtime-neutral discovery controller",
+      "type": "add_component",
+      "content": "The controller reconciles discovered membership with the inventory using stable cluster/node identity and incarnation versions. Its adapter may use an orchestrator API, a cloud inventory source, or a cluster protocol; none is selected by the frozen brief. Discovery changes are idempotent and must not erase a node merely because one listing is temporarily incomplete.",
+      "component": {
+        "nodeId": "cluster_health_discovery",
+        "componentType": "backend-server",
+        "label": "Discovery & Membership Controller",
+        "description": "Reconciles runtime membership and node incarnations",
+        "position": {"x": 0, "y": 760},
+        "properties": {"componentName": "Discovery Controller", "purpose": "Discover new nodes and reconcile membership with stable IDs, incarnation versions, and retry-safe updates.", "architecture": "Microservices", "instances": 3, "retry": true},
+        "highlightReason": "A generic Backend Server is already in the catalog; a provider-specific discovery product is not assumed."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "cluster_health_08",
+      "stepNumber": 8,
+      "phase": "Discover nodes and ingest low-overhead signals",
+      "title": "Buffer telemetry in a replicated event stream",
+      "type": "add_component",
+      "content": "The broker separates agent cadence from ingestion/evaluation capacity and allows consumers to recover after a short outage. Configure replicated durable acknowledgements, bounded retention, per-cluster partitioning, and lag alarms as deployment decisions; the catalog node is a generic message-broker concept, not a claim that durability is automatic.",
+      "component": {
+        "nodeId": "cluster_health_telemetry_stream",
+        "componentType": "message-broker",
+        "label": "Telemetry & Membership Stream",
+        "description": "Buffers versioned heartbeat, metric, and discovery events",
+        "position": {"x": 340, "y": 520},
+        "properties": {"componentName": "Telemetry Stream", "purpose": "Decouple node agents and discovery from consumers with bounded, replayable telemetry and membership events."},
+        "highlightReason": "Uses the existing Message Broker catalog component; broker vendor and durability settings remain deployment choices."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "cluster_health_09",
+      "stepNumber": 9,
+      "phase": "Discover nodes and ingest low-overhead signals",
+      "title": "Normalize events and calculate node health",
+      "type": "add_component",
+      "content": "Consumers validate event IDs and incarnation/sequence order, update liveness state, join telemetry with current membership, and emit a health transition only after the selected policy is met. Bound concurrency and retry idempotently; expose consumer lag and rejected/stale event counts.",
+      "component": {
+        "nodeId": "cluster_health_processor",
+        "componentType": "backend-server",
+        "label": "Telemetry Consumers & Health State Machine",
+        "description": "Deduplicates samples and computes explicit health states",
+        "position": {"x": 660, "y": 520},
+        "properties": {"componentName": "Health State Processor", "purpose": "Normalize ordered telemetry, detect stale/missing signals, and produce explicit Healthy, Degraded, Suspect, Unreachable, or Unknown transitions.", "architecture": "Microservices", "instances": 6, "retry": true, "bulkOps": true},
+        "highlightReason": "The generic Backend Server catalog entry fits a scalable consumer/service without adding a special processor type."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "cluster_health_10",
+      "stepNumber": 10,
+      "phase": "Discover nodes and ingest low-overhead signals",
+      "title": "Add the metrics and threshold-evaluation system",
+      "type": "add_component",
+      "content": "Use the catalog Monitoring component for metric ingestion/queries and configurable rule evaluation. The sample chooses the catalog's Prometheus + Grafana option; compatibility adapters and actual deployment are still choices. Alert on sustained threshold windows and missing-data policy, not single noisy samples.",
+      "component": {
+        "nodeId": "cluster_health_monitoring",
+        "componentType": "monitoring",
+        "label": "Metrics, Thresholds & Alert Evaluation",
+        "description": "Collects health metrics, evaluates sustained rules, and exposes observability",
+        "position": {"x": 1000, "y": 520},
+        "properties": {"componentName": "Cluster Monitoring", "purpose": "Evaluate configurable CPU, memory, disk, availability, and freshness rules with sustained windows and explicit missing-data behavior.", "stack": "Prometheus + Grafana", "metrics": true, "alerts": true, "retention": 30},
+        "highlightReason": "Monitoring already exists in the Observability catalog with editable stack, metrics, alerting, and retention properties."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "cluster_health_11",
+      "stepNumber": 11,
+      "phase": "Discover nodes and ingest low-overhead signals",
+      "title": "Store the latest health projection for fast reads",
+      "type": "add_component",
+      "content": "Maintain a rebuildable latest-state projection keyed by cluster and node, including state, last-seen time, incarnation, and version. Use conditional/versioned updates so a delayed old event cannot overwrite newer state. The brief gives no freshness percentile or cache TTL; measure and expose the projection's as-of time.",
+      "component": {
+        "nodeId": "cluster_health_current_cache",
+        "componentType": "cache",
+        "label": "Current Health Snapshot Cache",
+        "description": "Versioned latest state for bounded operator reads",
+        "position": {"x": 1000, "y": 180},
+        "properties": {"componentName": "Current Health Cache", "purpose": "Serve versioned per-node current status and last-seen metadata; rebuild from durable telemetry and inventory."},
+        "highlightReason": "The generic Cache catalog component fits the rebuildable current-state projection; it is not the durable history source."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "cluster_health_12",
+      "stepNumber": 12,
+      "phase": "Discover nodes and ingest low-overhead signals",
+      "title": "Retain time-series history for trends",
+      "type": "add_component",
+      "content": "Keep timestamped samples and rollups in a time-series data store, partitioned by cluster and time/node access patterns. The generic database catalog supports Time-Series workload type, replication, sharding, backups, and encryption properties. Thirty days is only the provisional retention value selected for this draft; choose resolution, downsampling, and legal retention from actual product needs.",
+      "component": {
+        "nodeId": "cluster_health_history",
+        "componentType": "database",
+        "label": "Historical Metrics Store",
+        "description": "Time-series samples and rollups for historical trends",
+        "position": {"x": 1360, "y": 360},
+        "properties": {"componentName": "Metrics History", "purpose": "Persist timestamped host metrics and rollups for range queries and trend visualization; retention and engine need confirmation.", "type": "Time-Series", "workload": "OLAP", "sharding": "Hash-based", "shards": 16, "replication": 3, "multiAZ": true, "backups": true, "encryption": true},
+        "highlightReason": "Reuses the generic Database catalog's Time-Series option and editable storage/replication properties."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "cluster_health_13",
+      "stepNumber": 13,
+      "phase": "Discover nodes and ingest low-overhead signals",
+      "title": "Persist cluster membership and topology",
+      "type": "add_component",
+      "content": "Store cluster, node, parent/zone or peer relationships, labels, discovery source, incarnation, and membership version. Use conditional writes and tombstones so transient source omissions do not silently delete topology. No cloud provider, orchestrator, or topology shape is stated, so those fields remain generic and configurable.",
+      "component": {
+        "nodeId": "cluster_health_inventory",
+        "componentType": "database",
+        "label": "Cluster Inventory & Topology Store",
+        "description": "Current membership, stable IDs, and topology relationships",
+        "position": {"x": 680, "y": 900},
+        "properties": {"componentName": "Cluster Inventory", "purpose": "Persist discovered cluster/node membership, topology edges, source, incarnation, and versioned updates.", "type": "NoSQL", "engine": "cassandra", "workload": "OLTP", "sharding": "Hash-based", "shards": 16, "replication": 3, "multiAZ": true, "backups": true, "encryption": true},
+        "highlightReason": "Uses the generic Database catalog with supported NoSQL, Cassandra, sharding, replication, and recovery properties; provider-specific infrastructure is not assumed."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "cluster_health_14",
+      "stepNumber": 14,
+      "phase": "Evaluate health, retain history, and alert",
+      "title": "Route actionable alert transitions",
+      "type": "add_component",
+      "content": "Separate alert routing from health evaluation so notification retries do not block telemetry processing. Deduplicate by cluster/node/rule/window and transition, apply escalation and recovery policy, and expose delivery failures. Threshold severity and recipient policy are open questions.",
+      "component": {
+        "nodeId": "cluster_health_alert_router",
+        "componentType": "backend-server",
+        "label": "Alert Routing & Deduplication",
+        "description": "Routes sustained threshold and health-state transitions",
+        "position": {"x": 1360, "y": 700},
+        "properties": {"componentName": "Alert Router", "purpose": "Deduplicate and route actionable threshold or health transitions with retry and recovery handling.", "architecture": "Microservices", "instances": 3, "retry": true},
+        "highlightReason": "The existing Backend Server component models routing logic without inventing an alert-router palette entry."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "cluster_health_15",
+      "stepNumber": 15,
+      "phase": "Evaluate health, retain history, and alert",
+      "title": "Deliver operator notifications through the existing service type",
+      "type": "add_component",
+      "content": "Send actionable alerts through configured channels and include cluster/node identity, observed state, evidence window, first/last seen, and a link to the dashboard. The channel, on-call provider, escalation schedule, and notification SLO are unspecified and must be chosen separately.",
+      "component": {
+        "nodeId": "cluster_health_notifications",
+        "componentType": "notification-service",
+        "label": "Operator Notifications",
+        "description": "Delivers deduplicated alerts and recovery notices",
+        "position": {"x": 1700, "y": 700},
+        "properties": {"componentName": "Operator Notifications", "purpose": "Deliver deduplicated health and threshold alerts with evidence links and recovery notices."},
+        "highlightReason": "The generic Notification Service already supports push/email/SMS alerting; channel choice remains configurable."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "cluster_health_16",
+      "stepNumber": 16,
+      "phase": "Evaluate health, retain history, and alert",
+      "title": "Add the operator-facing health and topology view",
+      "type": "add_component",
+      "content": "The dashboard presents cluster topology, current health, last-seen/freshness, and drill-down trends. Use color plus explicit text/state and an as-of timestamp; do not imply Healthy when the data source is stale or unavailable.",
+      "component": {
+        "nodeId": "cluster_health_dashboard",
+        "componentType": "web-app",
+        "label": "Cluster Health Dashboard",
+        "description": "Operator view of topology, current status, and historical trends",
+        "position": {"x": 0, "y": 0},
+        "properties": {"componentName": "Cluster Health Dashboard", "purpose": "Visualize discovered topology, explicit current health states, freshness, and historical CPU, memory, and disk trends."},
+        "highlightReason": "The existing Web App catalog component represents the operator UI without adding a new dashboard component type."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "cluster_health_17",
+      "stepNumber": 17,
+      "phase": "Evaluate health, retain history, and alert",
+      "title": "Put an API boundary in front of operator queries",
+      "type": "add_component",
+      "content": "Expose authenticated, paginated endpoints for cluster summaries, node detail, topology, and time-range trends. Apply tenant/cluster authorization and query limits; the identity provider and tenancy model are not described in the brief and remain open decisions.",
+      "component": {
+        "nodeId": "cluster_health_gateway",
+        "componentType": "api-gateway",
+        "label": "Operator API Gateway",
+        "description": "Authenticated and rate-bounded dashboard query entry point",
+        "position": {"x": 340, "y": 0},
+        "properties": {"componentName": "Operator API", "purpose": "Authenticate and bound paginated cluster, node, topology, and history requests before routing to the read API."},
+        "highlightReason": "Reuses the supported API Gateway component; tenant identity and auth integration are deployment decisions."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "cluster_health_18",
+      "stepNumber": 18,
+      "phase": "Evaluate health, retain history, and alert",
+      "title": "Aggregate bounded dashboard reads",
+      "type": "add_component",
+      "content": "The read service joins current health with authorized topology and queries history only for an explicit bounded time range. Paginate large clusters, cap returned series/points, and return partial/stale status rather than waiting indefinitely for a failed store.",
+      "component": {
+        "nodeId": "cluster_health_read_api",
+        "componentType": "backend-server",
+        "label": "Health & Topology Read API",
+        "description": "Bounded dashboard queries across current state, inventory, and history",
+        "position": {"x": 680, "y": 0},
+        "properties": {"componentName": "Health Read API", "purpose": "Authorize and paginate current health, topology, and bounded historical queries; label partial or stale results.", "architecture": "Microservices", "instances": 3, "caching": true, "retry": true},
+        "highlightReason": "Uses the generic Backend Server catalog entry for the query boundary; no custom service type is needed."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "cluster_health_19",
+      "stepNumber": 19,
+      "phase": "Evaluate health, retain history, and alert",
+      "title": "Send heartbeats and sampled metrics to the stream",
+      "type": "add_connection",
+      "content": "Agents batch and publish versioned liveness and CPU, memory, and disk samples. Use jitter, payload limits, retry-safe IDs, and bounded local buffering; stale events are later rejected by incarnation/sequence checks.",
+      "connection": {"edgeId": "cluster_health_edge_agents_stream", "sourceNodeId": "cluster_health_agents", "targetNodeId": "cluster_health_telemetry_stream", "connectionType": "telemetry-events", "label": "Batched heartbeats & host metrics", "description": "Low-overhead, versioned event delivery with bounded retries and explicit backpressure."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "cluster_health_20",
+      "stepNumber": 20,
+      "phase": "Evaluate health, retain history, and alert",
+      "title": "Reconcile discovered membership into topology",
+      "type": "add_connection",
+      "content": "The discovery controller performs idempotent, versioned membership writes; tombstones and source freshness distinguish removed nodes from a temporarily unavailable inventory source.",
+      "connection": {"edgeId": "cluster_health_edge_discovery_inventory", "sourceNodeId": "cluster_health_discovery", "targetNodeId": "cluster_health_inventory", "connectionType": "membership-upsert", "label": "Versioned discovery & topology", "description": "Stable cluster/node IDs, incarnation, source, and membership transitions update the inventory safely."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "cluster_health_21",
+      "stepNumber": 21,
+      "phase": "Evaluate health, retain history, and alert",
+      "title": "Publish discovery transitions for downstream reconciliation",
+      "type": "add_connection",
+      "content": "Discovery events share the durable stream so consumers can order membership changes with telemetry and rebuild projections. A membership event is not itself proof that a node is healthy.",
+      "connection": {"edgeId": "cluster_health_edge_discovery_stream", "sourceNodeId": "cluster_health_discovery", "targetNodeId": "cluster_health_telemetry_stream", "connectionType": "membership-events", "label": "Discovery & incarnation events", "description": "Membership changes enter the replayable stream and remain distinguishable from liveness evidence."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "cluster_health_22",
+      "stepNumber": 22,
+      "phase": "Evaluate health, retain history, and alert",
+      "title": "Consume, validate, and evaluate the telemetry stream",
+      "type": "add_connection",
+      "content": "Consumers deduplicate and reject stale incarnations before updating liveness; track consumer lag so a delayed pipeline cannot present old status as current.",
+      "connection": {"edgeId": "cluster_health_edge_stream_processor", "sourceNodeId": "cluster_health_telemetry_stream", "targetNodeId": "cluster_health_processor", "connectionType": "ordered-consumption", "label": "Replayable telemetry & membership", "description": "Consumers validate event identity/order and expose lag, stale-event, and retry metrics."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "cluster_health_23",
+      "stepNumber": 23,
+      "phase": "Evaluate health, retain history, and alert",
+      "title": "Evaluate metric rules and sustained health transitions",
+      "type": "add_connection",
+      "content": "The processor exports normalized metrics and health transitions to the monitoring/rule system through a supported ingestion adapter. The adapter is an implementation detail to validate; do not assume that the selected monitoring product natively consumes this broker protocol.",
+      "connection": {"edgeId": "cluster_health_edge_processor_monitoring", "sourceNodeId": "cluster_health_processor", "targetNodeId": "cluster_health_monitoring", "connectionType": "metrics-and-health-export", "label": "Normalized metrics & health transitions", "description": "An adapter exposes validated measurements and state transitions to threshold evaluation; protocol choice remains open."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "cluster_health_24",
+      "stepNumber": 24,
+      "phase": "Evaluate health, retain history, and alert",
+      "title": "Update the rebuildable current-health projection",
+      "type": "add_connection",
+      "content": "The processor performs version-checked writes for the latest node state and last-seen evidence. Consumers and dashboards compare projection watermark with current stream/monitoring progress before labeling it fresh.",
+      "connection": {"edgeId": "cluster_health_edge_processor_cache", "sourceNodeId": "cluster_health_processor", "targetNodeId": "cluster_health_current_cache", "connectionType": "versioned-health-update", "label": "Latest health snapshot", "description": "Versioned updates prevent late events from replacing newer state; the projection is rebuildable."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "cluster_health_25",
+      "stepNumber": 25,
+      "phase": "Evaluate health, retain history, and alert",
+      "title": "Persist metric samples and rollups",
+      "type": "add_connection",
+      "content": "Write timestamped samples to history with bounded labels and an explicit retention/downsampling policy. If history is unavailable, preserve bounded stream backlog and report the resulting lag; never silently claim a complete trend.",
+      "connection": {"edgeId": "cluster_health_edge_monitoring_history", "sourceNodeId": "cluster_health_monitoring", "targetNodeId": "cluster_health_history", "connectionType": "time-series-write", "label": "Samples & rollups", "description": "Retains historical CPU, memory, disk, and health measurements for bounded range queries."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "cluster_health_26",
+      "stepNumber": 26,
+      "phase": "Evaluate health, retain history, and alert",
+      "title": "Route sustained alerts without blocking collection",
+      "type": "add_connection",
+      "content": "Only actionable, deduplicated rule transitions enter the notification path. The routing service retries delivery independently and emits delivery status for operations.",
+      "connection": {"edgeId": "cluster_health_edge_monitoring_alerts", "sourceNodeId": "cluster_health_monitoring", "targetNodeId": "cluster_health_alert_router", "connectionType": "alert-transition", "label": "Sustained threshold events", "description": "Threshold windows and anti-flap policy produce deduplicated transitions outside the collection critical path."},
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "cluster_health_27",
+      "stepNumber": 27,
+      "phase": "Evaluate health, retain history, and alert",
+      "title": "Deliver alerts and recovery notices",
+      "type": "add_connection",
+      "content": "Notifications carry evidence and a dashboard link; failed delivery is observable and retried under bounded policy.",
+      "connection": {"edgeId": "cluster_health_edge_alerts_notifications", "sourceNodeId": "cluster_health_alert_router", "targetNodeId": "cluster_health_notifications", "connectionType": "operator-notification", "label": "Actionable alert & recovery", "description": "Routes deduplicated, sustained alerts and recovery notices over configured channels."},
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "cluster_health_28",
+      "stepNumber": 28,
+      "phase": "Connect the operator view and verify failure behavior",
+      "title": "Connect the operator dashboard to its API boundary",
+      "type": "add_connection",
+      "content": "The UI never connects directly to storage. The gateway authenticates, authorizes, rate-limits, and routes bounded queries; define tenancy and identity contracts before exposing cluster data.",
+      "connection": {"edgeId": "cluster_health_edge_dashboard_gateway", "sourceNodeId": "cluster_health_dashboard", "targetNodeId": "cluster_health_gateway", "connectionType": "https-api", "label": "Authenticated operator requests", "description": "Dashboard requests use an authenticated API boundary with cluster-scoped access and pagination."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "cluster_health_29",
+      "stepNumber": 29,
+      "phase": "Connect the operator view and verify failure behavior",
+      "title": "Route bounded queries to the health read API",
+      "type": "add_connection",
+      "content": "The read service enforces pagination, time-range limits, and partial/stale response semantics before reading projections or historical data.",
+      "connection": {"edgeId": "cluster_health_edge_gateway_read_api", "sourceNodeId": "cluster_health_gateway", "targetNodeId": "cluster_health_read_api", "connectionType": "authorized-query", "label": "Paginated topology, status & trends", "description": "Gateway routes authorized, bounded reads to the health and topology query service."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "cluster_health_30",
+      "stepNumber": 30,
+      "phase": "Connect the operator view and verify failure behavior",
+      "title": "Join current health, topology, and history",
+      "type": "add_connection",
+      "content": "The API reads versioned current status and inventory for topology and requests history only for a bounded interval. Return freshness/as-of metadata and a partial-data indicator whenever a backing path is stale or unavailable.",
+      "connection": {"edgeId": "cluster_health_edge_read_api_cache", "sourceNodeId": "cluster_health_read_api", "targetNodeId": "cluster_health_current_cache", "connectionType": "current-health-query", "label": "Current status & freshness", "description": "Reads the latest versioned health projection with its last-seen and freshness watermark."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "cluster_health_31",
+      "stepNumber": 31,
+      "phase": "Connect the operator view and verify failure behavior",
+      "title": "Finish topology and historical trend query paths",
+      "type": "add_connection",
+      "content": "Topology reads use inventory relationships; time-series queries use the history store with explicit range, resolution, and as-of metadata. The brief leaves exact retention, freshness, latency percentiles, thresholds, partition policy, authorization, and provider/runtime selection open. Before production, load-test at and beyond the chosen thousands-of-nodes target; inject agent, broker, consumer, monitoring, inventory, history, and notification outages; measure overhead, detection delay, false positives, recovery, data loss/lag, and dashboard freshness. These local draft graph actions do not establish browser persistence, AI assessment quality, or an SLO.",
+      "connection": {"edgeId": "cluster_health_edge_read_api_inventory", "sourceNodeId": "cluster_health_read_api", "targetNodeId": "cluster_health_inventory", "connectionType": "topology-query", "label": "Authorized cluster topology", "description": "Returns paginated, versioned membership and topology relationships for the requested cluster."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "cluster_health_32",
+      "stepNumber": 32,
+      "phase": "Connect the operator view and verify failure behavior",
+      "title": "Query historical trends through the bounded read path",
+      "type": "add_connection",
+      "content": "Trend requests read the historical store only for an explicit bounded time interval and resolution. Return gaps, retention limits, and the latest complete timestamp so delayed ingestion cannot masquerade as a complete or current trend.",
+      "connection": {"edgeId": "cluster_health_edge_read_api_history", "sourceNodeId": "cluster_health_read_api", "targetNodeId": "cluster_health_history", "connectionType": "historical-metrics-query", "label": "Bounded metric trends", "description": "Reads time-range samples and rollups with explicit resolution, retention, gaps, and as-of metadata."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3"]
+    }
+  ]
+}

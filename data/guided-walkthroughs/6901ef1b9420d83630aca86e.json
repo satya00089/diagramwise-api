@@ -1,0 +1,842 @@
+{
+  "problem_id": "6901ef1b9420d83630aca86e",
+  "version": "1.0.0-review-draft",
+  "requirementRevision": null,
+  "totalSteps": 42,
+  "phases": [
+    {
+      "name": "Define the state contract and request path",
+      "stepRange": [1, 13],
+      "description": "Freeze the brief, distinguish exact membership from derived counts, and establish authenticated like and unlike commands."
+    },
+    {
+      "name": "Persist membership and publish durable transitions",
+      "stepRange": [14, 25],
+      "description": "Commit idempotent membership changes with an outbox, then build replayable sharded count projections."
+    },
+    {
+      "name": "Serve live counts and reconcile projections",
+      "stepRange": [26, 39],
+      "description": "Fan out versioned aggregate updates, inspect hot-post load, and repair derived counters from exact membership."
+    },
+    {
+      "name": "Control abuse and operate at daily scale",
+      "stepRange": [40, 42],
+      "description": "Apply abuse controls, scale from observed traffic, and keep unspecified targets explicit."
+    }
+  ],
+  "steps": [
+    {
+      "id": "likes_01",
+      "stepNumber": 1,
+      "phase": "Define the state contract and request path",
+      "title": "Freeze the brief and name its unknowns",
+      "type": "explanation",
+      "content": "The brief requires real-time like operations and displayed counts, millions of likes per minute on viral posts, billions of likes per day, unlike, duplicate prevention, and a way to show who liked a post. It explicitly accepts eventual consistency for aggregated counts. It gives no numeric latency or count-freshness target, privacy-policy details, or retention period; leave those for product and operations decisions rather than inventing SLOs.",
+      "requirementIds": []
+    },
+    {
+      "id": "likes_02",
+      "stepNumber": 2,
+      "phase": "Define the state contract and request path",
+      "title": "Choose exact membership as truth",
+      "type": "decision_point",
+      "content": "Make the per-user, per-post liked state authoritative. Treat only the displayed aggregate count as a derived projection that can lag and be rebuilt. Eventual consistency applies to counts only; unlike, duplicate prevention, and liker identity use exact membership. A cached aggregate must never decide whether a user has liked a post.",
+      "decision": {
+        "question": "Which record decides whether a user currently likes a post?",
+        "chosen": "An exact membership record keyed by post and user; counts are a separate derived projection.",
+        "chosenReason": "Unlike, duplicate prevention, and the liker list need exact user-level state. A single mutable post counter cannot answer those questions or safely absorb retries; eventual consistency is limited to the displayed count.",
+        "alternatives": [
+          {
+            "option": "Use only a per-post counter",
+            "tradeoff": "It is compact, but cannot identify duplicate users, process unlike safely, or show who liked the post."
+          },
+          {
+            "option": "Compute every displayed count by scanning membership on each read",
+            "tradeoff": "It keeps reads close to the exact set but makes viral-post reads contend with the write workload."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "likes_03",
+      "stepNumber": 3,
+      "phase": "Define the state contract and request path",
+      "title": "Add the like and post-view client",
+      "type": "add_component",
+      "content": "Let a signed-in viewer request the desired liked state, read a displayed count, and request a page of liker identities. Reflect the server-confirmed liked state separately from the count estimate; only apply an optimistic count adjustment when the server confirms that membership actually changed.",
+      "component": {
+        "nodeId": "likes_client",
+        "componentType": "web-app",
+        "label": "Post and Like Client",
+        "description": "Like controls, count display, and privacy-filtered liker pages",
+        "position": {"x": 0, "y": 300},
+        "properties": {
+          "componentName": "Post and Like Client",
+          "purpose": "Submit desired like state, render the server-confirmed membership state, display a separately marked aggregate count with its freshness metadata, and request privacy-authorized pages of liker identities."
+        },
+        "highlightReason": "The catalog Web App models the existing client surface without adding a custom component type."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7"]
+    },
+    {
+      "id": "likes_04",
+      "stepNumber": 4,
+      "phase": "Define the state contract and request path",
+      "title": "Add an authenticated, abuse-aware API boundary",
+      "type": "add_component",
+      "content": "Validate post IDs, desired-state commands, cursors, and idempotency keys. Authenticate the caller, apply account and network abuse controls, and reject malformed or unauthorized requests before they reach membership storage.",
+      "component": {
+        "nodeId": "likes_gateway",
+        "componentType": "api-gateway",
+        "label": "Like API Gateway",
+        "description": "Validated and rate-limited like and read requests",
+        "position": {"x": 300, "y": 300},
+        "properties": {
+          "componentName": "Like API Gateway",
+          "purpose": "Validate like commands, post identifiers, pagination cursors, and idempotency keys; authenticate requests; apply configurable abuse rate limits and throttling; and deduplicate safe client retries.",
+          "inputValidation": true,
+          "authentication": "JWT",
+          "rateLimiting": true,
+          "deduplication": true,
+          "throttling": true
+        },
+        "highlightReason": "The catalog API Gateway exposes request validation, authentication, rate limiting, throttling, and deduplication controls."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "likes_05",
+      "stepNumber": 5,
+      "phase": "Define the state contract and request path",
+      "title": "Resolve identity and authorization",
+      "type": "add_component",
+      "content": "Resolve the authenticated user identity before mutation or liker-list reads. Keep post visibility, block, and audience checks in the authorized service path; authentication alone does not grant permission to inspect a liker list.",
+      "component": {
+        "nodeId": "likes_auth",
+        "componentType": "auth-service",
+        "label": "Identity and Access Service",
+        "description": "Verified identity and access context for like operations",
+        "position": {"x": 300, "y": 40},
+        "properties": {
+          "componentName": "Identity and Access Service",
+          "purpose": "Validate signed-in identity and provide the caller identity and authorization context used by like mutations and privacy-filtered liker-list reads.",
+          "oauth": true,
+          "sessions": "redis"
+        },
+        "highlightReason": "The existing Auth Service catalog component represents identity validation and session context."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "likes_06",
+      "stepNumber": 6,
+      "phase": "Define the state contract and request path",
+      "title": "Add the like command and read service",
+      "type": "add_component",
+      "content": "Handle explicit set-liked and set-unliked commands, membership reads, aggregate-count reads, and authorized liker pagination. Return whether membership changed so retries and the client do not infer a counter delta from a request alone.",
+      "component": {
+        "nodeId": "likes_api",
+        "componentType": "backend-server",
+        "label": "Like Command and Read Service",
+        "description": "Idempotent membership mutations and authorized reads",
+        "position": {"x": 650, "y": 300},
+        "properties": {
+          "componentName": "Like Command and Read Service",
+          "purpose": "Apply explicit desired-state like and unlike commands, return whether exact membership changed, read approximate count projections, and paginate liker identities only after post visibility and block policies pass.",
+          "architecture": "Microservices",
+          "retry": true
+        },
+        "highlightReason": "The catalog Backend Server represents the request logic while keeping exact state and count projections in separate stores."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "likes_07",
+      "stepNumber": 7,
+      "phase": "Define the state contract and request path",
+      "title": "Send client requests through the gateway",
+      "type": "add_connection",
+      "content": "Route like, unlike, count, and liker-page requests over the validated API. A retry carries the same operation identity so a lost response cannot create another state transition.",
+      "connection": {
+        "edgeId": "likes_client_gateway",
+        "sourceNodeId": "likes_client",
+        "targetNodeId": "likes_gateway",
+        "connectionType": "http",
+        "label": "Validated like and read requests",
+        "description": "Client commands and reads include authenticated context and stable retry identity."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "likes_08",
+      "stepNumber": 8,
+      "phase": "Define the state contract and request path",
+      "title": "Validate the caller before handling the command",
+      "type": "add_connection",
+      "content": "Resolve a verified identity and pass the resulting authorization context to the command service. Apply the platform's current post access policy again where list or mutation semantics require it.",
+      "connection": {
+        "edgeId": "likes_gateway_auth",
+        "sourceNodeId": "likes_gateway",
+        "targetNodeId": "likes_auth",
+        "connectionType": "api-call",
+        "label": "Identity verification",
+        "description": "Validate the caller token and resolve its authenticated user identity."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "likes_09",
+      "stepNumber": 9,
+      "phase": "Define the state contract and request path",
+      "title": "Route validated commands to the service",
+      "type": "add_connection",
+      "content": "Pass verified identity, desired state, post ID, request identity, and read cursor to the service. Keep this synchronous path limited to authorization, exact membership transition, and response assembly rather than waiting for global count aggregation.",
+      "connection": {
+        "edgeId": "likes_gateway_api",
+        "sourceNodeId": "likes_gateway",
+        "targetNodeId": "likes_api",
+        "connectionType": "http",
+        "label": "Authenticated command and query API",
+        "description": "Validated desired-state mutations and authorized reads reach the like service."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "likes_10",
+      "stepNumber": 10,
+      "phase": "Define the state contract and request path",
+      "title": "Add exact per-user like membership storage",
+      "type": "add_component",
+      "content": "Store one current membership for each post and user, with a uniqueness condition on that pair. Partition a hot post's membership writes using a stable user-derived bucket so one celebrity post does not force every membership mutation onto one storage partition. Support paginated reads across those buckets for the authorized liker list.",
+      "component": {
+        "nodeId": "likes_membership",
+        "componentType": "database",
+        "label": "Exact Like Membership Store",
+        "description": "Unique post-user state and paginated liker records",
+        "position": {"x": 980, "y": 300},
+        "properties": {
+          "componentName": "Exact Like Membership Store",
+          "purpose": "Keep the authoritative current liked state keyed by post and user with conditional uniqueness; hash user identity into post-scoped write buckets for viral posts; and support cursor-based liker reads across buckets without storing aggregate counters here.",
+          "type": "NoSQL",
+          "engine": "dynamodb",
+          "workload": "OLTP",
+          "sharding": "Hash-based",
+          "multiAZ": true,
+          "encryption": true,
+          "rbac": true,
+          "backups": true,
+          "pitr": true
+        },
+        "highlightReason": "The existing Database catalog supports a hash-sharded NoSQL membership store with access control and recovery properties."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:2"]
+    },
+    {
+      "id": "likes_11",
+      "stepNumber": 11,
+      "phase": "Define the state contract and request path",
+      "title": "Use exact membership for mutations and liker pages",
+      "type": "add_connection",
+      "content": "Read and conditionally change the same exact membership record for a user and post. For a liker page, read membership rows with a stable cursor across user-derived buckets and apply current post visibility, audience, and block rules before returning identities.",
+      "connection": {
+        "edgeId": "likes_api_membership",
+        "sourceNodeId": "likes_api",
+        "targetNodeId": "likes_membership",
+        "connectionType": "database-connection",
+        "label": "Conditional membership and authorized list reads",
+        "description": "Exact post-user state is the source for toggles, duplicate prevention, and privacy-filtered liker pages."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "likes_12",
+      "stepNumber": 12,
+      "phase": "Define the state contract and request path",
+      "title": "Make like and unlike retries idempotent",
+      "type": "decision_point",
+      "content": "Represent a toggle as an explicit desired state, not an unqualified increment/decrement. A conditional insert changes absent to liked once; repeating it is a no-op. A conditional delete changes liked to absent once; repeating it is a no-op. Scope an idempotency key to the user and operation, and reject stale retries when a newer desired-state command has already won.",
+      "decision": {
+        "question": "How should retries and repeated like/unlike requests affect membership and count events?",
+        "chosen": "Apply idempotent desired-state commands and emit a transition only when the exact membership state changes.",
+        "chosenReason": "A retry of a like or unlike cannot create another count delta, and an unlike for an absent membership cannot make the aggregate negative.",
+        "alternatives": [
+          {
+            "option": "Increment or decrement for every request",
+            "tradeoff": "Retries and repeated taps double-count or under-count because the request is mistaken for a state transition."
+          },
+          {
+            "option": "Use an unversioned blind toggle command",
+            "tradeoff": "A delayed retry can reverse a newer user intent; explicit desired state and stale-request handling avoid that ambiguity."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "likes_13",
+      "stepNumber": 13,
+      "phase": "Define the state contract and request path",
+      "title": "Keep liker visibility behind privacy policy",
+      "type": "decision_point",
+      "content": "The exact membership store can answer who liked a post, but it is not a public directory. Check the post's current audience and visibility, viewer authorization, and applicable block or account restrictions before each page. Return only the identity fields the product permits, and use a cursor that does not leak hidden rows.",
+      "decision": {
+        "question": "What authorizes a viewer to see liker identities?",
+        "chosen": "The platform's current post visibility and user privacy rules are evaluated by the service on every list request.",
+        "chosenReason": "An exact membership record proves a like exists; it does not grant other users permission to see that identity.",
+        "alternatives": [
+          {
+            "option": "Expose every membership to any viewer who can read the count",
+            "tradeoff": "This turns a public aggregate into an unauthorized identity disclosure."
+          },
+          {
+            "option": "Cache a list response without its authorization context",
+            "tradeoff": "The cached page can outlive a visibility, block, or account-policy change."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "likes_14",
+      "stepNumber": 14,
+      "phase": "Persist membership and publish durable transitions",
+      "title": "Add a transactional outbox relay",
+      "type": "add_component",
+      "content": "Relay only committed membership transitions. The service writes the membership change and an outbox event carrying a unique transition ID, post, user-derived counter shard, signed delta, and source version as one atomic operation. The relay can retry publication without losing the durable source event.",
+      "component": {
+        "nodeId": "likes_outbox_relay",
+        "componentType": "processing-worker",
+        "label": "Membership Outbox Relay",
+        "description": "Publish committed like-state transitions for asynchronous aggregation",
+        "position": {"x": 980, "y": 590},
+        "properties": {
+          "componentName": "Membership Outbox Relay",
+          "purpose": "Read durable outbox transitions written atomically with exact membership, preserve each unique transition ID and actor ordering, retry broker publication safely, and advance relay progress only after durable acknowledgement.",
+          "tasks": "Data Processing",
+          "autoscale": true
+        },
+        "highlightReason": "The catalog Processing Worker models the background relay required to keep count updates off the user request's aggregation path."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-requirement:5", "legacy-constraint:1"]
+    },
+    {
+      "id": "likes_15",
+      "stepNumber": 15,
+      "phase": "Persist membership and publish durable transitions",
+      "title": "Read committed transitions from the membership outbox",
+      "type": "add_connection",
+      "content": "The relay observes only the outbox record committed with the membership state change. A request that was rejected, duplicated without a state change, or rolled back produces no count event.",
+      "connection": {
+        "edgeId": "likes_membership_outbox",
+        "sourceNodeId": "likes_membership",
+        "targetNodeId": "likes_outbox_relay",
+        "connectionType": "data-flow",
+        "label": "Committed transition outbox",
+        "description": "Membership and its uniquely identified count transition are committed together."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1"]
+    },
+    {
+      "id": "likes_16",
+      "stepNumber": 16,
+      "phase": "Persist membership and publish durable transitions",
+      "title": "Add a durable transition stream",
+      "type": "add_component",
+      "content": "Buffer and replay transition events independently of request serving. Partition events using post and actor-derived shard information so events for a given user's post state stay ordered while one viral post can spread across stream partitions.",
+      "component": {
+        "nodeId": "likes_event_stream",
+        "componentType": "message-broker",
+        "label": "Like Transition Stream",
+        "description": "Durable ordered events for asynchronous count projections",
+        "position": {"x": 1300, "y": 590},
+        "properties": {
+          "componentName": "Like Transition Stream",
+          "purpose": "Retain replayable, uniquely identified like and unlike transitions; partition by post and actor-derived counter shard to distribute viral-post writes while preserving per-actor order; and expose consumer progress for recovery.",
+          "durable": true
+        },
+        "highlightReason": "The catalog Message Broker represents durable event fan-out and replay without binding the draft to a specific broker vendor."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "likes_17",
+      "stepNumber": 17,
+      "phase": "Persist membership and publish durable transitions",
+      "title": "Publish transitions for background consumers",
+      "type": "add_connection",
+      "content": "Publish the outbox transition with its stable event ID and ordering key. Retain enough stream history for consumer recovery and reconciliation according to an operationally agreed policy; the brief does not specify a retention duration.",
+      "connection": {
+        "edgeId": "likes_outbox_stream",
+        "sourceNodeId": "likes_outbox_relay",
+        "targetNodeId": "likes_event_stream",
+        "connectionType": "message-queue",
+        "label": "Durable membership transitions",
+        "description": "Replayable signed state changes carry stable event IDs and per-actor ordering keys."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "likes_18",
+      "stepNumber": 18,
+      "phase": "Persist membership and publish durable transitions",
+      "title": "Aggregate counts by post and counter shard",
+      "type": "add_component",
+      "content": "Consume signed transitions and update one post-specific counter shard at a time. Deduplicate by event ID and atomically persist each shard update with its applied-event checkpoint. Publish versioned absolute shard snapshots so a retry overwrites an older projection instead of incrementing it twice.",
+      "component": {
+        "nodeId": "likes_counter_worker",
+        "componentType": "processing-worker",
+        "label": "Sharded Counter Aggregator",
+        "description": "Idempotent background rollup of committed like transitions",
+        "position": {"x": 1630, "y": 590},
+        "properties": {
+          "componentName": "Sharded Counter Aggregator",
+          "purpose": "Consume ordered transitions, deduplicate unique event IDs, atomically commit each signed post-shard total with its progress checkpoint, and publish versioned absolute shard snapshots for eventually consistent count reads.",
+          "tasks": "Data Processing",
+          "autoscale": true
+        },
+        "highlightReason": "The catalog Processing Worker applies durable events away from the low-latency membership command path."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "likes_19",
+      "stepNumber": 19,
+      "phase": "Persist membership and publish durable transitions",
+      "title": "Consume the durable event stream",
+      "type": "add_connection",
+      "content": "Scale consumers across stream partitions and counter shards. Preserve ordering for one actor's transitions to one post, while allowing different actors on a viral post to update independent shards.",
+      "connection": {
+        "edgeId": "likes_stream_aggregator",
+        "sourceNodeId": "likes_event_stream",
+        "targetNodeId": "likes_counter_worker",
+        "connectionType": "message-queue",
+        "label": "Ordered replayable count events",
+        "description": "The consumer applies each committed membership transition idempotently."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "likes_20",
+      "stepNumber": 20,
+      "phase": "Persist membership and publish durable transitions",
+      "title": "Store durable sharded rollups separately",
+      "type": "add_component",
+      "content": "Persist aggregate totals by post and counter shard together with deduplication or progress state. This is a rebuildable projection, not the per-user membership list. Keep reconciliation able to replace a bad shard from exact membership and replayed events.",
+      "component": {
+        "nodeId": "likes_counter_rollups",
+        "componentType": "database",
+        "label": "Durable Sharded Count Rollups",
+        "description": "Rebuildable aggregate totals and applied-event progress",
+        "position": {"x": 1950, "y": 590},
+        "properties": {
+          "componentName": "Durable Sharded Count Rollups",
+          "purpose": "Persist post-and-shard aggregate totals with event deduplication and applied progress in an atomic update; keep this rebuildable projection separate from exact post-user membership and support repair from a consistent membership snapshot plus later events.",
+          "type": "NoSQL",
+          "engine": "dynamodb",
+          "workload": "OLTP",
+          "sharding": "Hash-based",
+          "multiAZ": true,
+          "encryption": true,
+          "rbac": true,
+          "backups": true,
+          "pitr": true
+        },
+        "highlightReason": "The catalog Database component gives durable count shards and checkpoints a distinct store from exact liker membership."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "likes_21",
+      "stepNumber": 21,
+      "phase": "Persist membership and publish durable transitions",
+      "title": "Commit rollup totals with replay progress",
+      "type": "add_connection",
+      "content": "For each consumed event, commit the deduplication/checkpoint state with its affected post-shard total. If a worker crashes around the commit, replay must discover that event as already applied or apply it once; never trust an in-memory offset alone.",
+      "connection": {
+        "edgeId": "likes_aggregator_rollups",
+        "sourceNodeId": "likes_counter_worker",
+        "targetNodeId": "likes_counter_rollups",
+        "connectionType": "database-connection",
+        "label": "Atomic shard rollup and checkpoint",
+        "description": "Durable per-shard totals and event progress recover together after retries."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "likes_22",
+      "stepNumber": 22,
+      "phase": "Persist membership and publish durable transitions",
+      "title": "Add Redis for low-latency count snapshots",
+      "type": "add_component",
+      "content": "Keep versioned per-post shard snapshots in Redis for fast display reads. The durable rollup and membership stores remain recoverable sources; a missing or stale cache value can be repopulated and must not be interpreted as exact membership.",
+      "component": {
+        "nodeId": "likes_counter_cache",
+        "componentType": "cache",
+        "label": "Redis Shard Count Cache",
+        "description": "Fast read path for eventually consistent count snapshots",
+        "position": {"x": 2280, "y": 590},
+        "properties": {
+          "componentName": "Redis Shard Count Cache",
+          "purpose": "Serve the latest available versioned total for each post counter shard, allow reads to sum shards, and rebuild cache values from durable rollups; this cache is an approximate count projection and never stores authoritative user membership.",
+          "engine": "redis",
+          "replication": true,
+          "clusterMode": true,
+          "persistence": true
+        },
+        "highlightReason": "The catalog Cache component supports Redis and clustered in-memory access for a fast derived-count read path."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "likes_23",
+      "stepNumber": 23,
+      "phase": "Persist membership and publish durable transitions",
+      "title": "Refresh cache shards from durable rollups",
+      "type": "add_connection",
+      "content": "Write absolute values with their source version or watermark. A delayed retry for an older snapshot must not overwrite a newer shard value, and cache loss must be recoverable from the durable rollup store.",
+      "connection": {
+        "edgeId": "likes_aggregator_cache",
+        "sourceNodeId": "likes_counter_worker",
+        "targetNodeId": "likes_counter_cache",
+        "connectionType": "data-flow",
+        "label": "Versioned aggregate snapshots",
+        "description": "The cache receives retry-safe shard values derived from durable rollups."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "likes_24",
+      "stepNumber": 24,
+      "phase": "Persist membership and publish durable transitions",
+      "title": "Read count estimates without blocking membership",
+      "type": "add_connection",
+      "content": "Read the cache's available shard snapshots for display and include their aggregate watermark or freshness metadata. A cache miss or lag should use a defined fallback or visibly mark the estimate as stale; do not wait for every global event to finish before confirming an exact membership change.",
+      "connection": {
+        "edgeId": "likes_cache_api",
+        "sourceNodeId": "likes_counter_cache",
+        "targetNodeId": "likes_api",
+        "connectionType": "data-flow",
+        "label": "Approximate count read",
+        "description": "Fast count estimates include freshness context and remain separate from liked-state answers."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "likes_25",
+      "stepNumber": 25,
+      "phase": "Persist membership and publish durable transitions",
+      "title": "Spread a viral post across counter shards",
+      "type": "decision_point",
+      "content": "Do not send every mutation for a high-profile post to one counter key. Derive a stable write shard from the post and actor hash, keep each actor's transitions ordered, and sum that post's shard snapshots for reads. Use separate user-derived buckets for exact membership writes so the liker set also avoids one hot partition.",
+      "decision": {
+        "question": "How should writes for one post with millions of likes per minute avoid a single hot key?",
+        "chosen": "Spread membership and count writes across post-scoped, stable actor-hash buckets; sum counter shards only on the read path.",
+        "chosenReason": "Different actors update different shards, avoiding a single hot key, while a stable actor assignment preserves retry and transition ordering. Shard count and any later resharding are chosen from observed load, not an invented fixed capacity.",
+        "alternatives": [
+          {
+            "option": "Increment one Redis key and one membership partition per post",
+            "tradeoff": "A viral post concentrates writes at the exact key and partition the design needs to scale."
+          },
+          {
+            "option": "Randomly select a new shard for every request",
+            "tradeoff": "Retries and opposing transitions for one actor can be reordered or applied on different shards."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:2"]
+    },
+    {
+      "id": "likes_26",
+      "stepNumber": 26,
+      "phase": "Serve live counts and reconcile projections",
+      "title": "Add authorized live count fan-out",
+      "type": "add_component",
+      "content": "Distribute coalesced, versioned aggregate updates to viewers currently authorized to see the post. Fan out count snapshots rather than every raw like event, and recheck visibility when subscriptions or post policy change.",
+      "component": {
+        "nodeId": "likes_live_fanout",
+        "componentType": "message-dispatcher",
+        "label": "Authorized Count Update Fan-out",
+        "description": "Coalesced count updates for eligible active viewers",
+        "position": {"x": 2280, "y": 300},
+        "properties": {
+          "componentName": "Authorized Count Update Fan-out",
+          "purpose": "Deliver coalesced versioned aggregate-count updates to active viewers authorized for the post, suppress duplicate older snapshots, and stop delivery when current post visibility or viewer policy no longer permits it."
+        },
+        "highlightReason": "The existing Message Dispatcher catalog component represents live update routing while count events remain aggregated."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-constraint:1"]
+    },
+    {
+      "id": "likes_27",
+      "stepNumber": 27,
+      "phase": "Serve live counts and reconcile projections",
+      "title": "Publish only aggregate count snapshots",
+      "type": "add_connection",
+      "content": "Send a new shard-summed count version after aggregation. Coalesce superseded updates for the same post so a burst does not force the system to fan out every individual mutation.",
+      "connection": {
+        "edgeId": "likes_aggregator_fanout",
+        "sourceNodeId": "likes_counter_worker",
+        "targetNodeId": "likes_live_fanout",
+        "connectionType": "data-flow",
+        "label": "Versioned aggregate count updates",
+        "description": "Only derived count snapshots enter the live fan-out path."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "likes_28",
+      "stepNumber": 28,
+      "phase": "Serve live counts and reconcile projections",
+      "title": "Deliver updates to eligible viewers",
+      "type": "add_connection",
+      "content": "Deliver the latest authorized aggregate count and its freshness context to active clients. The client can show its own liked state from the exact command response even while other viewers' aggregate count updates are still being processed.",
+      "connection": {
+        "edgeId": "likes_fanout_client",
+        "sourceNodeId": "likes_live_fanout",
+        "targetNodeId": "likes_client",
+        "connectionType": "data-flow",
+        "label": "Authorized live count snapshots",
+        "description": "Active viewers receive coalesced counts only while the post remains visible to them."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-constraint:1"]
+    },
+    {
+      "id": "likes_29",
+      "stepNumber": 29,
+      "phase": "Serve live counts and reconcile projections",
+      "title": "Scale from per-post shard skew and consumer lag",
+      "type": "scale_trigger",
+      "content": "A viral post can be hotter than aggregate traffic suggests. Watch the busiest post's shard skew, membership write distribution, oldest unprocessed outbox age, stream consumer lag, and count freshness. Use measured skew to add or rebalance post-scoped hash shards and consumers while preserving each actor's stable ordering and replay history.",
+      "scaleTrigger": {
+        "metric": "Per-post membership and counter-shard skew, outbox age, stream lag, and aggregate freshness",
+        "action": "Add or rebalance post-scoped actor-hash shards and scale consumers based on observed load; preserve stable routing, event IDs, and replayable checkpoints.",
+        "impact": "Relieves a celebrity-post hot spot without routing all writes through one counter key or weakening exact membership."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "likes_30",
+      "stepNumber": 30,
+      "phase": "Serve live counts and reconcile projections",
+      "title": "Add a membership-to-counter reconciliation worker",
+      "type": "add_component",
+      "content": "Periodically compare durable counter shards with exact membership at a compatible snapshot or event watermark. Produce repair work for missing, duplicated, or misapplied transitions; rebuild only derived rollups and cache values, never alter membership to fit a counter.",
+      "component": {
+        "nodeId": "likes_reconciler",
+        "componentType": "processing-worker",
+        "label": "Count Reconciliation Worker",
+        "description": "Repair derived counts against exact membership and replay progress",
+        "position": {"x": 1630, "y": 920},
+        "properties": {
+          "componentName": "Count Reconciliation Worker",
+          "purpose": "Compare exact membership cardinality with durable post-shard rollups at a compatible snapshot and event watermark, identify drift or missing event ranges, rebuild affected derived shards, and refresh cache snapshots without modifying membership truth.",
+          "tasks": "Data Processing",
+          "autoscale": true
+        },
+        "highlightReason": "The catalog Processing Worker supports repeatable background repair rather than putting full membership scans on count reads."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "likes_31",
+      "stepNumber": 31,
+      "phase": "Serve live counts and reconcile projections",
+      "title": "Read exact membership for count reconciliation",
+      "type": "add_connection",
+      "content": "Read exact post-user membership at a stable snapshot or watermark as the authoritative input for repairing derived counts. Membership is not eventually consistent; account for writes after the snapshot by replaying later committed transitions before declaring the repaired count current.",
+      "connection": {
+        "edgeId": "likes_membership_reconciler",
+        "sourceNodeId": "likes_membership",
+        "targetNodeId": "likes_reconciler",
+        "connectionType": "database-connection",
+        "label": "Exact membership evidence",
+        "description": "An exact membership view is the basis for correcting derived aggregate counts."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:3"]
+    },
+    {
+      "id": "likes_32",
+      "stepNumber": 32,
+      "phase": "Serve live counts and reconcile projections",
+      "title": "Inspect durable rollups and applied progress",
+      "type": "add_connection",
+      "content": "Compare each post-shard total and applied-event checkpoint with the compatible membership boundary. A count match without a matching event position is not proof that later changes have been applied.",
+      "connection": {
+        "edgeId": "likes_rollups_reconciler",
+        "sourceNodeId": "likes_counter_rollups",
+        "targetNodeId": "likes_reconciler",
+        "connectionType": "database-connection",
+        "label": "Shard totals and event checkpoints",
+        "description": "Reconciliation compares both projected values and the stream progress that produced them."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "likes_33",
+      "stepNumber": 33,
+      "phase": "Serve live counts and reconcile projections",
+      "title": "Repair derived rollups idempotently",
+      "type": "add_connection",
+      "content": "Write corrected shard totals and a repair checkpoint so a repeated repair cannot double-apply. Replay transitions after the chosen snapshot boundary and retain evidence of the repaired range for investigation.",
+      "connection": {
+        "edgeId": "likes_reconciler_rollups",
+        "sourceNodeId": "likes_reconciler",
+        "targetNodeId": "likes_counter_rollups",
+        "connectionType": "database-connection",
+        "label": "Idempotent count repair",
+        "description": "Repair affects only derived rollups and records the compatible source boundary."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "likes_34",
+      "stepNumber": 34,
+      "phase": "Serve live counts and reconcile projections",
+      "title": "Refresh cache values after repair",
+      "type": "add_connection",
+      "content": "Replace repaired Redis shard snapshots with their new version and watermark. Reject delayed older values, and let active viewers receive the corrected aggregate through the normal authorized fan-out path.",
+      "connection": {
+        "edgeId": "likes_reconciler_cache",
+        "sourceNodeId": "likes_reconciler",
+        "targetNodeId": "likes_counter_cache",
+        "connectionType": "data-flow",
+        "label": "Repaired versioned cache snapshots",
+        "description": "A corrected durable projection refreshes the derived count cache."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "likes_35",
+      "stepNumber": 35,
+      "phase": "Serve live counts and reconcile projections",
+      "title": "Add operational visibility for lag and drift",
+      "type": "add_component",
+      "content": "Expose request rejection and retry rates, outbox age, stream lag, per-post shard skew, cache watermark, reconciliation drift, and repair outcomes. Alert on data-path degradation using thresholds established with operators rather than values invented in this brief.",
+      "component": {
+        "nodeId": "likes_monitoring",
+        "componentType": "monitoring",
+        "label": "Like Pipeline Monitoring",
+        "description": "Observe abuse controls, processing lag, shard skew, and count drift",
+        "position": {"x": 1950, "y": 920},
+        "properties": {
+          "componentName": "Like Pipeline Monitoring",
+          "purpose": "Track accepted and rejected commands, duplicate no-ops, outbox age, stream lag, hot-post shard skew, cache watermark, reconciliation drift, and repair results; alert using operator-approved thresholds.",
+          "stack": "Prometheus + Grafana",
+          "metrics": true,
+          "alerts": true
+        },
+        "highlightReason": "The catalog Monitoring component makes queue lag and reconciliation correctness visible as first-class operating signals."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "likes_36",
+      "stepNumber": 36,
+      "phase": "Serve live counts and reconcile projections",
+      "title": "Measure rejected and duplicate commands",
+      "type": "add_connection",
+      "content": "Record gateway and service outcomes without logging unnecessary liker identities. Separate an idempotent no-op from an abuse rejection so retries remain safe and abuse controls can be tuned from evidence.",
+      "connection": {
+        "edgeId": "likes_api_monitoring",
+        "sourceNodeId": "likes_api",
+        "targetNodeId": "likes_monitoring",
+        "connectionType": "data-flow",
+        "label": "Command outcomes and abuse signals",
+        "description": "Operational events omit unnecessary personal data and distinguish no-ops from rejected abuse."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "likes_37",
+      "stepNumber": 37,
+      "phase": "Serve live counts and reconcile projections",
+      "title": "Measure aggregation freshness and shard skew",
+      "type": "add_connection",
+      "content": "Report consumer position, oldest pending event, per-post shard distribution, retry and dedup outcomes, and cache watermark. These signals distinguish a correct but delayed estimate from a counter that has drifted.",
+      "connection": {
+        "edgeId": "likes_aggregator_monitoring",
+        "sourceNodeId": "likes_counter_worker",
+        "targetNodeId": "likes_monitoring",
+        "connectionType": "data-flow",
+        "label": "Aggregation lag and shard health",
+        "description": "Worker progress and distribution signals support scaling and drift diagnosis."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "likes_38",
+      "stepNumber": 38,
+      "phase": "Serve live counts and reconcile projections",
+      "title": "Record count reconciliation evidence",
+      "type": "add_connection",
+      "content": "Persist or emit the compared snapshot boundary, event checkpoint, affected shards, observed drift, repair version, and outcome. Avoid recording raw liker lists in general operational logs.",
+      "connection": {
+        "edgeId": "likes_reconciler_monitoring",
+        "sourceNodeId": "likes_reconciler",
+        "targetNodeId": "likes_monitoring",
+        "connectionType": "data-flow",
+        "label": "Count drift and repair evidence",
+        "description": "Auditable derived-count repair metadata excludes unnecessary personal membership data."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "likes_39",
+      "stepNumber": 39,
+      "phase": "Serve live counts and reconcile projections",
+      "title": "Reconcile against a compatible boundary",
+      "type": "explanation",
+      "content": "Eventual consistency applies only to displayed aggregate counts: a count may temporarily lag after exact membership has committed. For repair, compare membership and count rollups at compatible snapshot and event positions, then replay later transitions. Unlike, duplicate prevention, and liker identity continue to use authoritative per-user membership; the count cache never becomes the source for who liked the post.",
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:3"]
+    },
+    {
+      "id": "likes_40",
+      "stepNumber": 40,
+      "phase": "Control abuse and operate at daily scale",
+      "title": "Apply layered like-spam controls",
+      "type": "decision_point",
+      "content": "Rate-limit by authenticated account and relevant network or post dimensions, then combine those controls with anomaly and automation signals in the service. Use product-approved challenges, cooldowns, or rejection actions; avoid one global per-post cap that blocks a legitimate audience during a viral event. Only committed membership transitions reach the counter stream.",
+      "decision": {
+        "question": "How should the system prevent like spam without making viral traffic itself look abusive?",
+        "chosen": "Use layered identity-aware rate limits and risk signals, with operator-approved actions and no invented numeric thresholds.",
+        "chosenReason": "Abuse controls can target suspicious actors and retry patterns while preserving valid high-volume activity across many users.",
+        "alternatives": [
+          {
+            "option": "Apply one fixed global limit to each post",
+            "tradeoff": "A legitimate high-profile post can exceed it because of audience size, causing valid likes to be rejected."
+          },
+          {
+            "option": "Count every request before abuse and membership checks",
+            "tradeoff": "Retries, duplicate requests, and rejected spam contaminate the displayed count."
+          }
+        ]
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "likes_41",
+      "stepNumber": 41,
+      "phase": "Control abuse and operate at daily scale",
+      "title": "Scale the daily event volume without losing replayability",
+      "type": "scale_trigger",
+      "content": "Billions of likes per day require capacity across the full path, not only the Redis read cache. Measure accepted transition volume, membership partition skew, outbox backlog, broker partition utilization, worker lag, rollup contention, and reconciliation time. Add partitions, shards, and consumers from measured bottlenecks while preserving event IDs, per-actor ordering, and recoverable checkpoints.",
+      "scaleTrigger": {
+        "metric": "Accepted daily transitions, storage and broker partition skew, pending outbox age, consumer lag, rollup contention, and reconciliation progress",
+        "action": "Scale the constrained durable write, event, aggregation, or repair stage using observed load; preserve idempotency, ordering, and replay checkpoints through each change.",
+        "impact": "Supports the stated daily volume across writes and projections without claiming an unprovided numeric latency or capacity target."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "likes_42",
+      "stepNumber": 42,
+      "phase": "Control abuse and operate at daily scale",
+      "title": "Set freshness and privacy policy with product owners",
+      "type": "explanation",
+      "content": "Before implementation, agree how the UI labels count freshness, the operational lag and latency targets, liker-list ordering and pagination behavior, privacy and block rules, and abuse thresholds. None is quantified by the frozen brief. Keep exact liked state responsive from the membership command; describe displayed totals as derived until their event watermark catches up.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

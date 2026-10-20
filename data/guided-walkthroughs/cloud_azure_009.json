@@ -1,0 +1,759 @@
+{
+  "problem_id": "cloud_azure_009",
+  "version": "1.0.0-review-draft",
+  "totalSteps": 40,
+  "phases": [
+    {
+      "name": "Frame consortium, transaction, and finality targets",
+      "stepRange": [1, 10],
+      "description": "Separate the supplied blockchain requirements from workload, chain, governance, and privacy decisions that the brief leaves open."
+    },
+    {
+      "name": "Model the ledger, contracts, membership, and key boundary",
+      "stepRange": [11, 20],
+      "description": "Place the consortium network and its responsibilities using existing catalog types, while keeping chain, consensus, membership, and key-custody choices explicit."
+    },
+    {
+      "name": "Separate private off-chain data from integrations",
+      "stepRange": [21, 30],
+      "description": "Use the supplied Cosmos DB and Logic Apps hints as candidates, preserve sensitive-data boundaries, and connect existing systems without assuming delivery semantics."
+    },
+    {
+      "name": "Observe, scale, and validate the design",
+      "stepRange": [31, 40],
+      "description": "Instrument transaction lifecycle and consensus behavior, then prove throughput, finality, Byzantine fault tolerance, privacy, and member-scale requirements through owner-approved tests."
+    }
+  ],
+  "steps": [
+    {
+      "id": "blockchain_01",
+      "stepNumber": 1,
+      "phase": "Frame consortium, transaction, and finality targets",
+      "title": "Separate supplied requirements from open design inputs",
+      "type": "explanation",
+      "content": "The brief requires a deployed blockchain network, smart contracts, consortium-member management, off-chain storage, integration with existing systems, transaction monitoring, immutability, and a consensus mechanism. It sets finality under 10 seconds, 1000+ transactions per second, Byzantine fault tolerance, privacy for sensitive data, and a consortium of 100+ members. The hints name Azure Blockchain Service, Ethereum or Hyperledger Fabric, Cosmos DB, Logic Apps, Azure Monitor, and Key Vault. These are candidate directions, not proof of current service fit or capacity. Chain, consensus algorithm, workload distribution, privacy scheme, and governance model are open questions.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "blockchain_02",
+      "stepNumber": 2,
+      "phase": "Frame consortium, transaction, and finality targets",
+      "title": "Define transaction throughput and finality measurements",
+      "type": "decision_point",
+      "content": "Clarify whether 1000+ transactions per second means sustained committed transactions, submitted transactions, or a burst target, and define transaction size, operation mix, and participant distribution. Define where finality timing starts and ends, which percentile must stay under 10 seconds, and whether client acknowledgement or consensus commitment is the endpoint. Do not infer a workload mix or convert the target to a different request-rate promise.",
+      "decision": {
+        "question": "What workload and measurement contract should the performance test prove?",
+        "chosen": "Keep 1000+ transactions per second and finality under 10 seconds as supplied targets; ask the product and consortium owners to define the transaction mix, sustained-versus-burst window, measurement boundaries, and percentile before sizing.",
+        "chosenReason": "The numeric targets are explicit, but their measurement and workload semantics are not, so capacity claims need an agreed benchmark contract.",
+        "alternatives": [
+          {"option": "Treat all submitted transactions as committed throughput", "tradeoff": "Submission rate can hide queue growth, rejected transactions, and slow or stalled finality."},
+          {"option": "Assume a uniform transaction mix and report an average", "tradeoff": "An average can conceal contract-specific contention and tail finality delays."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "blockchain_03",
+      "stepNumber": 3,
+      "phase": "Frame consortium, transaction, and finality targets",
+      "title": "Keep chain and consensus selection open",
+      "type": "decision_point",
+      "content": "The hints offer Ethereum or Hyperledger Fabric, while the constraints require Byzantine fault tolerance and fast finality. Ask which chain implementations, deployment model, validator eligibility rules, and consensus configurations are acceptable to the consortium. Compare candidates against the exact transaction model, permissioning, privacy needs, operational skills, and measured targets; do not select a chain or a particular consensus protocol in this draft.",
+      "decision": {
+        "question": "Which approved chain and BFT-capable consensus configuration satisfy the consortium's requirements?",
+        "chosen": "Carry Ethereum and Hyperledger Fabric forward only as brief-supplied candidates and defer the chain and consensus choice until consortium, security, and benchmark owners confirm the requirements.",
+        "chosenReason": "The brief names candidate chains and requires BFT, but does not state the chosen network, validator model, or consensus algorithm.",
+        "alternatives": [
+          {"option": "Commit to Ethereum without confirming its permissioning and deployment model", "tradeoff": "The term Ethereum alone does not establish the required consortium governance, privacy, BFT configuration, or finality behavior."},
+          {"option": "Commit to Hyperledger Fabric and a specific ordering service", "tradeoff": "That would choose an unstated platform and consensus/deployment configuration before consortium owners approve it."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "blockchain_04",
+      "stepNumber": 4,
+      "phase": "Frame consortium, transaction, and finality targets",
+      "title": "Add consortium participant applications",
+      "type": "add_component",
+      "content": "Represent member-operated applications and clients with the existing Custom Component catalog type because the brief does not specify their channels or hosting model. Clients submit authenticated business commands through the platform boundary; they do not connect directly to validator nodes or hold shared signing secrets. Confirm which members operate clients, validators, or both.",
+      "component": {
+        "nodeId": "consortium_clients",
+        "componentType": "custom-component",
+        "label": "Consortium Member Applications",
+        "description": "Member-owned clients that submit and inspect business transactions",
+        "position": {"x": 40, "y": 260},
+        "properties": {
+          "componentName": "Consortium Member Applications",
+          "subtitle": "Client channels and member topology TBD",
+          "componentType": "Consortium client applications",
+          "technology": "Member channels and hosting model TBD",
+          "purpose": "Provide member-facing workflows to submit authorized business commands and inspect transaction status. Use the approved identity and access protocol; do not expose validator endpoints or embed shared signing credentials in client software.",
+          "notes": "Confirm which consortium members operate clients, validators, or both."
+        },
+        "highlightReason": "The participant applications are required by the user flows but their channels and hosting model are unspecified, so the existing Custom Component preserves that question."
+      },
+      "requirementIds": ["legacy-constraint:5"]
+    },
+    {
+      "id": "blockchain_05",
+      "stepNumber": 5,
+      "phase": "Frame consortium, transaction, and finality targets",
+      "title": "Add the Azure API management boundary",
+      "type": "add_component",
+      "content": "Use the existing API Gateway catalog component for Azure API Management as an inferred Azure-context candidate; it is not named in the brief's hints. Keep service fit, identity integration, quotas, and deployment configuration subject to validation. The gateway validates and routes requests, but does not itself establish ledger commitment or transaction finality.",
+      "component": {
+        "nodeId": "member_api_gateway",
+        "componentType": "api-gateway",
+        "label": "Azure API Management (service fit TBD)",
+        "description": "Authenticated member API ingress and request validation",
+        "position": {"x": 370, "y": 260},
+        "properties": {
+          "componentName": "Azure API Management (service fit TBD)",
+          "purpose": "Provide a controlled API ingress for consortium clients, validate request shape, enforce the approved authentication and authorization policy, and route commands to the transaction service. Confirm tier limits, member identity model, and regional configuration before relying on this Azure service candidate.",
+          "inputValidation": true,
+          "authentication": "OAuth 2.0",
+          "tlsTermination": true
+        },
+        "highlightReason": "The existing API Gateway palette component expresses the request boundary; its label records Azure API Management as the candidate without introducing a new node type."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "blockchain_06",
+      "stepNumber": 6,
+      "phase": "Frame consortium, transaction, and finality targets",
+      "title": "Route member commands through the API boundary",
+      "type": "add_connection",
+      "content": "Route clients through the gateway so member authentication, request validation, and authorization decisions are observable and enforceable before a transaction is submitted.",
+      "connection": {
+        "edgeId": "clients_to_gateway",
+        "sourceNodeId": "consortium_clients",
+        "targetNodeId": "member_api_gateway",
+        "connectionType": "authenticated-api-request",
+        "label": "Authorized member requests",
+        "description": "Member clients submit authenticated commands through the API boundary."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "blockchain_07",
+      "stepNumber": 7,
+      "phase": "Frame consortium, transaction, and finality targets",
+      "title": "Add the transaction and integration API service",
+      "type": "add_component",
+      "content": "Add an application service using the existing Custom Component type. It validates business commands, applies authorization and idempotency policy, coordinates off-chain data with ledger submission, and returns a pending or final status according to the selected chain's actual semantics. Keep signing delegated to approved key custody and avoid claiming that an accepted API request is already final.",
+      "component": {
+        "nodeId": "transaction_service",
+        "componentType": "custom-component",
+        "label": "Blockchain Transaction and Integration API",
+        "description": "Validates commands and coordinates ledger and off-chain operations",
+        "position": {"x": 710, "y": 260},
+        "properties": {
+          "componentName": "Blockchain Transaction and Integration API",
+          "subtitle": "Application service; runtime TBD",
+          "componentType": "Transaction orchestration service",
+          "technology": "Azure-hosted service option TBD",
+          "purpose": "Validate member commands, enforce application authorization and idempotency, coordinate approved off-chain data writes with ledger submission, expose transaction lifecycle status, and invoke key operations through the approved custody boundary. Do not equate request acceptance with consensus finality.",
+          "notes": "Define retry and compensation behavior after the chain and data consistency contract are selected."
+        },
+        "highlightReason": "No matching Azure-specific orchestration service is present in the palette; the existing Custom Component type models the application boundary without creating a component."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1"]
+    },
+    {
+      "id": "blockchain_08",
+      "stepNumber": 8,
+      "phase": "Frame consortium, transaction, and finality targets",
+      "title": "Send validated commands to transaction orchestration",
+      "type": "add_connection",
+      "content": "The gateway routes validated member requests to the transaction service. Propagate a stable request identifier and authenticated member context; do not let an untrusted client choose validator identity or consensus metadata.",
+      "connection": {
+        "edgeId": "gateway_to_transaction_service",
+        "sourceNodeId": "member_api_gateway",
+        "targetNodeId": "transaction_service",
+        "connectionType": "validated-command",
+        "label": "Validated transaction commands",
+        "description": "Route authenticated commands with member context and a stable request identifier."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "blockchain_09",
+      "stepNumber": 9,
+      "phase": "Frame consortium, transaction, and finality targets",
+      "title": "Add the Azure consortium blockchain network boundary",
+      "type": "add_component",
+      "content": "Represent the permissioned or consortium network with the existing Custom Component type. Azure Blockchain Service is retained only as a supplied hint to validate, not as a claim about present availability or suitability. The network boundary owns member/validator participation and the selected chain's consensus and finality behavior; leave chain, topology, and consensus algorithm undecided until owners choose them.",
+      "component": {
+        "nodeId": "consortium_network",
+        "componentType": "custom-component",
+        "label": "Azure Consortium Blockchain Network (chain TBD)",
+        "description": "Consortium ledger, validator participation, and consensus boundary",
+        "position": {"x": 1110, "y": 260},
+        "properties": {
+          "componentName": "Azure Consortium Blockchain Network (chain TBD)",
+          "subtitle": "Azure Blockchain Service hint; verify service fit",
+          "componentType": "Consortium blockchain network",
+          "technology": "Ethereum or Hyperledger Fabric candidate; selection TBD",
+          "purpose": "Host the consortium ledger and the approved validator/member topology. The selected network must be configured and benchmarked for Byzantine fault tolerance, transaction finality under 10 seconds, and 1000+ transactions per second. Do not assume a chain, consensus algorithm, validator count, deployment topology, or provider capability from this placeholder.",
+          "notes": "Validate the Azure Blockchain Service hint and supported deployment options with platform owners before selecting a product."
+        },
+        "highlightReason": "The palette has no dedicated blockchain-network node, so the existing Custom Component represents the Azure-oriented network without adding a new catalog component."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "blockchain_10",
+      "stepNumber": 10,
+      "phase": "Frame consortium, transaction, and finality targets",
+      "title": "Submit transactions to the selected network",
+      "type": "add_connection",
+      "content": "The transaction service submits signed commands to the selected network using its approved client protocol. Track submission, inclusion, finality, rejection, and timeout as distinct states; exact state names and retry safety depend on the selected chain.",
+      "connection": {
+        "edgeId": "transaction_service_to_network",
+        "sourceNodeId": "transaction_service",
+        "targetNodeId": "consortium_network",
+        "connectionType": "ledger-transaction-submit",
+        "label": "Signed transaction submission and status",
+        "description": "Submit authorized commands through the selected network client and track chain-defined lifecycle states."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "blockchain_11",
+      "stepNumber": 11,
+      "phase": "Model the ledger, contracts, membership, and key boundary",
+      "title": "Add the smart-contract boundary",
+      "type": "add_component",
+      "content": "Represent smart contracts with the existing Custom Component type because the catalog has no chain-specific contract runtime. Keep deployment, execution, authorization, upgrade policy, and chain-specific language/runtime as explicit design details. Expose contract events only through an integration mechanism supported by the selected chain; do not assume event availability or delivery semantics before choosing and validating that platform. Contract code should enforce business invariants that all participants agree must be ledger-verifiable.",
+      "component": {
+        "nodeId": "smart_contracts",
+        "componentType": "custom-component",
+        "label": "Consortium Smart Contracts",
+        "description": "Versioned business rules executed by the selected chain",
+        "position": {"x": 1460, "y": 70},
+        "properties": {
+          "componentName": "Consortium Smart Contracts",
+          "subtitle": "Contract runtime and language TBD",
+          "componentType": "Smart contracts",
+          "technology": "Ethereum or Hyperledger Fabric runtime TBD",
+          "purpose": "Implement consortium-approved business rules, validate transaction preconditions, and record authorized state transitions. Expose events to integrations only through an interface supported by the selected chain. Define deployment, access control, versioning, review, and upgrade procedures for the chosen chain; do not assume a language, event interface, or upgrade mechanism.",
+          "notes": "Contract changes require a consortium-approved release and rollback or forward-fix procedure."
+        },
+        "highlightReason": "No dedicated smart-contract type exists in the component catalog; the existing Custom Component captures the contract boundary while preserving chain choice."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:7"]
+    },
+    {
+      "id": "blockchain_12",
+      "stepNumber": 12,
+      "phase": "Model the ledger, contracts, membership, and key boundary",
+      "title": "Execute approved business rules on the ledger",
+      "type": "add_connection",
+      "content": "The selected network executes the deployed contract under its chain-specific rules. Treat contract execution success separately from transaction finality, and verify event and state behavior against the selected platform's documented semantics and consortium acceptance tests; do not treat a vendor label as a blanket guarantee.",
+      "connection": {
+        "edgeId": "network_to_contracts",
+        "sourceNodeId": "consortium_network",
+        "targetNodeId": "smart_contracts",
+        "connectionType": "contract-execution",
+        "label": "Contract execution and state transition",
+        "description": "Execute versioned contract logic as part of the chain transaction lifecycle."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1"]
+    },
+    {
+      "id": "blockchain_13",
+      "stepNumber": 13,
+      "phase": "Model the ledger, contracts, membership, and key boundary",
+      "title": "Add consortium membership and governance controls",
+      "type": "add_component",
+      "content": "Use the existing Custom Component type for membership and governance because the brief requires member management but does not prescribe a voting model. The control plane tracks member identity, onboarding/offboarding state, authorized roles, and the resulting network configuration changes. Require an auditable approval policy, but leave voting thresholds, veto rights, and signer combinations to consortium owners.",
+      "component": {
+        "nodeId": "consortium_governance",
+        "componentType": "custom-component",
+        "label": "Consortium Membership and Governance",
+        "description": "Auditable member lifecycle and approved network changes",
+        "position": {"x": 1110, "y": 540},
+        "properties": {
+          "componentName": "Consortium Membership and Governance",
+          "subtitle": "Voting and approval policy TBD",
+          "componentType": "Consortium governance control plane",
+          "technology": "Azure-hosted control-plane option TBD",
+          "purpose": "Track consortium member identity and lifecycle, enforce the owner-approved authorization and approval process for membership and network changes, and preserve an audit trail of approved actions. Design for 100+ members without assuming voting thresholds, quorum, veto rights, or validator privileges.",
+          "notes": "Define emergency removal, dispute resolution, and membership changes with consortium owners."
+        },
+        "highlightReason": "The catalog has no consortium-governance type; the existing Custom Component expresses the necessary control plane without inventing voting mechanics."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "blockchain_14",
+      "stepNumber": 14,
+      "phase": "Model the ledger, contracts, membership, and key boundary",
+      "title": "Apply membership changes through an authorized control path",
+      "type": "add_connection",
+      "content": "Only the governance control plane may request member lifecycle or network-configuration changes, and the network applies them after the agreed approval and audit checks. The precise approval workflow remains an owner decision.",
+      "connection": {
+        "edgeId": "transaction_service_to_governance",
+        "sourceNodeId": "transaction_service",
+        "targetNodeId": "consortium_governance",
+        "connectionType": "membership-administration",
+        "label": "Authorized member lifecycle operations",
+        "description": "Route authorized membership requests to the audited governance control plane."
+      },
+      "requirementIds": ["legacy-requirement:3"]
+    },
+    {
+      "id": "blockchain_15",
+      "stepNumber": 15,
+      "phase": "Model the ledger, contracts, membership, and key boundary",
+      "title": "Apply approved consortium changes to the network",
+      "type": "add_connection",
+      "content": "The governance service communicates approved membership and configuration changes to the network through the selected platform's supported administrative interface. Record who approved each change and verify that offboarding revokes access and keys as intended.",
+      "connection": {
+        "edgeId": "governance_to_network",
+        "sourceNodeId": "consortium_governance",
+        "targetNodeId": "consortium_network",
+        "connectionType": "approved-membership-change",
+        "label": "Approved member and network changes",
+        "description": "Apply only owner-approved membership and validator configuration changes through the selected network control plane."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8"]
+    },
+    {
+      "id": "blockchain_16",
+      "stepNumber": 16,
+      "phase": "Model the ledger, contracts, membership, and key boundary",
+      "title": "Ask the consortium to define governance authority",
+      "type": "decision_point",
+      "content": "Member count does not tell us how decisions are made. Ask who may propose, approve, veto, or execute membership, contract, and network changes; what evidence is retained; how emergency action works; and how a member disputes a decision. Do not assume majority voting, quorum, or a particular threshold.",
+      "decision": {
+        "question": "Which governance decision rights and approval workflow does the consortium require?",
+        "chosen": "Keep policy enforcement and auditability in the architecture, and defer voting, quorum, veto, and emergency authority rules to the consortium charter.",
+        "chosenReason": "The brief asks for consortium governance but supplies no voting or approval model.",
+        "alternatives": [
+          {"option": "Assume one-member-one-vote majority approval", "tradeoff": "That may conflict with legal agreements, member classes, or agreed emergency rights."},
+          {"option": "Give a single operator unilateral network control", "tradeoff": "This may violate consortium independence and create an unacceptable trust concentration."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "blockchain_17",
+      "stepNumber": 17,
+      "phase": "Model the ledger, contracts, membership, and key boundary",
+      "title": "Add Azure Key Vault as the key-custody candidate",
+      "type": "add_component",
+      "content": "Use the existing Secrets Manager catalog component and select its Azure Key Vault provider. Model a custody boundary for approved cryptographic key operations; do not assume private keys are exportable, that a specific HSM tier is required, or that the network can use remote signing without a compatible adapter. Confirm tenant ownership, access policy, recovery, rotation, and audit requirements.",
+      "component": {
+        "nodeId": "key_vault",
+        "componentType": "secrets-manager",
+        "label": "Azure Key Vault (key custody candidate)",
+        "description": "Managed key and secret operations for approved network identities",
+        "position": {"x": 710, "y": 540},
+        "properties": {
+          "componentName": "Azure Key Vault (key custody candidate)",
+          "purpose": "Provide the approved Azure key and secret custody boundary for service credentials and cryptographic operations where supported by the selected chain integration. Keep private key material protected, scope access to workload identities, and enable the owner-approved audit and recovery process. Confirm key type, exportability, hardware protection, rotation, and remote-signing compatibility before deployment.",
+          "provider": "Azure Key Vault",
+          "audit": true
+        },
+        "highlightReason": "Azure Key Vault is an explicit provider option on the existing Secrets Manager catalog type, so no new component is needed."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "blockchain_18",
+      "stepNumber": 18,
+      "phase": "Model the ledger, contracts, membership, and key boundary",
+      "title": "Request key operations through the custody boundary",
+      "type": "add_connection",
+      "content": "The transaction service requests signing or key operations through an authenticated workload identity and the selected network adapter. Audit the operation identity and outcome without logging private key material, credentials, or sensitive transaction payloads.",
+      "connection": {
+        "edgeId": "transaction_service_to_key_vault",
+        "sourceNodeId": "transaction_service",
+        "targetNodeId": "key_vault",
+        "connectionType": "cryptographic-key-operation",
+        "label": "Authorized signing and key operations",
+        "description": "Request chain-compatible cryptographic operations without exposing protected key material to clients."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "blockchain_19",
+      "stepNumber": 19,
+      "phase": "Model the ledger, contracts, membership, and key boundary",
+      "title": "Confirm key ownership and signing semantics",
+      "type": "decision_point",
+      "content": "Establish whether member keys are held by each member, by a managed service, or by another approved custody arrangement. Define signing authority, rotation, recovery, revocation, and audit retention. Validate whether Azure Key Vault supports the selected chain's key algorithms and signing interface before committing to this path.",
+      "decision": {
+        "question": "Who owns validator and transaction-signing keys, and where may they be used?",
+        "chosen": "Use Azure Key Vault as the supplied candidate and keep key ownership, key type, hardware boundary, remote signing, and member separation as explicit security-owner decisions.",
+        "chosenReason": "The hint identifies Key Vault but does not define which actors' keys it holds or how a chosen chain consumes them.",
+        "alternatives": [
+          {"option": "Place all member keys in one operator-controlled vault", "tradeoff": "It can concentrate signing authority and undermine independent member control."},
+          {"option": "Let application clients hold shared signing secrets", "tradeoff": "It expands exposure and makes revocation and audit difficult to enforce consistently."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "blockchain_20",
+      "stepNumber": 20,
+      "phase": "Model the ledger, contracts, membership, and key boundary",
+      "title": "Keep the immutable ledger distinct from application data",
+      "type": "explanation",
+      "content": "Treat the ledger as the shared record of agreed state transitions, not as a default repository for every business payload. Immutability depends on the selected chain, consensus, finality, and governance assumptions; document the threat model and correction process rather than promising absolute immutability.",
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "blockchain_21",
+      "stepNumber": 21,
+      "phase": "Separate private off-chain data from integrations",
+      "title": "Add Cosmos DB as the off-chain data candidate",
+      "type": "add_component",
+      "content": "Use the existing Database catalog type configured as NoSQL to represent the Azure Cosmos DB hint, and avoid inventing an engine or consistency setting the catalog and brief do not establish. Store approved off-chain payloads and metadata with access controls, encryption, retention, and a ledger-reference strategy agreed with data owners. Validate partitioning and service fit against the real access patterns.",
+      "component": {
+        "nodeId": "offchain_store",
+        "componentType": "database",
+        "label": "Azure Cosmos DB (off-chain data candidate)",
+        "description": "Off-chain document and transaction metadata store",
+        "position": {"x": 1110, "y": 850},
+        "properties": {
+          "componentName": "Azure Cosmos DB (off-chain data candidate)",
+          "purpose": "Store approved off-chain business payloads and metadata separately from the immutable shared ledger. Define partition keys, access patterns, retention, encryption, regional behavior, and consistency from the application requirements; do not store sensitive fields on-chain by default.",
+          "type": "NoSQL"
+        },
+        "highlightReason": "Cosmos DB is in the brief's Azure hints; the existing Database palette type supports NoSQL without adding a Cosmos-specific component or asserting an engine option the catalog does not offer."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:4"]
+    },
+    {
+      "id": "blockchain_22",
+      "stepNumber": 22,
+      "phase": "Separate private off-chain data from integrations",
+      "title": "Coordinate approved off-chain writes",
+      "type": "add_connection",
+      "content": "The transaction service writes only the data required by the approved off-chain contract and associates it with a stable business/transaction reference. Define behavior for a successful store write followed by a failed ledger submission, and for ledger success followed by delayed metadata persistence; do not imply a cross-system atomic transaction.",
+      "connection": {
+        "edgeId": "transaction_service_to_offchain_store",
+        "sourceNodeId": "transaction_service",
+        "targetNodeId": "offchain_store",
+        "connectionType": "offchain-data-write",
+        "label": "Protected off-chain payload and reference",
+        "description": "Persist owner-approved data outside the ledger and coordinate it with the transaction lifecycle."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:4"]
+    },
+    {
+      "id": "blockchain_23",
+      "stepNumber": 23,
+      "phase": "Separate private off-chain data from integrations",
+      "title": "Ask owners to choose the privacy and disclosure model",
+      "type": "decision_point",
+      "content": "Classify which fields are sensitive, who may read them, and whether any ledger metadata is itself sensitive. Compare the selected chain's supported privacy controls and off-chain access enforcement with legal and consortium obligations. Do not select a privacy scheme, assume encryption alone hides metadata, or put sensitive payloads on a shared ledger by default.",
+      "decision": {
+        "question": "Which privacy model protects sensitive data across members while preserving required verification?",
+        "chosen": "Keep sensitive business payloads in the access-controlled off-chain boundary and defer on-chain fields, cryptographic privacy mechanisms, retention, and member visibility to the data and security owners.",
+        "chosenReason": "The brief requires privacy but does not identify data classes, participant visibility, jurisdiction, or a privacy technology.",
+        "alternatives": [
+          {"option": "Place all transaction details on a shared ledger", "tradeoff": "Immutable replication can disclose sensitive content or metadata to participants who should not see it."},
+          {"option": "Assume encryption makes all on-chain data private", "tradeoff": "Metadata, key access, future disclosure, and immutable retention still need explicit analysis."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "blockchain_24",
+      "stepNumber": 24,
+      "phase": "Separate private off-chain data from integrations",
+      "title": "Define how off-chain records are verifiably referenced",
+      "type": "decision_point",
+      "content": "A ledger reference may be an identifier, commitment, digest, or another approved representation, but each choice has privacy and integrity implications. Ask what must be independently verified, whether deletion or correction is legally required, and whether reference metadata can identify a member or customer. Select a representation only after privacy review; do not assume a particular hash or proof scheme.",
+      "decision": {
+        "question": "What minimum ledger record proves integrity without exposing sensitive off-chain information?",
+        "chosen": "Record only the minimum consortium-approved state and reference needed for verification; defer the specific reference or proof format to security, privacy, and contract owners.",
+        "chosenReason": "The problem asks for immutability and privacy but supplies no data schema or cryptographic representation.",
+        "alternatives": [
+          {"option": "Write the raw payload to the ledger", "tradeoff": "Creates permanent replicated disclosure and makes correction or deletion difficult."},
+          {"option": "Write a deterministic digest without privacy review", "tradeoff": "A digest can still reveal low-entropy or correlatable data and does not define access control."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "blockchain_25",
+      "stepNumber": 25,
+      "phase": "Separate private off-chain data from integrations",
+      "title": "Add Azure Logic Apps as an integration candidate",
+      "type": "add_component",
+      "content": "Use the existing Custom Component type for Azure Logic Apps because the catalog has no dedicated Logic Apps node. The integration boundary adapts approved external-system contracts and may react to ledger events using a chain-supported delivery adapter. Validate connectors, identity, retry behavior, throughput, and licensing/service fit; do not assume a delivery guarantee or synchronous transaction coupling.",
+      "component": {
+        "nodeId": "integration_workflows",
+        "componentType": "custom-component",
+        "label": "Azure Logic Apps (integration workflows)",
+        "description": "Workflow boundary for existing-system integration",
+        "position": {"x": 1460, "y": 540},
+        "properties": {
+          "componentName": "Azure Logic Apps (integration workflows)",
+          "subtitle": "Connectors and event adapter TBD",
+          "componentType": "Integration workflow",
+          "technology": "Azure Logic Apps",
+          "purpose": "Translate approved external-system contracts, orchestrate integration workflows, and process ledger-triggered business events through a selected delivery adapter. Define idempotency, retries, ordering, dead-letter handling, credentials, and connector limits before promising delivery semantics.",
+          "notes": "Keep external side effects outside the consensus-critical path unless the business contract explicitly requires synchronous coupling."
+        },
+        "highlightReason": "Azure Logic Apps is a supplied hint but has no dedicated catalog type; the existing Custom Component makes the Azure service explicit without adding a palette node."
+      },
+      "requirementIds": ["legacy-requirement:5"]
+    },
+    {
+      "id": "blockchain_26",
+      "stepNumber": 26,
+      "phase": "Separate private off-chain data from integrations",
+      "title": "Represent existing systems without inventing vendors",
+      "type": "add_component",
+      "content": "Add the external systems with the existing Custom Component type because the brief does not name them or their protocols. List each source and destination, data owner, identity boundary, schema version, and allowed side effects during discovery; do not assume a particular ERP, CRM, or transport.",
+      "component": {
+        "nodeId": "existing_systems",
+        "componentType": "custom-component",
+        "label": "Existing Consortium Systems (TBD)",
+        "description": "External systems participating in approved workflows",
+        "position": {"x": 1810, "y": 540},
+        "properties": {
+          "componentName": "Existing Consortium Systems (TBD)",
+          "subtitle": "Systems, protocols, and owners TBD",
+          "componentType": "External systems",
+          "technology": "Existing member platforms; inventory required",
+          "purpose": "Represent member and enterprise systems that exchange approved business data with the consortium network. Establish system owners, schemas, identity, direction, and failure behavior before implementing connectors.",
+          "notes": "Do not infer a vendor, protocol, or source-of-truth policy from the brief."
+        },
+        "highlightReason": "The user requires integration with existing systems but provides no vendor or protocol; the existing Custom Component keeps that uncertainty visible."
+      },
+      "requirementIds": ["legacy-requirement:5"]
+    },
+    {
+      "id": "blockchain_27",
+      "stepNumber": 27,
+      "phase": "Separate private off-chain data from integrations",
+      "title": "Route external-system workflows through Logic Apps",
+      "type": "add_connection",
+      "content": "Connect external systems through the integration boundary using per-system identities and explicit schema validation. The workflow owns translation and retry policy; it must not bypass contract authorization or write ledger state directly without the selected network's approved interface.",
+      "connection": {
+        "edgeId": "systems_to_logic_apps",
+        "sourceNodeId": "existing_systems",
+        "targetNodeId": "integration_workflows",
+        "connectionType": "external-system-integration",
+        "label": "Validated external-system exchange",
+        "description": "Adapt approved systems and schemas through the integration boundary."
+      },
+      "requirementIds": ["legacy-requirement:5"]
+    },
+    {
+      "id": "blockchain_28",
+      "stepNumber": 28,
+      "phase": "Separate private off-chain data from integrations",
+      "title": "Submit integration commands through the transaction service",
+      "type": "add_connection",
+      "content": "Logic Apps sends a normalized command through the same transaction service as member clients so authorization, idempotency, off-chain coordination, and status handling remain consistent. Use an integration identity with the minimum approved permissions.",
+      "connection": {
+        "edgeId": "logic_apps_to_transaction_service",
+        "sourceNodeId": "integration_workflows",
+        "targetNodeId": "transaction_service",
+        "connectionType": "integration-command",
+        "label": "Normalized and authorized commands",
+        "description": "Submit external workflows through the common transaction validation and authorization path."
+      },
+      "requirementIds": ["legacy-requirement:5"]
+    },
+    {
+      "id": "blockchain_29",
+      "stepNumber": 29,
+      "phase": "Separate private off-chain data from integrations",
+      "title": "Deliver committed ledger events to integrations",
+      "type": "add_connection",
+      "content": "Expose contract events to Logic Apps through the selected chain's supported event or adapter path. The event must identify its chain position and transaction status so consumers can distinguish provisional observations from final outcomes. Delivery may be duplicated or delayed unless the selected platform proves otherwise.",
+      "connection": {
+        "edgeId": "network_to_logic_apps",
+        "sourceNodeId": "consortium_network",
+        "targetNodeId": "integration_workflows",
+        "connectionType": "ledger-event-delivery",
+        "label": "Ledger events through selected adapter",
+        "description": "Deliver chain events with finality status and replay metadata for downstream workflows."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:1"]
+    },
+    {
+      "id": "blockchain_30",
+      "stepNumber": 30,
+      "phase": "Separate private off-chain data from integrations",
+      "title": "Make integration effects replay-safe",
+      "type": "decision_point",
+      "content": "Define event identity, ordering scope, finality status, replay window, deduplication key, and reconciliation behavior for each external side effect. A blockchain transaction and an external API call are not one atomic commit. Decide whether consumers act only after finality and how compensating actions or manual review handle a reorganization, rejection, duplicate, or unavailable destination.",
+      "decision": {
+        "question": "When may external systems act on a ledger event, and how are retries and corrections reconciled?",
+        "chosen": "Require consumer idempotency and explicit chain-finality handling, with replay and reconciliation rules agreed per integration; do not assume exactly-once delivery.",
+        "chosenReason": "The brief requires integration and monitoring but states no event-delivery or external transaction guarantee.",
+        "alternatives": [
+          {"option": "Trigger irreversible external effects on first event observation", "tradeoff": "A provisional, duplicated, or reordered event can produce an inconsistent external result."},
+          {"option": "Retry external calls without a stable idempotency key", "tradeoff": "Timeouts can create duplicate side effects that are difficult to reconcile."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1"]
+    },
+    {
+      "id": "blockchain_31",
+      "stepNumber": 31,
+      "phase": "Observe, scale, and validate the design",
+      "title": "Add Azure Monitor as the observability candidate",
+      "type": "add_component",
+      "content": "Use the existing Monitoring component and treat Azure Monitor as the brief's candidate, not a guarantee of chain-specific telemetry coverage. Confirm that the selected network can export transaction lifecycle, submission backlog, finality latency, rejected transactions, contract failures, validator health, membership changes, and integration outcomes to the chosen Azure Monitor configuration. Keep sensitive payloads, secrets, and private keys out of telemetry; verify ingestion, retention, regional, and alerting limits for the selected plan.",
+      "component": {
+        "nodeId": "azure_monitor",
+      "componentType": "monitoring",
+        "label": "Azure Monitor (observability candidate)",
+        "description": "Metrics, logs, and alerts for ledger and integration health",
+        "position": {"x": 1810, "y": 260},
+    "properties": {
+      "componentName": "Azure Monitor (observability candidate)",
+      "purpose": "Where supported by the selected network's export interface and the chosen Azure Monitor plan, observe request and transaction lifecycle, submitted-versus-committed throughput, finality latency, network/validator health, contract errors, member changes, integration lag, retries, and reconciliation. Verify signal coverage, ingestion limits, retention, and regional behavior before relying on it. Define access with data owners; exclude secrets, private keys, and sensitive payloads from logs and metric dimensions, and alert only on owner-approved objectives.",
+      "stack": "Azure Monitor"
+    },
+    "highlightReason": "The existing Monitoring component now exposes Azure Monitor as a selectable stack."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "blockchain_32",
+      "stepNumber": 32,
+      "phase": "Observe, scale, and validate the design",
+      "title": "Observe API and transaction lifecycle",
+      "type": "add_connection",
+      "content": "Send correlated, privacy-filtered service telemetry to Azure Monitor. Include a stable transaction reference that does not expose private payloads, and record transitions from accepted through submitted, finalized, rejected, or timed out.",
+      "connection": {
+        "edgeId": "transaction_service_to_monitor",
+        "sourceNodeId": "transaction_service",
+        "targetNodeId": "azure_monitor",
+        "connectionType": "service-telemetry",
+        "label": "Redacted request and transaction telemetry",
+        "description": "Monitor API health and transaction state transitions without sensitive payloads."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "blockchain_33",
+      "stepNumber": 33,
+      "phase": "Observe, scale, and validate the design",
+      "title": "Observe consensus and network health",
+      "type": "add_connection",
+      "content": "Collect the selected platform's validator, consensus, block/commit, finality, and peer-health signals. Map vendor metrics to the agreed BFT and finality acceptance criteria; do not treat node reachability alone as proof that the ledger is progressing safely.",
+      "connection": {
+        "edgeId": "network_to_monitor",
+        "sourceNodeId": "consortium_network",
+        "targetNodeId": "azure_monitor",
+        "connectionType": "ledger-health-telemetry",
+        "label": "Consensus, validator, and finality signals",
+        "description": "Observe ledger progression and the selected network's consensus health indicators."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "blockchain_34",
+      "stepNumber": 34,
+      "phase": "Observe, scale, and validate the design",
+      "title": "Observe workflow delay and external outcomes",
+      "type": "add_connection",
+      "content": "Measure event delivery delay, retries, dead-letter volume, duplicate suppression, and destination outcomes. Correlate them to the originating transaction state and avoid including sensitive fields in dimensions or error logs.",
+      "connection": {
+        "edgeId": "logic_apps_to_monitor",
+        "sourceNodeId": "integration_workflows",
+        "targetNodeId": "azure_monitor",
+        "connectionType": "integration-telemetry",
+        "label": "Workflow lag, retries, and destination outcomes",
+        "description": "Observe downstream delivery and replay without logging private business data."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "blockchain_35",
+      "stepNumber": 35,
+      "phase": "Observe, scale, and validate the design",
+      "title": "Scale consortium operations for the stated member target",
+      "type": "scale_trigger",
+      "content": "Plan onboarding, identity lifecycle, policy distribution, validator configuration, support, and audit workflows for a consortium of 100+ members. The member target does not imply 100 validators or a particular voting/consensus topology; ask owners for the expected split among clients, observers, and validators.",
+      "scaleTrigger": {
+        "metric": "Member onboarding and network-configuration work as membership approaches or exceeds 100+ members",
+        "action": "Automate repeatable, owner-approved identity, configuration, and audit steps while preserving per-member authorization and explicit approvals.",
+        "impact": "Reduces manual drift and onboarding delays without assuming every member participates in consensus."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "blockchain_36",
+      "stepNumber": 36,
+      "phase": "Observe, scale, and validate the design",
+      "title": "Benchmark throughput and finality together",
+      "type": "scale_trigger",
+      "content": "Load test the approved chain and contract mix against the supplied targets: 1000+ transactions per second and finality under 10 seconds. Report accepted, committed, and failed transactions separately, include tail latency, and monitor pending work so a high submission rate cannot hide a growing finality backlog. Use the workload contract from the owners rather than inventing a transaction distribution.",
+      "scaleTrigger": {
+        "metric": "Committed transaction rate, finality latency, and pending-transaction backlog under the agreed workload",
+        "action": "Identify whether the bottleneck is client submission, contract execution, validator/consensus capacity, network communication, or an external integration; tune or scale only the proven bottleneck and rerun the same benchmark.",
+        "impact": "Demonstrates whether the deployed configuration meets both throughput and finality targets instead of optimizing one while regressing the other."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "blockchain_37",
+      "stepNumber": 37,
+      "phase": "Observe, scale, and validate the design",
+      "title": "Prove Byzantine fault tolerance for the selected configuration",
+      "type": "decision_point",
+      "content": "Have the platform and security owners state the adversary assumptions, failure model, validator independence, and evidence that the chosen chain configuration tolerates Byzantine behavior. Test partitions, malicious or unavailable validators, conflicting messages, and recovery using the platform's approved test environment. Do not infer BFT from a product name or select an unstated algorithm here.",
+      "decision": {
+        "question": "What failure model and independent evidence establish BFT for the selected network?",
+        "chosen": "Make BFT an explicit acceptance criterion for the chosen chain/configuration and require platform-specific fault tests and a reviewed threat model before production approval.",
+        "chosenReason": "BFT is required, but the brief does not define its adversary threshold, validator topology, or consensus protocol.",
+        "alternatives": [
+          {"option": "Treat a vendor statement as sufficient proof", "tradeoff": "It may not cover the chosen topology, validator independence, or configured failure assumptions."},
+          {"option": "Assume any replicated ledger is Byzantine fault tolerant", "tradeoff": "Replication alone does not establish safe progress under malicious participants."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "blockchain_38",
+      "stepNumber": 38,
+      "phase": "Observe, scale, and validate the design",
+      "title": "Exercise failure, recovery, and integrity paths",
+      "type": "explanation",
+      "content": "Test validator loss and recovery, delayed or duplicated events, contract rejection, off-chain-store unavailability, key-service denial, member offboarding, and integration destination failure. Verify transaction status remains truthful, retries do not duplicate business effects, ledger references can be reconciled, and sensitive data is not exposed during diagnostics. Define recovery objectives with owners; none are supplied in the brief.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:4"]
+    },
+    {
+      "id": "blockchain_39",
+      "stepNumber": 39,
+      "phase": "Observe, scale, and validate the design",
+      "title": "Trace every requirement to an observable acceptance test",
+      "type": "explanation",
+      "content": "Before approval, map each functional requirement to a user or operator journey and each constraint to a measurable test: deployment and member lifecycle; contract correctness and upgrade review; off-chain privacy and reconciliation; external integration replay; transaction monitoring; immutability and finality behavior; consensus fault tolerance; throughput and finality under the agreed workload; and onboarding for 100+ members. Record evidence and unresolved decisions rather than converting assumptions into pass criteria.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "blockchain_40",
+      "stepNumber": 40,
+      "phase": "Observe, scale, and validate the design",
+      "title": "Collect the remaining consortium decisions",
+      "type": "decision_point",
+      "content": "Use the interview to close the decisions that materially change this design: selected Azure service and chain, consensus and validator topology, transaction workload and finality measurement, privacy classifications and member visibility, governance rights, external-system inventory, key ownership, data retention, and availability/recovery expectations. Preserve the supplied numeric targets exactly and mark each unresolved item with its owner.",
+      "decision": {
+        "question": "Which product, security, data, platform, and consortium owners must approve the open architecture decisions?",
+        "chosen": "Keep this diagram as a review draft until the owners confirm chain/service fit, consensus, privacy, governance, workload, integration, key custody, and recovery requirements.",
+        "chosenReason": "Those choices are not specified by the problem statement and can change both the architecture and whether the stated targets are achievable.",
+        "alternatives": [
+          {"option": "Fill the gaps with assumed defaults and present them as requirements", "tradeoff": "Users may mistake invented policy and workload choices for facts in the brief."},
+          {"option": "Publish capacity and compliance guarantees before measurement", "tradeoff": "It would overstate evidence that the selected services and configuration have not yet produced."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

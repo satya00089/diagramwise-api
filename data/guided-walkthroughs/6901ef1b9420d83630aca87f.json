@@ -1,0 +1,1062 @@
+{
+  "problem_id": "6901ef1b9420d83630aca87f",
+  "version": "1.0.0-review-draft",
+  "requirementRevision": null,
+  "totalSteps": 58,
+  "phases": [
+    {
+      "name": "Define the campaign contract and policy inputs",
+      "stepRange": [1, 13],
+      "description": "Freeze the supplied advertising brief, create the advertiser control plane, and establish consent-aware audience inputs before selecting ads."
+    },
+    {
+      "name": "Gate candidates and decide inside the latency budget",
+      "stepRange": [14, 30],
+      "description": "Filter for lawful eligibility first, then combine campaign pacing, frequency caps, experiments, and bounded real-time bidding on the feed path."
+    },
+    {
+      "name": "Deliver, verify events, and reconcile spend",
+      "stepRange": [31, 58],
+      "description": "Connect ad delivery to an at-least-once measurement pipeline, apply fraud controls, reconcile immutable billing entries, and scale from measured peaks."
+    }
+  ],
+  "steps": [
+    {
+      "id": "ads_01_brief",
+      "stepNumber": 1,
+      "phase": "Define the campaign contract and policy inputs",
+      "type": "explanation",
+      "title": "Read the exact brief and mark decisions it leaves open",
+      "content": "The frozen problem is Develop an Ads Management and Display System for a Social Feed: Design an advertising platform for targeting, serving, and billing ads in social media feeds. Requirements: Create and manage ad campaigns; Target ads by demographics and interests; Serve ads in user feeds; Track impressions and clicks; Billing and budget management; A/B testing for ad creatives; Fraud detection and prevention; Handle billions of ad impressions per day; Real-time bidding support. Constraints: Low latency for ad serving (<100ms); Fair ad distribution; Accurate tracking and attribution; Privacy compliance (GDPR, CCPA); Prevent click fraud. The hints are Ad ranking and auction algorithms; User profiling for targeting; Real-time bidding infrastructure; Impression/click tracking pipeline; Machine learning for optimization. Hints are prompts, not additional requirements. The brief does not specify consent semantics, sensitive-category rules, a fairness metric, auction/pricing rules, billing events, attribution windows, retention, currency handling, the latency percentile, or peak traffic. This review draft makes provisional choices below and marks policy owners' decisions for review; none is a claim of legal approval or production capacity.",
+      "requirementIds": [
+        "legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3",
+        "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6",
+        "legacy-requirement:7", "legacy-requirement:8", "legacy-requirement:9",
+        "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3",
+        "legacy-constraint:4", "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "ads_02_advertiser_console",
+      "stepNumber": 2,
+      "phase": "Define the campaign contract and policy inputs",
+      "type": "add_component",
+      "title": "Add the advertiser campaign console",
+      "content": "Advertisers create, edit, pause, and inspect campaigns through an authenticated console. Validate creative assets, dates, audience rules, budget, bid, currency, and the selected buying model before a campaign can become eligible. Keep draft edits distinct from the active version used by auctions.",
+      "component": {
+        "nodeId": "ads_advertiser_console",
+        "componentType": "web-app",
+        "label": "Advertiser Console",
+        "description": "Campaign setup, creative experiments, and spend reporting",
+        "position": {"x": 0, "y": 0},
+        "properties": {
+          "componentName": "Advertiser Console",
+          "purpose": "Let authenticated advertisers create and manage versioned campaigns, upload creatives, configure targeting, budget, bid, buying model and A/B variants, then review delivery and reconciled spend."
+        },
+        "highlightReason": "This existing Web App catalog component represents the advertiser-facing campaign workflow."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:6"]
+    },
+    {
+      "id": "ads_03_gateway",
+      "stepNumber": 3,
+      "phase": "Define the campaign contract and policy inputs",
+      "type": "add_component",
+      "title": "Add the ads API gateway",
+      "content": "Use one catalog gateway for advertiser operations, feed ad-decision requests, and signed measurement events, with separate routes, authorization scopes, validation, and rate limits. Keep event ingestion asynchronous after a bounded acceptance response; it must not wait for billing or analytics.",
+      "component": {
+        "nodeId": "ads_gateway",
+        "componentType": "api-gateway",
+        "label": "Ads API Gateway",
+        "description": "Authenticated campaign, decision, and event routes",
+        "position": {"x": 280, "y": 0},
+        "properties": {
+          "componentName": "Ads API Gateway",
+          "purpose": "Validate and route separately authorized advertiser, feed-decision, and signed impression/click requests; enforce request bounds and protect the latency-sensitive decision path."
+        },
+        "highlightReason": "The API Gateway catalog type covers the existing platform's authenticated HTTP entry point."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "ads_04_campaign_service",
+      "stepNumber": 4,
+      "phase": "Define the campaign contract and policy inputs",
+      "type": "add_component",
+      "title": "Add campaign lifecycle and validation",
+      "content": "The service owns campaign state transitions and publishes an immutable active configuration version only after validation. Preserve targeting, bid, budget, creative, experiment, and buying-model versions with each decision so later reports and billing can explain which rules were applied.",
+      "component": {
+        "nodeId": "ads_campaign_service",
+        "componentType": "backend-server",
+        "label": "Campaign Service",
+        "description": "Campaign validation, versioning, and advertiser reporting",
+        "position": {"x": 560, "y": 0},
+        "properties": {
+          "componentName": "Campaign Service",
+          "purpose": "Validate campaign schedules, targeting, budgets, bids, buying models, creatives and experiment variants; publish versioned active state and expose advertiser reporting without putting writes on feed reads."
+        },
+        "highlightReason": "The Backend Server catalog type represents the campaign domain service without adding a new component type."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:6"]
+    },
+    {
+      "id": "ads_05_campaign_store",
+      "stepNumber": 5,
+      "phase": "Define the campaign contract and policy inputs",
+      "type": "add_component",
+      "title": "Persist campaign versions and budget policy",
+      "content": "Store campaign status, schedule, targeting rules, bid and budget limits, currency, buying model, creative versions, and experiment configuration. Treat this durable store as the source for campaign state, while the decision path consumes bounded, versioned snapshots rather than scanning it per feed request.",
+      "component": {
+        "nodeId": "ads_campaign_store",
+        "componentType": "database",
+        "label": "Campaign Configuration Store",
+        "description": "Durable source of campaign and experiment versions",
+        "position": {"x": 840, "y": 0},
+        "properties": {
+          "componentName": "Campaign Configuration Store",
+          "purpose": "Persist versioned campaign status, schedules, targeting, bids, currency, budgets, buying models, creative references and experiment definitions as the durable control-plane source."
+        },
+        "highlightReason": "The Database catalog type stores durable campaign configuration and reporting state."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:6"]
+    },
+    {
+      "id": "ads_06_creative_store",
+      "stepNumber": 6,
+      "phase": "Define the campaign contract and policy inputs",
+      "type": "add_component",
+      "title": "Keep creative assets separate from campaign metadata",
+      "content": "Store validated creative files under immutable or versioned references; keep moderation state, dimensions, destination URL, and campaign ownership in campaign metadata. A creative cannot enter an experiment or auction until validation and review have completed.",
+      "component": {
+        "nodeId": "ads_creative_store",
+        "componentType": "object-storage",
+        "label": "Creative Asset Store",
+        "description": "Versioned image, video, and approved creative assets",
+        "position": {"x": 1120, "y": 0},
+        "properties": {
+          "componentName": "Creative Asset Store",
+          "purpose": "Store validated, versioned ad creative assets separately from campaign metadata and expose only approved assets through controlled delivery references."
+        },
+        "highlightReason": "The existing Object Storage catalog component fits large creative files without inventing a storage type."
+      },
+      "requirementIds": ["legacy-requirement:6"]
+    },
+    {
+      "id": "ads_07_campaign_policy_choice",
+      "stepNumber": 7,
+      "phase": "Define the campaign contract and policy inputs",
+      "type": "decision_point",
+      "title": "Choose a versioned campaign contract",
+      "content": "The brief asks for campaign creation and management but does not define activation or edit semantics. This draft publishes immutable active versions and records the version on each auction, event, and ledger entry.",
+      "decision": {
+        "question": "How should an edit to a live campaign affect decisions already in flight?",
+        "chosen": "Activate a new validated version atomically and retain the old version for in-flight decision and event attribution",
+        "chosenReason": "A decision, impression, or invoice can then be reproduced against the exact targeting, creative, budget, and buying rules it observed.",
+        "alternatives": [
+          {"option": "Mutate active campaign rows in place", "tradeoff": "An event arriving later may no longer identify the rules or creative actually served."},
+          {"option": "Require every edit to create a separate campaign", "tradeoff": "It burdens operators and fragments reporting for ordinary revisions."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6"]
+    },
+    {
+      "id": "ads_08_targeting_policy",
+      "stepNumber": 8,
+      "phase": "Define the campaign contract and policy inputs",
+      "type": "explanation",
+      "title": "Make targeting an eligibility rule, not a data license",
+      "content": "Demographics and interests are campaign inputs only when their collection and use are consented, disclosed, purpose-limited, and legally permitted for the user's region. The working assumption is to exclude sensitive categories and inferred sensitive traits. A contextual-only path remains available when personalization is unavailable; legal basis, age rules, consent wording, retention, and regional policy still need owner review.",
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "ads_09_feed_client",
+      "stepNumber": 9,
+      "phase": "Define the campaign contract and policy inputs",
+      "type": "add_component",
+      "title": "Add the social feed client",
+      "content": "The client requests an ad slot as part of a feed page and renders only the returned approved creative reference. It sends signed impression and click events with event IDs; a client callback is evidence to validate, not proof that an impression or click is billable.",
+      "component": {
+        "nodeId": "ads_feed_client",
+        "componentType": "web-app",
+        "label": "Social Feed Client",
+        "description": "Feed slot request, ad rendering, and signed event callbacks",
+        "position": {"x": 0, "y": 400},
+        "properties": {
+          "componentName": "Social Feed Client",
+          "purpose": "Request an ad slot with permitted feed context, render an approved creative reference, and submit signed impression/click event IDs for server-side validation."
+        },
+        "highlightReason": "The Web App catalog type represents the existing social feed surface where ads are displayed."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4"]
+    },
+    {
+      "id": "ads_10_feed_service",
+      "stepNumber": 10,
+      "phase": "Define the campaign contract and policy inputs",
+      "type": "add_component",
+      "title": "Add the feed integration",
+      "content": "The feed service requests a bounded ad decision after assembling the placement context. It returns the feed without holding the whole page open for an unavailable bidder; the platform's <100ms constraint applies to ad serving, and the official timing boundary and percentile must be confirmed.",
+      "component": {
+        "nodeId": "ads_feed_service",
+        "componentType": "backend-server",
+        "label": "Feed Ad Integration",
+        "description": "Placement context and bounded ad decision integration",
+        "position": {"x": 280, "y": 400},
+        "properties": {
+          "componentName": "Feed Ad Integration",
+          "purpose": "Call the ad decision path with placement context, enforce its deadline, and return an approved creative or no-fill without blocking the social feed on a slow external bidder."
+        },
+        "highlightReason": "The Backend Server catalog component models the feed's server-side placement integration."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:9", "legacy-constraint:1"]
+    },
+    {
+      "id": "ads_11_privacy_policy",
+      "stepNumber": 11,
+      "phase": "Define the campaign contract and policy inputs",
+      "type": "add_component",
+      "title": "Add a consent and policy gate",
+      "content": "Resolve the user's current region and consent/opt-out state before any personalized profile lookup. The gate returns an explicit allowed mode and policy version; missing, stale, or contradictory consent state fails to contextual-only selection rather than silently enabling profiling.",
+      "component": {
+        "nodeId": "ads_privacy_policy",
+        "componentType": "auth-service",
+        "label": "Consent and Ads Policy Gate",
+        "description": "Region, consent, opt-out, and deletion policy decisions",
+        "position": {"x": 560, "y": 400},
+        "properties": {
+          "componentName": "Consent and Ads Policy Gate",
+          "purpose": "Resolve region and current consent or opt-out policy before personalized targeting; return a versioned allowed mode and fail to contextual-only when policy state is unavailable."
+        },
+        "highlightReason": "The Auth Service catalog type supplies an existing security boundary for the consent decision."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "ads_12_privacy_store",
+      "stepNumber": 12,
+      "phase": "Define the campaign contract and policy inputs",
+      "type": "add_component",
+      "title": "Keep consent state and deletion work auditable",
+      "content": "Persist purpose, region, consent version, opt-out, and data deletion state with restricted access and an auditable change trail. Propagate withdrawal and deletion to profile indexes and caches; keep only the minimum event and financial records allowed by the reviewed retention policy.",
+      "component": {
+        "nodeId": "ads_privacy_store",
+        "componentType": "database",
+        "label": "Consent and Privacy Store",
+        "description": "Versioned user ad-consent and suppression state",
+        "position": {"x": 840, "y": 400},
+        "properties": {
+          "componentName": "Consent and Privacy Store",
+          "purpose": "Persist versioned ad consent, region, opt-out, suppression and deletion state with restricted access and an audit trail; drive removal from derived audience indexes."
+        },
+        "highlightReason": "The Database catalog type supports durable and reviewable privacy-policy state."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "ads_13_audience_index",
+      "stepNumber": 13,
+      "phase": "Define the campaign contract and policy inputs",
+      "type": "add_component",
+      "title": "Index only permitted audience signals",
+      "content": "Build queryable demographic and interest segments from approved, purpose-limited signals. Keep provenance and policy version with a segment, exclude sensitive categories, and support deletion/opt-out propagation. Do not put raw identifiers or unreviewed profile features into the online candidate index.",
+      "component": {
+        "nodeId": "ads_audience_index",
+        "componentType": "search",
+        "label": "Permitted Audience Index",
+        "description": "Consent-gated audience segment lookup",
+        "position": {"x": 1120, "y": 400},
+        "properties": {
+          "componentName": "Permitted Audience Index",
+          "purpose": "Find campaign candidates from approved demographic and interest segments while retaining policy provenance, excluding sensitive traits, and propagating deletion and opt-out changes."
+        },
+        "highlightReason": "The existing Search catalog type provides an index for fast segment candidate lookup."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "ads_14_privacy_mode",
+      "stepNumber": 14,
+      "phase": "Gate candidates and decide inside the latency budget",
+      "type": "decision_point",
+      "title": "Choose the no-consent behavior",
+      "content": "GDPR and CCPA are named constraints, not complete implementation specifications. This draft treats missing consent, a withdrawal, or a CCPA opt-out as a hard stop for cross-session personalized targeting and uses contextual-only campaigns; the user remains eligible for the feed itself.",
+      "decision": {
+        "question": "What may the decision path use when personalized ads are not allowed?",
+        "chosen": "Use contextual placement and non-sensitive campaign rules; do not query or persist a cross-session profile for ad selection",
+        "chosenReason": "The fallback keeps serving possible while honoring the consent gate and avoiding a hidden profiling fallback.",
+        "alternatives": [
+          {"option": "Use the profile but suppress only reporting", "tradeoff": "Targeting itself still uses data after the user has opted out or withdrawn consent."},
+          {"option": "Suppress every ad and the feed", "tradeoff": "It couples an advertising choice to access to the underlying social feed."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "ads_15_decision_service",
+      "stepNumber": 15,
+      "phase": "Gate candidates and decide inside the latency budget",
+      "type": "add_component",
+      "title": "Add the eligibility-first ad decision service",
+      "content": "Apply hard checks for campaign status, schedule, placement, policy, audience, creative approval, budget reservation, and frequency cap before ranking. Only then compare eligible internal candidates with bounded exchange bids. Record the chosen campaign, auction, creative and policy versions for later event attribution.",
+      "component": {
+        "nodeId": "ads_decision_service",
+        "componentType": "backend-server",
+        "label": "Ad Decision and Auction Service",
+        "description": "Eligibility, constrained ranking, and bounded auction",
+        "position": {"x": 840, "y": 800},
+        "properties": {
+          "componentName": "Ad Decision and Auction Service",
+          "purpose": "Filter campaign, placement, consent, creative, pacing and frequency eligibility before ranking; run a bounded internal/external auction and record versioned decision context for attribution."
+        },
+        "highlightReason": "The Backend Server catalog type represents the low-latency decision and auction logic."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:9", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "ads_16_pacing_frequency",
+      "stepNumber": 16,
+      "phase": "Gate candidates and decide inside the latency budget",
+      "type": "add_component",
+      "title": "Reserve budget and enforce frequency caps atomically",
+      "content": "Use a fast distributed store for atomic campaign budget reservations and consent-eligible frequency counters. Reservations prevent concurrent regions from overserving the same remaining budget; reconcile them against accepted billable events and release expired or rejected reservations idempotently. It is a serving guard, not the financial source of truth.",
+      "component": {
+        "nodeId": "ads_pacing_frequency",
+        "componentType": "cache",
+        "label": "Pacing and Frequency State",
+        "description": "Atomic serving reservations and bounded frequency counters",
+        "position": {"x": 1120, "y": 800},
+        "properties": {
+          "componentName": "Pacing and Frequency State",
+          "purpose": "Make atomic campaign-budget reservations and enforce campaign/user frequency caps using consent-eligible pseudonymous keys; reconcile reservations to the financial ledger."
+        },
+        "highlightReason": "The Cache catalog type represents low-latency counters; the durable ledger remains authoritative for charges."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:2"]
+    },
+    {
+      "id": "ads_17_bid_exchange",
+      "stepNumber": 17,
+      "phase": "Gate candidates and decide inside the latency budget",
+      "type": "add_component",
+      "title": "Add the real-time bidding adapter",
+      "content": "The adapter sends only the permitted request fields to configured demand partners, signs and validates bid responses, and rejects late, malformed, wrong-currency, or ineligible bids. The brief does not name an exchange protocol or partner contract; treat those as integration decisions and keep partner calls isolated behind this adapter.",
+      "component": {
+        "nodeId": "ads_bid_exchange",
+        "componentType": "api-gateway",
+        "label": "RTB Exchange Adapter",
+        "description": "Bounded external bid requests and response validation",
+        "position": {"x": 1120, "y": 1200},
+        "properties": {
+          "componentName": "RTB Exchange Adapter",
+          "purpose": "Call configured real-time bidding partners with policy-approved fields, enforce deadlines, validate signed bid responses and currency, and isolate partner failures from feed delivery."
+        },
+        "highlightReason": "The API Gateway catalog type supports the existing bounded HTTP integration pattern for external bidding."
+      },
+      "requirementIds": ["legacy-requirement:9", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "ads_18_latency_budget",
+      "stepNumber": 18,
+      "phase": "Gate candidates and decide inside the latency budget",
+      "type": "explanation",
+      "title": "Turn the <100ms constraint into a measurable deadline",
+      "content": "The brief supplies an ad-serving ceiling of <100ms, so the operational goal is to return an ad payload or no-fill in under 100 ms; it gives no percentile or measurement endpoints. Working review assumption: measure from the feed slot request reaching the feed integration until the result is ready; reserve at most 70ms for the decision service and 30ms for feed integration/transport. Inside the service, fetch consent and candidate snapshots in parallel, give external bids a bounded deadline (30ms is an initial design assumption), then leave time for eligibility, ranking, and response. Confirm the percentile and stage budgets with the product owner and representative load tests; do not describe these draft budgets as measured SLOs.",
+      "requirementIds": ["legacy-requirement:9", "legacy-constraint:1"]
+    },
+    {
+      "id": "ads_19_auction_fallback",
+      "stepNumber": 19,
+      "phase": "Gate candidates and decide inside the latency budget",
+      "type": "decision_point",
+      "title": "Bound exchange waits and choose a safe fallback",
+      "content": "Run internal candidate retrieval and permitted exchange calls concurrently under the remaining deadline. If an exchange misses its cutoff, ignore that response; do not extend the feed request to rescue an external bid.",
+      "decision": {
+        "question": "What should happen when the real-time bidding deadline expires?",
+        "chosen": "Rank already eligible internal campaigns if available; otherwise return no-fill and continue the feed",
+        "chosenReason": "A bounded fallback protects the <100ms ad-serving constraint and avoids billing for an ad that was not selected and rendered.",
+        "alternatives": [
+          {"option": "Wait for every exchange response", "tradeoff": "A slow partner can consume the full feed latency budget or stall the page."},
+          {"option": "Accept the first unvalidated late response", "tradeoff": "It bypasses eligibility, currency, auction ordering, and reproducible decision records."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:9", "legacy-constraint:1"]
+    },
+    {
+      "id": "ads_20_pacing_caps_fairness",
+      "stepNumber": 20,
+      "phase": "Gate candidates and decide inside the latency budget",
+      "type": "explanation",
+      "title": "Separate campaign pacing from user frequency",
+      "content": "Pacing limits campaign spend and delivery over the campaign's configured period; smooth reservations toward that campaign's own budget and schedule, then correct against ledgered billable events. Frequency caps limit repeated exposure for a campaign or advertiser over a configured window. Use a first-party pseudonymous key only when policy permits; otherwise use a session-level cap or no persistent cap. A fairness rule should prevent eligible campaigns from starving solely due to volume, while respecting bids, relevance, budgets, and contracts; the owner must define the fairness metric and tie-break policy.",
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "ads_21_creative_cdn",
+      "stepNumber": 21,
+      "phase": "Gate candidates and decide inside the latency budget",
+      "type": "add_component",
+      "title": "Deliver approved creative assets from the edge",
+      "content": "Return an opaque approved asset reference from the decision path and serve the versioned creative through the CDN. Do not cache personalized decision responses as public content; support rapid invalidation for withdrawn or disapproved creatives.",
+      "component": {
+        "nodeId": "ads_creative_cdn",
+        "componentType": "cdn",
+        "label": "Creative Delivery CDN",
+        "description": "Versioned approved creative delivery",
+        "position": {"x": 1400, "y": 800},
+        "properties": {
+          "componentName": "Creative Delivery CDN",
+          "purpose": "Serve versioned approved creative assets from the edge while keeping personalized ad-decision responses private and supporting invalidation of withdrawn or disapproved assets."
+        },
+        "highlightReason": "The CDN catalog component serves static creative assets without caching user-specific auction decisions."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6"]
+    },
+    {
+      "id": "ads_22_event_ingest",
+      "stepNumber": 22,
+      "phase": "Gate candidates and decide inside the latency budget",
+      "type": "add_component",
+      "title": "Accept signed impression and click events",
+      "content": "Validate event signature, schema, campaign/creative/auction reference, event ID, and replay window, then acknowledge durable queue acceptance. Keep event-time and ingest-time distinct. Never count a client callback twice because a browser or network retried it.",
+      "component": {
+        "nodeId": "ads_event_ingest",
+        "componentType": "api-gateway",
+        "label": "Measurement Event Ingest",
+        "description": "Validated, deduplicable impression and click intake",
+        "position": {"x": 280, "y": 1600},
+        "properties": {
+          "componentName": "Measurement Event Ingest",
+          "purpose": "Validate signed impression/click event envelopes, decision references, event IDs and replay bounds, then durably enqueue accepted events without synchronous analytics or billing work."
+        },
+        "highlightReason": "The existing API Gateway catalog type represents bounded event acceptance at the public edge."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "ads_23_event_broker",
+      "stepNumber": 23,
+      "phase": "Gate candidates and decide inside the latency budget",
+      "type": "add_component",
+      "title": "Buffer the high-volume event stream",
+      "content": "Partition accepted events for parallel consumption and replay, retaining event IDs and campaign/auction references. Delivery is at least once: consumers must be idempotent, offsets and lag observable, and retention long enough for the reviewed replay and reconciliation needs.",
+      "component": {
+        "nodeId": "ads_event_broker",
+        "componentType": "message-broker",
+        "label": "Impression and Click Event Broker",
+        "description": "Durable partitioned event transport for measurement and billing",
+        "position": {"x": 560, "y": 1600},
+        "properties": {
+          "componentName": "Impression and Click Event Broker",
+          "purpose": "Buffer and partition accepted ad events for independent fraud, attribution, analytics, and billing consumers; preserve replayability and assume at-least-once delivery."
+        },
+        "highlightReason": "The Message Broker catalog type supports scalable, replayable fan-out to downstream event consumers."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "ads_24_fraud_processor",
+      "stepNumber": 24,
+      "phase": "Gate candidates and decide inside the latency budget",
+      "type": "add_component",
+      "title": "Detect invalid and suspicious click activity",
+      "content": "Deduplicate by event ID and decision reference; check signatures, replay, impossible rates, repeated patterns, and configured bot/fraud signals. Keep expensive cross-event analysis asynchronous so click fraud defenses do not add unbounded work to ad selection. Quarantine uncertain events for review instead of silently deleting accounting evidence.",
+      "component": {
+        "nodeId": "ads_fraud_processor",
+        "componentType": "stream-processor",
+        "label": "Fraud and Attribution Processor",
+        "description": "Idempotent event validation, click-fraud signals, and attribution",
+        "position": {"x": 840, "y": 1600},
+        "properties": {
+          "componentName": "Fraud and Attribution Processor",
+          "purpose": "Deduplicate and validate ad events, detect click-fraud patterns, apply versioned attribution rules, and quarantine uncertain events without delaying the feed decision path."
+        },
+        "highlightReason": "The Stream Processor catalog type supports high-volume, stateful event validation and attribution."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "ads_25_billing_ledger",
+      "stepNumber": 25,
+      "phase": "Gate candidates and decide inside the latency budget",
+      "type": "add_component",
+      "title": "Record billable events in an immutable ledger",
+      "content": "Persist idempotent charge entries with campaign, auction, creative/variant, event ID, buying-model version, accepted billable event, price snapshot, currency, and policy references. Keep reservations and estimates separate from posted charges; late fraud findings create explicit reversal or credit entries rather than rewriting history.",
+      "component": {
+        "nodeId": "ads_billing_ledger",
+        "componentType": "database",
+        "label": "Advertiser Billing Ledger",
+        "description": "Immutable, idempotent campaign charge and adjustment records",
+        "position": {"x": 1120, "y": 1600},
+        "properties": {
+          "componentName": "Advertiser Billing Ledger",
+          "purpose": "Append idempotent billable-event charges and explicit reversals with campaign, auction, creative variant, model version, price, currency and event provenance."
+        },
+        "highlightReason": "The Database catalog type is the durable financial record, separate from fast pacing counters."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "ads_26_billing_reconciler",
+      "stepNumber": 26,
+      "phase": "Gate candidates and decide inside the latency budget",
+      "type": "add_component",
+      "title": "Reconcile delivery, charges, budgets, and invoices",
+      "content": "Compare accepted decisions and deduplicated validated billable events with ledger entries and campaign budget reservations by campaign, period, buying model, and currency. Explain unmatched, duplicate, late, reversed, or quarantined events; issue auditable adjustments and invoice totals from ledger records, not raw client counters.",
+      "component": {
+        "nodeId": "ads_billing_reconciler",
+        "componentType": "backend-server",
+        "label": "Billing Reconciliation Service",
+        "description": "Event-to-ledger reconciliation and advertiser invoice preparation",
+        "position": {"x": 1400, "y": 1600},
+        "properties": {
+          "componentName": "Billing Reconciliation Service",
+          "purpose": "Reconcile accepted billable events, auction records, pacing reservations and immutable ledger entries by campaign, period and currency; explain variances and produce auditable invoice totals."
+        },
+        "highlightReason": "The Backend Server catalog type supports explicit reconciliation and invoice preparation logic."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "ads_27_analytics_store",
+      "stepNumber": 27,
+      "phase": "Gate candidates and decide inside the latency budget",
+      "type": "add_component",
+      "title": "Store aggregate delivery and experiment outcomes",
+      "content": "Build advertiser reports, attribution summaries, A/B results, pacing diagnostics, and capacity trends from validated events. Use consent-aware retention and aggregation; keep raw identifiers out of general analytics and preserve experiment assignment and campaign-version labels for comparable results.",
+      "component": {
+        "nodeId": "ads_analytics_store",
+        "componentType": "data-warehouse",
+        "label": "Ads Analytics Warehouse",
+        "description": "Aggregated campaign, attribution, experiment, and capacity data",
+        "position": {"x": 1680, "y": 1600},
+        "properties": {
+          "componentName": "Ads Analytics Warehouse",
+          "purpose": "Store policy-aware aggregates for campaign reporting, attribution, A/B comparisons, fraud diagnostics and capacity planning without exposing raw identifiers broadly."
+        },
+        "highlightReason": "The Data Warehouse catalog type supports analytical workloads separately from feed serving and financial writes."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ads_28_monitoring",
+      "stepNumber": 28,
+      "phase": "Gate candidates and decide inside the latency budget",
+      "type": "add_component",
+      "title": "Observe serving, privacy, events, and finance separately",
+      "content": "Measure decision latency by stage and percentile, no-fill and timeout rates, campaign under-delivery, budget reservation drift, frequency-cap hits, consent-mode decisions, event lag/deduplication, suspected fraud, ledger variance, and deletion propagation. Keep dashboards and traces free of raw profiles or unnecessary personal data.",
+      "component": {
+        "nodeId": "ads_monitoring",
+        "componentType": "monitoring",
+        "label": "Ads Platform Monitoring",
+        "description": "Latency, fairness, privacy, event, fraud, and billing health",
+        "position": {"x": 1960, "y": 1600},
+        "properties": {
+          "componentName": "Ads Platform Monitoring",
+          "purpose": "Track decision stage latency, timeouts, campaign delivery fairness, reservation drift, consent outcomes, event lag, fraud signals, ledger variances and privacy deletion propagation with minimized telemetry."
+        },
+        "highlightReason": "The Monitoring catalog type covers operational signals without adding a custom component."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "ads_29_capacity_trigger",
+      "stepNumber": 29,
+      "phase": "Gate candidates and decide inside the latency budget",
+      "type": "scale_trigger",
+      "title": "Scale from peak rate and skew evidence",
+      "content": "One billion impressions per day averages about 11.6k per second; the brief says billions per day, but supplies no peak-to-average ratio, regional split, event bytes, or campaign skew. Use partitioned event processing and campaign/region-aware serving keys, then size partitions and consumers from measured bursts, hot campaigns, queue age, and decision latency rather than choosing an unsupported fixed fleet size.",
+      "scaleTrigger": {
+        "metric": "Observed peak impressions and clicks per second, partition skew, queue age, decision latency, and reservation contention",
+        "action": "Add capacity or repartition only after identifying hot campaign and regional keys; preserve idempotent replay and atomic budget reservations",
+        "impact": "Builds a testable path toward billions of ad impressions per day while avoiding an average-rate-only capacity claim."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "ads_30_experiment_assignment",
+      "stepNumber": 30,
+      "phase": "Gate candidates and decide inside the latency budget",
+      "type": "decision_point",
+      "title": "Make creative experiments reproducible",
+      "content": "Choose a campaign-scoped assignment using a stable pseudonymous key only when policy allows; otherwise assign at session scope. Persist experiment and variant IDs on the decision and validated events, keep control/treatment eligibility equivalent, and avoid moving a person between variants during a configured experiment.",
+      "decision": {
+        "question": "How should the platform assign and measure A/B creative variants?",
+        "chosen": "Use deterministic campaign-scoped assignment with consent-aware identity, explicit control/treatment versions, and event-level experiment IDs",
+        "chosenReason": "Stable assignment reduces cross-arm contamination and lets validated impressions, clicks, and billing be tied to the creative actually selected.",
+        "alternatives": [
+          {"option": "Choose a random creative on every request", "tradeoff": "Repeated exposure can cross arms and makes user-level comparisons noisy."},
+          {"option": "Use a stable account identifier for every user", "tradeoff": "It ignores opt-out and regional limits on persistent profiling."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:4"]
+    },
+    {
+      "id": "ads_31_console_gateway",
+      "stepNumber": 31,
+      "phase": "Deliver, verify events, and reconcile spend",
+      "type": "add_connection",
+      "title": "Route advertiser actions through the ads gateway",
+      "content": "Authenticate advertiser identity and scope each campaign operation before it reaches lifecycle validation.",
+      "connection": {
+        "edgeId": "ads_console_gateway",
+        "sourceNodeId": "ads_advertiser_console",
+        "targetNodeId": "ads_gateway",
+        "connectionType": "https",
+        "label": "Campaign management API",
+        "description": "Authenticated advertiser requests for campaign creation, edits, creative experiments, and reporting."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6"]
+    },
+    {
+      "id": "ads_32_gateway_campaign",
+      "stepNumber": 32,
+      "phase": "Deliver, verify events, and reconcile spend",
+      "type": "add_connection",
+      "title": "Validate and publish campaign versions",
+      "content": "The control-plane route writes through the campaign service, which validates state before a new version becomes active.",
+      "connection": {
+        "edgeId": "ads_gateway_campaign_service",
+        "sourceNodeId": "ads_gateway",
+        "targetNodeId": "ads_campaign_service",
+        "connectionType": "api-call",
+        "label": "Validated campaign mutation",
+        "description": "Route scoped campaign changes to lifecycle validation and atomic version publication."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5"]
+    },
+    {
+      "id": "ads_33_campaign_store_edge",
+      "stepNumber": 33,
+      "phase": "Deliver, verify events, and reconcile spend",
+      "type": "add_connection",
+      "title": "Persist source campaign state",
+      "content": "Campaign state and experiment definitions survive service restarts and remain traceable by version.",
+      "connection": {
+        "edgeId": "ads_campaign_service_store",
+        "sourceNodeId": "ads_campaign_service",
+        "targetNodeId": "ads_campaign_store",
+        "connectionType": "database-connection",
+        "label": "Versioned campaign records",
+        "description": "Persist validated schedules, audience rules, budgets, buying models, creative versions, and experiment configuration."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:6"]
+    },
+    {
+      "id": "ads_34_creative_asset_edge",
+      "stepNumber": 34,
+      "phase": "Deliver, verify events, and reconcile spend",
+      "type": "add_connection",
+      "title": "Store creative files outside the campaign database",
+      "content": "The campaign service stores references and moderation state; binary media uses versioned object storage.",
+      "connection": {
+        "edgeId": "ads_campaign_creatives",
+        "sourceNodeId": "ads_campaign_service",
+        "targetNodeId": "ads_creative_store",
+        "connectionType": "data-flow",
+        "label": "Validated creative upload",
+        "description": "Keep approved versioned asset bytes separate from campaign and experiment metadata."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6"]
+    },
+    {
+      "id": "ads_35_feed_client_service",
+      "stepNumber": 35,
+      "phase": "Deliver, verify events, and reconcile spend",
+      "type": "add_connection",
+      "title": "Request a feed page with an ad slot",
+      "content": "The social client receives the feed and placement through the feed service; it does not call demand partners directly.",
+      "connection": {
+        "edgeId": "ads_feed_client_service",
+        "sourceNodeId": "ads_feed_client",
+        "targetNodeId": "ads_feed_service",
+        "connectionType": "https",
+        "label": "Feed page and ad placement",
+        "description": "Return the feed with a bounded ad payload or no-fill result."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:1"]
+    },
+    {
+      "id": "ads_36_feed_gateway",
+      "stepNumber": 36,
+      "phase": "Deliver, verify events, and reconcile spend",
+      "type": "add_connection",
+      "title": "Route the placement request to the decision API",
+      "content": "The feed integration calls the decision route with placement context and a correlation ID under its remaining deadline.",
+      "connection": {
+        "edgeId": "ads_feed_gateway",
+        "sourceNodeId": "ads_feed_service",
+        "targetNodeId": "ads_gateway",
+        "connectionType": "api-call",
+        "label": "Bounded ad slot request",
+        "description": "Send only allowed placement and context fields to the authenticated ad-decision route."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:9", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "ads_37_gateway_decision",
+      "stepNumber": 37,
+      "phase": "Deliver, verify events, and reconcile spend",
+      "type": "add_connection",
+      "title": "Run eligibility and auction logic",
+      "content": "The gateway routes the placement to the isolated decision service, which enforces campaign and privacy policy before auction ranking.",
+      "connection": {
+        "edgeId": "ads_gateway_decision",
+        "sourceNodeId": "ads_gateway",
+        "targetNodeId": "ads_decision_service",
+        "connectionType": "api-call",
+        "label": "Deadline-bound decision",
+        "description": "Run eligible-candidate selection and real-time auction work within the remaining sub-100ms service budget."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:9", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "ads_38_consent_check",
+      "stepNumber": 38,
+      "phase": "Deliver, verify events, and reconcile spend",
+      "type": "add_connection",
+      "title": "Resolve consent before personalization",
+      "content": "The privacy policy gate returns the current allowed ad mode before the decision service reads user-derived segments.",
+      "connection": {
+        "edgeId": "ads_decision_privacy_policy",
+        "sourceNodeId": "ads_decision_service",
+        "targetNodeId": "ads_privacy_policy",
+        "connectionType": "api-call",
+        "label": "Consent and region check",
+        "description": "Check current consent, opt-out, region, and policy version before personalized data access."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "ads_39_privacy_store_edge",
+      "stepNumber": 39,
+      "phase": "Deliver, verify events, and reconcile spend",
+      "type": "add_connection",
+      "title": "Read and audit current privacy choices",
+      "content": "The policy gate checks durable consent and deletion state; stale state must not turn into permission by default.",
+      "connection": {
+        "edgeId": "ads_privacy_policy_store",
+        "sourceNodeId": "ads_privacy_policy",
+        "targetNodeId": "ads_privacy_store",
+        "connectionType": "database-connection",
+        "label": "Versioned consent state",
+        "description": "Read current policy state and record auditable consent, opt-out, suppression, and deletion changes."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "ads_40_policy_audience",
+      "stepNumber": 40,
+      "phase": "Deliver, verify events, and reconcile spend",
+      "type": "add_connection",
+      "title": "Propagate permitted segments and removals",
+      "content": "Only the approved mode can open personalized audience lookup; withdrawal and deletion suppress derived entries.",
+      "connection": {
+        "edgeId": "ads_privacy_policy_audience",
+        "sourceNodeId": "ads_privacy_policy",
+        "targetNodeId": "ads_audience_index",
+        "connectionType": "data-flow",
+        "label": "Policy-filtered audience index updates",
+        "description": "Apply reviewed purpose and regional rules and propagate opt-out and deletion suppression."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "ads_41_decision_audience",
+      "stepNumber": 41,
+      "phase": "Deliver, verify events, and reconcile spend",
+      "type": "add_connection",
+      "title": "Retrieve only consent-permitted audience candidates",
+      "content": "The decision service queries demographic and interest segments only after the policy gate has returned a personalized mode.",
+      "connection": {
+        "edgeId": "ads_decision_audience",
+        "sourceNodeId": "ads_decision_service",
+        "targetNodeId": "ads_audience_index",
+        "connectionType": "api-call",
+        "label": "Permitted segment candidate lookup",
+        "description": "Return bounded campaign candidates from eligible, non-sensitive audience segments."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "ads_42_decision_campaigns",
+      "stepNumber": 42,
+      "phase": "Deliver, verify events, and reconcile spend",
+      "type": "add_connection",
+      "title": "Read active campaign and experiment snapshots",
+      "content": "The decision service reads a bounded, versioned view of active campaign rules and records those versions with its result.",
+      "connection": {
+        "edgeId": "ads_decision_campaign_store",
+        "sourceNodeId": "ads_decision_service",
+        "targetNodeId": "ads_campaign_store",
+        "connectionType": "database-connection",
+        "label": "Active campaign snapshot",
+        "description": "Resolve campaign status, schedule, bids, budget policy, buying model, creative and experiment versions."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:9"]
+    },
+    {
+      "id": "ads_43_budget_frequency_reservation",
+      "stepNumber": 43,
+      "phase": "Deliver, verify events, and reconcile spend",
+      "type": "add_connection",
+      "title": "Reserve delivery budget and check exposure caps",
+      "content": "Atomically reserve campaign delivery capacity and check the consent-eligible frequency window before a candidate can win. A failed or timed-out reservation makes that candidate ineligible; do not overrun a budget by silently serving on stale state.",
+      "connection": {
+        "edgeId": "ads_decision_pacing_state",
+        "sourceNodeId": "ads_decision_service",
+        "targetNodeId": "ads_pacing_frequency",
+        "connectionType": "api-call",
+        "label": "Atomic budget and cap check",
+        "description": "Reserve against the campaign pacing envelope and enforce campaign/advertiser frequency caps with an allowed key."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "ads_44_external_bids",
+      "stepNumber": 44,
+      "phase": "Deliver, verify events, and reconcile spend",
+      "type": "add_connection",
+      "title": "Collect and validate external bids under a cutoff",
+      "content": "Call configured bidders concurrently with internal candidate retrieval. Validate response signature, campaign eligibility, price and currency before including any bid; late responses cannot reopen the auction.",
+      "connection": {
+        "edgeId": "ads_decision_exchange",
+        "sourceNodeId": "ads_decision_service",
+        "targetNodeId": "ads_bid_exchange",
+        "connectionType": "api-call",
+        "label": "Bounded RTB fan-out and validated responses",
+        "description": "Request real-time bids with minimized policy-approved context and enforce the exchange deadline."
+      },
+      "requirementIds": ["legacy-requirement:9", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "ads_45_decision_feed_response",
+      "stepNumber": 45,
+      "phase": "Deliver, verify events, and reconcile spend",
+      "type": "add_connection",
+      "title": "Return the selected creative or no-fill",
+      "content": "Rank only eligible campaigns, apply the reviewed tie-break and price policy, and return a reproducible decision token with the selected variant. If none qualifies before deadline, return no-fill and release any unused reservation.",
+      "connection": {
+        "edgeId": "ads_decision_feed_response",
+        "sourceNodeId": "ads_decision_service",
+        "targetNodeId": "ads_feed_service",
+        "connectionType": "api-call",
+        "label": "Decision token and creative reference",
+        "description": "Return a selected eligible ad or no-fill with campaign, auction, experiment and policy version references."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:9", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "ads_46_feed_creative_cdn",
+      "stepNumber": 46,
+      "phase": "Deliver, verify events, and reconcile spend",
+      "type": "add_connection",
+      "title": "Fetch the approved asset independently of auctioning",
+      "content": "After selection, the feed renders the returned versioned asset reference; creative delivery can use the edge cache without exposing personalized decision data.",
+      "connection": {
+        "edgeId": "ads_feed_creative_cdn",
+        "sourceNodeId": "ads_feed_service",
+        "targetNodeId": "ads_creative_cdn",
+        "connectionType": "https",
+        "label": "Versioned creative asset",
+        "description": "Fetch an approved creative object through edge delivery with withdrawal and moderation invalidation."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6"]
+    },
+    {
+      "id": "ads_47_client_event_ingest",
+      "stepNumber": 47,
+      "phase": "Deliver, verify events, and reconcile spend",
+      "type": "add_connection",
+      "title": "Submit impression and click evidence",
+      "content": "The client reports render and click events against the signed decision token. Server-side validation and deduplication determine whether each event can advance to attribution and billing.",
+      "connection": {
+        "edgeId": "ads_client_measurement",
+        "sourceNodeId": "ads_feed_client",
+        "targetNodeId": "ads_event_ingest",
+        "connectionType": "https",
+        "label": "Signed impression and click callbacks",
+        "description": "Send unique event IDs and decision references for server-side acceptance, replay defense, and billing validation."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "ads_48_event_ingest_broker",
+      "stepNumber": 48,
+      "phase": "Deliver, verify events, and reconcile spend",
+      "type": "add_connection",
+      "title": "Acknowledge only after durable event acceptance",
+      "content": "The ingest route writes accepted envelopes to the broker and returns a correlated receipt; it does not wait for downstream attribution or invoice generation.",
+      "connection": {
+        "edgeId": "ads_event_ingest_broker",
+        "sourceNodeId": "ads_event_ingest",
+        "targetNodeId": "ads_event_broker",
+        "connectionType": "message-queue",
+        "label": "Durable accepted event stream",
+        "description": "Buffer validated impression and click records for replayable asynchronous consumers."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "ads_49_broker_fraud",
+      "stepNumber": 49,
+      "phase": "Deliver, verify events, and reconcile spend",
+      "type": "add_connection",
+      "title": "Run asynchronous deduplication and click-fraud checks",
+      "content": "The processor consumes at least once, applies idempotency by event ID, and flags suspicious click patterns for configured handling without slowing the real-time auction.",
+      "connection": {
+        "edgeId": "ads_broker_fraud_processor",
+        "sourceNodeId": "ads_event_broker",
+        "targetNodeId": "ads_fraud_processor",
+        "connectionType": "message-queue",
+        "label": "Replayable events for fraud and attribution",
+        "description": "Consume deduplicated impressions and clicks for validation, click fraud analysis, and attribution."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "ads_50_fraud_ledger",
+      "stepNumber": 50,
+      "phase": "Deliver, verify events, and reconcile spend",
+      "type": "add_connection",
+      "title": "Post only validated billable events",
+      "content": "Apply the campaign's versioned CPM or CPC billable-event rule after event acceptance and fraud policy. Preserve rejected, quarantined, and reversed event references for audit; an event retry must not create another charge.",
+      "connection": {
+        "edgeId": "ads_fraud_billing_ledger",
+        "sourceNodeId": "ads_fraud_processor",
+        "targetNodeId": "ads_billing_ledger",
+        "connectionType": "data-flow",
+        "label": "Idempotent charge or adjustment entry",
+        "description": "Post validated buying-model events and explicit later credits with immutable source-event provenance."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "ads_51_fraud_analytics",
+      "stepNumber": 51,
+      "phase": "Deliver, verify events, and reconcile spend",
+      "type": "add_connection",
+      "title": "Publish privacy-aware attribution and experiment aggregates",
+      "content": "Validated events carry campaign, creative variant, auction, and policy versions into analytics. Attribute clicks and impressions using configured windows; those windows and retention periods are owner decisions, not values supplied by the brief.",
+      "connection": {
+        "edgeId": "ads_fraud_analytics",
+        "sourceNodeId": "ads_fraud_processor",
+        "targetNodeId": "ads_analytics_store",
+        "connectionType": "data-flow",
+        "label": "Validated aggregate-ready events",
+        "description": "Publish minimized attribution, A/B variant, delivery, and fraud outcomes for reporting and analysis."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "ads_52_reconcile_ledger",
+      "stepNumber": 52,
+      "phase": "Deliver, verify events, and reconcile spend",
+      "type": "add_connection",
+      "title": "Reconcile source events against ledger entries",
+      "content": "The reconciler compares idempotent source events and auction evidence with posted charges, adjustments, and invoice totals; retain a reason for every mismatch.",
+      "connection": {
+        "edgeId": "ads_reconciler_ledger",
+        "sourceNodeId": "ads_billing_reconciler",
+        "targetNodeId": "ads_billing_ledger",
+        "connectionType": "database-connection",
+        "label": "Ledger and variance review",
+        "description": "Read posted charge and adjustment entries and persist traceable reconciliation results."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "ads_53_reconcile_campaign",
+      "stepNumber": 53,
+      "phase": "Deliver, verify events, and reconcile spend",
+      "type": "add_connection",
+      "title": "Refresh budget and advertiser reporting from reconciled spend",
+      "content": "Use reconciled ledger totals to correct pacing state and expose spend, remaining budget, and invoice explanations through the campaign service.",
+      "connection": {
+        "edgeId": "ads_reconciler_campaign_service",
+        "sourceNodeId": "ads_billing_reconciler",
+        "targetNodeId": "ads_campaign_service",
+        "connectionType": "data-flow",
+        "label": "Reconciled campaign spend",
+        "description": "Update campaign budget views and advertiser reporting from financial records, not estimated counters."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "ads_54_invoice_route",
+      "stepNumber": 54,
+      "phase": "Deliver, verify events, and reconcile spend",
+      "type": "add_connection",
+      "title": "Expose invoice and variance reports to advertisers",
+      "content": "The advertiser reads invoice-ready totals and documented adjustments through an authorized route; the source remains the reconciled ledger.",
+      "connection": {
+        "edgeId": "ads_gateway_reconciler",
+        "sourceNodeId": "ads_gateway",
+        "targetNodeId": "ads_billing_reconciler",
+        "connectionType": "api-call",
+        "label": "Authorized billing report",
+        "description": "Return campaign-period invoice totals, currency, credits, and explained reconciliation variances."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "ads_55_monitor_decision",
+      "stepNumber": 55,
+      "phase": "Deliver, verify events, and reconcile spend",
+      "type": "add_connection",
+      "title": "Alert on decision latency and delivery imbalance",
+      "content": "Measure each stage and the end-to-end feed slot result, plus no-fill, timeout, under-delivery, reservation drift, and frequency-cap behavior.",
+      "connection": {
+        "edgeId": "ads_monitor_decision",
+        "sourceNodeId": "ads_monitoring",
+        "targetNodeId": "ads_decision_service",
+        "connectionType": "data-flow",
+        "label": "Latency and auction health",
+        "description": "Collect minimized stage metrics and alert on deadline misses, no-fill changes, fairness signals, and pacing errors."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "ads_56_monitor_fraud",
+      "stepNumber": 56,
+      "phase": "Deliver, verify events, and reconcile spend",
+      "type": "add_connection",
+      "title": "Watch fraud signals and event backlog",
+      "content": "Alert on broker lag, duplicate rate, quarantined events, false-positive review outcomes, and click-fraud indicators without placing raw user identifiers in general dashboards.",
+      "connection": {
+        "edgeId": "ads_monitor_fraud",
+        "sourceNodeId": "ads_monitoring",
+        "targetNodeId": "ads_fraud_processor",
+        "connectionType": "data-flow",
+        "label": "Fraud and pipeline health",
+        "description": "Track processing lag, deduplication, suspicion rates, and reviewed fraud outcomes with minimized telemetry."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "ads_57_monitor_billing",
+      "stepNumber": 57,
+      "phase": "Deliver, verify events, and reconcile spend",
+      "type": "add_connection",
+      "title": "Make billing variance visible before invoice close",
+      "content": "Track unmatched accepted events, missing ledger entries, duplicate suppression, late adjustments, and campaign budget drift by currency and period.",
+      "connection": {
+        "edgeId": "ads_monitor_billing_reconciler",
+        "sourceNodeId": "ads_monitoring",
+        "targetNodeId": "ads_billing_reconciler",
+        "connectionType": "data-flow",
+        "label": "Reconciliation variance signals",
+        "description": "Alert on unexplained event-to-ledger variances and incomplete advertiser billing periods."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "ads_58_review_gates",
+      "stepNumber": 58,
+      "phase": "Deliver, verify events, and reconcile spend",
+      "type": "explanation",
+      "title": "Review the unresolved policy and capacity gates",
+      "content": "Before treating this local draft as a reviewed design, confirm the consent/legal basis and retention rules, sensitive-category exclusions, fairness definition, first-price versus second-price and CPM/CPC contracts, attribution windows, event acceptance and reversal policy, official <100ms percentile/boundary, exchange deadlines, currency/rounding rules, and peak traffic profile. Verify deletion propagation, duplicate replay, late fraud reversals, budget races across regions, and invoice reconciliation with representative fixtures and load. The graph is a review draft; it does not claim those product decisions or operational results are settled.",
+      "requirementIds": ["legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

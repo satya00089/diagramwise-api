@@ -1,0 +1,726 @@
+{
+  "problem_id": "6901ef1b9420d83630aca87b",
+  "version": "1.0.0-review",
+  "requirementRevision": null,
+  "totalSteps": 42,
+  "phases": [
+    {
+      "name": "Phase 1: Contract and request path",
+      "stepRange": [1, 8],
+      "description": "Keep the frozen brief visible, state the assumptions, and make the synchronous like action small."
+    },
+    {
+      "name": "Phase 2: Idempotent state and event publication",
+      "stepRange": [9, 16],
+      "description": "Make a user's desired like state authoritative and publish committed changes for asynchronous consumers."
+    },
+    {
+      "name": "Phase 3: Counts and hot keys",
+      "stepRange": [17, 22],
+      "description": "Derive live counts safely and spread writes for unusually popular posts."
+    },
+    {
+      "name": "Phase 4: Liker reads and live fanout",
+      "stepRange": [23, 27],
+      "description": "Deliver events to viewers while keeping liker identity queryable and event ordering explicit."
+    },
+    {
+      "name": "Phase 5: Delivery recovery and abuse controls",
+      "stepRange": [28, 37],
+      "description": "Recover from transient delivery failures and apply request controls without confusing retries with new intent."
+    },
+    {
+      "name": "Phase 6: Validation and operational decisions",
+      "stepRange": [38, 42],
+      "description": "Handle undo and disconnected clients, then validate the stated workload and remaining product decisions."
+    }
+  ],
+  "steps": [
+    {
+      "id": "6901ef1b9420d83630aca87b_step_01",
+      "stepNumber": 1,
+      "phase": "Phase 1: Contract and request path",
+      "type": "explanation",
+      "title": "Read the brief as behavior, not a hidden SLO",
+      "content": "The brief asks users to like and unlike posts in real time, see live counts and who liked a post, avoid duplicate likes, handle millions of likes per minute, undo an action, and update the UI optimistically. Its constraints allow eventual consistency, call for low-latency actions and updates to viewers, require concurrent like/unlike handling, and ask for spam prevention. It gives no numeric latency target, exact traffic distribution, identity model, or liker-visibility policy; keep those as open decisions or labeled assumptions.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_02",
+      "stepNumber": 2,
+      "phase": "Phase 1: Contract and request path",
+      "type": "decision_point",
+      "title": "Record assumptions separately from requirements",
+      "content": "Use these review assumptions to make the design concrete, then replace them with product decisions: accounts and posts have stable IDs; the service can check a post's visibility policy before returning liker identities; count and liker projections may lag until consumers catch up because eventual consistency is allowed, but the brief sets no freshness bound. The brief's scale requirement is millions of likes per minute; agree the exact workload, traffic distribution, and burst profile before sizing or claiming a load test passes. It specifies low latency qualitatively, not a numeric latency objective.",
+      "decision": {
+        "question": "Which facts can this design treat as fixed?",
+        "chosen": "Treat only the listed behaviors and constraints as requirements; label identity, visibility, freshness, and capacity details as assumptions.",
+        "chosenReason": "This preserves the problem statement and makes the unprovided product and traffic choices reviewable.",
+        "alternatives": [
+          {"option": "Assume every user can see every liker", "tradeoff": "Simplifies reads but invents a privacy rule that the prompt does not state."},
+          {"option": "Promise a numeric latency objective and exact peak rate", "tradeoff": "Creates targets unsupported by the prompt and may hide the need to agree on an SLO."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_03",
+      "stepNumber": 3,
+      "phase": "Phase 1: Contract and request path",
+      "type": "add_component",
+      "title": "Add the Like Client",
+      "content": "The client applies the latest click optimistically and keeps its local intent sequence and idempotency key while pending. In this client, allow one mutation in flight per actor/post; coalesce later clicks to the latest desired state, then send that state after the current response if it is still needed. Reconcile acknowledgements and live actor-state events by server likeVersion, ignoring older versions. If a newer local intent disagrees with the committed state, keep that latest intent pending and resubmit it with a fresh idempotency key; do not let a late response roll the UI back to an older click. Count and liker projections can still lag independently.",
+      "component": {
+        "nodeId": "like_client",
+        "componentType": "web-app",
+        "label": "Like Client",
+        "position": {"x": 60, "y": 220},
+        "highlightReason": "Owns optimistic like state, undo controls, live count rendering, and reconnect reconciliation for the user.",
+        "properties": {
+          "componentName": "Like Client",
+          "purpose": "Optimistically show the requested like state, display count snapshots and permitted liker identities, and reconcile pending actions after responses or reconnects.",
+          "framework": "React",
+          "logic": "Apply the latest local desired state optimistically; retain its idempotency key while pending; reconcile actor state by server version without overwriting a newer local intent; offer undo as a new inverse desired-state action."
+        }
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_04",
+      "stepNumber": 4,
+      "phase": "Phase 1: Contract and request path",
+      "type": "add_component",
+      "title": "Add the Like API Gateway",
+      "content": "Validate the authenticated actor, post identifier, desired state, and idempotency key. Apply per-user and per-network rate limits and route reads and mutations to the like service.",
+      "component": {
+        "nodeId": "like_api",
+        "componentType": "api-gateway",
+        "label": "Like API Gateway",
+        "position": {"x": 300, "y": 220},
+        "highlightReason": "Provides validated, rate-limited entry points for like state changes and paginated liker reads.",
+        "properties": {
+          "componentName": "Like API Gateway",
+          "purpose": "Validate actor and post identifiers, authenticate requests, enforce abuse rate limits, deduplicate retried commands by idempotency key, and route like and liker-list APIs.",
+          "inputValidation": true,
+          "authentication": "JWT",
+          "rateLimiting": true,
+          "deduplication": true
+        }
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_05",
+      "stepNumber": 5,
+      "phase": "Phase 1: Contract and request path",
+      "type": "add_component",
+      "title": "Add the Like Service",
+      "content": "Keep the synchronous path focused on authorization, an idempotent state transition, and a durable commit. Counts, liker-feed updates, and socket fanout run asynchronously so a slow viewer connection does not hold up the actor's action.",
+      "component": {
+        "nodeId": "like_service",
+        "componentType": "backend-server",
+        "label": "Like Service",
+        "position": {"x": 550, "y": 220},
+        "highlightReason": "Applies authorized desired-state transitions and serves the authoritative like and paginated liker queries.",
+        "properties": {
+          "componentName": "Like Service",
+          "purpose": "Authorize a post action, conditionally persist the actor's desired like state and version, and serve count and paginated liker reads without waiting for live fanout.",
+          "architecture": "Microservices",
+          "retry": true,
+          "caching": true
+        }
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_06",
+      "stepNumber": 6,
+      "phase": "Phase 1: Contract and request path",
+      "type": "add_connection",
+      "title": "Client to API (mutation and read entry)",
+      "content": "Use an authenticated HTTPS request for setting the current actor's like state and for reading a post's count or liker page. The client may render an optimistic state while this request is pending.",
+      "connection": {
+        "edgeId": "edge_like_client_api",
+        "sourceNodeId": "like_client",
+        "targetNodeId": "like_api",
+        "connectionType": "http",
+        "label": "Like and liker APIs",
+        "description": "Authenticated HTTP requests carry desired state, a stable idempotency key, or a paginated liker cursor."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_07",
+      "stepNumber": 7,
+      "phase": "Phase 1: Contract and request path",
+      "type": "add_connection",
+      "title": "API to Like Service",
+      "content": "The gateway passes the verified actor, validated post, requested boolean state, idempotency key, and request metadata. Do not expose a blind toggle operation whose retry could reverse a successful first attempt.",
+      "connection": {
+        "edgeId": "edge_api_like_service",
+        "sourceNodeId": "like_api",
+        "targetNodeId": "like_service",
+        "connectionType": "http",
+        "label": "Validated desired-state command",
+        "description": "The service receives the authenticated actor and a desired state rather than an ambiguous toggle."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_08",
+      "stepNumber": 8,
+      "phase": "Phase 1: Contract and request path",
+      "type": "explanation",
+      "title": "Make retries repeat intent",
+      "content": "Expose a desired-state operation such as PUT /posts/{postId}/likes/me with liked=true or false, plus an Idempotency-Key. Return the committed state and server version. Repeating the same key and payload returns the original result; reusing a key with a different payload is rejected. A fresh unlike is a state transition, not deletion of the actor's identity history. This supports retries, rapid clicks, and undo without treating a duplicate delivery as another like.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:6"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_09",
+      "stepNumber": 9,
+      "phase": "Phase 2: Idempotent state and event publication",
+      "type": "add_component",
+      "title": "Add the Authoritative Like Store",
+      "content": "Store one current state per (post_id, user_id), including liked state, server-assigned likeVersion, and the event/outbox data needed to publish a committed transition. Hash or partition on the composite actor/post key so one popular post can use multiple storage partitions; validate uniqueness and query costs at the chosen scale.",
+      "component": {
+        "nodeId": "like_store",
+        "componentType": "database",
+        "label": "Like State Store",
+        "position": {"x": 800, "y": 220},
+        "highlightReason": "Owns the unique actor/post state and durable version from which counters and live events are derived.",
+        "properties": {
+          "componentName": "Like State Store",
+          "purpose": "Authoritative OLTP state keyed by post and user, with a unique composite key, conditional state/version updates, and an outbox record committed with each real transition.",
+          "type": "RDBMS",
+          "engine": "postgresql",
+          "workload": "OLTP"
+        }
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_10",
+      "stepNumber": 10,
+      "phase": "Phase 2: Idempotent state and event publication",
+      "type": "add_connection",
+      "title": "Like Service to authoritative store",
+      "content": "Commit the actor/post state change and its outbox event before acknowledging success. A no-op desired-state request should not create a second count delta.",
+      "connection": {
+        "edgeId": "edge_service_like_store",
+        "sourceNodeId": "like_service",
+        "targetNodeId": "like_store",
+        "connectionType": "database-connection",
+        "label": "Conditional state and outbox transaction",
+        "description": "The write changes one actor/post row and records its event atomically; repeated desired state is a no-op."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:2"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_11",
+      "stepNumber": 11,
+      "phase": "Phase 2: Idempotent state and event publication",
+      "type": "decision_point",
+      "title": "Use a uniqueness guard and transition version",
+      "content": "Enforce one unique (post_id, user_id) row and conditionally change it only when the requested state differs. Serialize distinct desired-state commands for that actor/post pair: each real committed transition increments likeVersion, and commit order determines the resulting state. Repeating the same idempotency key and payload returns the original result; a different key is a new intent, not a retry. Emit a count event only for a real state transition. This is a per-pair ordering rule, not a global order across a post or a consistency guarantee for projections.",
+      "decision": {
+        "question": "How should duplicate and concurrent state changes be resolved?",
+        "chosen": "Serialize transitions for each (post_id, user_id), persist desired state and likeVersion, and make request retries idempotent.",
+        "chosenReason": "The unique actor/post key prevents duplicate active likes, while explicit state and versions make retries and later inverse actions distinguishable.",
+        "alternatives": [
+          {"option": "Increment a counter for every request", "tradeoff": "Retries and duplicate requests overcount, and unlike cannot reliably reverse one prior transition."},
+          {"option": "Require a global order for every post event", "tradeoff": "Adds a hot serialization point; the prompt needs concurrent state handling, not a total order across different users."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_12",
+      "stepNumber": 12,
+      "phase": "Phase 2: Idempotent state and event publication",
+      "type": "add_component",
+      "title": "Add the Outbox Relay",
+      "content": "Read committed outbox rows, publish them with a stable event ID, and mark progress only after broker acknowledgement. A relay restart may publish an event again, so every downstream consumer must still be idempotent.",
+      "component": {
+        "nodeId": "outbox_relay",
+        "componentType": "backend-server",
+        "label": "Outbox Relay",
+        "position": {"x": 1050, "y": 220},
+        "highlightReason": "Bridges committed database state to asynchronous consumers without losing events between a database write and publish.",
+        "properties": {
+          "componentName": "Outbox Relay",
+          "purpose": "Poll or stream committed outbox rows, publish stable event IDs, checkpoint acknowledged progress, and retry safely after relay or broker interruption.",
+          "architecture": "Microservices",
+          "retry": true,
+          "bulkOps": true
+        }
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_13",
+      "stepNumber": 13,
+      "phase": "Phase 2: Idempotent state and event publication",
+      "type": "add_connection",
+      "title": "Store to relay (committed outbox changes)",
+      "content": "The relay observes only committed rows and resumes from a durable checkpoint, so downstream count and live-viewer projections can recover after interruption instead of silently losing a committed transition. Those consumers may lag while catching up. Retain outbox history for the agreed outage-recovery objective and monitor the oldest unpublished event.",
+      "connection": {
+        "edgeId": "edge_store_outbox_relay",
+        "sourceNodeId": "like_store",
+        "targetNodeId": "outbox_relay",
+        "connectionType": "data-flow",
+        "label": "Committed outbox stream",
+        "description": "Changes become publishable only after the state and outbox records commit together."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_14",
+      "stepNumber": 14,
+      "phase": "Phase 2: Idempotent state and event publication",
+      "type": "add_component",
+      "title": "Add the Like Event Bus",
+      "content": "Publish state-transition events containing event ID, post ID, user ID, desired state, likeVersion, and commit time. Partition by a key that preserves order for one actor/post while spreading different actors on a viral post across partitions; set partition count from measured throughput and recovery needs.",
+      "component": {
+        "nodeId": "like_bus",
+        "componentType": "message-broker",
+        "label": "Like Event Bus",
+        "position": {"x": 1280, "y": 220},
+        "highlightReason": "Separates durable like commits from independently scalable count projection and viewer delivery.",
+        "properties": {
+          "componentName": "Like Event Bus",
+          "purpose": "Retain versioned like-state events for independent count and fanout consumers; partition per actor/post ordering while distributing one viral post's many actors. Choose retention and replication from measured throughput and the agreed recovery objective.",
+          "durable": true
+        }
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_15",
+      "stepNumber": 15,
+      "phase": "Phase 2: Idempotent state and event publication",
+      "type": "add_connection",
+      "title": "Relay to event bus",
+      "content": "The relay publishes at least once and advances its checkpoint after broker acknowledgement. Stable event IDs let consumers recognize replay without assuming exactly-once delivery across systems.",
+      "connection": {
+        "edgeId": "edge_relay_like_bus",
+        "sourceNodeId": "outbox_relay",
+        "targetNodeId": "like_bus",
+        "connectionType": "message-queue",
+        "label": "Versioned transition events",
+        "description": "At-least-once publishing is safe because the event carries a stable ID and each consumer applies transitions idempotently."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_16",
+      "stepNumber": 16,
+      "phase": "Phase 2: Idempotent state and event publication",
+      "type": "decision_point",
+      "title": "Define the ordering boundary",
+      "content": "The authoritative conditional write serializes real transitions for one (post_id, user_id), assigning a higher likeVersion to each committed transition. Consumers ignore duplicate event IDs and versions older than the one already applied for that actor/post. This resolves concurrent like/unlike writes for one actor; it does not impose a global order across different users. Count projections and viewer fanout are separate asynchronous paths: their updates may lag or arrive out of order, then converge through replay/reconciliation under the allowed eventual consistency.",
+      "decision": {
+        "question": "What ordering does the product need?",
+        "chosen": "Per actor/post version order, with no total order across all actors on a post.",
+        "chosenReason": "This prevents an old like event from overwriting a later unlike while avoiding one serialized hot partition for a viral post.",
+        "alternatives": [
+          {"option": "Use one broker key per post", "tradeoff": "Simplifies total event order but concentrates all writes for a viral post on one partition."},
+          {"option": "Accept unversioned events", "tradeoff": "A delayed like could arrive after a newer unlike and leave projections in the wrong state."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_17",
+      "stepNumber": 17,
+      "phase": "Phase 3: Counts and hot keys",
+      "type": "add_component",
+      "title": "Add the Like Projector",
+      "content": "Consume state transitions, deduplicate event IDs, discard stale per-actor/post versions, and apply only a real false-to-true or true-to-false change to the derived count. This protects the count projection from duplicate delivery; the authoritative unique actor/post row, not this consumer, prevents duplicate active likes. Keep projection checkpoints so workers can resume or rebuild.",
+      "component": {
+        "nodeId": "like_projector",
+        "componentType": "backend-server",
+        "label": "Like Projector",
+        "position": {"x": 1280, "y": 470},
+        "highlightReason": "Builds the count projection from ordered, replayable state transitions instead of counting raw requests.",
+        "properties": {
+          "componentName": "Like Projector",
+          "purpose": "Idempotently consume stable event IDs, compare likeVersion per actor/post, apply only actual state transitions, and checkpoint or rebuild derived counts.",
+          "architecture": "Microservices",
+          "retry": true,
+          "bulkOps": true
+        }
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_18",
+      "stepNumber": 18,
+      "phase": "Phase 3: Counts and hot keys",
+      "type": "add_connection",
+      "title": "Event bus to projector",
+      "content": "Let the projector replay broker history after a worker restart and scale consumer concurrency with partition count and observed lag. Do not infer a count delta from every delivered message.",
+      "connection": {
+        "edgeId": "edge_bus_projector",
+        "sourceNodeId": "like_bus",
+        "targetNodeId": "like_projector",
+        "connectionType": "message-queue",
+        "label": "Replayable transition stream",
+        "description": "The projector applies versioned transitions and can resume from its durable consumer position."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_19",
+      "stepNumber": 19,
+      "phase": "Phase 3: Counts and hot keys",
+      "type": "add_component",
+      "title": "Add the Sharded Counter Cache",
+      "content": "Keep count buckets as a derived, replaceable projection. For each post, spread increments across counterBucket keys selected deterministically from actor identity; sum the buckets for a displayed snapshot and repair them from authoritative state or replay when needed.",
+      "component": {
+        "nodeId": "like_counters",
+        "componentType": "cache",
+        "label": "Sharded Like Counters",
+        "position": {"x": 1530, "y": 470},
+        "highlightReason": "Avoids a single hot counter key for one viral post while serving low-latency count snapshots.",
+        "properties": {
+          "componentName": "Sharded Like Counters",
+          "purpose": "Hold replaceable per-post counter buckets in Redis, spread hot writes by actor-derived bucket, and return a summed count snapshot for client display.",
+          "engine": "redis",
+          "inMemory": true
+        }
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_20",
+      "stepNumber": 20,
+      "phase": "Phase 3: Counts and hot keys",
+      "type": "add_connection",
+      "title": "Projector to counter buckets",
+      "content": "Apply the transition and its event-ID deduplication atomically in the projection path. A replay must not increment a bucket twice; keep a repair path because the Redis count is not the authoritative record of who liked a post.",
+      "connection": {
+        "edgeId": "edge_projector_counters",
+        "sourceNodeId": "like_projector",
+        "targetNodeId": "like_counters",
+        "connectionType": "database-connection",
+        "label": "Idempotent counter projection",
+        "description": "Only a new, correctly ordered state transition changes a derived sharded counter."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_21",
+      "stepNumber": 21,
+      "phase": "Phase 3: Counts and hot keys",
+      "type": "explanation",
+      "title": "Distinguish a live count from a source of truth",
+      "content": "The displayed count is a materialized view over accepted like-state transitions and may be stale while its projection catches up; eventual consistency does not specify a maximum lag. Reconcile or rebuild it from active authoritative states, expose freshness/lag to operations, and avoid promising an exact instantaneous count unless the product adds that requirement.",
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_22",
+      "stepNumber": 22,
+      "phase": "Phase 3: Counts and hot keys",
+      "type": "scale_trigger",
+      "title": "Scale when a post becomes a hot key",
+      "content": "When per-post partition or Redis key contention rises, increase the number of actor-derived counter buckets and spread broker partitions by actor/post key. Recompute bucket count from measured write rate, read fanout, and repair cost; agree the workload and distribution for the brief's millions-per-minute scale before choosing capacity. No exact rate or burst factor is supplied.",
+      "scaleTrigger": {
+        "metric": "Per-post write latency, partition skew, Redis command queueing, and projector lag",
+        "action": "Increase tested bucket/partition parallelism for hot posts and rebalance consumers while preserving per actor/post version checks.",
+        "impact": "Spreads a viral post's writes while retaining idempotent transitions; count reads sum more buckets and therefore need measured caching and repair behavior."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_23",
+      "stepNumber": 23,
+      "phase": "Phase 4: Liker reads and live fanout",
+      "type": "add_component",
+      "title": "Add the Live Fanout Gateway",
+      "content": "Maintain authenticated viewer subscriptions by post and deliver versioned state events plus count snapshots. Route a viral post through multiple regional and gateway fanout groups rather than making one process send every socket message.",
+      "component": {
+        "nodeId": "like_fanout",
+        "componentType": "backend-server",
+        "label": "Live Fanout Gateway",
+        "position": {"x": 1530, "y": 220},
+        "highlightReason": "Delivers post-scoped updates to connected viewers and isolates socket load from like writes.",
+        "properties": {
+          "componentName": "Live Fanout Gateway",
+          "purpose": "Manage post-scoped viewer subscriptions, distribute versioned like events and count snapshots across gateways, and track reconnect cursors without owning like state.",
+          "architecture": "Microservices",
+          "retry": true,
+          "caching": true
+        }
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:1"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_24",
+      "stepNumber": 24,
+      "phase": "Phase 4: Liker reads and live fanout",
+      "type": "add_connection",
+      "title": "Event bus to live fanout",
+      "content": "Fanout consumes independently from the count projector. It may coalesce count snapshots for busy posts, but keep state transitions recoverable through versioned events and the liker read API.",
+      "connection": {
+        "edgeId": "edge_bus_fanout",
+        "sourceNodeId": "like_bus",
+        "targetNodeId": "like_fanout",
+        "connectionType": "message-queue",
+        "label": "Post-scoped live events",
+        "description": "A separate consumer group distributes live events without blocking count projection."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_25",
+      "stepNumber": 25,
+      "phase": "Phase 4: Liker reads and live fanout",
+      "type": "add_connection",
+      "title": "Live fanout to connected clients",
+      "content": "Fan out post-scoped state events and count snapshots to active viewer subscriptions. Delivery is live but asynchronous, not an atomic all-viewer snapshot: clients deduplicate event IDs and ignore older actor versions, while count snapshots can lag and converge through refresh/replay. A disconnected viewer recovers through the cursor and snapshot flow; socket delivery is not the only way to learn the result.",
+      "connection": {
+        "edgeId": "edge_fanout_client",
+        "sourceNodeId": "like_fanout",
+        "targetNodeId": "like_client",
+        "connectionType": "data-flow",
+        "label": "WebSocket live updates",
+        "description": "Connected clients receive deduplicable state events and eventually consistent count snapshots."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_26",
+      "stepNumber": 26,
+      "phase": "Phase 4: Liker reads and live fanout",
+      "type": "explanation",
+      "title": "Serve who liked the post as a paginated read",
+      "content": "Use the Like Service's authoritative state to answer a cursor-paginated liker query, ordered by a stable committed sequence or timestamp plus user ID. Filter by the post visibility policy before returning identities. A live event can identify its actor when policy permits, while pagination remains the way to browse the full liker set; the prompt does not specify privacy or list size.",
+      "requirementIds": ["legacy-requirement:3"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_27",
+      "stepNumber": 27,
+      "phase": "Phase 4: Liker reads and live fanout",
+      "type": "decision_point",
+      "title": "Order actor state and coalesce count traffic separately",
+      "content": "Deduplicate actor state by event ID and apply only a higher likeVersion for that actor/post. Under viral fanout, coalesce count snapshots to a measured freshness cadence; retain or query liker state so coalescing a count does not erase who liked the post.",
+      "decision": {
+        "question": "What may fanout coalesce under load?",
+        "chosen": "Coalesce derived count snapshots; retain versioned actor state events or let clients recover identities through the paginated API.",
+        "chosenReason": "Counts can be refreshed from a later aggregate snapshot, while actor transitions and the authoritative liker list remain recoverable.",
+        "alternatives": [
+          {"option": "Send every count increment to every viewer", "tradeoff": "Creates unnecessary socket and egress amplification for a viral post."},
+          {"option": "Drop all per-actor information", "tradeoff": "Makes the display-who-liked requirement impossible to recover from the live view alone."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_28",
+      "stepNumber": 28,
+      "phase": "Phase 5: Delivery recovery and abuse controls",
+      "type": "add_component",
+      "title": "Add a Delivery Retry Queue",
+      "content": "Use bounded exponential backoff for transient fanout failures and a dead-letter path for poison messages. Preserve event IDs and versions in retries; alert on queue age and provide an operator-controlled replay after fixing the cause.",
+      "component": {
+        "nodeId": "delivery_retry",
+        "componentType": "queue",
+        "label": "Delivery Retry Queue",
+        "position": {"x": 1780, "y": 220},
+        "highlightReason": "Isolates temporary gateway failures and retains a reviewable dead-letter and replay path.",
+        "properties": {
+          "componentName": "Delivery Retry Queue",
+          "purpose": "Retain failed live-delivery work with stable event IDs, bounded retries, exponential backoff, and a dead-letter path for controlled replay.",
+          "durable": true,
+          "backoff": "exponential"
+        }
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_29",
+      "stepNumber": 29,
+      "phase": "Phase 5: Delivery recovery and abuse controls",
+      "type": "add_connection",
+      "title": "Fanout to retry queue",
+      "content": "Enqueue only the failed delivery work with enough post, event, version, and subscription routing metadata to retry safely. Do not duplicate the authoritative like mutation.",
+      "connection": {
+        "edgeId": "edge_fanout_retry",
+        "sourceNodeId": "like_fanout",
+        "targetNodeId": "delivery_retry",
+        "connectionType": "message-queue",
+        "label": "Failed delivery work",
+        "description": "Transient delivery failures are retried independently of the committed like state."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_30",
+      "stepNumber": 30,
+      "phase": "Phase 5: Delivery recovery and abuse controls",
+      "type": "add_connection",
+      "title": "Retry queue back to fanout",
+      "content": "On retry or operator replay, deliver the same event ID and version. Gateways and clients deduplicate it, so recovery does not create a second like or count delta.",
+      "connection": {
+        "edgeId": "edge_retry_fanout",
+        "sourceNodeId": "delivery_retry",
+        "targetNodeId": "like_fanout",
+        "connectionType": "message-queue",
+        "label": "Backoff retry or reviewed replay",
+        "description": "Replayed delivery retains identity and ordering metadata for downstream deduplication."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:3"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_31",
+      "stepNumber": 31,
+      "phase": "Phase 5: Delivery recovery and abuse controls",
+      "type": "explanation",
+      "title": "Recover after a dropped connection",
+      "content": "Clients reconnect with their last acknowledged cursor. Replay retained events when possible; if the cursor is outside retention or a gap is detected, fetch a fresh count snapshot and liker page, then resume from a new cursor. Use bounded polling as a degraded fallback when WebSocket delivery is unavailable. The durable state write succeeds independently of a viewer's socket, and delivery remains eventually consistent.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_32",
+      "stepNumber": 32,
+      "phase": "Phase 5: Delivery recovery and abuse controls",
+      "type": "scale_trigger",
+      "title": "Scale fanout for a viral post",
+      "content": "Treat one post with a very large live audience as a stress scenario, not as a numeric requirement in the prompt. Split its viewer room across gateway groups or regions, batch/coalesce count snapshots, and apply backpressure to slow sockets. Track per-post fanout lag and egress so one room cannot starve unrelated posts.",
+      "scaleTrigger": {
+        "metric": "Per-post subscriber count, fanout queue age, gateway socket saturation, and event-to-viewer lag",
+        "action": "Add gateway groups or regional fanout stages, partition the room, batch count snapshots, and shed or poll slow clients with a recovery cursor.",
+        "impact": "Contains viral-post fanout and egress amplification while keeping durable state and liker queries available."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:1"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_33",
+      "stepNumber": 33,
+      "phase": "Phase 5: Delivery recovery and abuse controls",
+      "type": "add_component",
+      "title": "Add Like Path Monitoring",
+      "content": "Observe command latency, conditional-write conflicts, outbox age, consumer lag, deduplication rate, counter repair drift, reconnect recovery, retry age, and dead-letter volume. Alert on symptoms tied to the user-visible requirements.",
+      "component": {
+        "nodeId": "like_monitoring",
+        "componentType": "monitoring",
+        "label": "Like Path Monitoring",
+        "position": {"x": 800, "y": 700},
+        "highlightReason": "Makes action latency, stale projections, viral skew, and degraded delivery visible to operators.",
+        "properties": {
+          "componentName": "Like Path Monitoring",
+          "purpose": "Track request latency and errors, outbox and broker lag, hot-key skew, count repair drift, reconnect results, retry age, and dead-letter volume.",
+          "stack": "Prometheus + Grafana",
+          "metrics": true,
+          "alerts": true
+        }
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_34",
+      "stepNumber": 34,
+      "phase": "Phase 5: Delivery recovery and abuse controls",
+      "type": "add_connection",
+      "title": "Like Service to monitoring",
+      "content": "Measure accepted, rejected, duplicate, and conflicting desired-state commands separately. Rate limiting and abuse controls should not make idempotent retries look like new user intent.",
+      "connection": {
+        "edgeId": "edge_service_monitoring",
+        "sourceNodeId": "like_service",
+        "targetNodeId": "like_monitoring",
+        "connectionType": "data-flow",
+        "label": "Command and state metrics",
+        "description": "Service metrics distinguish real state transitions from no-ops, retries, and conflicts."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_35",
+      "stepNumber": 35,
+      "phase": "Phase 5: Delivery recovery and abuse controls",
+      "type": "add_connection",
+      "title": "Event bus to monitoring",
+      "content": "Alert on old unconsumed events, partition skew, replay volume, and retention headroom before a lagging consumer can no longer recover from the broker.",
+      "connection": {
+        "edgeId": "edge_bus_monitoring",
+        "sourceNodeId": "like_bus",
+        "targetNodeId": "like_monitoring",
+        "connectionType": "data-flow",
+        "label": "Stream health and lag",
+        "description": "Broker and consumer metrics expose delivery delay and recovery capacity."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_36",
+      "stepNumber": 36,
+      "phase": "Phase 5: Delivery recovery and abuse controls",
+      "type": "add_connection",
+      "title": "Fanout to monitoring",
+      "content": "Track slow sockets, disconnected viewers, reconnect success, fallback polling, and per-post fanout lag. Use the agreed freshness objective once product owners define it.",
+      "connection": {
+        "edgeId": "edge_fanout_monitoring",
+        "sourceNodeId": "like_fanout",
+        "targetNodeId": "like_monitoring",
+        "connectionType": "data-flow",
+        "label": "Viewer delivery health",
+        "description": "Fanout measurements support capacity tuning and detection of degraded viewer delivery."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:1"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_37",
+      "stepNumber": 37,
+      "phase": "Phase 5: Delivery recovery and abuse controls",
+      "type": "explanation",
+      "title": "Treat spam control as separate from deduplication",
+      "content": "An idempotency key prevents one command retry from applying twice; it does not stop a client from generating many distinct commands. Enforce configurable per-account and per-network limits, burst controls, and abuse review at the API boundary. Preserve a path for legitimate undo and rapid state correction, and measure rejected traffic separately from successful transitions.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:5"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_38",
+      "stepNumber": 38,
+      "phase": "Phase 6: Validation and operational decisions",
+      "type": "explanation",
+      "title": "Implement undo as a new inverse intent",
+      "content": "Keep the optimistic action undoable for the product-defined window. Undo sends a new desired state with its own idempotency key and a version that follows the original committed transition. If the original request is still pending, cancel or supersede it locally where safe; otherwise apply the inverse through the same conditional state path. Reconcile the UI with the newest server version.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:2"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_39",
+      "stepNumber": 39,
+      "phase": "Phase 6: Validation and operational decisions",
+      "type": "explanation",
+      "title": "Define degraded behavior by dependency",
+      "content": "If the socket path is down, keep committed state, buffer delivery work, and let clients poll or reconnect. If the broker is down, the committed outbox accumulates and the relay resumes later. If the authoritative store cannot commit, do not tell the client the like succeeded: keep its optimistic state marked pending or restore the last confirmed state, and retry the same idempotency key. Bound buffers and expose their age to avoid silently promising unlimited recovery.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_40",
+      "stepNumber": 40,
+      "phase": "Phase 6: Validation and operational decisions",
+      "type": "explanation",
+      "title": "Load-test the assumption, then replace it with evidence",
+      "content": "Load-test at a workload agreed for the brief's millions-of-likes-per-minute scale; the brief does not specify an exact rate, burst factor, or traffic distribution. Vary actor distribution, duplicate retries, concurrent like/unlike races, broker replay, cache loss, slow sockets, and reconnect gaps. Measure request latency, write conflicts, hot-key skew, count drift, event-to-viewer delay, and recovery time, then agree explicit freshness and latency objectives before production sizing.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_41",
+      "stepNumber": 41,
+      "phase": "Phase 6: Validation and operational decisions",
+      "type": "explanation",
+      "title": "Review acceptance against the frozen brief",
+      "content": "Exercise like and unlike, live count refresh, paginated liker identity under the visibility policy, duplicate request replay, concurrent actor state changes, an agreed load test for the brief's millions-per-minute scale, undo, and optimistic UI reconciliation. Inject relay/broker/fanout interruptions, duplicate and out-of-order events, hot-post load, dropped sockets, and expired cursors. Confirm eventual convergence and spam throttling; do not mark an unmeasured freshness or latency number as a prompt requirement.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "6901ef1b9420d83630aca87b_step_42",
+      "stepNumber": 42,
+      "phase": "Phase 6: Validation and operational decisions",
+      "type": "explanation",
+      "title": "Keep unresolved product choices visible",
+      "content": "Before treating this review draft as a production design, agree who may see liker identities, the count/freshness behavior, the undo window, traffic peaks and hot-post distribution, abuse policy, and measurable latency and recovery objectives. The graph uses catalog components to make a candidate system concrete; the brief supplies a millions-per-minute scale requirement but no exact workload or latency target.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

@@ -1,0 +1,977 @@
+{
+  "problem_id": "cloud_gcp_011",
+  "version": "1.0-review",
+  "totalSteps": 50,
+  "requirementRevision": null,
+  "phases": [
+    {
+      "name": "Freeze the live brief and shape the request path",
+      "stepRange": [1, 16],
+      "description": "Keep the supplied targets distinct from design choices, then assemble a bounded online path for recommendation requests."
+    },
+    {
+      "name": "Capture behavior and maintain usable features",
+      "stepRange": [17, 24],
+      "description": "Publish interaction events asynchronously, transform them with Dataflow, and make online features and historical data available."
+    },
+    {
+      "name": "Train, validate, and serve model versions",
+      "stepRange": [25, 34],
+      "description": "Separate incremental update work from serving, validate each model version, and promote it through an explicit registry boundary."
+    },
+    {
+      "name": "Experiment, observe, and define acceptance evidence",
+      "stepRange": [35, 50],
+      "description": "Assign and measure product experiments, observe service and data health, then validate the stated latency, audience, event, uplift, and cost targets."
+    }
+  ],
+  "steps": [
+    {
+      "id": "recs_01_live_brief",
+      "stepNumber": 1,
+      "phase": "Freeze the live brief and shape the request path",
+      "title": "Freeze the current DynamoDB brief before designing",
+      "type": "explanation",
+      "content": "This review draft is checked against the frozen local problem fixture for cloud_gcp_011; no live DynamoDB lookup was performed. Title: Design a Personalized Recommendation Engine. Description: Design a recommendation system that analyzes user behavior, trains ML models, generates personalized recommendations, and serves predictions via API. Requirements (verbatim): Generate personalized recommendations; Track user behavior; Train recommendation models; Serve real-time predictions; Handle cold-start problem; Implement A/B testing; Monitor recommendation quality; Update models incrementally. Constraints (verbatim): Recommendation latency under 100ms; Support 1M+ active users; Improve click-through rate by 20%; Process 100M+ events daily; Cost-effective model training. Hints (verbatim): Recommendations AI for pre-built models; BigQuery ML for custom models; Dataflow for feature engineering; Cloud Run for serving; Vertex AI for advanced ML; Memorystore for caching. The brief does not specify request cohorts, the latency statistic and boundaries, user/item cardinality beyond the stated active-user target, event schema, feature freshness, model family, update cadence, retention policy, or experiment assignment policy. Treat those as open design inputs; the targets are not measured results.",
+      "requirementIds": [
+        "legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4",
+        "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8",
+        "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "recs_02_api_gateway",
+      "stepNumber": 2,
+      "phase": "Freeze the live brief and shape the request path",
+      "title": "Put a stable API boundary in front of recommendation traffic",
+      "type": "add_component",
+      "content": "Use the existing API Gateway catalog component as the public request boundary for prediction and behavior-event endpoints. The brief requires predictions through an API but does not name an API product or authentication policy; keep those choices configurable.",
+      "component": {
+        "nodeId": "recs_api_gateway",
+        "componentType": "api-gateway",
+        "label": "Recommendation API Gateway",
+        "description": "API boundary for prediction and behavior-event requests",
+        "position": {"x": 0, "y": 210},
+        "properties": {
+          "componentName": "Recommendation API Gateway",
+          "purpose": "Expose prediction and behavior-event API boundaries, validate request shape, and apply the selected identity and admission policies before Cloud Run handles work."
+        },
+        "highlightReason": "The brief explicitly requires real-time predictions through an API; the catalog has a matching API gateway component."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "recs_03_cloud_run_api",
+      "stepNumber": 3,
+      "phase": "Freeze the live brief and shape the request path",
+      "title": "Keep request orchestration on Cloud Run",
+      "type": "add_component",
+      "content": "Represent Cloud Run with the existing backend-server type. This service validates the request, selects the experiment arm, reads features, invokes the selected recommendation path, and returns the response. The catalog has no Cloud Run-specific node, so the provider product stays in the editable component label and purpose.",
+      "component": {
+        "nodeId": "recs_cloud_run_api",
+        "componentType": "backend-server",
+        "label": "Cloud Run Recommendation API",
+        "description": "Request orchestration and response assembly",
+        "position": {"x": 300, "y": 210},
+        "properties": {
+          "componentName": "Cloud Run Recommendation API",
+          "purpose": "Validate prediction requests, obtain the assigned experiment arm and relevant online features, invoke the selected recommender, and return ranked results through the API. Keep provider calls bounded by the end-to-end latency target."
+        },
+        "highlightReason": "Cloud Run is a supplied serving hint and backend-server is the existing catalog role for request orchestration."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "recs_04_gateway_to_service",
+      "stepNumber": 4,
+      "phase": "Freeze the live brief and shape the request path",
+      "title": "Route API requests into the serving service",
+      "type": "add_connection",
+      "content": "Pass prediction requests and accepted behavior events through the API boundary to Cloud Run. Keep the request identity and event correlation data consistent so outcomes can be joined to exposures without adding identity fields that the brief has not defined.",
+      "connection": {
+        "edgeId": "recs_edge_gateway_cloud_run",
+        "sourceNodeId": "recs_api_gateway",
+        "targetNodeId": "recs_cloud_run_api",
+        "connectionType": "api-request",
+        "label": "Prediction and event API",
+        "description": "The gateway forwards validated requests to the Cloud Run orchestration service."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "recs_05_memorystore_cache",
+      "stepNumber": 5,
+      "phase": "Freeze the live brief and shape the request path",
+      "title": "Add a cache for reusable online results",
+      "type": "add_component",
+      "content": "Use the catalog cache component to represent Memorystore. Cache only results or features whose key includes the relevant user, item, context, and model or experiment version; define freshness from product behavior instead of choosing a TTL unsupported by the brief.",
+      "component": {
+        "nodeId": "recs_memorystore",
+        "componentType": "cache",
+        "label": "Memorystore Online Cache",
+        "description": "Reusable recommendation results and hot online features",
+        "position": {"x": 590, "y": 35},
+        "properties": {
+          "componentName": "Memorystore Online Cache",
+          "purpose": "Cache reusable recommendation results or hot feature lookups with keys that include the relevant request context and model version; choose freshness and invalidation behavior from product requirements."
+        },
+        "highlightReason": "Memorystore is an explicit hint and the existing cache component represents its role without inventing a cache duration."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "recs_06_cache_path",
+      "stepNumber": 6,
+      "phase": "Freeze the live brief and shape the request path",
+      "title": "Use cache-aside behavior without making cache correctness authoritative",
+      "type": "add_connection",
+      "content": "Cloud Run may read a reusable entry and refresh it from the selected recommender on a miss. A cache miss or eviction must still reach the correct source; do not let cached output cross users, experiment arms, or model versions.",
+      "connection": {
+        "edgeId": "recs_edge_cloud_run_cache",
+        "sourceNodeId": "recs_cloud_run_api",
+        "targetNodeId": "recs_memorystore",
+        "connectionType": "cache-read-write",
+        "label": "Context-scoped cache lookup",
+        "description": "Cloud Run uses Memorystore for eligible results and feature lookups while retaining a source-backed miss path."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "recs_07_feature_store",
+      "stepNumber": 7,
+      "phase": "Freeze the live brief and shape the request path",
+      "title": "Separate online features from event history",
+      "type": "add_component",
+      "content": "Use the generic feature-store component for user and item features needed by online inference. Its backing GCP product and the required freshness are not named in the brief; keep the logical role separate from the historical warehouse and validate the product mapping before implementation.",
+      "component": {
+        "nodeId": "recs_feature_store",
+        "componentType": "feature-store",
+        "label": "Online User and Item Features",
+        "description": "Serving-time feature lookup for personalization and cold start",
+        "position": {"x": 590, "y": 225},
+        "properties": {
+          "componentName": "Online User and Item Features",
+          "purpose": "Serve the user and item signals required by the selected ranking path, with feature definitions and freshness aligned between online inference and model training. Confirm the GCP backing service and freshness contract."
+        },
+        "highlightReason": "The existing feature-store type captures the online model input role without claiming a specific GCP feature-store product."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5"]
+    },
+    {
+      "id": "recs_08_service_feature_lookup",
+      "stepNumber": 8,
+      "phase": "Freeze the live brief and shape the request path",
+      "title": "Fetch online features in the request path",
+      "type": "add_connection",
+      "content": "Cloud Run requests only the features needed for the active serving path. Define behavior for missing, stale, or unavailable features so cold-start handling does not turn into an unbounded wait.",
+      "connection": {
+        "edgeId": "recs_edge_cloud_run_features",
+        "sourceNodeId": "recs_cloud_run_api",
+        "targetNodeId": "recs_feature_store",
+        "connectionType": "online-feature-read",
+        "label": "User and item features",
+        "description": "The serving API fetches the feature values required to personalize a request."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1"]
+    },
+    {
+      "id": "recs_09_recommendation_service",
+      "stepNumber": 9,
+      "phase": "Freeze the live brief and shape the request path",
+      "title": "Create a provider-neutral recommendation boundary",
+      "type": "add_component",
+      "content": "Use the existing recommendation-service catalog type as the candidate and ranking boundary. The live hints name Recommendations AI for pre-built models and BigQuery ML with Vertex AI for custom models; select a path only after checking data needs, model-update behavior, evaluation evidence, and the latency target.",
+      "component": {
+        "nodeId": "recs_engine",
+        "componentType": "recommendation-service",
+        "label": "Candidate Generation and Ranking",
+        "description": "Personalized candidate selection and ranking boundary",
+        "position": {"x": 900, "y": 225},
+        "properties": {
+          "componentName": "Candidate Generation and Ranking",
+          "purpose": "Generate personalized candidates and rank them from online user and item features. Keep the provider choice replaceable between the supplied Recommendations AI pre-built option and a validated custom model path."
+        },
+        "highlightReason": "The catalog includes a recommendation-service component matching the central personalized recommendation capability."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4"]
+    },
+    {
+      "id": "recs_10_features_to_engine",
+      "stepNumber": 10,
+      "phase": "Freeze the live brief and shape the request path",
+      "title": "Supply the recommender with aligned features",
+      "type": "add_connection",
+      "content": "Pass the online feature view to candidate generation and ranking. Keep feature transformations consistent with the definitions used in training, and include the selected item and user context needed for cold-start behavior.",
+      "connection": {
+        "edgeId": "recs_edge_features_engine",
+        "sourceNodeId": "recs_feature_store",
+        "targetNodeId": "recs_engine",
+        "connectionType": "inference-features",
+        "label": "Online feature values",
+        "description": "The recommendation boundary consumes serving-time user and item features."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5"]
+    },
+    {
+      "id": "recs_11_engine_response",
+      "stepNumber": 11,
+      "phase": "Freeze the live brief and shape the request path",
+      "title": "Return ranked results to the API service",
+      "type": "add_connection",
+      "content": "Return ranked item identifiers and the response metadata required by the API. Apply eligibility and availability rules before delivery; the brief does not define a response size or a result-list policy.",
+      "connection": {
+        "edgeId": "recs_edge_engine_cloud_run",
+        "sourceNodeId": "recs_engine",
+        "targetNodeId": "recs_cloud_run_api",
+        "connectionType": "ranked-recommendations",
+        "label": "Ranked candidate response",
+        "description": "The selected recommendation implementation returns eligible ranked candidates to Cloud Run."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "recs_12_latency_contract",
+      "stepNumber": 12,
+      "phase": "Freeze the live brief and shape the request path",
+      "title": "Turn the under-100ms target into an observable contract",
+      "type": "decision_point",
+      "content": "The brief says Recommendation latency under 100ms but does not define the request cohort, start and end events, or the statistic used. Agree those boundaries and measure the complete API path, including cache behavior, feature reads, candidate generation, ranking, and response delivery. Allocate and bound dependency work from traces; do not claim the target is met from component-level timings alone.",
+      "decision": {
+        "question": "How should the service respond when a recommendation dependency consumes the request budget?",
+        "chosen": "Bound online dependency work and use a product-approved fallback path before the end-to-end target is exceeded.",
+        "chosenReason": "The latency target applies to the served recommendation, so an optional slow dependency must not hold the whole request indefinitely.",
+        "alternatives": [
+          {"option": "Wait for every feature and model call", "tradeoff": "May return a more complete result but allows a slow dependency to dominate request latency."},
+          {"option": "Return cached output without checking its context", "tradeoff": "Can be fast but may leak results across users, variants, or model versions."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "recs_cloud_run_api",
+        "properties": {"purpose": "Validate prediction requests, obtain the assigned experiment arm and relevant online features, invoke the selected recommender, and return ranked results through the API. Bound dependency work against the agreed end-to-end latency measurement and use only a product-approved fallback."}
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "recs_13_model_path_choice",
+      "stepNumber": 13,
+      "phase": "Freeze the live brief and shape the request path",
+      "title": "Choose pre-built or custom ranking with evidence",
+      "type": "decision_point",
+      "content": "Compare the supplied Recommendations AI pre-built option with a custom BigQuery ML and Vertex AI path against feature control, incremental update support for the chosen model, quality evaluation, and the measured serving budget. Keep the recommendation-service boundary provider-neutral so a selection can change without changing API contracts. The hint list alone does not prove either option meets the brief.",
+      "decision": {
+        "question": "Which model route should own candidate ranking?",
+        "chosen": "Keep a replaceable recommendation boundary and select a route only after a representative offline and online evaluation confirms its fit.",
+        "chosenReason": "The brief asks for training and incremental updates but supplies no model family, data contract, or evaluation results that would justify a provider-specific commitment.",
+        "alternatives": [
+          {"option": "Use Recommendations AI as the only model path", "tradeoff": "Uses the supplied pre-built-model hint but must be checked for the required feature and update controls."},
+          {"option": "Use a custom BigQuery ML model served through Vertex AI", "tradeoff": "Offers a custom path but requires validated training, rollout, and latency behavior."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "recs_engine",
+        "properties": {"purpose": "Generate personalized candidates and rank them from online user and item features. Keep the provider choice replaceable between Recommendations AI and a custom BigQuery ML or Vertex AI model path; select only after update behavior, evaluation, and latency fit are demonstrated."}
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:8"]
+    },
+    {
+      "id": "recs_14_catalog_store",
+      "stepNumber": 14,
+      "phase": "Freeze the live brief and shape the request path",
+      "title": "Keep canonical item metadata available",
+      "type": "add_component",
+      "content": "Represent the source of item identity, descriptive metadata, and eligibility with the existing database component. The live brief does not specify a source system, database type, or item schema; this is a logical boundary to map to the actual product catalog.",
+      "component": {
+        "nodeId": "recs_item_catalog",
+        "componentType": "database",
+        "label": "Canonical Item Catalog",
+        "description": "Item identity, metadata, and eligibility source",
+        "position": {"x": 300, "y": 425},
+        "properties": {
+          "componentName": "Canonical Item Catalog",
+          "purpose": "Provide authoritative item identifiers, descriptive attributes, and eligibility information for candidate generation and cold-start features. Map this logical boundary to the existing product catalog and its access patterns."
+        },
+        "highlightReason": "An existing database type can represent the item source without introducing an unsupported catalog component type."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5"]
+    },
+    {
+      "id": "recs_15_catalog_to_api",
+      "stepNumber": 15,
+      "phase": "Freeze the live brief and shape the request path",
+      "title": "Apply current item eligibility before serving",
+      "type": "add_connection",
+      "content": "Cloud Run obtains canonical item metadata or eligibility through the existing catalog boundary, then ensures candidates are valid for the requesting context. Keep this source distinct from derived user/item features.",
+      "connection": {
+        "edgeId": "recs_edge_catalog_cloud_run",
+        "sourceNodeId": "recs_item_catalog",
+        "targetNodeId": "recs_cloud_run_api",
+        "connectionType": "catalog-read",
+        "label": "Item metadata and eligibility",
+        "description": "The API uses canonical catalog state to validate candidate items before returning them."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5"]
+    },
+    {
+      "id": "recs_16_cold_start",
+      "stepNumber": 16,
+      "phase": "Freeze the live brief and shape the request path",
+      "title": "Make the cold-start path explicit",
+      "type": "decision_point",
+      "content": "The brief explicitly calls out cold start but does not define which users or items count as new, what context may be used, or the acceptable fallback. Use available item metadata and request context where valid, and have the product owner choose a safe fallback when personalized history is absent. Do not present a generic popularity list as an agreed requirement.",
+      "decision": {
+        "question": "What should be ranked when user or item interaction history is missing?",
+        "chosen": "Use eligible metadata and available context, with a product-approved non-personalized fallback when those signals are insufficient.",
+        "chosenReason": "This addresses the stated cold-start problem while leaving the fallback policy and permitted signals explicit for product review.",
+        "alternatives": [
+          {"option": "Return no recommendation until history exists", "tradeoff": "Avoids weak personalization but leaves new users and items without a result."},
+          {"option": "Always return globally popular items", "tradeoff": "Provides a result but may ignore context, eligibility, or the product's intended cold-start experience."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "recs_engine",
+        "properties": {"purpose": "Generate personalized candidates from available user and item signals. For cold start, use eligible metadata and request context where permitted, then follow the product-approved fallback when history or required features are absent."}
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5"]
+    },
+    {
+      "id": "recs_17_behavior_events",
+      "stepNumber": 17,
+      "phase": "Capture behavior and maintain usable features",
+      "title": "Buffer behavior events outside the response path",
+      "type": "add_component",
+      "content": "Use the existing Pub/Sub component for accepted behavior, recommendation exposure, and outcome events. Keep event publication asynchronous to prediction responses and define consent, identifiers, retention, and deletion with the product's actual policy.",
+      "component": {
+        "nodeId": "recs_behavior_events",
+        "componentType": "pubsub",
+        "label": "Behavior and Exposure Events",
+        "description": "Asynchronous stream of recommendation interactions and outcomes",
+        "position": {"x": 590, "y": 520},
+        "properties": {
+          "componentName": "Behavior and Exposure Events",
+          "purpose": "Buffer interaction, recommendation-exposure, and outcome event references for independent processing. Use idempotent consumers and a governed event contract; do not make analytics persistence a synchronous dependency of the prediction response."
+        },
+        "highlightReason": "Pub/Sub is an existing catalog component and matches the supplied Dataflow event-processing hint."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:7"]
+    },
+    {
+      "id": "recs_18_publish_events",
+      "stepNumber": 18,
+      "phase": "Capture behavior and maintain usable features",
+      "title": "Publish behavior without delaying predictions",
+      "type": "add_connection",
+      "content": "After the request path has a result, publish the permitted event and exposure data for downstream feature and experiment analysis. Define retry and duplicate handling from the event contract; the brief supplies no event schema or retention duration.",
+      "connection": {
+        "edgeId": "recs_edge_api_events",
+        "sourceNodeId": "recs_cloud_run_api",
+        "targetNodeId": "recs_behavior_events",
+        "connectionType": "behavior-event-publish",
+        "label": "Interaction and exposure events",
+        "description": "Cloud Run emits governed event references for asynchronous processing after serving work."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "recs_19_dataflow",
+      "stepNumber": 19,
+      "phase": "Capture behavior and maintain usable features",
+      "title": "Transform events with Dataflow",
+      "type": "add_component",
+      "content": "Represent Dataflow with the existing stream-processor type. Transform event records into validated feature updates and historical facts, preserving event provenance and replay safety; agree event-time and late-arrival semantics before implementation.",
+      "component": {
+        "nodeId": "recs_dataflow",
+        "componentType": "stream-processor",
+        "label": "Dataflow Feature Pipeline",
+        "description": "Validated event processing for online features and history",
+        "position": {"x": 900, "y": 520},
+        "properties": {
+          "componentName": "Dataflow Feature Pipeline",
+          "purpose": "Validate and transform behavior and exposure events into feature updates and historical records. Preserve event identity and replay safety, and define late-event handling from the actual event contract."
+        },
+        "highlightReason": "Dataflow is an explicit feature-engineering hint and stream-processor is the catalog's matching processing role."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:8", "legacy-constraint:4"]
+    },
+    {
+      "id": "recs_20_events_to_dataflow",
+      "stepNumber": 20,
+      "phase": "Capture behavior and maintain usable features",
+      "title": "Process the event stream independently",
+      "type": "add_connection",
+      "content": "Dataflow consumes the behavior and exposure stream, applies the agreed schema and deduplication rules, and publishes derived outputs. Event processing capacity and freshness remain measurements to establish against the stated daily event target.",
+      "connection": {
+        "edgeId": "recs_edge_events_dataflow",
+        "sourceNodeId": "recs_behavior_events",
+        "targetNodeId": "recs_dataflow",
+        "connectionType": "event-stream",
+        "label": "Behavior event stream",
+        "description": "Dataflow processes the asynchronous event stream for feature and historical-data consumers."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:8", "legacy-constraint:4"]
+    },
+    {
+      "id": "recs_21_bigquery",
+      "stepNumber": 21,
+      "phase": "Capture behavior and maintain usable features",
+      "title": "Retain analytical history for model work",
+      "type": "add_component",
+      "content": "Use the existing data-warehouse type to represent BigQuery history for model training and quality analysis. The brief gives an event-volume target but does not define retention, partitioning, or data residency; decide those from workload and policy evidence.",
+      "component": {
+        "nodeId": "recs_bigquery",
+        "componentType": "data-warehouse",
+        "label": "BigQuery Interaction History",
+        "description": "Historical behavior and exposure data for training and evaluation",
+        "position": {"x": 1200, "y": 520},
+        "properties": {
+          "componentName": "BigQuery Interaction History",
+          "purpose": "Store governed historical interactions, recommendation exposures, and outcomes for BigQuery ML training and quality analysis. Set retention and physical layout only after query, policy, and cost needs are known."
+        },
+        "highlightReason": "BigQuery ML is a supplied custom-model hint and the existing data-warehouse component represents its historical data boundary."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "recs_22_dataflow_to_bigquery",
+      "stepNumber": 22,
+      "phase": "Capture behavior and maintain usable features",
+      "title": "Persist validated history for training and analysis",
+      "type": "add_connection",
+      "content": "Write validated interaction and exposure records to BigQuery for custom model training and offline evaluation. Keep raw or replayable source references according to the agreed policy rather than assuming indefinite event retention.",
+      "connection": {
+        "edgeId": "recs_edge_dataflow_bigquery",
+        "sourceNodeId": "recs_dataflow",
+        "targetNodeId": "recs_bigquery",
+        "connectionType": "historical-event-write",
+        "label": "Validated events and outcomes",
+        "description": "Dataflow writes governed historical records used by training and recommendation-quality analysis."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "recs_23_dataflow_to_features",
+      "stepNumber": 23,
+      "phase": "Capture behavior and maintain usable features",
+      "title": "Update online features from validated events",
+      "type": "add_connection",
+      "content": "Publish derived user and item feature updates to the online feature boundary. Keep the transformation definition shared with training and expose feature age so the serving path can handle missing or stale values deliberately.",
+      "connection": {
+        "edgeId": "recs_edge_dataflow_features",
+        "sourceNodeId": "recs_dataflow",
+        "targetNodeId": "recs_feature_store",
+        "connectionType": "online-feature-update",
+        "label": "Derived feature updates",
+        "description": "Validated event processing refreshes serving-time user and item features."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:8"]
+    },
+    {
+      "id": "recs_24_event_feature_contract",
+      "stepNumber": 24,
+      "phase": "Capture behavior and maintain usable features",
+      "title": "Define event quality and feature freshness before scaling",
+      "type": "decision_point",
+      "content": "Agree which user actions count as behavior, how recommendation exposures and outcomes are joined, how duplicates and late events are handled, and what feature freshness the serving model needs. The current brief does not define these contracts; record them before interpreting daily volume or model quality.",
+      "decision": {
+        "question": "How should incomplete or repeated behavior events affect feature updates?",
+        "chosen": "Validate an explicit event contract, deduplicate by its stable event identity, and make late or invalid records visible for replay or correction.",
+        "chosenReason": "Training and online personalization depend on trustworthy event-derived features, while the brief does not define event identity or late-arrival semantics.",
+        "alternatives": [
+          {"option": "Apply every delivered event immediately", "tradeoff": "Simple but can double-count retries or admit malformed signals into features."},
+          {"option": "Drop records that arrive outside an arbitrary window", "tradeoff": "Can silently bias training and feature state without a business-approved lateness policy."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "recs_dataflow",
+        "properties": {"purpose": "Validate and transform behavior and exposure events under an agreed event contract. Deduplicate by its stable event identity, preserve replayability, and make late or invalid records visible for correction."}
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:4"]
+    },
+    {
+      "id": "recs_25_model_update_queue",
+      "stepNumber": 25,
+      "phase": "Train, validate, and serve model versions",
+      "title": "Separate model-update work from user requests",
+      "type": "add_component",
+      "content": "Use the existing queue component for model-update work requests. This separates training and validation from interactive serving and makes failed updates retryable without tying a model job to a prediction request.",
+      "component": {
+        "nodeId": "recs_model_update_queue",
+        "componentType": "queue",
+        "label": "Model Update Work Queue",
+        "description": "Asynchronous requests to train and validate model versions",
+        "position": {"x": 1200, "y": 740},
+        "properties": {
+          "componentName": "Model Update Work Queue",
+          "purpose": "Buffer model-update requests independently of online prediction traffic so training, validation, retries, and promotion do not block recommendation responses."
+        },
+        "highlightReason": "The existing queue type represents asynchronous model-update work without adding a new component type."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "recs_26_event_to_update_queue",
+      "stepNumber": 26,
+      "phase": "Train, validate, and serve model versions",
+      "title": "Trigger update evaluation from new data",
+      "type": "add_connection",
+      "content": "Dataflow or a governed warehouse workflow can enqueue an update request when new feature and history state is ready. Define the trigger condition and cadence from the model's supported update method and observed data, not from a guessed event threshold.",
+      "connection": {
+        "edgeId": "recs_edge_dataflow_update_queue",
+        "sourceNodeId": "recs_dataflow",
+        "targetNodeId": "recs_model_update_queue",
+        "connectionType": "model-update-trigger",
+        "label": "New training data available",
+        "description": "Validated feature and event progress can request an asynchronous model update evaluation."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "recs_27_model_training",
+      "stepNumber": 27,
+      "phase": "Train, validate, and serve model versions",
+      "title": "Train custom models from governed history",
+      "type": "add_component",
+      "content": "Represent the training workflow with the existing model-training type and the supplied BigQuery ML hint. Keep algorithm, labels, evaluation cohort, and supported incremental-update mechanism open until the data and product contracts are defined.",
+      "component": {
+        "nodeId": "recs_model_training",
+        "componentType": "model-training",
+        "label": "BigQuery ML Model Training",
+        "description": "Training and validation workflow for recommendation model versions",
+        "position": {"x": 1500, "y": 740},
+        "properties": {
+          "componentName": "BigQuery ML Model Training",
+          "purpose": "Train and evaluate custom recommendation models from governed BigQuery history and aligned feature definitions. Confirm that the selected model family supports the required incremental update behavior before claiming this requirement is met."
+        },
+        "highlightReason": "Model training is an explicit requirement and the catalog has a dedicated model-training component."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "recs_28_queue_to_training",
+      "stepNumber": 28,
+      "phase": "Train, validate, and serve model versions",
+      "title": "Run model updates outside the serving path",
+      "type": "add_connection",
+      "content": "The training workflow consumes queued update requests, reads an agreed snapshot or incrementally updated training view, and produces a candidate model version. Preserve the data and feature lineage used to create each candidate.",
+      "connection": {
+        "edgeId": "recs_edge_update_queue_training",
+        "sourceNodeId": "recs_model_update_queue",
+        "targetNodeId": "recs_model_training",
+        "connectionType": "asynchronous-training-work",
+        "label": "Model update request",
+        "description": "Queued work starts an isolated training and validation run."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "recs_29_incremental_update_policy",
+      "stepNumber": 29,
+      "phase": "Train, validate, and serve model versions",
+      "title": "Make incremental updates a tested model capability",
+      "type": "decision_point",
+      "content": "The brief requires incremental model updates but does not define the algorithm, update unit, cadence, or quality guardrails. Select a model and update workflow that demonstrably incorporates new data without silently discarding the current good version; if the selected BigQuery ML or Vertex AI approach cannot meet that contract, surface the gap rather than relabeling full retraining as incremental.",
+      "decision": {
+        "question": "What should happen when a candidate incremental update fails quality validation?",
+        "chosen": "Keep the current serving version active, retain the rejected candidate and its evaluation evidence, and retry only after the cause is addressed.",
+        "chosenReason": "An update should not degrade recommendations merely because new data arrived; incremental behavior and quality must be demonstrated together.",
+        "alternatives": [
+          {"option": "Promote every completed update", "tradeoff": "Ensures new data is incorporated but can replace a better model with a degraded one."},
+          {"option": "Use only periodic full retraining", "tradeoff": "May be easier to operate but does not by itself satisfy the stated incremental-update requirement."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "recs_model_training",
+        "properties": {"purpose": "Train and evaluate custom recommendation models from governed history and aligned features. Use a model-supported incremental update workflow, preserve the current good version on failed validation, and retain lineage and evaluation evidence for every candidate."}
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8"]
+    },
+    {
+      "id": "recs_30_model_registry",
+      "stepNumber": 30,
+      "phase": "Train, validate, and serve model versions",
+      "title": "Track validated model versions",
+      "type": "add_component",
+      "content": "Use the existing model-registry component to retain candidate identity, training inputs, feature definitions, evaluation results, and promotion state. A model artifact is not ready for serving merely because training completed.",
+      "component": {
+        "nodeId": "recs_model_registry",
+        "componentType": "model-registry",
+        "label": "Recommendation Model Registry",
+        "description": "Version and promotion record for trained models",
+        "position": {"x": 1800, "y": 740},
+        "properties": {
+          "componentName": "Recommendation Model Registry",
+          "purpose": "Version model artifacts with their training data, feature definitions, evaluation evidence, and explicit candidate, accepted, or rejected state before deployment."
+        },
+        "highlightReason": "The catalog includes a model registry suited to explicit version and promotion tracking."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "recs_31_training_to_registry",
+      "stepNumber": 31,
+      "phase": "Train, validate, and serve model versions",
+      "title": "Register candidates with their evaluation evidence",
+      "type": "add_connection",
+      "content": "Publish a candidate only after its agreed offline checks complete. Record which event and feature definitions produced it so later quality changes can be traced to a model version and its inputs.",
+      "connection": {
+        "edgeId": "recs_edge_training_registry",
+        "sourceNodeId": "recs_model_training",
+        "targetNodeId": "recs_model_registry",
+        "connectionType": "validated-model-registration",
+        "label": "Candidate model and evaluation",
+        "description": "Training registers a version together with its lineage and validation evidence."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-requirement:8"]
+    },
+    {
+      "id": "recs_32_vertex_model_serving",
+      "stepNumber": 32,
+      "phase": "Train, validate, and serve model versions",
+      "title": "Serve a promoted custom model through Vertex AI",
+      "type": "add_component",
+      "content": "Represent the custom online model endpoint with the existing model-serving type and the supplied Vertex AI hint. Keep model-specific deployment configuration and serving capacity tied to measured demand and the agreed latency contract.",
+      "component": {
+        "nodeId": "recs_vertex_serving",
+        "componentType": "model-serving",
+        "label": "Vertex AI Recommendation Model",
+        "description": "Online inference for a promoted custom model",
+        "position": {"x": 1800, "y": 250},
+        "properties": {
+          "componentName": "Vertex AI Recommendation Model",
+          "purpose": "Serve only a promoted custom recommendation model version for online inference. Confirm model-specific deployment, feature compatibility, and measured serving behavior against the API latency target."
+        },
+        "highlightReason": "The supplied Vertex AI hint maps to the existing model-serving component."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:8"]
+    },
+    {
+      "id": "recs_33_registry_to_serving",
+      "stepNumber": 33,
+      "phase": "Train, validate, and serve model versions",
+      "title": "Promote only an accepted registry version",
+      "type": "add_connection",
+      "content": "Deploy a registry version only after the agreed validation and release checks. Retain a clear way to restore the previously accepted version if live quality or serving behavior regresses.",
+      "connection": {
+        "edgeId": "recs_edge_registry_vertex",
+        "sourceNodeId": "recs_model_registry",
+        "targetNodeId": "recs_vertex_serving",
+        "connectionType": "model-promotion",
+        "label": "Accepted model version",
+        "description": "The serving endpoint receives a version that passed the defined promotion checks."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:8"]
+    },
+    {
+      "id": "recs_34_model_release_gate",
+      "stepNumber": 34,
+      "phase": "Train, validate, and serve model versions",
+      "title": "Separate model quality from model availability",
+      "type": "decision_point",
+      "content": "Define offline relevance checks and online guardrails for each model version, including the CTR experiment goal and any user-experience measures the product selects. No achieved lift or quality threshold beyond the brief's target is supplied. Keep the existing model serving until the candidate has evidence appropriate to its rollout.",
+      "decision": {
+        "question": "When is a trained recommendation model eligible for promotion?",
+        "chosen": "Promote only after reproducible offline evaluation, feature compatibility checks, and a controlled online plan with observable rollback signals.",
+        "chosenReason": "Training completion alone does not show that recommendations are useful or that the model can serve within the requested latency.",
+        "alternatives": [
+          {"option": "Promote as soon as training finishes", "tradeoff": "Reduces release delay but skips evidence that quality and serving contracts still hold."},
+          {"option": "Require the brief's CTR target before any exposure", "tradeoff": "Can prevent learning from a controlled experiment because the target itself is an outcome to measure."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "recs_vertex_serving",
+        "properties": {"purpose": "Serve only a promoted custom recommendation model version with feature compatibility and reproducible evaluation evidence. Retain a rollback path and verify live quality and latency during controlled rollout."}
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "recs_35_experiment_assignment",
+      "stepNumber": 35,
+      "phase": "Experiment, observe, and define acceptance evidence",
+      "title": "Represent product experiment assignment explicitly",
+      "type": "add_component",
+      "content": "The catalog's experiment-tracking component is for model-run comparisons and does not represent assigning product users to recommendation variants or recording their exposure. Use its existing generic custom component for this genuine catalog gap; keep the assignment key and allocation policy open until the product defines them.",
+      "component": {
+        "nodeId": "recs_experiment_assignment",
+        "componentType": "custom-component",
+        "label": "Product A/B Assignment and Exposure",
+        "description": "Product-level variant assignment and exposure record",
+        "position": {"x": 1200, "y": 35},
+        "properties": {
+          "componentName": "Product A/B Assignment and Exposure",
+          "subtitle": "Product experiment control",
+          "purpose": "Assign the product-defined recommendation variant and record eligible exposure for outcome analysis. The assignment key, allocation, enrollment, and exclusion rules remain to be defined with the product team.",
+          "componentType": "Catalog gap: product A/B assignment and exposure service",
+          "technology": "Existing product experimentation platform, if available",
+          "notes": "No dedicated user-to-variant assignment component exists in the catalog. The model experiment-tracking component does not provide this product assignment role."
+        },
+        "highlightReason": "The existing catalog lacks product experiment assignment and exposure semantics; this is the sole generic custom component in the draft."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "recs_36_request_to_experiment",
+      "stepNumber": 36,
+      "phase": "Experiment, observe, and define acceptance evidence",
+      "title": "Assign an experiment arm before recommendation selection",
+      "type": "add_connection",
+      "content": "Cloud Run requests the product-defined assignment using the agreed subject and experiment context. Ensure retries preserve the same assignment semantics; do not assume a user identifier or allocation policy that the brief has not provided.",
+      "connection": {
+        "edgeId": "recs_edge_api_experiment",
+        "sourceNodeId": "recs_cloud_run_api",
+        "targetNodeId": "recs_experiment_assignment",
+        "connectionType": "experiment-assignment-request",
+        "label": "Variant assignment request",
+        "description": "The request service obtains the experiment arm under the product-defined assignment policy."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6"]
+    },
+    {
+      "id": "recs_37_experiment_to_request",
+      "stepNumber": 37,
+      "phase": "Experiment, observe, and define acceptance evidence",
+      "title": "Apply the assigned variant consistently",
+      "type": "add_connection",
+      "content": "Return the selected arm to Cloud Run so it can route to the corresponding recommendation configuration. Keep control and treatment behavior explicit in the experiment plan and avoid mixing variants through shared cache keys.",
+      "connection": {
+        "edgeId": "recs_edge_experiment_api",
+        "sourceNodeId": "recs_experiment_assignment",
+        "targetNodeId": "recs_cloud_run_api",
+        "connectionType": "experiment-assignment-result",
+        "label": "Assigned recommendation variant",
+        "description": "Cloud Run applies the returned arm when choosing recommendation behavior and cache context."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:6"]
+    },
+    {
+      "id": "recs_38_variant_to_engine",
+      "stepNumber": 38,
+      "phase": "Experiment, observe, and define acceptance evidence",
+      "title": "Pass the selected variant into recommendation logic",
+      "type": "add_connection",
+      "content": "Cloud Run passes the assigned model or ranking configuration to the recommendation boundary. The variant choice should not change user eligibility rules or the event definitions used to compare outcomes.",
+      "connection": {
+        "edgeId": "recs_edge_api_engine",
+        "sourceNodeId": "recs_cloud_run_api",
+        "targetNodeId": "recs_engine",
+        "connectionType": "variant-aware-recommendation-request",
+        "label": "Context and assigned variant",
+        "description": "Cloud Run invokes the recommendation boundary with the selected experiment configuration."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:6"]
+    },
+    {
+      "id": "recs_39_engine_to_vertex",
+      "stepNumber": 39,
+      "phase": "Experiment, observe, and define acceptance evidence",
+      "title": "Call the custom model only for the selected route",
+      "type": "add_connection",
+      "content": "When the chosen route uses the custom model, the recommendation boundary requests inference from Vertex AI with the compatible feature view. The pre-built Recommendations AI option remains an alternative at this same semantic boundary, not an extra serial call on every request.",
+      "connection": {
+        "edgeId": "recs_edge_engine_vertex",
+        "sourceNodeId": "recs_engine",
+        "targetNodeId": "recs_vertex_serving",
+        "connectionType": "custom-model-inference",
+        "label": "Selected custom model request",
+        "description": "The recommendation boundary calls Vertex AI only when the selected implementation is the custom model route."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4"]
+    },
+    {
+      "id": "recs_40_vertex_to_engine",
+      "stepNumber": 40,
+      "phase": "Experiment, observe, and define acceptance evidence",
+      "title": "Return model scores to candidate ranking",
+      "type": "add_connection",
+      "content": "Return scores or ranking signals to the recommendation boundary for eligibility filtering and final response assembly. Define the score meaning and tie-breaking behavior with the selected model; the brief gives no ranking formula.",
+      "connection": {
+        "edgeId": "recs_edge_vertex_engine",
+        "sourceNodeId": "recs_vertex_serving",
+        "targetNodeId": "recs_engine",
+        "connectionType": "model-score-response",
+        "label": "Model scores and ranking signals",
+        "description": "Custom model output returns to the recommendation boundary for final candidate handling."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4"]
+    },
+    {
+      "id": "recs_41_quality_analytics",
+      "stepNumber": 41,
+      "phase": "Experiment, observe, and define acceptance evidence",
+      "title": "Measure recommendation quality from governed outcomes",
+      "type": "add_component",
+      "content": "Use the existing analytics component for offline and online recommendation-quality views. Include the agreed exposure and outcome definitions, segment results only by legitimate product cohorts, and keep the CTR goal separate from measured performance.",
+      "component": {
+        "nodeId": "recs_quality_analytics",
+        "componentType": "analytics",
+        "label": "Recommendation Quality Analytics",
+        "description": "Quality and experiment outcome analysis",
+        "position": {"x": 1500, "y": 500},
+        "properties": {
+          "componentName": "Recommendation Quality Analytics",
+          "purpose": "Analyze governed recommendation exposures, user outcomes, and model quality with agreed definitions. Distinguish the stated click-through-rate goal from observed experiment results."
+        },
+        "highlightReason": "The existing analytics component matches recommendation-quality and outcome analysis."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "recs_42_request_to_analytics",
+      "stepNumber": 42,
+      "phase": "Experiment, observe, and define acceptance evidence",
+      "title": "Record exposures and user outcomes for analysis",
+      "type": "add_connection",
+      "content": "Emit the experiment arm, eligible exposure, returned recommendation context, and agreed downstream outcome references. Avoid attributing an outcome to a recommendation without the experiment's defined join and attribution policy.",
+      "connection": {
+        "edgeId": "recs_edge_api_analytics",
+        "sourceNodeId": "recs_cloud_run_api",
+        "targetNodeId": "recs_quality_analytics",
+        "connectionType": "recommendation-outcome-telemetry",
+        "label": "Exposure and request context",
+        "description": "The serving path emits governed exposure references for quality and experiment analysis."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "recs_43_history_to_analytics",
+      "stepNumber": 43,
+      "phase": "Experiment, observe, and define acceptance evidence",
+      "title": "Join outcomes to historical interaction data",
+      "type": "add_connection",
+      "content": "Use the governed BigQuery history to calculate agreed offline quality and experiment outcomes. Preserve the event and model-version lineage used for each result so comparisons remain interpretable after model updates.",
+      "connection": {
+        "edgeId": "recs_edge_bigquery_analytics",
+        "sourceNodeId": "recs_bigquery",
+        "targetNodeId": "recs_quality_analytics",
+        "connectionType": "offline-quality-analysis",
+        "label": "Historical outcomes and exposures",
+        "description": "Analytics joins governed history with model and experiment versions for offline evaluation."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "recs_44_service_monitoring",
+      "stepNumber": 44,
+      "phase": "Experiment, observe, and define acceptance evidence",
+      "title": "Observe serving health separately from model quality",
+      "type": "add_component",
+      "content": "Use the existing monitoring component for request latency, errors, dependency health, cache behavior, and capacity signals. Keep operational health distinct from offline relevance and experiment outcome analytics.",
+      "component": {
+        "nodeId": "recs_monitoring",
+        "componentType": "monitoring",
+        "label": "Recommendation Service Monitoring",
+        "description": "Operational health of the online and event-processing paths",
+        "position": {"x": 1800, "y": 500},
+        "properties": {
+          "componentName": "Recommendation Service Monitoring",
+          "purpose": "Observe API latency and errors, model and feature dependencies, cache behavior, event-processing health, and measured capacity. Do not treat infrastructure health as proof of recommendation quality."
+        },
+        "highlightReason": "The existing monitoring component covers operational metrics without conflating them with product-quality analytics."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:7"]
+    },
+    {
+      "id": "recs_45_api_telemetry",
+      "stepNumber": 45,
+      "phase": "Experiment, observe, and define acceptance evidence",
+      "title": "Trace the full online prediction path",
+      "type": "add_connection",
+      "content": "Instrument the gateway-to-response path and its cache, feature, recommender, and model dependencies. Use the agreed latency boundary and cohort labels while excluding sensitive event payloads from operational logs.",
+      "connection": {
+        "edgeId": "recs_edge_api_monitoring",
+        "sourceNodeId": "recs_cloud_run_api",
+        "targetNodeId": "recs_monitoring",
+        "connectionType": "serving-telemetry",
+        "label": "Request latency and dependency health",
+        "description": "The online service exports operational signals for the complete prediction path."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1"]
+    },
+    {
+      "id": "recs_46_pipeline_telemetry",
+      "stepNumber": 46,
+      "phase": "Experiment, observe, and define acceptance evidence",
+      "title": "Observe event lag and data quality",
+      "type": "add_connection",
+      "content": "Export event backlog age, processing failures, duplicate and late-event counts, and feature freshness. Define operational thresholds only after the pipeline is measured against the event-volume and product freshness needs.",
+      "connection": {
+        "edgeId": "recs_edge_dataflow_monitoring",
+        "sourceNodeId": "recs_dataflow",
+        "targetNodeId": "recs_monitoring",
+        "connectionType": "pipeline-telemetry",
+        "label": "Event lag and feature freshness",
+        "description": "Dataflow reports processing health and freshness signals for operational response."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:4"]
+    },
+    {
+      "id": "recs_47_ctr_evaluation",
+      "stepNumber": 47,
+      "phase": "Experiment, observe, and define acceptance evidence",
+      "title": "Treat the 20% click-through goal as an experiment outcome",
+      "type": "decision_point",
+      "content": "The brief asks to improve click-through rate by 20% but gives no baseline, denominator, attribution window, eligible population, or guardrails. Predefine those with the product team and compare a controlled experiment with a valid baseline. Do not claim the target is achieved from recommendation clicks alone if exposure, downstream outcomes, or user experience are not accounted for.",
+      "decision": {
+        "question": "What evidence would support the stated click-through improvement goal?",
+        "chosen": "Use a product-approved controlled experiment with consistent exposure logging, a declared baseline and denominator, and reviewable outcome and user-experience guardrails.",
+        "chosenReason": "The brief states a goal, not an observed result or measurement method; controlled attribution makes the result auditable.",
+        "alternatives": [
+          {"option": "Compare raw clicks before and after launch", "tradeoff": "Easy to calculate but confounded by traffic, placement, seasonality, and user mix."},
+          {"option": "Optimize only offline ranking metrics", "tradeoff": "Useful during training but does not establish the requested online click-through improvement."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "recs_quality_analytics",
+        "properties": {"purpose": "Analyze governed recommendation exposures, user outcomes, and model quality with predeclared experiment definitions. Evaluate the stated 20% click-through improvement goal against an agreed baseline, denominator, attribution, and user-experience guardrails; report results as measured evidence."}
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "recs_48_online_capacity_gate",
+      "stepNumber": 48,
+      "phase": "Experiment, observe, and define acceptance evidence",
+      "title": "Validate the active-user and request-latency targets",
+      "type": "scale_trigger",
+      "content": "Load-test a representative workload that supports the stated 1M+ active-user target while measuring the agreed end-to-end recommendation latency. The brief does not specify concurrent-user behavior, request rate, cohort mix, or geographic distribution, so capacity must be derived from workload evidence rather than from an invented traffic multiplier.",
+      "scaleTrigger": {
+        "metric": "Active users, observed request arrival and concurrency, end-to-end recommendation latency, cache hit behavior, feature-store latency, and model endpoint saturation",
+        "action": "Scale the Cloud Run and model-serving capacity from measured workload and dependency saturation, and retest the complete API path against the agreed under-100ms contract.",
+        "impact": "Tests whether the serving design supports 1M+ active users and Recommendation latency under 100ms; neither target is claimed as achieved."
+      },
+      "componentUpdate": {
+        "nodeId": "recs_cloud_run_api",
+        "properties": {"purpose": "Validate prediction requests, obtain the assigned experiment arm and relevant online features, invoke the selected recommender, and return ranked results through the API. Scale from measured active-user workload and dependency saturation; verify the agreed end-to-end latency contract."}
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "recs_49_event_training_capacity",
+      "stepNumber": 49,
+      "phase": "Experiment, observe, and define acceptance evidence",
+      "title": "Validate daily event processing and training cost together",
+      "type": "scale_trigger",
+      "content": "Exercise the stated 100M+ daily event target with realistic event shape and processing behavior. Observe backlog, feature freshness, training work, and spend; choose worker and update capacity from measured throughput and the approved research budget. The brief does not specify a freshness deadline or cost ceiling.",
+      "scaleTrigger": {
+        "metric": "Daily event volume, oldest-event age, processing throughput, feature freshness, queued model-update work, and measured training and storage cost",
+        "action": "Adjust Dataflow and training capacity from observed backlog and job cost, isolate failed partitions for replay, and compare model freshness needs with the approved budget.",
+        "impact": "Provides evidence for processing 100M+ events daily and keeping model training cost-effective without inventing a freshness SLO or spend threshold."
+      },
+      "componentUpdate": {
+        "nodeId": "recs_model_update_queue",
+        "properties": {"purpose": "Buffer model-update requests independently of online prediction traffic. Adjust processing and training capacity from observed event backlog, feature freshness needs, and the approved budget; keep failures replayable without blocking recommendations."}
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "recs_50_review_evidence",
+      "stepNumber": 50,
+      "phase": "Experiment, observe, and define acceptance evidence",
+      "title": "Review claims against measured evidence",
+      "type": "explanation",
+      "content": "Before treating this design as ready, demonstrate the agreed under-100ms end-to-end recommendation measurement, capacity evidence for 1M+ active users, processing evidence for 100M+ events daily, and a controlled experiment evaluating the 20% click-through goal. Also show that behavior events and features are governed, cold-start behavior is product-approved, the selected model supports incremental updates, model promotion is reversible, and training cost is measured against the approved budget. This file is a local review draft; none of these performance or outcome targets is represented as achieved.",
+      "requirementIds": [
+        "legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4",
+        "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8",
+        "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"
+      ]
+    }
+  ]
+}

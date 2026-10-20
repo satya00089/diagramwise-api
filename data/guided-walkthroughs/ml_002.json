@@ -1,0 +1,1065 @@
+{
+  "problem_id": "ml_002",
+  "version": "1.0.0-review-draft",
+  "totalSteps": 44,
+  "phases": [
+    {
+      "name": "Frame the prediction problem",
+      "stepRange": [
+        1,
+        3
+      ],
+      "description": "Separate supplied targets from the operating definitions and labels that must be agreed before claiming predictive value."
+    },
+    {
+      "name": "Ingest and prepare time-series data",
+      "stepRange": [
+        4,
+        12
+      ],
+      "description": "Preserve device identity, event time, ordering, and raw history while keeping the continuous path streaming."
+    },
+    {
+      "name": "Train and qualify models",
+      "stepRange": [
+        13,
+        30
+      ],
+      "description": "Build leakage-aware training and explicit gates for RUL, anomalies, and failure modes before registering artifacts."
+    },
+    {
+      "name": "Close the maintenance feedback loop",
+      "stepRange": [
+        31,
+        42
+      ],
+      "description": "Turn bounded model outputs into explainable health state, work orders, dashboards, and operational signals."
+    },
+    {
+      "name": "Validate and scale",
+      "stepRange": [
+        43,
+        44
+      ],
+      "description": "Treat prompt thresholds as acceptance targets that must be measured on representative equipment and operating conditions."
+    }
+  ],
+  "steps": [
+    {
+      "id": "pm_frame_brief",
+      "stepNumber": 1,
+      "phase": "Frame the prediction problem",
+      "title": "Read the frozen brief before choosing a model",
+      "type": "explanation",
+      "content": "Design a Predictive Maintenance System. Design an ML system that predicts equipment failures before they occur using sensor data, time-series analysis, and anomaly detection, enabling proactive maintenance scheduling. Functional requirements: Ingest real-time sensor data from equipment; Extract features from time-series signals; Predict remaining useful life (RUL); Detect anomalous equipment behavior; Classify failure modes; Generate maintenance work orders; Track equipment health scores over time; Provide dashboards for maintenance teams. Non-functional constraints: Prediction accuracy above 90% for critical failures; False alarm rate below 5%; Predict failures at least 24 hours in advance; Handle 10k+ sensors streaming data continuously; Process sensor data with under 1-minute delay. Hints: Use LSTM or Transformer models for time-series; Implement survival analysis for RUL prediction; Use isolation forests for anomaly detection; Extract statistical features (mean, std, FFT); Implement sliding window approach for feature extraction; Use Apache Kafka for sensor data ingestion. These are prompt facts and candidate techniques, not evidence that a particular model will meet the targets."
+    },
+    {
+      "id": "pm_assumptions",
+      "stepNumber": 2,
+      "phase": "Frame the prediction problem",
+      "title": "Ask for the operating definitions",
+      "type": "explanation",
+      "content": "Clarify sensor sampling rates, equipment identities, clock quality, failure-label source, maintenance history, failure-mode taxonomy, fleet mix, and whether assets may be taken offline. Define what counts as a critical failure, the denominator and evaluation window for false alarms, and when the 24-hour lead-time clock starts. None of these is supplied. Preserve raw readings and event timestamps so later evaluations can be reconstructed; do not claim 90% accuracy or a sub-minute end-to-end result from this diagram alone."
+    },
+    {
+      "id": "pm_decide_stream",
+      "stepNumber": 3,
+      "phase": "Frame the prediction problem",
+      "title": "Keep streaming inference distinct from historical training",
+      "type": "decision_point",
+      "content": "A streaming path is necessary because the prompt requires continuous sensors and under-one-minute processing; historical replay remains a separate training/evaluation path.",
+      "decision": {
+        "question": "Should the platform wait for large batch windows before evaluating equipment?",
+        "chosen": "Use a streaming ingest and feature path, with batch history reserved for training and backfill.",
+        "chosenReason": "Batch-only processing would make the stated continuous-ingestion and under-one-minute targets difficult to meet; asynchronous archival and training keep heavier work off the scoring path.",
+        "alternatives": [
+          {
+            "option": "Batch-only polling",
+            "tradeoff": "Simpler operations, but detection latency depends on the batch interval and can violate the prompt target."
+          },
+          {
+            "option": "Stream every event directly into model training",
+            "tradeoff": "Couples online latency and training workloads and makes reproducible evaluation harder."
+          }
+        ]
+      }
+    },
+    {
+      "id": "pm_sensor_adapter",
+      "stepNumber": 4,
+      "phase": "Ingest and prepare time-series data",
+      "title": "Normalize equipment telemetry at the boundary",
+      "type": "add_component",
+      "content": "Use a catalog custom component because the catalog has no equipment-sensor gateway. Normalize equipment ID, sensor ID, units, event time, sequence, and schema version without discarding vendor-specific payloads.",
+      "component": {
+        "nodeId": "pm_sensor_adapter",
+        "componentType": "custom-component",
+        "label": "Equipment Sensor Adapters",
+        "description": "Normalizes continuous readings from heterogeneous equipment.",
+        "position": {
+          "x": 80,
+          "y": 220
+        },
+        "properties": {
+          "componentName": "Equipment Sensor Adapters",
+          "componentType": "Telemetry Adapter",
+          "technology": "Equipment protocols",
+          "purpose": "Normalize equipment and sensor identity, units, event timestamps, sequence numbers, and schema versions while retaining source provenance."
+        },
+        "highlightReason": "The prompt starts with real-time sensor data, but device protocols and clock behavior are unspecified."
+      },
+      "requirementIds": [
+        "legacy-requirement:1"
+      ]
+    },
+    {
+      "id": "pm_broker",
+      "stepNumber": 5,
+      "phase": "Ingest and prepare time-series data",
+      "title": "Buffer and partition the continuous stream",
+      "type": "add_component",
+      "content": "Use the existing message-broker type (Kafka is one hinted option) to absorb bursts, retain events for replay, and partition by a key that preserves useful per-equipment ordering. Choose partition count only after measuring throughput and ordering needs.",
+      "component": {
+        "nodeId": "pm_broker",
+        "componentType": "message-broker",
+        "label": "Telemetry Event Stream",
+        "description": "Durable partitioned transport for equipment events.",
+        "position": {
+          "x": 360,
+          "y": 220
+        },
+        "properties": {
+          "componentName": "Telemetry Event Stream",
+          "purpose": "Buffer continuous equipment telemetry for streaming consumers and reproducible replay; partitioning and retention are sized from measured event rates."
+        },
+        "highlightReason": "10k+ continuously streaming sensors call for an ingestion boundary that can absorb bursts and decouple consumers."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "pm_edge_sensor_broker",
+      "stepNumber": 6,
+      "phase": "Ingest and prepare time-series data",
+      "title": "Publish normalized readings durably",
+      "type": "add_connection",
+      "content": "Attach source identity and event-time metadata before publishing. Use idempotency or sequence checks in consumers because delivery may be retried; do not assume the transport alone provides end-to-end exactly-once effects.",
+      "connection": {
+        "edgeId": "pm_sensor_to_broker",
+        "sourceNodeId": "pm_sensor_adapter",
+        "targetNodeId": "pm_broker",
+        "connectionType": "event-stream",
+        "label": "Normalized telemetry",
+        "description": "Continuous sensor events with equipment identity, event time, units, and replayable source metadata."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "pm_stream_processor",
+      "stepNumber": 7,
+      "phase": "Ingest and prepare time-series data",
+      "title": "Compute rolling windows without waiting for batch jobs",
+      "type": "add_component",
+      "content": "Use event-time windows, late-event handling, and state keyed by equipment. Extract the requested statistical and frequency-domain features only where sensors and sampling rates support them; sliding-window size and allowed lateness need workload and domain review.",
+      "component": {
+        "nodeId": "pm_stream_processor",
+        "componentType": "stream-processor",
+        "label": "Time-Series Feature Processor",
+        "description": "Builds event-time windows and low-latency features.",
+        "position": {
+          "x": 650,
+          "y": 220
+        },
+        "properties": {
+          "componentName": "Time-Series Feature Processor",
+          "engine": "Apache Flink",
+          "windowing": true,
+          "stateful": true,
+          "purpose": "Validate timestamps and units, handle late readings, and compute versioned sliding-window statistics and supported signal features for online scoring."
+        },
+        "highlightReason": "Continuous signals must become consistent features while meeting the prompt's under-one-minute processing target."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "pm_edge_broker_stream",
+      "stepNumber": 8,
+      "phase": "Ingest and prepare time-series data",
+      "title": "Consume by equipment key and event time",
+      "type": "add_connection",
+      "content": "Monitor broker lag and event age separately. A low consumer lag does not prove that the end-to-end sensor-to-feature delay is below one minute.",
+      "connection": {
+        "edgeId": "pm_broker_to_stream",
+        "sourceNodeId": "pm_broker",
+        "targetNodeId": "pm_stream_processor",
+        "connectionType": "event-stream",
+        "label": "Ordered event partitions",
+        "description": "Streaming consumers process equipment-keyed partitions and expose lag and event-time delay."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "pm_raw_store",
+      "stepNumber": 9,
+      "phase": "Ingest and prepare time-series data",
+      "title": "Retain an immutable source for replay",
+      "type": "add_component",
+      "content": "Store raw or minimally normalized events with schema version and ingestion metadata. Retention, privacy, and compression are open requirements; avoid treating the object store as the low-latency feature-serving path.",
+      "component": {
+        "nodeId": "pm_raw_store",
+        "componentType": "object-storage",
+        "label": "Raw Telemetry Archive",
+        "description": "Replayable history for labeling, training, and audits.",
+        "position": {
+          "x": 650,
+          "y": 500
+        },
+        "properties": {
+          "componentName": "Raw Telemetry Archive",
+          "provider": "S3",
+          "versioning": true,
+          "checksumValidation": true,
+          "purpose": "Retain source readings and schema versions for replay, label corrections, temporal validation, and audit; retention is to be agreed."
+        },
+        "highlightReason": "Predictive models require reproducible historical windows and corrected labels, not only transient stream state."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:3",
+        "legacy-requirement:5"
+      ]
+    },
+    {
+      "id": "pm_edge_stream_archive",
+      "stepNumber": 10,
+      "phase": "Ingest and prepare time-series data",
+      "title": "Archive the same source events asynchronously",
+      "type": "add_connection",
+      "content": "The archive branch must not block online feature computation. Include event-time and schema metadata so backtests can reconstruct exactly what was known at each prediction time.",
+      "connection": {
+        "edgeId": "pm_stream_to_archive",
+        "sourceNodeId": "pm_stream_processor",
+        "targetNodeId": "pm_raw_store",
+        "connectionType": "data-flow",
+        "label": "Raw replay records",
+        "description": "Asynchronous durable archive of source events and processing metadata."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:3",
+        "legacy-requirement:5"
+      ]
+    },
+    {
+      "id": "pm_feature_store",
+      "stepNumber": 11,
+      "phase": "Ingest and prepare time-series data",
+      "title": "Version features shared by training and serving",
+      "type": "add_component",
+      "content": "Keep feature definitions, units, windows, and transformation versions explicit. The catalog's Feature Store is a generic building block; the online/offline materialization implementation still needs to be selected and validated.",
+      "component": {
+        "nodeId": "pm_feature_store",
+        "componentType": "feature-store",
+        "label": "Equipment Feature Store",
+        "description": "Versioned equipment features for model development and scoring.",
+        "position": {
+          "x": 950,
+          "y": 220
+        },
+        "properties": {
+          "componentName": "Equipment Feature Store",
+          "platform": "Feast",
+          "purpose": "Define versioned time-series features, units, entity keys, and window semantics shared by training and online inference; platform choice is a proposal to validate."
+        },
+        "highlightReason": "A shared feature contract reduces train/serve skew and supports reproducible RUL and anomaly inputs."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5"
+      ]
+    },
+    {
+      "id": "pm_edge_stream_features",
+      "stepNumber": 12,
+      "phase": "Ingest and prepare time-series data",
+      "title": "Publish current feature values",
+      "type": "add_connection",
+      "content": "Write feature values with entity, event time, transformation version, and freshness metadata. The prompt does not specify acceptable staleness or online-store technology; measure end-to-end age against the under-one-minute target.",
+      "connection": {
+        "edgeId": "pm_stream_to_features",
+        "sourceNodeId": "pm_stream_processor",
+        "targetNodeId": "pm_feature_store",
+        "connectionType": "data-flow",
+        "label": "Versioned rolling features",
+        "description": "Current feature values and their event-time and transformation provenance."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "pm_training",
+      "stepNumber": 13,
+      "phase": "Train and qualify models",
+      "title": "Train on time-respecting windows and verified labels",
+      "type": "add_component",
+      "content": "Train separate or multi-task candidates for RUL, anomaly scoring, and failure modes. Compare hinted sequence models and survival analysis with simpler baselines; split by time and, where needed, by equipment/site to reduce leakage.",
+      "component": {
+        "nodeId": "pm_training",
+        "componentType": "model-training",
+        "label": "Temporal Model Training",
+        "description": "Builds predictive-maintenance models from replayable windows.",
+        "position": {
+          "x": 1250,
+          "y": 500
+        },
+        "properties": {
+          "componentName": "Temporal Model Training",
+          "computeType": "GPU",
+          "purpose": "Train and compare temporal baselines and candidate sequence or survival models using versioned features, label provenance, and time-ordered splits."
+        },
+        "highlightReason": "RUL, anomaly detection, and failure-mode classification are distinct outcomes and need separately measured objectives."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "pm_edge_archive_training",
+      "stepNumber": 14,
+      "phase": "Train and qualify models",
+      "title": "Reconstruct historical examples without future leakage",
+      "type": "add_connection",
+      "content": "Join labels and maintenance events using only information available at the prediction timestamp. Keep corrected-label versions and data lineage with each training run.",
+      "connection": {
+        "edgeId": "pm_archive_to_training",
+        "sourceNodeId": "pm_raw_store",
+        "targetNodeId": "pm_training",
+        "connectionType": "data-flow",
+        "label": "Temporal training history",
+        "description": "Replayable sensor windows, event-time metadata, and versioned failure and maintenance labels."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "pm_edge_features_training",
+      "stepNumber": 15,
+      "phase": "Train and qualify models",
+      "title": "Train from the online feature contract",
+      "type": "add_connection",
+      "content": "Use the same feature definitions and transformation versions as serving, while reconstructing historical values as of each event time. Persist the dataset and feature version identifiers with the run.",
+      "connection": {
+        "edgeId": "pm_features_to_training",
+        "sourceNodeId": "pm_feature_store",
+        "targetNodeId": "pm_training",
+        "connectionType": "data-flow",
+        "label": "Versioned training features",
+        "description": "Time-correct feature values using the shared feature contract."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5"
+      ]
+    },
+    {
+      "id": "pm_validation_gate",
+      "stepNumber": 16,
+      "phase": "Train and qualify models",
+      "title": "Make target metrics promotion gates, not promises",
+      "type": "add_component",
+      "content": "Use a custom evaluation gate because no catalog node represents the domain-specific acceptance criteria. Evaluate critical-failure performance and false alarms on temporal holdouts, with confidence intervals and slices by equipment, site, and failure mode where data permits.",
+      "component": {
+        "nodeId": "pm_validation_gate",
+        "componentType": "custom-component",
+        "label": "Temporal Model Evaluation Gate",
+        "description": "Qualifies models against defined maintenance metrics before registration.",
+        "position": {
+          "x": 1550,
+          "y": 500
+        },
+        "properties": {
+          "componentName": "Temporal Model Evaluation Gate",
+          "componentType": "Model Evaluation",
+          "technology": "Temporal holdout evaluation",
+          "purpose": "Measure critical-failure prediction accuracy, false-alarm rate, lead time, and subgroup behavior against owner-defined denominators and prompt targets; fail promotion when evidence is insufficient."
+        },
+        "highlightReason": "The 90% accuracy and below-5% false-alarm thresholds are acceptance criteria, not guaranteed properties of a model family."
+      },
+      "requirementIds": [
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "pm_edge_training_gate",
+      "stepNumber": 17,
+      "phase": "Train and qualify models",
+      "title": "Gate every candidate on held-out evidence",
+      "type": "add_connection",
+      "content": "The evaluation contract must state the critical-failure denominator, alarm grouping window, minimum sample size, confidence interval, and lead-time measurement. Those definitions are clarifying questions, not supplied facts.",
+      "connection": {
+        "edgeId": "pm_training_to_gate",
+        "sourceNodeId": "pm_training",
+        "targetNodeId": "pm_validation_gate",
+        "connectionType": "data-flow",
+        "label": "Candidate and holdout evidence",
+        "description": "Versioned model, temporal split, metrics, and subgroup reports for promotion review."
+      },
+      "requirementIds": [
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "pm_registry",
+      "stepNumber": 18,
+      "phase": "Train and qualify models",
+      "title": "Register artifacts with complete provenance",
+      "type": "add_component",
+      "content": "Store model artifacts and metadata only after evaluation. Include training data and feature versions, label snapshot, code/config digest, evaluation report, and lifecycle status so a deployed model can be traced and rolled back.",
+      "component": {
+        "nodeId": "pm_registry",
+        "componentType": "model-registry",
+        "label": "Maintenance Model Registry",
+        "description": "Versions qualified RUL, anomaly, and failure-mode artifacts.",
+        "position": {
+          "x": 1830,
+          "y": 500
+        },
+        "properties": {
+          "componentName": "Maintenance Model Registry",
+          "platform": "MLflow",
+          "purpose": "Version model artifacts and evaluation evidence, record dataset and feature lineage, and retain the exact approved artifact for deployment or rollback."
+        },
+        "highlightReason": "Reproducible maintenance decisions require knowing which model and data produced each score."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5"
+      ]
+    },
+    {
+      "id": "pm_edge_gate_registry",
+      "stepNumber": 19,
+      "phase": "Train and qualify models",
+      "title": "Promote only an evaluated model version",
+      "type": "add_connection",
+      "content": "The registry must reject candidates without an attached evaluation report and approval state. Do not route raw training output directly to the online scorer.",
+      "connection": {
+        "edgeId": "pm_gate_to_registry",
+        "sourceNodeId": "pm_validation_gate",
+        "targetNodeId": "pm_registry",
+        "connectionType": "api-call",
+        "label": "Qualified artifact and report",
+        "description": "Only candidates that pass the agreed temporal evaluation contract are registered for deployment."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "pm_rul_model",
+      "stepNumber": 20,
+      "phase": "Train and qualify models",
+      "title": "Represent useful-life estimation explicitly",
+      "type": "add_component",
+      "content": "Treat remaining useful life as a prediction distribution or calibrated interval where possible, not a falsely precise countdown. The target is at least 24 hours of advance prediction; calibration and censoring behavior need domain review.",
+      "component": {
+        "nodeId": "pm_rul_model",
+        "componentType": "ml-model",
+        "label": "Remaining Useful Life Model",
+        "description": "Estimates time-to-failure from time-series features.",
+        "position": {
+          "x": 2120,
+          "y": 270
+        },
+        "properties": {
+          "componentName": "Remaining Useful Life Model",
+          "modelType": "Regression",
+          "framework": "PyTorch",
+          "purpose": "Estimate RUL from versioned time-series features and expose uncertainty and model version for maintenance decisions."
+        },
+        "highlightReason": "RUL is an explicit requirement, and lead time matters as much as point-error metrics."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "pm_edge_registry_rul",
+      "stepNumber": 21,
+      "phase": "Train and qualify models",
+      "title": "Deploy the approved RUL artifact",
+      "type": "add_connection",
+      "content": "Pin the serving model to an immutable registry version. A rollback changes the selected artifact version, not the historic predictions already used for work orders.",
+      "connection": {
+        "edgeId": "pm_registry_to_rul",
+        "sourceNodeId": "pm_registry",
+        "targetNodeId": "pm_rul_model",
+        "connectionType": "data-flow",
+        "label": "Approved RUL artifact",
+        "description": "Versioned regression or survival model with its evaluation and provenance metadata."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "pm_anomaly_model",
+      "stepNumber": 22,
+      "phase": "Train and qualify models",
+      "title": "Keep anomaly scoring separate from failure probability",
+      "type": "add_component",
+      "content": "An anomaly score indicates unusual behavior; it is not automatically a probability of failure. Use a threshold policy calibrated against reviewed events and monitor the resulting alarm burden.",
+      "component": {
+        "nodeId": "pm_anomaly_model",
+        "componentType": "ml-model",
+        "label": "Equipment Anomaly Model",
+        "description": "Flags unusual sensor patterns for evaluation and triage.",
+        "position": {
+          "x": 2120,
+          "y": 500
+        },
+        "properties": {
+          "componentName": "Equipment Anomaly Model",
+          "modelType": "Anomaly Detection",
+          "framework": "Scikit-learn",
+          "purpose": "Score unusual time-series behavior and emit model version, contributing signals, and calibrated threshold context; an anomaly is not itself a failure diagnosis."
+        },
+        "highlightReason": "The prompt calls for anomaly detection, while the below-5% false-alarm target needs a defined operational denominator."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-constraint:2"
+      ]
+    },
+    {
+      "id": "pm_edge_registry_anomaly",
+      "stepNumber": 23,
+      "phase": "Train and qualify models",
+      "title": "Serve a versioned anomaly detector",
+      "type": "add_connection",
+      "content": "Persist threshold calibration and reviewed-label evidence with the artifact. Recheck alarm rates after changes in equipment mix or sensor firmware.",
+      "connection": {
+        "edgeId": "pm_registry_to_anomaly",
+        "sourceNodeId": "pm_registry",
+        "targetNodeId": "pm_anomaly_model",
+        "connectionType": "data-flow",
+        "label": "Approved anomaly artifact",
+        "description": "Versioned anomaly model plus its calibration, evaluation, and rollback identity."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-constraint:2"
+      ]
+    },
+    {
+      "id": "pm_failure_model",
+      "stepNumber": 24,
+      "phase": "Train and qualify models",
+      "title": "Classify known failure modes with uncertainty",
+      "type": "add_component",
+      "content": "Train classification only for failure modes with sufficiently reliable labels. Preserve an unknown/other outcome and show confidence so the maintenance policy can route ambiguous cases to human review.",
+      "component": {
+        "nodeId": "pm_failure_model",
+        "componentType": "ml-model",
+        "label": "Failure-Mode Classifier",
+        "description": "Classifies supported failure categories from time-series evidence.",
+        "position": {
+          "x": 2120,
+          "y": 730
+        },
+        "properties": {
+          "componentName": "Failure-Mode Classifier",
+          "modelType": "Classification",
+          "framework": "XGBoost",
+          "purpose": "Classify only the agreed failure taxonomy, emit confidence and unknown outcomes, and retain feature/model provenance for review."
+        },
+        "highlightReason": "Failure-mode classification is separate from RUL and anomaly detection and depends on the quality of the labeled taxonomy."
+      },
+      "requirementIds": [
+        "legacy-requirement:5"
+      ]
+    },
+    {
+      "id": "pm_edge_registry_classifier",
+      "stepNumber": 25,
+      "phase": "Train and qualify models",
+      "title": "Bind failure labels to the approved taxonomy",
+      "type": "add_connection",
+      "content": "Version the failure taxonomy with training and inference. If the taxonomy changes, do not silently reinterpret historical scores.",
+      "connection": {
+        "edgeId": "pm_registry_to_classifier",
+        "sourceNodeId": "pm_registry",
+        "targetNodeId": "pm_failure_model",
+        "connectionType": "data-flow",
+        "label": "Approved classification artifact",
+        "description": "Versioned classifier, taxonomy, confidence behavior, and evaluation record."
+      },
+      "requirementIds": [
+        "legacy-requirement:5"
+      ]
+    },
+    {
+      "id": "pm_model_serving",
+      "stepNumber": 26,
+      "phase": "Train and qualify models",
+      "title": "Put an inference boundary in front of the models",
+      "type": "add_component",
+      "content": "Use one serving boundary to resolve the approved model versions, apply the matching feature contract, and return versioned outputs. Size concurrency and hardware only after measuring model cost and sensor rates.",
+      "component": {
+        "nodeId": "pm_model_serving",
+        "componentType": "model-serving",
+        "label": "Maintenance Inference Service",
+        "description": "Scores fresh equipment features with approved model versions.",
+        "position": {
+          "x": 2410,
+          "y": 500
+        },
+        "properties": {
+          "componentName": "Maintenance Inference Service",
+          "platform": "KServe",
+          "autoscaling": true,
+          "purpose": "Score fresh, versioned equipment features with the approved RUL, anomaly, and failure-mode artifacts; return freshness, confidence, and model version."
+        },
+        "highlightReason": "Inference must be separated from training and return auditable outputs to the maintenance policy."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-constraint:3",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "pm_edge_rul_serving",
+      "stepNumber": 27,
+      "phase": "Train and qualify models",
+      "title": "Include RUL in the online score response",
+      "type": "add_connection",
+      "content": "Measure lead time from the first qualifying prediction to the labeled failure using an agreed rule; a sub-minute processing delay does not establish a 24-hour prediction horizon.",
+      "connection": {
+        "edgeId": "pm_rul_to_serving",
+        "sourceNodeId": "pm_rul_model",
+        "targetNodeId": "pm_model_serving",
+        "connectionType": "data-flow",
+        "label": "RUL score and uncertainty",
+        "description": "Approved RUL model output with calibration, feature freshness, and model version."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "pm_edge_anomaly_serving",
+      "stepNumber": 28,
+      "phase": "Train and qualify models",
+      "title": "Include anomaly signals in the response",
+      "type": "add_connection",
+      "content": "Keep anomaly threshold and score semantics visible to downstream policy and review tools so operators can distinguish unusual behavior from a confirmed fault.",
+      "connection": {
+        "edgeId": "pm_anomaly_to_serving",
+        "sourceNodeId": "pm_anomaly_model",
+        "targetNodeId": "pm_model_serving",
+        "connectionType": "data-flow",
+        "label": "Anomaly score and evidence",
+        "description": "Calibrated anomaly output with feature provenance and model identity."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-constraint:2"
+      ]
+    },
+    {
+      "id": "pm_edge_classifier_serving",
+      "stepNumber": 29,
+      "phase": "Train and qualify models",
+      "title": "Return a taxonomy-versioned failure mode",
+      "type": "add_connection",
+      "content": "Include confidence, unknown-category handling, and the taxonomy version. A downstream policy should not generate a specific repair action from an unsupported or low-confidence label.",
+      "connection": {
+        "edgeId": "pm_classifier_to_serving",
+        "sourceNodeId": "pm_failure_model",
+        "targetNodeId": "pm_model_serving",
+        "connectionType": "data-flow",
+        "label": "Failure mode and confidence",
+        "description": "Taxonomy-versioned classification output with uncertainty and provenance."
+      },
+      "requirementIds": [
+        "legacy-requirement:5"
+      ]
+    },
+    {
+      "id": "pm_lifecycle_explanation",
+      "stepNumber": 30,
+      "phase": "Train and qualify models",
+      "title": "Separate an alert from an approved maintenance action",
+      "type": "explanation",
+      "content": "Model scores are evidence for a maintenance policy, not direct commands to equipment. Keep the policy, work-order creation, and operator acknowledgement auditable; use human review for uncertain or safety-critical decisions."
+    },
+    {
+      "id": "pm_policy",
+      "stepNumber": 31,
+      "phase": "Close the maintenance feedback loop",
+      "title": "Apply an explicit maintenance policy",
+      "type": "add_component",
+      "content": "Combine RUL, anomaly evidence, failure mode, freshness, and asset criticality under owner-approved rules. Do not invent intervention thresholds or auto-shutdown behavior; those require safety and operations approval.",
+      "component": {
+        "nodeId": "pm_policy",
+        "componentType": "custom-component",
+        "label": "Maintenance Decision Policy",
+        "description": "Combines model outputs with approved operational rules.",
+        "position": {
+          "x": 2700,
+          "y": 500
+        },
+        "properties": {
+          "componentName": "Maintenance Decision Policy",
+          "componentType": "Decision Service",
+          "technology": "Versioned rules and human review",
+          "purpose": "Apply approved asset-specific thresholds to RUL, anomaly evidence, failure mode, and freshness; fail closed on stale or incomplete evidence, route uncertain cases to review, and record the reason for every action."
+        },
+        "highlightReason": "Prediction must become a safe, explainable maintenance decision without treating model output as an actuator command."
+      },
+      "requirementIds": [
+        "legacy-requirement:6",
+        "legacy-constraint:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "pm_edge_serving_policy",
+      "stepNumber": 32,
+      "phase": "Close the maintenance feedback loop",
+      "title": "Pass versioned evidence to the policy",
+      "type": "add_connection",
+      "content": "Carry score, confidence, feature timestamp, model version, asset identity, and idempotency key. The policy should reject stale or incomplete evidence rather than creating duplicate work.",
+      "connection": {
+        "edgeId": "pm_serving_to_policy",
+        "sourceNodeId": "pm_model_serving",
+        "targetNodeId": "pm_policy",
+        "connectionType": "api-call",
+        "label": "Versioned maintenance evidence",
+        "description": "Fresh RUL, anomaly, and failure-mode outputs with confidence and provenance."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-constraint:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "pm_health_store",
+      "stepNumber": 33,
+      "phase": "Close the maintenance feedback loop",
+      "title": "Keep a time-indexed health history",
+      "type": "add_component",
+      "content": "Persist predictions, observed measurements, maintenance events, model version, and acknowledgement status over time. The prompt does not specify database retention or consistency targets; keep current status and immutable history distinguishable.",
+      "component": {
+        "nodeId": "pm_health_store",
+        "componentType": "database",
+        "label": "Equipment Health History",
+        "description": "Time-indexed scores, events, and maintenance outcomes.",
+        "position": {
+          "x": 2990,
+          "y": 500
+        },
+        "properties": {
+          "componentName": "Equipment Health History",
+          "type": "Time-Series",
+          "workload": "Hybrid",
+          "purpose": "Store time-indexed health scores, predictions, model and feature versions, reviewed failures, and maintenance outcomes for trend views and evaluation."
+        },
+        "highlightReason": "Health scores must be tracked over time and later compared with actual outcomes."
+      },
+      "requirementIds": [
+        "legacy-requirement:7"
+      ]
+    },
+    {
+      "id": "pm_edge_policy_health",
+      "stepNumber": 34,
+      "phase": "Close the maintenance feedback loop",
+      "title": "Persist each decision and its outcome",
+      "type": "add_connection",
+      "content": "Use idempotent writes keyed by equipment, event/prediction time, and decision version. Preserve corrections rather than rewriting prior model output silently.",
+      "connection": {
+        "edgeId": "pm_policy_to_health",
+        "sourceNodeId": "pm_policy",
+        "targetNodeId": "pm_health_store",
+        "connectionType": "database-connection",
+        "label": "Health and decision history",
+        "description": "Append predictions, policy decisions, operator actions, and eventual outcomes with provenance."
+      },
+      "requirementIds": [
+        "legacy-requirement:7"
+      ]
+    },
+    {
+      "id": "pm_cmms_adapter",
+      "stepNumber": 35,
+      "phase": "Close the maintenance feedback loop",
+      "title": "Integrate with the work-order system",
+      "type": "add_component",
+      "content": "Use an adapter for the existing CMMS/EAM rather than hard-coding a vendor. Include idempotency, asset mapping, retry/dead-letter handling, and a status callback so the platform can reconcile created, rejected, and completed work orders.",
+      "component": {
+        "nodeId": "pm_cmms_adapter",
+        "componentType": "custom-component",
+        "label": "CMMS Work-Order Adapter",
+        "description": "Creates and reconciles maintenance work orders with existing operations tools.",
+        "position": {
+          "x": 2990,
+          "y": 760
+        },
+        "properties": {
+          "componentName": "CMMS Work-Order Adapter",
+          "componentType": "External System Adapter",
+          "technology": "CMMS/EAM API",
+          "purpose": "Map equipment and approved maintenance decisions to an existing CMMS/EAM, create idempotent work orders, and reconcile downstream status and failures."
+        },
+        "highlightReason": "The prompt requires generated maintenance work orders but does not identify the system of record or workflow."
+      },
+      "requirementIds": [
+        "legacy-requirement:6"
+      ]
+    },
+    {
+      "id": "pm_edge_policy_cmms",
+      "stepNumber": 36,
+      "phase": "Close the maintenance feedback loop",
+      "title": "Create work orders through a retry-safe boundary",
+      "type": "add_connection",
+      "content": "Only approved policy decisions become work orders. Retry transient failures with idempotency, quarantine permanent mapping errors, and keep the operator-visible status synchronized with the CMMS response.",
+      "connection": {
+        "edgeId": "pm_policy_to_cmms",
+        "sourceNodeId": "pm_policy",
+        "targetNodeId": "pm_cmms_adapter",
+        "connectionType": "api-call",
+        "label": "Approved work-order request",
+        "description": "Idempotent, auditable maintenance request with asset, reason, evidence, and correlation identifiers."
+      },
+      "requirementIds": [
+        "legacy-requirement:6"
+      ]
+    },
+    {
+      "id": "pm_dashboard",
+      "stepNumber": 37,
+      "phase": "Close the maintenance feedback loop",
+      "title": "Give maintenance teams a review surface",
+      "type": "add_component",
+      "content": "Show equipment health trends, score freshness, evidence, model version, failure mode, open work orders, and operator feedback. Keep permissions and audit needs explicit for site and asset scopes.",
+      "component": {
+        "nodeId": "pm_dashboard",
+        "componentType": "web-app",
+        "label": "Maintenance Operations Dashboard",
+        "description": "Surfaces fleet health, predictions, and work-order status.",
+        "position": {
+          "x": 3290,
+          "y": 500
+        },
+        "properties": {
+          "componentName": "Maintenance Operations Dashboard",
+          "framework": "React",
+          "purpose": "Let maintenance teams review time-series health scores, model evidence and freshness, failure-mode predictions, and reconciled work-order status."
+        },
+        "highlightReason": "The dashboard is an explicit user requirement and also provides a path for human review and label feedback."
+      },
+      "requirementIds": [
+        "legacy-requirement:8"
+      ]
+    },
+    {
+      "id": "pm_edge_health_dashboard",
+      "stepNumber": 38,
+      "phase": "Close the maintenance feedback loop",
+      "title": "Query the longitudinal health view",
+      "type": "add_connection",
+      "content": "Use time-bounded, paginated queries and show data freshness; do not load raw high-frequency telemetry wholesale into the dashboard.",
+      "connection": {
+        "edgeId": "pm_health_to_dashboard",
+        "sourceNodeId": "pm_health_store",
+        "targetNodeId": "pm_dashboard",
+        "connectionType": "api-call",
+        "label": "Fleet health and history",
+        "description": "Authorized trend queries for health scores, model evidence, maintenance events, and work-order state."
+      },
+      "requirementIds": [
+        "legacy-requirement:7",
+        "legacy-requirement:8"
+      ]
+    },
+    {
+      "id": "pm_monitoring",
+      "stepNumber": 39,
+      "phase": "Close the maintenance feedback loop",
+      "title": "Monitor both infrastructure and model quality",
+      "type": "add_component",
+      "content": "Track end-to-end event age, broker lag, feature freshness, inference errors/latency, missing sensors, score distributions, alarm burden, and drift by equipment cohort. Alerting thresholds need operational ownership.",
+      "component": {
+        "nodeId": "pm_monitoring",
+        "componentType": "monitoring",
+        "label": "Telemetry and Model Monitoring",
+        "description": "Observes stream health, inference, freshness, drift, and maintenance outcomes.",
+        "position": {
+          "x": 3290,
+          "y": 790
+        },
+        "properties": {
+          "componentName": "Telemetry and Model Monitoring",
+          "stack": "Prometheus + Grafana",
+          "metrics": true,
+          "alerts": true,
+          "purpose": "Observe ingest delay, consumer lag, feature freshness, inference behavior, data quality, model drift, false alarms, and eventual maintenance outcomes."
+        },
+        "highlightReason": "Meeting prediction quality and latency targets requires continuous operational and outcome measurement."
+      },
+      "requirementIds": [
+        "legacy-requirement:7",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "pm_edge_broker_monitor",
+      "stepNumber": 40,
+      "phase": "Close the maintenance feedback loop",
+      "title": "Measure stream pressure at the source",
+      "type": "add_connection",
+      "content": "Alert on partition skew, lag, dropped/duplicate readings, and event-time delay; scale based on observed per-partition throughput and recovery behavior.",
+      "connection": {
+        "edgeId": "pm_broker_to_monitor",
+        "sourceNodeId": "pm_broker",
+        "targetNodeId": "pm_monitoring",
+        "connectionType": "data-flow",
+        "label": "Ingestion and lag metrics",
+        "description": "Broker throughput, partition balance, retention, replay, and consumer-lag telemetry."
+      },
+      "requirementIds": [
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "pm_edge_stream_monitor",
+      "stepNumber": 41,
+      "phase": "Close the maintenance feedback loop",
+      "title": "Measure end-to-end feature age",
+      "type": "add_connection",
+      "content": "Propagate a source event timestamp through transformations and record age at feature publication. This is the direct measurement for the under-one-minute constraint.",
+      "connection": {
+        "edgeId": "pm_stream_to_monitor",
+        "sourceNodeId": "pm_stream_processor",
+        "targetNodeId": "pm_monitoring",
+        "connectionType": "data-flow",
+        "label": "Window and freshness metrics",
+        "description": "Event-time lateness, processing duration, feature publication age, and error rates."
+      },
+      "requirementIds": [
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "pm_edge_serving_monitor",
+      "stepNumber": 42,
+      "phase": "Close the maintenance feedback loop",
+      "title": "Observe prediction quality after deployment",
+      "type": "add_connection",
+      "content": "Compare delayed, adjudicated outcomes with predictions and report quality by equipment cohort. Never interpret unlabeled or immature 24-hour windows as proof that the model passed.",
+      "connection": {
+        "edgeId": "pm_serving_to_monitor",
+        "sourceNodeId": "pm_model_serving",
+        "targetNodeId": "pm_monitoring",
+        "connectionType": "data-flow",
+        "label": "Inference and model-health signals",
+        "description": "Latency, errors, score distributions, model versions, and delayed outcome quality."
+      },
+      "requirementIds": [
+        "legacy-requirement:7",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "pm_scale_trigger",
+      "stepNumber": 43,
+      "phase": "Validate and scale",
+      "title": "Scale from event age and measured fleet rates",
+      "type": "scale_trigger",
+      "content": "The 10k+ sensor count is a minimum stated workload, not an events-per-second estimate. Benchmark with real sampling rates, burst patterns, partition skew, model cost, and recovery/replay load before selecting capacity.",
+      "scaleTrigger": {
+        "metric": "Sensor-to-feature event age, per-partition ingest rate, consumer lag, and inference saturation",
+        "action": "Increase broker/consumer parallelism or serving capacity only after identifying the saturated stage and preserving per-equipment ordering.",
+        "impact": "Protect the under-one-minute processing objective while absorbing the stated 10k+ continuously streaming sensors; no capacity guarantee follows from this diagram alone."
+      }
+    },
+    {
+      "id": "pm_review_gate",
+      "stepNumber": 44,
+      "phase": "Validate and scale",
+      "title": "Review safety, metrics, and feedback before launch",
+      "type": "decision_point",
+      "content": "Require domain owners to define critical failures, false-alarm denominator, lead-time measurement, intervention policy, and CMMS ownership. Verify temporal holdouts and site/failure-mode slices; do not launch automated interventions until safety review and operator workflow approval.",
+      "decision": {
+        "question": "What evidence is sufficient to enable a maintenance recommendation?",
+        "chosen": "Require the agreed offline gates, freshness checks, confidence policy, and human-reviewed rollout before expanding automation.",
+        "chosenReason": "The problem provides target thresholds but not the evaluation definitions or safety authority needed to claim they are met.",
+        "alternatives": [
+          {
+            "option": "Treat training accuracy as a launch criterion",
+            "tradeoff": "Can hide temporal leakage, class imbalance, site differences, and false-alarm burden."
+          },
+          {
+            "option": "Automatically create every work order from an anomaly score",
+            "tradeoff": "Conflates unusual behavior with a verified failure and can overwhelm operations."
+          }
+        ]
+      }
+    }
+  ]
+}

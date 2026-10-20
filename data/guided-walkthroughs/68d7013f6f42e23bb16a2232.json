@@ -1,0 +1,1230 @@
+{
+  "problem_id": "68d7013f6f42e23bb16a2232",
+  "version": "1.0-review",
+  "totalSteps": 46,
+  "phases": [
+    {
+      "name": "Define the payment contract",
+      "stepRange": [
+        1,
+        5
+      ],
+      "description": "Make the given requirements and constraints explicit, record provisional sizing targets, and establish idempotent payment intent semantics."
+    },
+    {
+      "name": "Accept, authenticate, and assess payment intents",
+      "stepRange": [
+        6,
+        13
+      ],
+      "description": "Build the authenticated command path and a versioned risk gate before attempting any money movement."
+    },
+    {
+      "name": "Route payment methods and currency",
+      "stepRange": [
+        14,
+        22
+      ],
+      "description": "Use existing payment processing nodes where they fit, model bank/wallet semantics, and freeze an auditable FX quote."
+    },
+    {
+      "name": "Post durable money movement",
+      "stepRange": [
+        23,
+        32
+      ],
+      "description": "Commit balanced financial state atomically, then publish replayable events for reconciliation and reporting."
+    },
+    {
+      "name": "Close the loop and prove safety",
+      "stepRange": [
+        33,
+        46
+      ],
+      "description": "Complete refunds and customer updates safely, state compliance boundaries honestly, and prove latency, scale, and recovery."
+    }
+  ],
+  "steps": [
+    {
+      "id": "pay_01",
+      "stepNumber": 1,
+      "phase": "Define the payment contract",
+      "title": "Separate stated facts from sizing assumptions",
+      "type": "explanation",
+      "content": "The live brief requires user-to-merchant payments, cards/bank transfers/wallets, currency conversion, fraud controls, transaction history/reporting, refunds/disputes, financial-regulatory compliance, and millions of transactions per day. It also requires encryption, ACID financial transactions, PCI DSS compliance, low latency, and graceful failure handling. It does not state a peak TPS, geography, availability target, retention period, or numeric latency SLO. Use 10 million payments/day (about 116 average requests/second) and p95 <=500ms for a normal authorization as provisional planning assumptions only; measure the real peak and provider latency and get product sign-off before treating either as an SLA.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "pay_02",
+      "stepNumber": 2,
+      "phase": "Define the payment contract",
+      "title": "Make each payment transition idempotent",
+      "type": "decision_point",
+      "content": "A payment is a state machine, not a boolean success flag. Create an intent, authorize, capture, refund, reverse, and dispute as distinct versioned transitions. A request can be retried after a timeout, so both the merchant command and each provider operation need stable idempotency keys.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:6",
+        "legacy-constraint:2",
+        "legacy-constraint:5"
+      ],
+      "decision": {
+        "question": "How should repeated commands and concurrent state changes behave?",
+        "chosen": "Scope a unique idempotency key to merchant + operation, store the canonical result, and apply version-checked state transitions; use a separate stable provider idempotency key for each external operation.",
+        "chosenReason": "Network retries are unavoidable, but a retry must return or reconcile the same payment rather than debit or capture twice.",
+        "alternatives": [
+          {
+            "option": "Generate a new payment for every retry",
+            "tradeoff": "A client timeout can become a duplicate charge."
+          },
+          {
+            "option": "Rely only on a queue's delivery guarantee",
+            "tradeoff": "Broker delivery semantics do not make database and provider side effects exactly once."
+          }
+        ]
+      }
+    },
+    {
+      "id": "pay_03",
+      "stepNumber": 3,
+      "phase": "Define the payment contract",
+      "title": "Add customer and merchant clients",
+      "type": "add_component",
+      "content": "Represent web/mobile checkout clients and merchant backends. Clients submit an amount, currency, payment-method token, merchant, and idempotency key, then query a versioned payment status. Do not make client retries create a new intent.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:5",
+        "legacy-constraint:1",
+        "legacy-constraint:4"
+      ],
+      "component": {
+        "nodeId": "pay_clients",
+        "componentType": "web-app",
+        "label": "Customer + Merchant Clients",
+        "description": "Checkout, payment status, and merchant API clients",
+        "position": {
+          "x": 0,
+          "y": 320
+        },
+        "properties": {
+          "componentName": "Customer + Merchant Clients",
+          "purpose": "Create payment intents with merchant-scoped idempotency keys, submit opaque payment tokens, query versioned status, and receive signed status webhooks. Never persist raw card number or CVV in the application."
+        },
+        "highlightReason": "The existing Web App palette component represents browser/mobile checkout and merchant-facing clients without introducing a new node type."
+      }
+    },
+    {
+      "id": "pay_04",
+      "stepNumber": 4,
+      "phase": "Define the payment contract",
+      "title": "Add the payment API boundary",
+      "type": "add_component",
+      "content": "Validate merchant identity, amount/currency format, method token, idempotency key, authorization scope, request size, and rate limits before dispatch. Separate public client routes from signed provider-webhook routes and verify webhook signatures and replay windows.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-constraint:1",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ],
+      "component": {
+        "nodeId": "pay_gateway",
+        "componentType": "api-gateway",
+        "label": "Payment API Gateway",
+        "description": "Authenticated commands, status reads, and signed callbacks",
+        "position": {
+          "x": 360,
+          "y": 320
+        },
+        "properties": {
+          "componentName": "Payment API Gateway",
+        "purpose": "Accept only opaque payment-method tokens and never PAN/CVV; reject cardholder-data fields at this public application boundary. Authenticate merchant/user principals; validate amount, currency, method token and idempotency key; enforce quotas; expose distinct payment-command, status-query and signed provider-webhook routes. Reject replayed or invalid callbacks."
+        },
+        "highlightReason": "API Gateway is the existing catalog component for the external HTTP boundary and request validation."
+      }
+    },
+    {
+      "id": "pay_05",
+      "stepNumber": 5,
+      "phase": "Define the payment contract",
+      "title": "Connect clients to the payment API",
+      "type": "add_connection",
+      "content": "The command carries a client-generated idempotency key, merchant ID, amount, currency, and opaque instrument token. The gateway returns a stable intent ID and current state; it does not claim settlement merely because a request was accepted.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:5",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ],
+      "connection": {
+        "edgeId": "pay_clients_gateway",
+        "sourceNodeId": "pay_clients",
+        "targetNodeId": "pay_gateway",
+        "connectionType": "https-api",
+        "label": "Create intent + query status",
+        "description": "Authenticated payment commands and status reads; duplicate commands with the same key resolve to the same intent."
+      }
+    },
+    {
+      "id": "pay_06",
+      "stepNumber": 6,
+      "phase": "Accept, authenticate, and assess payment intents",
+      "title": "Add the payment orchestrator",
+      "type": "add_component",
+      "content": "Keep payment state transitions and provider-specific retry policy behind one service boundary. It owns intent IDs, state versions, idempotency records, authorization/capture/refund commands, and timeout reconciliation; it must not mark a payment captured before the provider outcome is known.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:6",
+        "legacy-constraint:2",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ],
+      "component": {
+        "nodeId": "pay_orchestrator",
+        "componentType": "backend-server",
+        "label": "Payment Orchestrator",
+        "description": "Versioned intent state machine and bounded provider calls",
+        "position": {
+          "x": 1080,
+          "y": 320
+        },
+        "properties": {
+          "componentName": "Payment Orchestrator",
+          "purpose": "Own versioned payment intents and idempotent authorize/capture/refund transitions; persist provider operation IDs and outcomes; bound synchronous work; expose pending/unknown state for ambiguous timeouts; reconcile signed callbacks without duplicate capture."
+        },
+        "highlightReason": "Backend Server is the existing catalog component for application logic; no new orchestration node type is needed."
+      }
+    },
+    {
+      "id": "pay_07",
+      "stepNumber": 7,
+      "phase": "Accept, authenticate, and assess payment intents",
+      "title": "Send payment commands to the orchestrator",
+      "type": "add_connection",
+      "content": "The API layer forwards a validated, authenticated command and its idempotency key. The orchestrator rechecks merchant ownership and the expected intent version so stale or cross-tenant commands cannot move money.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:6",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:5"
+      ],
+      "connection": {
+        "edgeId": "pay_gateway_orchestrator",
+        "sourceNodeId": "pay_gateway",
+        "targetNodeId": "pay_orchestrator",
+        "connectionType": "api-call",
+        "label": "Versioned payment command",
+        "description": "Intent creation, confirmation, capture, refund, and status reads enter the state-owning service."
+      }
+    },
+    {
+      "id": "pay_08",
+      "stepNumber": 8,
+      "phase": "Accept, authenticate, and assess payment intents",
+      "title": "Add identity and permission checks",
+      "type": "add_component",
+      "content": "Authorize the user or merchant for the specific payment, account, and action. Authentication alone is not authorization: enforce tenant isolation, role scope, amount limits, and step-up verification where policy requires it.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-constraint:1"
+      ],
+      "component": {
+        "nodeId": "pay_auth",
+        "componentType": "auth-service",
+        "label": "Identity + Payment Authorization",
+        "description": "Principal, merchant, and account access checks",
+        "position": {
+          "x": 720,
+          "y": 0
+        },
+        "properties": {
+          "componentName": "Identity + Payment Authorization",
+        "purpose": "Apply jurisdiction-approved merchant due diligence and KYC/AML/sanctions policy at onboarding and before regulated money movement. Record the policy version and decision ID; block prohibited parties and route ambiguous matches to manual review. Also enforce tenant/account ownership, action scope, amount limits, step-up checks, and transaction authorization separately from authentication. The compliance owner must approve the applicable jurisdictions and rules."
+        },
+        "highlightReason": "Auth Service is the existing catalog component for identity and access decisions."
+      }
+    },
+    {
+      "id": "pay_09",
+      "stepNumber": 9,
+      "phase": "Accept, authenticate, and assess payment intents",
+      "title": "Authenticate incoming payment commands",
+      "type": "add_connection",
+      "content": "The gateway verifies the caller and the orchestrator receives the resulting principal, merchant, and authorization context. Do not pass credentials or full card data in logs, events, or analytics.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:7",
+        "legacy-constraint:1",
+        "legacy-constraint:3"
+      ],
+      "connection": {
+        "edgeId": "pay_gateway_auth",
+        "sourceNodeId": "pay_gateway",
+        "targetNodeId": "pay_auth",
+        "connectionType": "api-call",
+        "label": "Identity + merchant authorization",
+        "description": "Validate principal, tenant, account ownership, and action scope before a money-moving transition."
+      }
+    },
+    {
+      "id": "pay_10",
+      "stepNumber": 10,
+      "phase": "Accept, authenticate, and assess payment intents",
+      "title": "Pass scoped authorization to payment state",
+      "type": "add_connection",
+      "content": "The permission decision is bound to the intent, merchant, amount, and operation. Revalidate sensitive transitions such as capture and refund rather than reusing a broad login token.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-constraint:1"
+      ],
+      "connection": {
+        "edgeId": "pay_auth_orchestrator",
+        "sourceNodeId": "pay_auth",
+        "targetNodeId": "pay_orchestrator",
+        "connectionType": "api-call",
+        "label": "Scoped authorization context",
+        "description": "The state machine accepts only actions authorized for this merchant, account, intent, amount, and current version."
+      }
+    },
+    {
+      "id": "pay_11",
+      "stepNumber": 11,
+      "phase": "Accept, authenticate, and assess payment intents",
+      "title": "Add the fraud scoring model",
+      "type": "add_component",
+      "content": "Score transaction context such as account history, device signals, velocity, and merchant risk. Keep feature provenance and model version with the decision. The model recommends approve, review, or decline; it never writes ledger balances itself.",
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:7",
+        "legacy-constraint:1",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ],
+      "component": {
+        "nodeId": "pay_fraud",
+        "componentType": "ml-model",
+        "label": "Fraud Risk Model",
+        "description": "Versioned transaction-risk classification",
+        "position": {
+          "x": 1440,
+          "y": 0
+        },
+        "properties": {
+          "componentName": "Fraud Risk Model",
+          "purpose": "Classify payment risk using approved, minimized features; return score, reason codes, model version and feature timestamp. Never receive PAN/CVV or post ledger entries. Route uncertain/high-risk outcomes to review or step-up policy.",
+          "modelType": "Classification",
+          "framework": "XGBoost",
+          "version": "v1"
+        },
+        "highlightReason": "ML Model is the existing catalog component that fits fraud classification; a custom fraud-model node is unnecessary."
+      }
+    },
+    {
+      "id": "pay_12",
+      "stepNumber": 12,
+      "phase": "Accept, authenticate, and assess payment intents",
+      "title": "Evaluate risk before authorization",
+      "type": "add_connection",
+      "content": "The orchestrator sends only tokenized and policy-approved features to the risk model. Bind its response to the intent version; if the model is unavailable, follow an explicit risk policy (for example review or decline high-risk actions) rather than silently bypassing checks.",
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:7",
+        "legacy-constraint:1",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ],
+      "connection": {
+        "edgeId": "pay_orchestrator_fraud",
+        "sourceNodeId": "pay_orchestrator",
+        "targetNodeId": "pay_fraud",
+        "connectionType": "api-call",
+        "label": "Tokenized risk evaluation",
+        "description": "Return a versioned risk decision and reason codes before a card/bank authorization is attempted."
+      }
+    },
+    {
+      "id": "pay_13",
+      "stepNumber": 13,
+      "phase": "Accept, authenticate, and assess payment intents",
+      "title": "Keep risk decisions separate from money movement",
+      "type": "decision_point",
+      "content": "Use a policy threshold and reason codes to choose approve, step-up, manual review, or decline. Record policy/model version for audit and monitor false positives, false negatives, drift, and review backlog; a high score is not permission to skip regulatory screening.",
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:7",
+        "legacy-constraint:1",
+        "legacy-constraint:5"
+      ],
+      "decision": {
+        "question": "What happens when fraud evidence is uncertain or the scoring dependency is down?",
+        "chosen": "Apply an explicit fail-safe policy: step up or hold uncertain high-risk intents for review; only authorized low-risk states proceed, and every outcome is auditable.",
+        "chosenReason": "Fail-open behavior can authorize fraud, while treating every uncertain signal as a final decline creates avoidable false positives.",
+        "alternatives": [
+          {
+            "option": "Always approve when the model times out",
+            "tradeoff": "An attacker can target the outage path to bypass controls."
+          },
+          {
+            "option": "Permanently decline every model timeout",
+            "tradeoff": "A transient dependency outage becomes an unreviewable customer-wide payment outage."
+          }
+        ]
+      }
+    },
+    {
+      "id": "pay_14",
+      "stepNumber": 14,
+      "phase": "Route payment methods and currency",
+      "title": "Add a tokenizing card processor",
+      "type": "add_component",
+      "content": "Use the existing Payment Service catalog component as the card/acquirer adapter. A Stripe gateway is selected as an illustrative configured provider because the component exposes a provider selector; keep the adapter contract replaceable and verify the chosen provider supports the required markets, currencies, and methods before production.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:7",
+        "legacy-constraint:1",
+        "legacy-constraint:3"
+      ],
+      "component": {
+        "nodeId": "pay_card_processor",
+        "componentType": "payment-service",
+      "label": "PCI Card Tokenization",
+      "description": "Hosted card entry and provider authorization boundary",
+        "position": {
+          "x": 1440,
+          "y": 320
+        },
+        "properties": {
+        "componentName": "PCI Card Tokenization",
+        "purpose": "The provider-hosted card-entry surface is the cardholder-data boundary: PAN/CVV go directly from hosted fields to the acquirer/tokenizer and are not sent through platform APIs, services, logs, queues, analytics, or databases. Return only an opaque token to the client; accept that token for authorize/capture/void/refund and provider-status lookup using stable provider idempotency keys. Use an acquirer with a current PCI DSS attestation, verify the integration's actual scope and evidence before launch, and keep this adapter replaceable.",
+          "gateway": "Stripe",
+        "pciDss": true,
+          "tokenization": true,
+          "retry": false
+        },
+        "highlightReason": "Payment Service is an exact existing palette match for payment processing, gateway integration, and tokenization."
+      }
+    },
+    {
+      "id": "pay_15",
+      "stepNumber": 15,
+      "phase": "Route payment methods and currency",
+      "title": "Tokenize card details outside the application",
+      "type": "add_connection",
+      "content": "The browser or mobile SDK renders the acquirer's hosted card-entry fields. PAN/CVV travel to that provider boundary, not through the platform origin or services. The provider returns an opaque token to the client; only that token may be sent to the Payment API. Verify the exact data-flow and PCI scope with the acquirer and assessor rather than assuming tokenization alone removes every compliance obligation.",
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:7",
+        "legacy-constraint:1",
+        "legacy-constraint:3"
+      ],
+      "connection": {
+        "edgeId": "pay_clients_processor",
+        "sourceNodeId": "pay_clients",
+        "targetNodeId": "pay_card_processor",
+        "connectionType": "https-api",
+        "label": "Hosted fields -> opaque token",
+        "description": "PAN/CVV go directly to the acquirer's hosted tokenization surface. Only the returned opaque token enters the platform API; no raw card data is logged, queued, analyzed, or persisted by this system."
+      }
+    },
+    {
+      "id": "pay_16",
+      "stepNumber": 16,
+      "phase": "Route payment methods and currency",
+      "title": "Authorize cards through the adapter",
+      "type": "add_connection",
+      "content": "Send a provider operation ID derived from the intent and operation. The adapter applies provider-specific timeouts and idempotency; a retry of the same authorization must use the same provider key.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ],
+      "connection": {
+        "edgeId": "pay_orchestrator_processor",
+        "sourceNodeId": "pay_orchestrator",
+        "targetNodeId": "pay_card_processor",
+        "connectionType": "api-call",
+        "label": "Authorize / capture / refund",
+        "description": "Provider operations use stable idempotency keys and return an explicit approved, declined, pending, or unknown outcome."
+      }
+    },
+    {
+      "id": "pay_17",
+      "stepNumber": 17,
+      "phase": "Route payment methods and currency",
+      "title": "Add bank-transfer and wallet adapters",
+      "type": "add_component",
+      "content": "Bank transfers and wallets have different confirmation and settlement semantics from card authorization. Use a named custom component because the catalog has no method-specific bank-rail adapter; route each method through a versioned connector contract and represent delayed confirmation as pending.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:6",
+        "legacy-constraint:5"
+      ],
+      "component": {
+        "nodeId": "pay_bank_wallet",
+        "componentType": "custom-component",
+        "label": "Bank Transfer + Wallet Adapters",
+        "description": "Method-specific bank and wallet connectors",
+        "position": {
+          "x": 1440,
+          "y": 640
+        },
+        "properties": {
+          "componentName": "Bank Transfer + Wallet Adapters",
+          "subtitle": "Method-specific provider boundary",
+          "purpose": "Route bank transfer and wallet commands through provider-specific adapters. Persist each provider reference and idempotency key, verify signed callbacks, model pending/settled/reversed states, and reconcile delayed bank confirmation.",
+          "componentType": "Payment method adapter",
+          "technology": "Bank transfer rails + wallet APIs",
+          "notes": "Custom is used because the component catalog has no bank-rail/wallet adapter; verify supported rails and regional regulations per provider."
+        },
+        "highlightReason": "No existing component accurately represents bank-transfer rails and wallet-specific settlement states, so the existing Custom Component is used transparently."
+      }
+    },
+    {
+      "id": "pay_18",
+      "stepNumber": 18,
+      "phase": "Route payment methods and currency",
+      "title": "Route bank and wallet methods",
+      "type": "add_connection",
+      "content": "Select a connector based on the method, currency, merchant, and supported geography. Store the provider reference and method-specific settlement state; do not treat an accepted transfer instruction as settled funds.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:6",
+        "legacy-constraint:5"
+      ],
+      "connection": {
+        "edgeId": "pay_orchestrator_bank_wallet",
+        "sourceNodeId": "pay_orchestrator",
+        "targetNodeId": "pay_bank_wallet",
+        "connectionType": "api-call",
+        "label": "Bank transfer / wallet command",
+        "description": "Method-specific authorization, transfer initiation, status callback, refund, and reversal semantics."
+      }
+    },
+    {
+      "id": "pay_19",
+      "stepNumber": 19,
+      "phase": "Route payment methods and currency",
+      "title": "Model asynchronous payment methods honestly",
+      "type": "explanation",
+      "content": "Cards can return an authorization decision quickly, while bank debit/transfer may remain pending until later confirmation. Keep one intent API but distinct state transitions and response expectations per method; expose `pending` with a status URL rather than returning success before settlement evidence arrives.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "pay_20",
+      "stepNumber": 20,
+      "phase": "Route payment methods and currency",
+      "title": "Add an FX quote service",
+      "type": "add_component",
+      "content": "Use a custom component because the catalog has no exchange-rate/quote service. It returns a versioned quote with source, rate timestamp, source/settlement currencies, fee, rounding rule, and expiry; never recalculate an already-authorized amount silently.",
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-constraint:1",
+        "legacy-constraint:4"
+      ],
+      "component": {
+        "nodeId": "pay_fx",
+        "componentType": "custom-component",
+        "label": "FX Quote Service",
+        "description": "Versioned, expiring currency-conversion quotes",
+        "position": {
+          "x": 1800,
+          "y": 0
+        },
+        "properties": {
+          "componentName": "FX Quote Service",
+          "subtitle": "Rate provenance + quote expiry",
+          "purpose": "Return source/settlement currency amounts, rate, rate-source ID, observedAt, quote ID, fee and expiry. Bind the accepted quote to the payment intent and preserve it for ledger and refund calculations; reject expired quotes.",
+          "componentType": "Currency conversion service",
+          "technology": "External FX rates + quote API",
+          "notes": "No dedicated FX service exists in the catalog; provider/rate source and quote lifetime are deployment decisions."
+        },
+        "highlightReason": "The existing palette has no FX-rate quote component; a clearly named Custom Component is appropriate."
+      }
+    },
+    {
+      "id": "pay_21",
+      "stepNumber": 21,
+      "phase": "Route payment methods and currency",
+      "title": "Lock a currency quote before authorization",
+      "type": "add_connection",
+      "content": "The orchestrator requests a quote and persists its ID, currencies, rate, fee, and expiry before calling the processor. Define which party bears exchange-rate movement and apply the recorded rounding rule consistently to capture, refund, and reporting.",
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:1",
+        "legacy-requirement:6",
+        "legacy-constraint:2",
+        "legacy-constraint:5"
+      ],
+      "connection": {
+        "edgeId": "pay_orchestrator_fx",
+        "sourceNodeId": "pay_orchestrator",
+        "targetNodeId": "pay_fx",
+        "connectionType": "api-call",
+        "label": "Get and lock FX quote",
+        "description": "Bind the immutable rate/fee/expiry snapshot to this intent and provider operation."
+      }
+    },
+    {
+      "id": "pay_22",
+      "stepNumber": 22,
+      "phase": "Route payment methods and currency",
+      "title": "Choose the amount and FX audit boundary",
+      "type": "decision_point",
+      "content": "An intent may have a shopper-presentment amount and a merchant-settlement amount in different currencies. Persist both minor-unit amounts, ISO currency codes, quote ID, fee, and rounding policy; refunds use the original contract or an explicitly disclosed policy.",
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-constraint:2"
+      ],
+      "decision": {
+        "question": "How should the system preserve a reproducible converted amount?",
+        "chosen": "Freeze a quote snapshot on the intent and ledger entries; never recompute historical payment amounts from the latest FX rate.",
+        "chosenReason": "A later rate change must not alter what was authorized, captured, reported, or refunded.",
+        "alternatives": [
+          {
+            "option": "Read the current FX rate whenever a payment is retried",
+            "tradeoff": "The retry can charge a different amount than the customer's accepted quote."
+          },
+          {
+            "option": "Store only a converted decimal",
+            "tradeoff": "The original currencies, rate provenance, fees, and rounding cannot be audited or reproduced."
+          }
+        ]
+      }
+    },
+    {
+      "id": "pay_23",
+      "stepNumber": 23,
+      "phase": "Post durable money movement",
+      "title": "Add the authoritative ACID ledger",
+      "type": "add_component",
+      "content": "Use a relational OLTP database as the authoritative record for payment state and balanced double-entry postings. Store integer minor units, currency, payment/merchant/account references, immutable entry IDs, and a unique provider-operation reference; keep reporting projections out of the posting transaction.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:3",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-constraint:1",
+        "legacy-constraint:2"
+      ],
+      "component": {
+        "nodeId": "pay_ledger",
+        "componentType": "database",
+        "label": "ACID Payment Ledger",
+        "description": "Intent state, idempotency keys, and balanced postings",
+        "position": {
+          "x": 1800,
+          "y": 320
+        },
+        "properties": {
+          "componentName": "ACID Payment Ledger",
+          "purpose": "Single transactional authority for versioned intent state, unique merchant-scoped idempotency keys, provider references and append-only double-entry postings. Store amounts as integer minor units with ISO currency, FX quote ID, fee and payment operation references.",
+          "type": "RDBMS",
+          "engine": "postgresql",
+          "workload": "OLTP",
+          "sharding": "None",
+          "replicationMode": "Sync",
+          "multiAZ": true
+        },
+        "highlightReason": "The existing Database component is a good match for the required ACID transactional ledger; use its RDBMS/OLTP properties."
+      }
+    },
+    {
+      "id": "pay_24",
+      "stepNumber": 24,
+      "phase": "Post durable money movement",
+      "title": "Commit a payment and its ledger effects atomically",
+      "type": "add_connection",
+      "content": "Within one ACID transaction, validate the intent version, reserve the idempotency key, append equal-and-opposite ledger entries for the operation, update payment state, and insert an outbox record. If any invariant fails, roll back the entire posting.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-constraint:2",
+        "legacy-constraint:5"
+      ],
+      "connection": {
+        "edgeId": "pay_orchestrator_ledger",
+        "sourceNodeId": "pay_orchestrator",
+        "targetNodeId": "pay_ledger",
+        "connectionType": "database-connection",
+        "label": "Versioned state + balanced posting",
+        "description": "The durable boundary enforces unique keys, state preconditions, and balanced entries atomically."
+      }
+    },
+    {
+      "id": "pay_25",
+      "stepNumber": 25,
+      "phase": "Post durable money movement",
+      "title": "Make ledger invariants visible in the node",
+      "type": "update_component",
+      "content": "Record the non-negotiable financial invariants on the ledger itself: every posted journal balances per currency; posted entries are immutable; corrections are new reversals/adjustments; idempotency and provider-reference uniqueness are enforced transactionally. Read replicas may serve history but never authorize writes.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-constraint:2",
+        "legacy-constraint:5"
+      ],
+      "componentUpdate": {
+        "nodeId": "pay_ledger",
+        "properties": {
+        "purpose": "ACID transactional authority for versioned payment state and append-only double-entry postings. Enforce equal debits/credits per currency, immutable posted entries, unique merchant+operation idempotency keys, and unique provider references. Persist the jurisdiction, legal-entity, versioned compliance-policy decision ID, and audit-event reference needed to reconstruct each payment/refund/dispute; store evidence references rather than PAN/CVV or credentials. Apply approved encryption, least-privilege access, and jurisdiction-specific retention/legal-hold policy. Insert the outbox atomically; corrections use compensating entries and read replicas never authorize writes."
+        }
+      }
+    },
+    {
+      "id": "pay_26",
+      "stepNumber": 26,
+      "phase": "Post durable money movement",
+      "title": "Add a durable payment event backbone",
+      "type": "add_component",
+      "content": "Publish committed payment lifecycle events to at-least-once consumers. Keep event IDs, payment/intent version, merchant, currency and schema version; partition/order by the payment aggregate where needed and retain enough data for replay within the approved privacy policy.",
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:8",
+        "legacy-constraint:2",
+        "legacy-constraint:5"
+      ],
+      "component": {
+        "nodeId": "pay_events",
+        "componentType": "message-broker",
+        "label": "Payment Event Backbone",
+        "description": "Replayable lifecycle events for downstream consumers",
+        "position": {
+          "x": 2160,
+          "y": 320
+        },
+        "properties": {
+          "componentName": "Payment Event Backbone",
+          "purpose": "Deliver versioned payment, ledger, refund, dispute and settlement events at least once. Consumers deduplicate stable event IDs and checkpoint per partition; the transactional outbox prevents a committed ledger change from being lost before publish.",
+          "durable": true,
+          "retention": 168
+        },
+        "highlightReason": "Message Broker is the existing catalog component for durable asynchronous fan-out and replay."
+      }
+    },
+    {
+      "id": "pay_27",
+      "stepNumber": 27,
+      "phase": "Post durable money movement",
+      "title": "Publish only after the ledger commit",
+      "type": "add_connection",
+      "content": "An outbox relay publishes after the ACID transaction commits. Consumers can safely replay an event because they deduplicate by event ID and payment version; never emit a success event for a rolled-back ledger transaction.",
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-constraint:2",
+        "legacy-constraint:5"
+      ],
+      "connection": {
+        "edgeId": "pay_ledger_events",
+        "sourceNodeId": "pay_ledger",
+        "targetNodeId": "pay_events",
+        "connectionType": "event-stream",
+        "label": "Committed outbox event",
+        "description": "The relay publishes only committed state; at-least-once delivery is handled with consumer deduplication."
+      }
+    },
+    {
+      "id": "pay_28",
+      "stepNumber": 28,
+      "phase": "Post durable money movement",
+      "title": "Add settlement and dispute reconciliation",
+      "type": "add_component",
+      "content": "Compare provider settlement reports and signed callbacks against ledger postings. Detect missing, duplicate, delayed, or mismatched amounts/currencies, open an auditable repair case, and never rewrite a posted journal to make totals appear to match.",
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-constraint:2",
+        "legacy-constraint:5"
+      ],
+      "component": {
+        "nodeId": "pay_reconciliation",
+        "componentType": "backend-server",
+        "label": "Settlement + Dispute Reconciliation",
+        "description": "Provider-to-ledger matching and repair workflow",
+        "position": {
+          "x": 2520,
+          "y": 0
+        },
+        "properties": {
+          "componentName": "Settlement + Dispute Reconciliation",
+          "purpose": "Match provider settlement files/webhooks to payment and ledger references; detect missing, duplicate, late and amount/currency mismatches; track refund/dispute deadlines and evidence; create auditable compensating repairs rather than mutating posted history."
+        },
+        "highlightReason": "Backend Server is the existing catalog type for reconciliation workflow logic."
+      }
+    },
+    {
+      "id": "pay_29",
+      "stepNumber": 29,
+      "phase": "Post durable money movement",
+      "title": "Reconcile settlement from durable events",
+      "type": "add_connection",
+      "content": "The reconciliation worker consumes committed payment events and joins them to provider reports by stable references, amount, and currency. Alert on unmatched items and preserve evidence, ownership, and resolution history.",
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-constraint:2",
+        "legacy-constraint:5"
+      ],
+      "connection": {
+        "edgeId": "pay_events_reconciliation",
+        "sourceNodeId": "pay_events",
+        "targetNodeId": "pay_reconciliation",
+        "connectionType": "message-queue",
+        "label": "Settlement + dispute work",
+        "description": "Replayable event-driven reconciliation identifies provider/ledger mismatches without blocking checkout."
+      }
+    },
+    {
+      "id": "pay_30",
+      "stepNumber": 30,
+      "phase": "Post durable money movement",
+      "title": "Add a transaction-history read model",
+      "type": "add_component",
+      "content": "Project immutable ledger/payment events into query-oriented reporting views for customer history and merchant statements. Keep the ledger authoritative; label projection freshness and enforce tenant/account authorization on every read.",
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:8",
+        "legacy-constraint:4"
+      ],
+      "component": {
+        "nodeId": "pay_analytics",
+        "componentType": "analytics",
+        "label": "Payment History + Reporting",
+        "description": "Searchable transaction history and merchant reports",
+        "position": {
+          "x": 2520,
+          "y": 320
+        },
+        "properties": {
+          "componentName": "Payment History + Reporting",
+          "purpose": "Build query-optimized transaction history and merchant reports from committed ledger events. Preserve payment ID, operation version, currency, FX quote and audit references; enforce tenant-scoped access and disclose projection freshness. This is a derived read model, never the balance authority."
+        },
+        "highlightReason": "Analytics is the existing catalog component for reporting projections; it does not replace the ACID ledger."
+      }
+    },
+    {
+      "id": "pay_31",
+      "stepNumber": 31,
+      "phase": "Post durable money movement",
+      "title": "Build history and reports from committed events",
+      "type": "add_connection",
+      "content": "The projection consumes events idempotently, supports pagination and time/merchant filters, and can be rebuilt from ledger/event history. Redact tokens and personal data that are not required for a report.",
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:2"
+      ],
+      "connection": {
+        "edgeId": "pay_events_analytics",
+        "sourceNodeId": "pay_events",
+        "targetNodeId": "pay_analytics",
+        "connectionType": "message-queue",
+        "label": "History/report projection",
+        "description": "Idempotent consumers materialize searchable transaction history and reports from committed events."
+      }
+    },
+    {
+      "id": "pay_32",
+      "stepNumber": 32,
+      "phase": "Post durable money movement",
+      "title": "Serve authorized history without weakening writes",
+      "type": "add_connection",
+      "content": "Status and transaction-history reads can use the projection only when its freshness is appropriate; payment authorization, balance decisions, and refund eligibility must consult the authoritative state. Show `updatedAt` or a version so callers can distinguish eventual reporting from current payment state.",
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-constraint:2",
+        "legacy-constraint:4"
+      ],
+      "connection": {
+        "edgeId": "pay_gateway_analytics",
+        "sourceNodeId": "pay_gateway",
+        "targetNodeId": "pay_analytics",
+        "connectionType": "api-call",
+        "label": "Tenant-scoped history query",
+        "description": "Authorized read-only history/report queries; financial write decisions remain on the ACID ledger path."
+      }
+    },
+    {
+      "id": "pay_33",
+      "stepNumber": 33,
+      "phase": "Close the loop and prove safety",
+      "title": "Add status notifications",
+      "type": "add_component",
+      "content": "Deliver signed merchant webhooks and customer receipts asynchronously. Include intent ID, version, final/pending state, and event ID; retry delivery with deduplication and a dead-letter/repair path so notification outages cannot repeat a charge.",
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-constraint:5"
+      ],
+      "component": {
+        "nodeId": "pay_notifications",
+        "componentType": "notification-service",
+        "label": "Payment Status Notifications",
+        "description": "Signed, deduplicated webhooks and receipts",
+        "position": {
+          "x": 2520,
+          "y": 640
+        },
+        "properties": {
+          "componentName": "Payment Status Notifications",
+          "purpose": "Deliver signed merchant webhooks and customer receipts from committed payment events. Use stable event IDs, per-destination retry/backoff, delivery audit, deduplication, and an operator repair path; never retry the money-moving operation from this worker.",
+          "channels": "All",
+          "fanout": true,
+          "batching": true
+        },
+        "highlightReason": "Notification Service is the existing catalog component for webhook and customer-status delivery."
+      }
+    },
+    {
+      "id": "pay_34",
+      "stepNumber": 34,
+      "phase": "Close the loop and prove safety",
+      "title": "Send committed status changes to notification workers",
+      "type": "add_connection",
+      "content": "Notify only from durable payment events after the ledger commit. The worker's delivery retry policy is independent from the provider-operation retry policy.",
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-constraint:5"
+      ],
+      "connection": {
+        "edgeId": "pay_events_notifications",
+        "sourceNodeId": "pay_events",
+        "targetNodeId": "pay_notifications",
+        "connectionType": "message-queue",
+        "label": "Committed status events",
+        "description": "Asynchronous, deduplicated notification delivery; no synchronous dependency in authorization."
+      }
+    },
+    {
+      "id": "pay_35",
+      "stepNumber": 35,
+      "phase": "Close the loop and prove safety",
+      "title": "Return status to customers and merchants",
+      "type": "add_connection",
+      "content": "Send the payment ID, monotonically increasing version, state, provider reference where safe, and event ID. Clients must tolerate duplicate/out-of-order webhook deliveries and fetch the latest authorized status when a gap is detected.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-constraint:5"
+      ],
+      "connection": {
+        "edgeId": "pay_notifications_clients",
+        "sourceNodeId": "pay_notifications",
+        "targetNodeId": "pay_clients",
+        "connectionType": "https-api",
+        "label": "Signed status webhook / receipt",
+        "description": "Clients verify signatures, deduplicate by event ID, and reconcile gaps through an authorized status read."
+      }
+    },
+    {
+      "id": "pay_36",
+      "stepNumber": 36,
+      "phase": "Close the loop and prove safety",
+      "title": "Handle refunds and disputes as new workflows",
+      "type": "decision_point",
+      "content": "A refund is not deletion of the original payment. Verify the captured amount and remaining refundable balance, create an idempotent refund operation, call the provider, and post balanced compensating entries only when the outcome is known. Track dispute deadlines, evidence, provisional holds, and final outcomes separately.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-constraint:2",
+        "legacy-constraint:5"
+      ],
+      "decision": {
+        "question": "How do refunds, reversals, and disputes preserve history and balances?",
+        "chosen": "Represent each as a versioned operation with its own idempotency key and provider reference; append balanced compensating entries after confirmed outcomes and keep dispute evidence/deadlines auditable.",
+        "chosenReason": "Immutable history makes duplicate refunds detectable and lets finance reconcile the original capture, reversal, and settlement independently.",
+        "alternatives": [
+          {
+            "option": "Edit or delete the original ledger entry",
+            "tradeoff": "Breaks auditability and makes reconciliation unable to explain the money movement."
+          },
+          {
+            "option": "Assume a refund succeeded when the API times out",
+            "tradeoff": "Can duplicate the refund or report funds returned when the provider rejected it."
+          }
+        ]
+      }
+    },
+    {
+      "id": "pay_37",
+      "stepNumber": 37,
+      "phase": "Close the loop and prove safety",
+      "title": "Make ambiguous provider failures safe",
+      "type": "explanation",
+      "content": "If an authorize/capture/refund request times out after dispatch, the provider may have completed it. Keep the intent `unknown/pending`, query by the same provider idempotency key/reference, and accept signed callbacks or reconciliation before retrying. Retry only with the identical operation key; use bounded exponential backoff, circuit breaking, and a manual repair queue for unresolved cases.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "pay_38",
+      "stepNumber": 38,
+      "phase": "Close the loop and prove safety",
+      "title": "Treat PCI and regulatory compliance as system controls",
+      "type": "explanation",
+      "content": "Make the cardholder-data boundary explicit: hosted fields send PAN/CVV directly to the attested acquirer; the client receives an opaque token; the platform API rejects raw card fields; only the token enters authorization and the ledger; raw card data and secrets are excluded from services, events, logs, analytics, backups, and support tooling. For financial regulation, apply approved jurisdiction-specific KYC/AML/sanctions and merchant due-diligence rules, record versioned decisions, route ambiguous matches to human review, and preserve restricted, privacy-minimized audit evidence under approved retention/legal-hold rules. Encrypt traffic and sensitive data, restrict key and production access, redact logs, and audit privileged actions. A diagram, tokenization flag, or provider attestation alone does not establish that the whole platform is PCI DSS compliant: validate the end-to-end scope, applicable assessment, key management, incident response, and recurring evidence with the compliance owner.",
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:7",
+        "legacy-constraint:1",
+        "legacy-constraint:3"
+      ],
+      "componentUpdate": {
+        "nodeId": "pay_card_processor",
+        "properties": {
+        "componentName": "PCI Card Tokenization",
+        "purpose": "PCI cardholder-data boundary: provider-hosted fields send PAN/CVV directly to the attested acquirer/tokenizer; only its opaque token returns to the client and then enters the platform API. Exclude PAN/CVV and secrets from application services, ledger, event bus, logs, analytics, backups, and support tools. Verify the provider's current PCI DSS attestation, the platform's precise scope/assessment eligibility, key management, signed callbacks, and incident controls before launch. This provider control does not certify the whole platform; redact payment data and audit privileged actions.",
+        "pciDss": true,
+        "tokenization": true
+        }
+      }
+    },
+    {
+      "id": "pay_39",
+      "stepNumber": 39,
+      "phase": "Close the loop and prove safety",
+      "title": "Add payment reliability monitoring",
+      "type": "add_component",
+      "content": "Measure authorization and provider latency separately, approval/decline/review rates, timeout and unknown-state counts, ledger imbalance, outbox age, consumer lag, reconciliation gaps, webhook delay, refund/dispute backlog, and FX quote expiry. Alert on financial invariants and customer-visible stuck states, not only host health.",
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:8",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ],
+      "component": {
+        "nodeId": "pay_monitor",
+        "componentType": "monitoring",
+        "label": "Payment Reliability + Risk Monitoring",
+        "description": "Financial invariants, provider health, and user-visible lag",
+        "position": {
+          "x": 2160,
+          "y": 720
+        },
+        "properties": {
+          "componentName": "Payment Reliability + Risk Monitoring",
+          "purpose": "Track p95/p99 intent latency and provider latency separately; timeout/unknown states; approval/fraud-review rates; ledger imbalance; outbox age and consumer lag; reconciliation gaps; webhook/refund/dispute backlog; and FX quote expiry. Alert on stuck customer states and any broken financial invariant."
+        },
+        "highlightReason": "Monitoring is the existing catalog component for service health and financial correctness signals."
+      }
+    },
+    {
+      "id": "pay_40",
+      "stepNumber": 40,
+      "phase": "Close the loop and prove safety",
+      "title": "Observe payment and provider state",
+      "type": "add_connection",
+      "content": "The orchestrator emits redacted structured state transitions, provider operation IDs, latency, retry count, and risk decision version. Never include PAN, CVV, secrets, or raw provider credentials in telemetry.",
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ],
+      "connection": {
+        "edgeId": "pay_orchestrator_monitor",
+        "sourceNodeId": "pay_orchestrator",
+        "targetNodeId": "pay_monitor",
+        "connectionType": "data-flow",
+        "label": "Payment/provider telemetry",
+        "description": "Correlate user-visible state, provider latency, bounded retries, and risk outcomes without sensitive card data."
+      }
+    },
+    {
+      "id": "pay_41",
+      "stepNumber": 41,
+      "phase": "Close the loop and prove safety",
+      "title": "Alert on ledger and reconciliation invariants",
+      "type": "add_connection",
+      "content": "Emit high-priority signals for unbalanced journals, duplicate provider references, idempotency conflicts, aged outbox events, unmatched settlements, and stuck refunds. A financial invariant breach pages the owning team even if the API remains available.",
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-constraint:2",
+        "legacy-constraint:5"
+      ],
+      "connection": {
+        "edgeId": "pay_ledger_monitor",
+        "sourceNodeId": "pay_ledger",
+        "targetNodeId": "pay_monitor",
+        "connectionType": "data-flow",
+        "label": "Ledger correctness signals",
+        "description": "Balance, duplicate, commit, and reconciliation-gap checks drive alerts and auditable repair."
+      }
+    },
+    {
+      "id": "pay_42",
+      "stepNumber": 42,
+      "phase": "Close the loop and prove safety",
+      "title": "Size to measured peaks and keep the hot path bounded",
+      "type": "explanation",
+      "content": "At the provisional 10M/day baseline, average volume is about 116 transactions/second; average load does not size burst capacity. Measure regional/provider peak TPS, method mix, retries, fraud-review rate, history reads, and settlement bursts. Keep reporting, notifications, reconciliation, and model training off the synchronous posting path; partition only after proving that balanced postings remain atomic for each payment.",
+      "requirementIds": [
+        "legacy-requirement:8",
+        "legacy-requirement:5",
+        "legacy-requirement:4",
+        "legacy-constraint:2",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ],
+      "componentUpdate": {
+        "nodeId": "pay_events",
+        "properties": {
+        "purpose": "Carry versioned payment, ledger, refund, dispute, settlement, and privacy-minimized compliance-decision events with stable IDs and aggregate ordering. A dedicated archive retains redacted audit evidence/event hashes separately from the 168-hour broker replay window, with jurisdiction-approved retention and restricted audited access. Never publish PAN/CVV or credentials. Provisional capacity baseline: 10M payments/day (~116 average/s); peak and burst profile are unspecified and must be measured. Keep reporting, notifications, reconciliation, and model training off the synchronous posting path; preserve the transactional outbox boundary."
+        }
+      }
+    },
+    {
+      "id": "pay_43",
+      "stepNumber": 43,
+      "phase": "Close the loop and prove safety",
+      "title": "Set and validate the latency budget",
+      "type": "explanation",
+      "content": "Use p95 <=500ms for a normal authorization as a provisional end-to-end target, but report gateway, risk, ledger, and provider latency separately. When an external provider exceeds its bounded deadline, return an honest pending/unknown state rather than blocking indefinitely or inventing success. Replace this provisional number if the product owner sets a different SLA.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:4",
+        "legacy-requirement:8",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ],
+      "componentUpdate": {
+        "nodeId": "pay_orchestrator",
+        "properties": {
+        "purpose": "Normalize card, bank-transfer, and wallet provider results into one versioned state machine: REQUIRES_ACTION, PENDING, AUTHORIZED, CAPTURED, SETTLED, FAILED, REVERSED, REFUNDED, or DISPUTED, while preserving each method's provider reference and raw outcome for reconciliation. A delayed bank confirmation remains PENDING, never falsely successful; retries are idempotent and ambiguous timeouts are queried/reconciled before another money movement. Provisional target: normal authorization p95 <=500ms; measure gateway, risk, ledger, and provider latency separately. Enforce a bounded provider deadline; product must ratify or replace this target before it is an SLA."
+        }
+      }
+    },
+  {
+    "id": "pay_45",
+    "stepNumber": 44,
+    "phase": "Close the loop and prove safety",
+    "title": "Archive privacy-safe compliance evidence",
+    "type": "add_component",
+    "content": "The event broker's seven-day replay retention is not the regulatory audit archive. Add the existing Object Storage catalog component for versioned, integrity-checked evidence envelopes and event hashes, encrypted and access-audited, with retention/legal-hold configured per the approved jurisdictions. Store decision and transaction references, not PAN/CVV, credentials, or unnecessary personal data. Object storage preserves evidence; it does not itself certify PCI DSS or satisfy every jurisdiction's retention rules.",
+    "requirementIds": [
+      "legacy-requirement:5",
+      "legacy-requirement:7",
+      "legacy-constraint:1",
+      "legacy-constraint:3"
+    ],
+    "component": {
+      "nodeId": "pay_compliance_archive",
+      "componentType": "object-storage",
+      "label": "Compliance Evidence Archive",
+      "description": "Versioned, integrity-checked audit evidence",
+      "position": {
+        "x": 2880,
+        "y": 360
+      },
+      "properties": {
+        "componentName": "Compliance Evidence Archive",
+        "purpose": "Keep encrypted, versioned, integrity-checked and access-audited evidence envelopes for payments, refunds, disputes and KYC/AML/sanctions decisions. Store transaction/event IDs, policy version, decision reference and event hash only; exclude PAN/CVV and credentials. Configure retention, legal hold, residency, deletion and access-review policies with the compliance owner for each operating jurisdiction. This evidence archive supports audits but does not claim whole-platform PCI DSS certification.",
+        "provider": "S3",
+        "versioning": true,
+        "checksumValidation": true,
+        "storageGB": 1000
+      },
+      "highlightReason": "Object Storage is the existing catalog component that fits a separate, versioned compliance-evidence archive; the provider choice is illustrative and replaceable."
+    }
+  },
+  {
+    "id": "pay_46",
+    "stepNumber": 45,
+    "phase": "Close the loop and prove safety",
+    "title": "Retain redacted audit events beyond broker replay",
+    "type": "add_connection",
+    "content": "Archive a privacy-minimized evidence envelope after the committed event is produced. Preserve who/what/when, jurisdiction, policy version, decision reference, transaction state, and a verifiable event hash; exclude PAN/CVV, authentication secrets, and raw provider payloads. Enforce retention and legal holds in the storage policy, and audit reads.",
+    "requirementIds": [
+      "legacy-requirement:5",
+      "legacy-requirement:7",
+      "legacy-constraint:1",
+      "legacy-constraint:3"
+    ],
+    "connection": {
+      "edgeId": "pay_events_compliance_archive",
+      "sourceNodeId": "pay_events",
+      "targetNodeId": "pay_compliance_archive",
+      "connectionType": "event-stream",
+      "label": "Redacted audit envelope + event hash",
+      "description": "Archive committed payment and versioned compliance-decision references with integrity hashes and jurisdictional retention controls; never export PAN/CVV, credentials, or unnecessary personal data."
+    }
+  },
+    {
+    "id": "pay_44",
+    "stepNumber": 46,
+      "phase": "Close the loop and prove safety",
+      "title": "Accept only when money, security, and history reconcile",
+      "type": "conclusion",
+      "content": "The design is ready for review when every accepted command is idempotent; authorization/capture/refund/dispute states are explicit; every posted transaction balances in ACID storage; card data is tokenized and never logged; cards, bank transfers, and wallets have method-specific outcomes; FX quotes are immutable and auditable; reporting derives from committed history; and provider timeouts never cause duplicate money movement. Load-test the measured peak and obtain compliance/product sign-off before claiming production readiness.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,1197 @@
+{
+  "problem_id": "6901ef1b9420d83630aca86b",
+  "version": "1.0.0-review-draft",
+  "totalSteps": 51,
+  "requirementRevision": null,
+  "phases": [
+    {
+      "name": "Frame the experiment contract",
+      "stepRange": [1, 4],
+      "description": "Separate the supplied brief from design assumptions and identify policies that need an owner decision."
+    },
+    {
+      "name": "Create experiments and connect gradual rollout",
+      "stepRange": [5, 13],
+      "description": "Build the control plane for experiment lifecycle, configuration, and feature-flag rollout integration."
+    },
+    {
+      "name": "Assign eligible users consistently",
+      "stepRange": [14, 27],
+      "description": "Connect the client assignment path to versioned targeting, deterministic bucketing, cache, and durable assignment state."
+    },
+    {
+      "name": "Collect events and build analysis data",
+      "stepRange": [28, 41],
+      "description": "Capture confirmed exposures and outcomes, process the high-volume stream, and make live and historical data available for analysis."
+    },
+    {
+      "name": "Monitor results and review validity",
+      "stepRange": [42, 51],
+      "description": "Expose live health and experiment results while keeping statistical and rollout policies explicit."
+    }
+  ],
+  "steps": [
+    {
+      "id": "ab_01_brief_facts",
+      "stepNumber": 1,
+      "phase": "Frame the experiment contract",
+      "title": "Keep the supplied brief as the source of truth",
+      "type": "explanation",
+      "content": "Brief facts: the platform creates and manages experiments, randomly assigns users to variants, tracks metrics and events, analyzes results statistically, supports concurrent experiments and targeted user segments, handles billions of events, and monitors experiments in real time. The stated constraints are consistent per-user assignment, minimizing bias, high traffic, statistical significance, and gradual rollouts. The hints are suggestions, not additional requirements. No peak rate, latency or freshness objective, retention period, variant-count limit, baseline metric, minimum detectable effect, power, required sample size, significance threshold, stopping rule, or vendor is supplied.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "ab_02_assignment_unit",
+      "stepNumber": 2,
+      "phase": "Frame the experiment contract",
+      "title": "Use the user as the assignment unit",
+      "type": "decision_point",
+      "content": "The brief explicitly calls for consistent assignment per user. Use a stable user identifier as the unit for a given experiment, and make the identity source part of the integration contract. Assumption: participating clients can present the same authorized user identifier across requests. Anonymous identity, account merges, and cross-device identity need an owner policy before they can be included.",
+      "decision": {
+        "question": "What must remain stable when one user requests an experiment assignment more than once?",
+        "chosen": "The user's variant within each experiment",
+        "chosenReason": "This directly implements the stated per-user consistency constraint while allowing separate experiments to make independent assignments.",
+        "alternatives": [
+          {
+            "option": "Assign per request or session",
+            "tradeoff": "A returning user could see different variants, violating the brief."
+          },
+          {
+            "option": "Assign one variant globally across all experiments",
+            "tradeoff": "It prevents independent experiments from assigning the same user separately."
+          }
+        ]
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-constraint:1"
+      ]
+    },
+    {
+      "id": "ab_03_exposure_boundary",
+      "stepNumber": 3,
+      "phase": "Frame the experiment contract",
+      "title": "Separate assignment from confirmed exposure",
+      "type": "decision_point",
+      "content": "An assignment response alone does not prove that a user saw the feature. Emit a deduplicated exposure event only after the client confirms that the selected experience was rendered, and attach the experiment, variant, user-level assignment key, and event identity needed to join later outcomes. Treat this as delivery and instrumentation evidence, not an automatic analysis denominator. Predefine the estimand and analysis population: for an intention-to-treat comparison, retain all eligible randomized users in their assigned arms and capture their outcomes even when render confirmation is absent. Conditioning on post-assignment exposure can introduce selection bias, so use an exposure-conditioned analysis only when its estimand and assumptions are explicit.",
+      "decision": {
+        "question": "How should assignment and actual treatment delivery be represented in analysis data?",
+        "chosen": "Persist the randomized assignment and record a separate deduplicated render confirmation; define the analysis population before enrollment",
+        "chosenReason": "This keeps delivery observable without silently conditioning the randomized comparison on post-assignment behavior.",
+        "alternatives": [
+          {
+            "option": "Count every assignment lookup as an exposure",
+            "tradeoff": "Lookups that never render the variant overstate confirmed treatment delivery."
+          },
+          {
+            "option": "Use only render-confirmed users as the denominator for every causal comparison",
+            "tradeoff": "Conditioning on a post-randomization event can create selection bias and discard outcomes from assigned users."
+          }
+        ]
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-constraint:2"
+      ]
+    },
+    {
+      "id": "ab_04_open_inputs",
+      "stepNumber": 4,
+      "phase": "Frame the experiment contract",
+      "title": "Record the inputs this brief leaves open",
+      "type": "explanation",
+      "content": "Assumptions for this review draft: a representative web client illustrates the SDK path, and an existing or separately selected feature-flag provider can exchange versioned rules. Neither is named by the brief. Before production use, owners must set the identity contract, event schema and retention, traffic and freshness objectives, metric definitions and analysis population, baseline and minimum detectable effect inputs, power and sample-size plan, statistical method and significance policy, and rollout or rollback gates. These are experiment or operating-policy inputs, not supplied targets. No numerical targets are inferred.",
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "ab_05_admin_console",
+      "stepNumber": 5,
+      "phase": "Create experiments and connect gradual rollout",
+      "title": "Add the experiment authoring surface",
+      "type": "add_component",
+      "content": "Use the existing admin-console catalog component for authorized experiment owners to create, review, pause, and inspect experiments. Keep targeting rules and metric definitions reviewable before launch; the console is a control surface, not the authority that assigns a user at request time.",
+      "component": {
+        "nodeId": "ab_admin",
+        "componentType": "admin-console",
+        "label": "Experiment Admin Console",
+        "description": "Authorized control-plane interface for experiment lifecycle, targeting, metrics, and review.",
+        "position": { "x": 0, "y": 0 },
+        "properties": {
+          "componentName": "Experiment Admin Console",
+          "purpose": "Create and manage experiment definitions, targeting, metric plans, and rollout review through an authorized control-plane interface."
+        },
+        "highlightReason": "The brief requires experiment creation and management, including reviewable controls for concurrent experiments."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:5"
+      ]
+    },
+    {
+      "id": "ab_06_control_api",
+      "stepNumber": 6,
+      "phase": "Create experiments and connect gradual rollout",
+      "title": "Add the control-plane API entry",
+      "type": "add_component",
+      "content": "Use the API Gateway catalog component for authenticated experiment administration and assignment requests. Apply separate authorization and request validation to control-plane mutations and client assignment traffic, even if they share a gateway component in this overview.",
+      "component": {
+        "nodeId": "ab_api",
+        "componentType": "api-gateway",
+        "label": "Experiment and Assignment API",
+        "description": "Validated API entry for experiment administration and client assignment calls.",
+        "position": { "x": 300, "y": 0 },
+        "properties": {
+          "componentName": "Experiment and Assignment API",
+          "purpose": "Authenticate and validate experiment management and user assignment requests before routing them to the appropriate service."
+        },
+        "highlightReason": "A shared API boundary lets the control plane and clients reach the correct service without trusting client-side assignment logic."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "ab_07_experiment_registry",
+      "stepNumber": 7,
+      "phase": "Create experiments and connect gradual rollout",
+      "title": "Store versioned experiment definitions",
+      "type": "add_component",
+      "content": "Reuse the experiment-tracking catalog concept as the platform's experiment registry. Store experiment identity and lifecycle, variants and allocation rules, targeting segment references, metric definitions, and immutable configuration versions. Assumption: this catalog concept represents a service boundary; it does not require a particular ML tracking vendor.",
+      "component": {
+        "nodeId": "ab_registry",
+        "componentType": "experiment-tracking",
+        "label": "Experiment Registry and Metric Plan",
+        "description": "Versioned source of experiment, variant, targeting, rollout, and metric configuration.",
+        "position": { "x": 620, "y": -140 },
+        "properties": {
+          "componentName": "Experiment Registry and Metric Plan",
+          "purpose": "Keep versioned experiment lifecycle, variants, allocation rules, segment references, and pre-launch metric definitions for assignment and analysis services."
+        },
+        "highlightReason": "This is the durable control-plane concept behind creation, concurrent experiments, targeting, and analysis configuration."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-requirement:6"
+      ]
+    },
+    {
+      "id": "ab_08_flag_provider",
+      "stepNumber": 8,
+      "phase": "Create experiments and connect gradual rollout",
+      "title": "Represent the feature-flag rollout integration",
+      "type": "add_component",
+      "content": "Use the deployment-pipeline catalog component with its supported Feature Flag strategy to represent the integration boundary suggested by the brief. Assumption: a compatible provider exists or will be selected. Keep its vendor, rule-sync protocol, and control ownership open until specified.",
+      "component": {
+        "nodeId": "ab_flags",
+        "componentType": "deployment-pipeline",
+        "label": "Feature Flag and Rollout Provider",
+        "description": "Integration boundary for versioned feature-flag rules and gradual rollout control.",
+        "position": { "x": 930, "y": -140 },
+        "properties": {
+          "componentName": "Feature Flag and Rollout Provider",
+          "purpose": "Integrate experiment configuration with feature flags and gradual rollout controls while leaving provider choice and ramp values to the owning team.",
+          "strategy": "Feature Flag"
+        },
+        "highlightReason": "Gradual rollout is an explicit constraint and feature-flag integration is a supplied hint; no provider or rollout percentage is specified."
+      },
+      "requirementIds": [
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "ab_09_admin_api_edge",
+      "stepNumber": 9,
+      "phase": "Create experiments and connect gradual rollout",
+      "title": "Route experiment authoring through the API",
+      "type": "add_connection",
+      "content": "The console submits lifecycle and configuration changes to the authenticated API. Server-side authorization and validation remain authoritative.",
+      "connection": {
+        "edgeId": "ab_admin_api",
+        "sourceNodeId": "ab_admin",
+        "targetNodeId": "ab_api",
+        "connectionType": "api-call",
+        "label": "Authorized experiment changes",
+        "description": "Route create, edit, pause, and review requests through the control-plane API."
+      },
+      "requirementIds": [
+        "legacy-requirement:1"
+      ]
+    },
+    {
+      "id": "ab_10_api_registry_edge",
+      "stepNumber": 10,
+      "phase": "Create experiments and connect gradual rollout",
+      "title": "Persist validated experiment versions",
+      "type": "add_connection",
+      "content": "Validated control-plane requests create or transition versioned records in the registry. Preserve prior versions so assignments and analysis can identify the exact rules used.",
+      "connection": {
+        "edgeId": "ab_api_registry",
+        "sourceNodeId": "ab_api",
+        "targetNodeId": "ab_registry",
+        "connectionType": "api-call",
+        "label": "Validated lifecycle and configuration",
+        "description": "Persist experiment state, variant rules, segment references, and metric plans with explicit versions."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:5",
+        "legacy-requirement:6"
+      ]
+    },
+    {
+      "id": "ab_11_registry_flag_edge",
+      "stepNumber": 11,
+      "phase": "Create experiments and connect gradual rollout",
+      "title": "Publish rollout rules to the flag boundary",
+      "type": "add_connection",
+      "content": "The registry supplies versioned eligible variants and rollout state to the feature-flag integration. A rollout change is auditable and does not rewrite an already persisted user assignment.",
+      "connection": {
+        "edgeId": "ab_registry_flags",
+        "sourceNodeId": "ab_registry",
+        "targetNodeId": "ab_flags",
+        "connectionType": "data-flow",
+        "label": "Versioned flag and rollout rules",
+        "description": "Synchronize approved experiment configuration with the feature-flag provider."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "ab_12_ramp_policy",
+      "stepNumber": 12,
+      "phase": "Create experiments and connect gradual rollout",
+      "title": "Make rollout progression an explicit policy",
+      "type": "explanation",
+      "content": "Gradual rollout means the owner can increase or reduce eligible traffic through versioned rules and pause or roll back a change. The brief supplies no rollout percentages, time intervals, or automated health thresholds; configure those with the experiment owner rather than inventing a schedule.",
+      "requirementIds": [
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "ab_13_concurrent_experiments",
+      "stepNumber": 13,
+      "phase": "Create experiments and connect gradual rollout",
+      "title": "Namespace concurrent experiments and surface overlap",
+      "type": "decision_point",
+      "content": "Give each experiment its own identifier, assignment namespace, salt, and configuration version so independent experiments do not share one global bucket. Record targeting and surface overlap; require an explicit compatibility or exclusion policy when concurrent experiments could affect the same users or outcome.",
+      "decision": {
+        "question": "How should simultaneous experiments avoid accidental assignment coupling?",
+        "chosen": "Use experiment-scoped assignment namespaces and make overlapping targeting explicit in configuration",
+        "chosenReason": "The brief requires concurrent experiments, while an experiment-specific namespace keeps each assignment deterministic without implying that all experiments are compatible.",
+        "alternatives": [
+          {
+            "option": "Use one shared bucket across all experiments",
+            "tradeoff": "Unrelated experiments can become coupled and users cannot be assigned independently."
+          },
+          {
+            "option": "Allow every overlap without recording it",
+            "tradeoff": "Experiments affecting the same users or surface can confound interpretation."
+          }
+        ]
+      },
+      "requirementIds": [
+        "legacy-requirement:5",
+        "legacy-constraint:2"
+      ]
+    },
+    {
+      "id": "ab_14_client_sdk",
+      "stepNumber": 14,
+      "phase": "Assign eligible users consistently",
+      "title": "Add a representative product client",
+      "type": "add_component",
+      "content": "Assumption: a web product is one representative SDK consumer for this design. The client requests a variant and reports confirmed exposure and product events, but it does not choose a variant or decide whether the user is eligible.",
+      "component": {
+        "nodeId": "ab_client",
+        "componentType": "web-app",
+        "label": "Product Client and Experiment SDK",
+        "description": "Representative browser client that requests an assignment and reports rendered exposure and outcome events.",
+        "position": { "x": 0, "y": 300 },
+        "properties": {
+          "componentName": "Product Client and Experiment SDK",
+          "purpose": "Request server-authoritative experiment assignments and emit exposure or outcome events after the corresponding product behavior occurs."
+        },
+        "highlightReason": "A client-facing assignment and event path makes per-user treatment and actual exposure observable."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-constraint:1"
+      ]
+    },
+    {
+      "id": "ab_15_assignment_service",
+      "stepNumber": 15,
+      "phase": "Assign eligible users consistently",
+      "title": "Add the authoritative assignment service",
+      "type": "add_component",
+      "content": "Resolve the active experiment version, evaluate its user segment, and deterministically choose a variant in this backend service. Return the same persisted choice for repeated requests. Keep eligibility and allocation logic server-side to limit bias from client-side divergence; this boundary does not by itself guarantee unbiased enrollment or analysis.",
+      "component": {
+        "nodeId": "ab_assigner",
+        "componentType": "backend-server",
+        "label": "Targeting and Assignment Service",
+        "description": "Server-side segment evaluation and deterministic, sticky per-user variant assignment.",
+        "position": { "x": 620, "y": 300 },
+        "properties": {
+          "componentName": "Targeting and Assignment Service",
+          "purpose": "Evaluate versioned user segments and return a deterministic experiment-scoped variant, preserving the first assignment for each user and experiment."
+        },
+        "highlightReason": "This service implements random assignment, targeting, user-level consistency, and a trusted boundary that reduces client-side bias."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "ab_16_assignment_cache",
+      "stepNumber": 16,
+      "phase": "Assign eligible users consistently",
+      "title": "Add the assignment cache as an accelerator",
+      "type": "add_component",
+      "content": "Cache resolved assignments using an experiment and user key to reduce repeated durable reads. A cache miss or eviction must fall back to the assignment ledger; cache contents are never the sole source of a sticky decision.",
+      "component": {
+        "nodeId": "ab_cache",
+        "componentType": "cache",
+        "label": "Resolved Assignment Cache",
+        "description": "Low-latency lookup for assignments whose durable record remains authoritative.",
+        "position": { "x": 930, "y": 180 },
+        "properties": {
+          "componentName": "Resolved Assignment Cache",
+          "purpose": "Accelerate repeat assignment lookups while treating the durable assignment ledger as authoritative after cache misses, eviction, or invalidation."
+        },
+        "highlightReason": "Assignment caching is a supplied hint and can lower hot-path load without weakening per-user consistency."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-constraint:1",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "ab_17_assignment_ledger",
+      "stepNumber": 17,
+      "phase": "Assign eligible users consistently",
+      "title": "Persist the first assignment and its version",
+      "type": "add_component",
+      "content": "Persist a unique assignment record keyed by experiment and user, with the chosen variant and configuration version. Store an outbox record in the same durable transaction so assignment facts can be delivered for analysis without treating an uncommitted cache value as truth.",
+      "component": {
+        "nodeId": "ab_ledger",
+        "componentType": "database",
+        "label": "Assignment Ledger and Outbox",
+        "description": "Durable idempotency boundary for sticky user assignments and their analysis handoff.",
+        "position": { "x": 930, "y": 430 },
+        "properties": {
+          "componentName": "Assignment Ledger and Outbox",
+          "purpose": "Uniquely persist each experiment and user assignment with its variant and configuration version, plus an outbox record for reliable downstream delivery."
+        },
+        "highlightReason": "Durable assignment state preserves a user's variant across cache loss and supports auditable experiment analysis."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-constraint:1"
+      ]
+    },
+    {
+      "id": "ab_18_client_assignment_request",
+      "stepNumber": 18,
+      "phase": "Assign eligible users consistently",
+      "title": "Send assignment requests through the API",
+      "type": "add_connection",
+      "content": "The SDK submits the experiment identifier and authenticated user context. Return the selected variant on the same request; do not trust a variant selected by the browser.",
+      "connection": {
+        "edgeId": "ab_client_api",
+        "sourceNodeId": "ab_client",
+        "targetNodeId": "ab_api",
+        "connectionType": "http",
+        "label": "User assignment request",
+        "description": "Send experiment identity and authorized user context to the assignment API boundary."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-constraint:1",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "ab_19_api_assignment_route",
+      "stepNumber": 19,
+      "phase": "Assign eligible users consistently",
+      "title": "Route assignment calls to the decision service",
+      "type": "add_connection",
+      "content": "The API validates the request and forwards it to the assignment service. Authorization, validation, and request limits belong at trusted server boundaries; the brief does not prescribe their numerical settings.",
+      "connection": {
+        "edgeId": "ab_api_assigner",
+        "sourceNodeId": "ab_api",
+        "targetNodeId": "ab_assigner",
+        "connectionType": "api-call",
+        "label": "Validated assignment lookup",
+        "description": "Route authenticated assignment requests to server-side targeting and bucketing."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:6",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "ab_20_registry_assignment_config",
+      "stepNumber": 20,
+      "phase": "Assign eligible users consistently",
+      "title": "Read the versioned experiment and segment rules",
+      "type": "add_connection",
+      "content": "The assignment service evaluates the registry's active configuration version, including variants, allocation, and segment predicates. A request must use one coherent version rather than mixing rules during an update.",
+      "connection": {
+        "edgeId": "ab_registry_assigner",
+        "sourceNodeId": "ab_registry",
+        "targetNodeId": "ab_assigner",
+        "connectionType": "data-flow",
+        "label": "Versioned variants and segment rules",
+        "description": "Supply one coherent experiment configuration version for targeting and assignment."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:5",
+        "legacy-requirement:6"
+      ]
+    },
+    {
+      "id": "ab_21_rollout_assignment_rules",
+      "stepNumber": 21,
+      "phase": "Assign eligible users consistently",
+      "title": "Apply the current gradual-rollout eligibility",
+      "type": "add_connection",
+      "content": "The assignment service consumes the approved flag and rollout state before selecting among eligible variants. Rollout configuration changes affect new eligibility according to the configured policy; persisted assignments remain sticky unless an explicit migration is approved.",
+      "connection": {
+        "edgeId": "ab_flags_assigner",
+        "sourceNodeId": "ab_flags",
+        "targetNodeId": "ab_assigner",
+        "connectionType": "data-flow",
+        "label": "Active flag and rollout state",
+        "description": "Provide versioned eligibility and gradual-rollout rules to the assignment path."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-constraint:1",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "ab_22_assignment_cache_edge",
+      "stepNumber": 22,
+      "phase": "Assign eligible users consistently",
+      "title": "Use the cache before durable lookup",
+      "type": "add_connection",
+      "content": "Check the resolved assignment cache using the experiment and user key. On a miss, read or create the durable assignment and refresh the cache from that committed value.",
+      "connection": {
+        "edgeId": "ab_assigner_cache",
+        "sourceNodeId": "ab_assigner",
+        "targetNodeId": "ab_cache",
+        "connectionType": "database-connection",
+        "label": "Read-through assignment lookup",
+        "description": "Accelerate repeat lookups while allowing the ledger to rebuild evicted cache entries."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-constraint:1",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "ab_23_assignment_ledger_edge",
+      "stepNumber": 23,
+      "phase": "Assign eligible users consistently",
+      "title": "Make the durable assignment idempotent",
+      "type": "add_connection",
+      "content": "On a cache miss, use a uniqueness boundary on the experiment and user key to return an existing decision or commit the first chosen variant and its configuration version. Concurrent requests must converge on the same stored assignment.",
+      "connection": {
+        "edgeId": "ab_assigner_ledger",
+        "sourceNodeId": "ab_assigner",
+        "targetNodeId": "ab_ledger",
+        "connectionType": "database-connection",
+        "label": "Idempotent assignment and outbox write",
+        "description": "Read or atomically create one sticky user assignment and its durable downstream record."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-constraint:1"
+      ]
+    },
+    {
+      "id": "ab_24_deterministic_bucketing",
+      "stepNumber": 24,
+      "phase": "Assign eligible users consistently",
+      "title": "Choose a reproducible random bucket",
+      "type": "decision_point",
+      "content": "For a first eligible assignment, compute a deterministic pseudorandom bucket from the experiment identifier, stable user identifier, and an independently chosen experiment-scoped salt, then map it to the configured cumulative variant allocation. Persist the result. Do not change the salt or silently rebucket existing users when allocation rules change. Hash-based bucketing is a reproducible randomization mechanism, not proof that realized groups are balanced or free of bias; monitor allocation and investigate sample-ratio mismatch.",
+      "decision": {
+        "question": "How can assignment be random across users and repeatable for the same user?",
+        "chosen": "Use a deterministic hash-derived bucket scoped by experiment and user, then persist the selected variant",
+        "chosenReason": "A suitably distributed hash with a preselected experiment salt gives reproducible pseudorandom assignment, while the ledger protects stickiness through configuration changes and cache eviction; observed balance and other bias risks still require validation.",
+        "alternatives": [
+          {
+            "option": "Choose a fresh random variant on every request",
+            "tradeoff": "The same user can switch variants between visits."
+          },
+          {
+            "option": "Use one global hash without experiment scope",
+            "tradeoff": "Assignments across concurrent experiments can become unintentionally coupled."
+          }
+        ]
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:5",
+        "legacy-constraint:1"
+      ]
+    },
+    {
+      "id": "ab_25_segment_evaluation",
+      "stepNumber": 25,
+      "phase": "Assign eligible users consistently",
+      "title": "Evaluate targeting before bucketing",
+      "type": "decision_point",
+      "content": "Evaluate the versioned segment predicate before allocating a variant. Persist enough rule-version and eligibility context to explain why an assignment was or was not returned. Define missing, stale, or unavailable attributes as an explicit policy instead of silently treating them as eligible.",
+      "decision": {
+        "question": "When does a user enter variant bucketing?",
+        "chosen": "Only after the user satisfies the experiment's versioned targeting segment",
+        "chosenReason": "This makes user targeting an explicit gate and prevents ineligible traffic from contaminating experiment results.",
+        "alternatives": [
+          {
+            "option": "Assign first and filter events later",
+            "tradeoff": "Ineligible users can receive treatment and complicate exposure denominators."
+          },
+          {
+            "option": "Treat absent targeting attributes as a match",
+            "tradeoff": "Unavailable data can broaden targeting unexpectedly."
+          }
+        ]
+      },
+      "requirementIds": [
+        "legacy-requirement:6",
+        "legacy-constraint:2"
+      ]
+    },
+    {
+      "id": "ab_26_assignment_scale_trigger",
+      "stepNumber": 26,
+      "phase": "Assign eligible users consistently",
+      "title": "Scale the assignment path from measured pressure",
+      "type": "scale_trigger",
+      "content": "Watch assignment request rate, cache hit and miss rate, ledger latency and contention, and error rate. Scale stateless assignment workers and partition durable state by the experiment and user key as measured load requires; do not claim an unprovided throughput or latency target.",
+      "scaleTrigger": {
+        "metric": "Observed assignment request rate, cache hit/miss rate, ledger latency and contention, and assignment errors",
+        "action": "Add stateless service capacity and partition the assignment lookup/write path when observed pressure requires it; preserve the uniqueness key and sticky decision semantics.",
+        "impact": "Raises assignment capacity while retaining consistent per-user decisions under high traffic."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-constraint:1",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "ab_27_bias_controls",
+      "stepNumber": 27,
+      "phase": "Assign eligible users consistently",
+      "title": "Pre-register choices that limit experiment bias",
+      "type": "decision_point",
+      "content": "Before enabling enrollment, record the estimand and analysis population, assignment unit, eligible population, variant allocation, primary and guardrail metric definitions (including numerator, denominator, and outcome window), exclusions, and analysis plan. Where the decision requires it, pre-specify the baseline assumptions, minimum detectable effect, power, sample-size or sequential stopping plan; these values are experiment-specific inputs absent from the brief, not platform targets. Check assignment counts for sample-ratio mismatch and investigate before interpreting an effect. Pre-registration and diagnostics reduce avoidable bias but do not prove that every experiment is unbiased.",
+      "decision": {
+        "question": "What must be fixed before results are inspected?",
+        "chosen": "The eligible population, randomization unit, allocation, metric plan, exclusions, and validity checks",
+        "chosenReason": "Pre-registration and assignment diagnostics make post-hoc changes visible and expose randomization or instrumentation failures.",
+        "alternatives": [
+          {
+            "option": "Choose metrics and exclusions after seeing results",
+            "tradeoff": "It increases researcher degrees of freedom and makes results harder to interpret."
+          },
+          {
+            "option": "Treat any observed variant imbalance as a product effect",
+            "tradeoff": "A sample-ratio mismatch may indicate assignment or event-pipeline defects."
+          }
+        ]
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-constraint:2",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "ab_28_event_contract",
+      "stepNumber": 28,
+      "phase": "Collect events and build analysis data",
+      "title": "Define exposure and outcome event identity",
+      "type": "explanation",
+      "content": "Assumption: product clients can emit a stable event identifier and assignment context when recording a render confirmation or product outcome. Validate experiment and variant versions, event time, and event identity at ingestion. Deduplicate repeated delivery downstream; keep assignment, confirmed exposure, and outcomes distinct. Do not count assignment creation as a rendered exposure, and do not require a render-confirmation event to retain an assigned user's outcome for a pre-specified intention-to-treat analysis.",
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:7",
+        "legacy-constraint:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "ab_29_event_ingest",
+      "stepNumber": 29,
+      "phase": "Collect events and build analysis data",
+      "title": "Add the experiment event intake",
+      "type": "add_component",
+      "content": "Reuse the API Gateway catalog concept for a separately governed event-intake endpoint. Validate event identity and experiment context, apply bounded admission behavior under pressure, and acknowledge only according to the chosen durable handoff contract.",
+      "component": {
+        "nodeId": "ab_event_api",
+        "componentType": "api-gateway",
+        "label": "Exposure and Metric Event API",
+        "description": "Validated ingress for rendered exposures and experiment outcome events.",
+        "position": { "x": 300, "y": 650 },
+        "properties": {
+          "componentName": "Exposure and Metric Event API",
+          "purpose": "Validate event identity, experiment context, and assignment references before handing exposure and outcome events to the durable event pipeline."
+        },
+        "highlightReason": "A distinct event-ingestion boundary supports billions of events without coupling analytics delivery to assignment response latency."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:7",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "ab_30_event_broker",
+      "stepNumber": 30,
+      "phase": "Collect events and build analysis data",
+      "title": "Buffer and distribute the event stream",
+      "type": "add_component",
+      "content": "Use the message-broker catalog component to absorb bursts and decouple event acceptance from stream processing. Partition by a stable experiment and user-derived key when ordering or locality is needed, and measure skew rather than assuming uniform traffic.",
+      "component": {
+        "nodeId": "ab_broker",
+        "componentType": "message-broker",
+        "label": "Experiment Event Stream",
+        "description": "Durable partitioned handoff for assignment facts, exposures, and outcome events.",
+        "position": { "x": 620, "y": 650 },
+        "properties": {
+          "componentName": "Experiment Event Stream",
+          "purpose": "Buffer and distribute high-volume assignment, confirmed exposure, and outcome events to independent processing consumers with observable lag."
+        },
+        "highlightReason": "A broker separates high-volume event intake from analytics consumers and supports independent processing capacity."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:7",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "ab_31_event_processor",
+      "stepNumber": 31,
+      "phase": "Collect events and build analysis data",
+      "title": "Process and validate events continuously",
+      "type": "add_component",
+      "content": "Use the stream-processor catalog component for schema validation, idempotent deduplication, assignment and exposure correlation, metric aggregation, and late or malformed event handling. Keep event freshness and retention objectives configurable because the brief gives no numerical targets.",
+      "component": {
+        "nodeId": "ab_stream",
+        "componentType": "stream-processor",
+        "label": "Event Validation and Aggregation",
+        "description": "Continuous deduplication, exposure correlation, and rolling experiment metric computation.",
+        "position": { "x": 930, "y": 650 },
+        "properties": {
+          "componentName": "Event Validation and Aggregation",
+          "purpose": "Validate and deduplicate event identities, correlate confirmed exposures with assignments, and compute rolling aggregates for active experiments."
+        },
+        "highlightReason": "Continuous processing supports billions of events and feeds real-time experiment monitoring."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "ab_32_event_warehouse",
+      "stepNumber": 32,
+      "phase": "Collect events and build analysis data",
+      "title": "Keep an analysis-ready historical record",
+      "type": "add_component",
+      "content": "Use the data-warehouse catalog concept for retained, queryable event and aggregate data used in deeper analysis and correction. Choose retention, privacy controls, and archival behavior with owners; none is specified in the brief.",
+      "component": {
+        "nodeId": "ab_warehouse",
+        "componentType": "data-warehouse",
+        "label": "Experiment Analytics Store",
+        "description": "Historical experiment events and aggregates for reproducible analysis and backfill.",
+        "position": { "x": 1240, "y": 820 },
+        "properties": {
+          "componentName": "Experiment Analytics Store",
+          "purpose": "Retain queryable, validated experiment events and aggregates for historical analysis, reproducible results, and correction after late data."
+        },
+        "highlightReason": "Statistical comparisons need a traceable analytical record in addition to live counters."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:7"
+      ]
+    },
+    {
+      "id": "ab_33_statistical_analytics",
+      "stepNumber": 33,
+      "phase": "Collect events and build analysis data",
+      "title": "Add the experiment results and statistics service",
+      "type": "add_component",
+      "content": "Reuse the analytics catalog concept for per-variant metrics, uncertainty, and configured statistical-significance calculations. Make the selected method and its assumptions visible with each result; the brief does not select a test family or significance threshold.",
+      "component": {
+        "nodeId": "ab_analytics",
+        "componentType": "analytics",
+        "label": "Experiment Metrics and Statistical Analysis",
+        "description": "Live metric aggregation and configured statistical analysis by experiment and variant.",
+        "position": { "x": 1550, "y": 500 },
+        "properties": {
+          "componentName": "Experiment Metrics and Statistical Analysis",
+          "purpose": "Compute per-variant metrics, uncertainty, and statistical significance using the experiment's recorded metric plan and configured analysis method."
+        },
+        "highlightReason": "This component directly implements statistical analysis while leaving unsupported statistical policy choices explicit."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:8",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "ab_34_client_event_request",
+      "stepNumber": 34,
+      "phase": "Collect events and build analysis data",
+      "title": "Submit render confirmations and assigned-user outcomes",
+      "type": "add_connection",
+      "content": "After rendering the assigned treatment, the SDK submits a render-confirmation event; product instrumentation submits the defined outcome events for randomized users with their assignment context, including when a separate render confirmation is missing if the pre-specified analysis population includes them. Processing must distinguish assignment, treatment delivery, and outcome rather than silently changing the denominator.",
+      "connection": {
+        "edgeId": "ab_client_event_api",
+        "sourceNodeId": "ab_client",
+        "targetNodeId": "ab_event_api",
+        "connectionType": "http",
+        "label": "Confirmed exposure and outcome events",
+        "description": "Send validated user-level exposure and metric events with their assignment context."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-constraint:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "ab_35_event_api_broker",
+      "stepNumber": 35,
+      "phase": "Collect events and build analysis data",
+      "title": "Durably hand accepted events to the stream",
+      "type": "add_connection",
+      "content": "Validate and publish accepted events to the broker before acknowledging according to the configured delivery contract. Keep retry identifiers stable so client or gateway retries do not create duplicate observations.",
+      "connection": {
+        "edgeId": "ab_event_api_broker",
+        "sourceNodeId": "ab_event_api",
+        "targetNodeId": "ab_broker",
+        "connectionType": "message-queue",
+        "label": "Validated exposure and metric events",
+        "description": "Buffer accepted events for independently scalable continuous consumers."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:7",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "ab_36_assignment_outbox_broker",
+      "stepNumber": 36,
+      "phase": "Collect events and build analysis data",
+      "title": "Publish committed assignment facts from the outbox",
+      "type": "add_connection",
+      "content": "A publisher forwards assignment records from the durable outbox to the event stream. These records establish which variant was assigned; the analytics path still waits for a separate confirmed exposure before counting a user as treated.",
+      "connection": {
+        "edgeId": "ab_ledger_broker",
+        "sourceNodeId": "ab_ledger",
+        "targetNodeId": "ab_broker",
+        "connectionType": "message-queue",
+        "label": "Committed assignment facts",
+        "description": "Deliver durable assignment and configuration-version records for later exposure correlation."
+      },
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-constraint:1"
+      ]
+    },
+    {
+      "id": "ab_37_broker_processor",
+      "stepNumber": 37,
+      "phase": "Collect events and build analysis data",
+      "title": "Consume the event stream with replayable processing",
+      "type": "add_connection",
+      "content": "The processor consumes partitioned events, records progress, deduplicates stable event identifiers, and makes replay or backfill possible after a processing defect. Monitor lag and partition skew as observed operating signals.",
+      "connection": {
+        "edgeId": "ab_broker_stream",
+        "sourceNodeId": "ab_broker",
+        "targetNodeId": "ab_stream",
+        "connectionType": "message-queue",
+        "label": "Partitioned experiment events",
+        "description": "Deliver assignment, confirmed exposure, and outcome records to continuous validation and aggregation."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:7",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "ab_38_processor_warehouse",
+      "stepNumber": 38,
+      "phase": "Collect events and build analysis data",
+      "title": "Persist validated history for reproducible analysis",
+      "type": "add_connection",
+      "content": "Write validated event facts and versioned aggregates to the analytical store. Keep enough source identity and processing-version metadata to explain or rebuild a result after a correction.",
+      "connection": {
+        "edgeId": "ab_stream_warehouse",
+        "sourceNodeId": "ab_stream",
+        "targetNodeId": "ab_warehouse",
+        "connectionType": "data-flow",
+        "label": "Validated event history and aggregates",
+        "description": "Persist queryable records for historical comparison and corrected backfills."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:7"
+      ]
+    },
+    {
+      "id": "ab_39_processor_live_analytics",
+      "stepNumber": 39,
+      "phase": "Collect events and build analysis data",
+      "title": "Feed rolling aggregates to live analysis",
+      "type": "add_connection",
+      "content": "Publish validated rolling counts and metric aggregates to the analytics service as they are computed. Include processing time and data-freshness context so a live result is not presented without its lag state.",
+      "connection": {
+        "edgeId": "ab_stream_analytics",
+        "sourceNodeId": "ab_stream",
+        "targetNodeId": "ab_analytics",
+        "connectionType": "data-flow",
+        "label": "Rolling per-variant aggregates",
+        "description": "Supply current exposure and metric aggregates for live results and monitoring."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:8",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "ab_40_registry_analysis_plan",
+      "stepNumber": 40,
+      "phase": "Collect events and build analysis data",
+      "title": "Join results to the pre-registered metric plan",
+      "type": "add_connection",
+      "content": "Supply the metric definitions, variant version, eligibility rules, and analysis configuration used by each experiment. The analytics service reports which configuration version produced each result.",
+      "connection": {
+        "edgeId": "ab_registry_analytics",
+        "sourceNodeId": "ab_registry",
+        "targetNodeId": "ab_analytics",
+        "connectionType": "data-flow",
+        "label": "Metric and analysis configuration",
+        "description": "Bind results to the experiment's recorded metric and analysis plan."
+      },
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "ab_41_warehouse_analysis",
+      "stepNumber": 41,
+      "phase": "Collect events and build analysis data",
+      "title": "Allow historical recomputation and correction",
+      "type": "add_connection",
+      "content": "The analytics service can read the historical store to recompute a result after late events, corrected instrumentation, or an approved analysis update. Preserve the distinction between a live provisional view and a reproducible historical result.",
+      "connection": {
+        "edgeId": "ab_warehouse_analytics",
+        "sourceNodeId": "ab_warehouse",
+        "targetNodeId": "ab_analytics",
+        "connectionType": "database-connection",
+        "label": "Historical data and backfill reads",
+        "description": "Support corrected or reproducible analysis beyond the current stream window."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:7",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "ab_42_monitoring",
+      "stepNumber": 42,
+      "phase": "Monitor results and review validity",
+      "title": "Add real-time health and experiment monitoring",
+      "type": "add_component",
+      "content": "Use the monitoring catalog component to expose assignment and event health alongside experiment metrics. Include event freshness, processing lag, assignment errors, per-variant counts, and sample-ratio diagnostics; define alert thresholds with operators because none are in the brief.",
+      "component": {
+        "nodeId": "ab_monitor",
+        "componentType": "monitoring",
+        "label": "Experiment Operations and Live Monitor",
+        "description": "Operational health, data freshness, assignment balance, and live experiment result view.",
+        "position": { "x": 1860, "y": 300 },
+        "properties": {
+          "componentName": "Experiment Operations and Live Monitor",
+          "purpose": "Display live experiment results with assignment errors, event freshness, processing lag, per-variant counts, and sample-ratio diagnostics."
+        },
+        "highlightReason": "Real-time experiment monitoring is an explicit requirement, while alert thresholds remain an owner decision."
+      },
+      "requirementIds": [
+        "legacy-requirement:8",
+        "legacy-requirement:4",
+        "legacy-constraint:2",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "ab_43_analytics_monitor_edge",
+      "stepNumber": 43,
+      "phase": "Monitor results and review validity",
+      "title": "Deliver live metrics and significance context",
+      "type": "add_connection",
+      "content": "Send per-variant metrics, configured statistical outputs, sample counts, and freshness metadata to the monitor. Label provisional estimates so users can distinguish a live view from a final analysis under the configured policy.",
+      "connection": {
+        "edgeId": "ab_analytics_monitor",
+        "sourceNodeId": "ab_analytics",
+        "targetNodeId": "ab_monitor",
+        "connectionType": "data-flow",
+        "label": "Live metrics and analysis status",
+        "description": "Expose current experiment results with sample and data-freshness context."
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:8",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "ab_44_monitor_admin_edge",
+      "stepNumber": 44,
+      "phase": "Monitor results and review validity",
+      "title": "Return status and alerts to experiment owners",
+      "type": "add_connection",
+      "content": "Make experiment health, freshness, imbalance warnings, and rollout status visible to authorized owners in the admin console. A warning is evidence to investigate, not an automatic claim that a variant won or lost.",
+      "connection": {
+        "edgeId": "ab_monitor_admin",
+        "sourceNodeId": "ab_monitor",
+        "targetNodeId": "ab_admin",
+        "connectionType": "data-flow",
+        "label": "Owner dashboard and actionable alerts",
+        "description": "Show live operational state and analysis caveats to authorized experiment owners."
+      },
+      "requirementIds": [
+        "legacy-requirement:8",
+        "legacy-requirement:1"
+      ]
+    },
+    {
+      "id": "ab_45_significance_policy",
+      "stepNumber": 45,
+      "phase": "Monitor results and review validity",
+      "title": "Calculate significance under a declared method",
+      "type": "decision_point",
+      "content": "Before enrollment, record each metric's estimand and population, analysis method and assumptions, baseline and minimum-detectable-effect inputs where applicable, power and sample-size or sequential plan, and adjustments for repeated looks or multiple comparisons. Report sample counts and uncertainty with each calculation. Statistical significance is evidence under the declared method, not by itself a product win or proof of practical value; declare a winner only when pre-specified validity checks, statistical policy, practical-effect criterion, and guardrail policy are satisfied. The brief supplies no test family, baseline, minimum detectable effect, power, required sample size, confidence level, p-value cutoff, practical-effect threshold, or stopping policy; owners must choose experiment-specific values, not infer platform targets.",
+      "decision": {
+        "question": "How should the service distinguish statistical evidence from a product decision?",
+        "chosen": "Use the pre-registered metric-specific analysis method and label a winner only when validity, statistical, practical-effect, and guardrail policies are met",
+        "chosenReason": "This makes the calculation interpretable without inventing a universal threshold or treating significance alone as proof of a useful treatment effect.",
+        "alternatives": [
+          {
+            "option": "Apply one unstated significance cutoff to every metric",
+            "tradeoff": "The brief does not provide a cutoff, and different metric types or monitoring policies may need different methods."
+          },
+          {
+            "option": "Show a lift estimate without uncertainty or method",
+            "tradeoff": "Readers cannot judge the statistical evidence or reproduce the result."
+          },
+          {
+            "option": "Declare the largest observed metric value the winner",
+            "tradeoff": "A noisy or invalid comparison can look best by chance, and statistical evidence does not establish practical value on its own."
+          }
+        ]
+      },
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "ab_46_validity_review",
+      "stepNumber": 46,
+      "phase": "Monitor results and review validity",
+      "title": "Gate interpretation on assignment and event validity",
+      "type": "decision_point",
+      "content": "Before interpreting a result, check sample-ratio mismatch, duplicate or missing render confirmations, assignment-version consistency, segment eligibility, and event freshness. Mark affected results as suspect or incomplete until the cause is understood; report non-exposure rather than silently excluding randomized users from an intention-to-treat population. Significance alone does not repair biased assignment or instrumentation.",
+      "decision": {
+        "question": "What happens when randomization or event-integrity checks fail?",
+        "chosen": "Surface a validity warning and withhold a confident experiment conclusion pending investigation",
+        "chosenReason": "Statistical calculations are only useful when assignment and measurement are trustworthy.",
+        "alternatives": [
+          {
+            "option": "Continue to label the strongest observed variant a winner",
+            "tradeoff": "A pipeline or randomization defect can be mistaken for a treatment effect."
+          },
+          {
+            "option": "Silently remove imbalanced data",
+            "tradeoff": "Unreviewed filtering can add bias and make the analysis irreproducible."
+          }
+        ]
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-constraint:2",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "ab_47_event_scale_trigger",
+      "stepNumber": 47,
+      "phase": "Monitor results and review validity",
+      "title": "Scale event processing against measured lag and skew",
+      "type": "scale_trigger",
+      "content": "Track accepted and processed event volume, oldest-event age, partition skew, deduplication load, and analytical-store pressure. Add ingress partitions and processor capacity as observed demand requires, while preserving event identity and replayability. Billions of events is the supplied scale statement; no events-per-second target is inferred.",
+      "scaleTrigger": {
+        "metric": "Accepted and processed event volume, oldest-event age, partition skew, deduplication load, and storage pressure",
+        "action": "Scale ingress, broker partitions, and stream consumers based on measured bottlenecks; retain stable event keys and replayable processing state.",
+        "impact": "Supports the stated billions-of-events workload while keeping freshness and processing pressure observable."
+      },
+      "requirementIds": [
+        "legacy-requirement:3",
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:3"
+      ]
+    },
+    {
+      "id": "ab_48_rollout_guardrails",
+      "stepNumber": 48,
+      "phase": "Monitor results and review validity",
+      "title": "Keep rollout and experiment stopping decisions distinct",
+      "type": "decision_point",
+      "content": "A feature-flag rollout controls who can receive a treatment; an experiment stopping decision interprets evidence under its analysis plan. Let owners define operational rollback guardrails and statistical stopping rules separately. No percentage, duration, or threshold is supplied by the brief.",
+      "decision": {
+        "question": "What should happen when a rollout guardrail or statistical stopping rule is reached?",
+        "chosen": "Apply the separately configured operational rollback or analysis stopping policy and record its reason",
+        "chosenReason": "This preserves gradual rollout control without conflating deployment safety with a statistical conclusion.",
+        "alternatives": [
+          {
+            "option": "Automatically stop whenever a live estimate changes direction",
+            "tradeoff": "Noisy interim data can cause uncontrolled rollout oscillation."
+          },
+          {
+            "option": "Use one hard-coded threshold for every experiment",
+            "tradeoff": "The brief does not supply such a threshold or establish that one policy fits all experiments."
+          }
+        ]
+      },
+      "requirementIds": [
+        "legacy-requirement:8",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "ab_49_live_vs_final",
+      "stepNumber": 49,
+      "phase": "Monitor results and review validity",
+      "title": "Label live estimates separately from final analysis",
+      "type": "explanation",
+      "content": "Real-time monitoring can show current counts and provisional estimates while the event stream is still changing. Show data freshness, processing lag, and analysis status; preserve a reproducible result after the pre-specified analysis or stopping policy is satisfied. The brief requires real-time monitoring but does not define a freshness SLO or sample-size plan.",
+      "requirementIds": [
+        "legacy-requirement:4",
+        "legacy-requirement:8",
+        "legacy-constraint:4"
+      ]
+    },
+    {
+      "id": "ab_50_review_assumptions",
+      "stepNumber": 50,
+      "phase": "Monitor results and review validity",
+      "title": "Review assumptions before accepting this design",
+      "type": "explanation",
+      "content": "Review-draft assumptions are limited to a representative web SDK client, a compatible feature-flag provider boundary, stable authorized user identity, and an event pipeline capable of durable handoff and replay. Owners still need to select traffic and latency objectives, freshness and retention, metric estimands and denominators, baseline and minimum-detectable-effect assumptions, power and sample-size plan, statistical decision rules, and rollout policies. These are open experiment or operating decisions—not numeric targets or facts from the problem brief.",
+      "requirementIds": [
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "ab_51_end_to_end_review",
+      "stepNumber": 51,
+      "phase": "Monitor results and review validity",
+      "title": "Trace one user from assignment to analysis",
+      "type": "explanation",
+      "content": "The connected design is: an owner versions an experiment and rollout policy; the assignment service evaluates the user segment, creates or retrieves one deterministic pseudorandom sticky variant, and returns it to the client; assignment is recorded separately from confirmed render exposure; outcome events remain joinable to randomized users under the pre-specified analysis population; durable assignment and event records flow through the broker and stream processor to live metrics and historical analysis; monitoring presents freshness, validity, and statistical context. Exposure confirms delivery but does not silently redefine the causal-analysis denominator. This is a local review draft whose policies and assumptions need owner review before use.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-requirement:8",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,708 @@
+{
+  "problem_id": "6901ef1b9420d83630aca86d",
+  "version": "1.0.0-review-draft",
+  "requirementRevision": null,
+  "totalSteps": 69,
+  "phases": [
+    {"name": "Read the brief and protect card data", "stepRange": [1, 16], "description": "Separate frozen requirements from proposed boundaries, then tokenize before ordinary payment services receive card data."},
+    {"name": "Make risk and 3-D Secure decisions", "stepRange": [17, 28], "description": "Evaluate minimized risk signals and complete any required cardholder challenge before authorization."},
+    {"name": "Authorize through networks and commit locally", "stepRange": [29, 41], "description": "Isolate network calls, represent uncertain outcomes honestly, and define the local ACID ledger boundary."},
+    {"name": "Publish and recover committed outcomes", "stepRange": [42, 49], "description": "Use an outbox, verified callbacks, deduplicated consumers, and reconciliation-safe retries."},
+    {"name": "Resolve disputes and reconcile settlement", "stepRange": [50, 58], "description": "Track chargebacks and evidence, then compare network records with the authoritative ledger."},
+    {"name": "Operate and validate the payment path", "stepRange": [59, 69], "description": "Observe financial invariants and test measured peak load without inventing latency or compliance claims."}
+  ],
+  "steps": [
+    {
+      "id": "cc_01_brief",
+      "stepNumber": 1,
+      "phase": "Read the brief and protect card data",
+      "title": "Separate frozen facts from review assumptions",
+      "type": "explanation",
+      "content": "Facts from the frozen brief: process card transactions, tokenize card data, prevent fraud, support 3-D Secure, handle chargebacks and disputes, support multiple payment networks, address PCI DSS, handle millions of transactions per day, and authorize in real time. The stated constraints are ACID transaction guarantees, low authorization latency, strong security and encryption, regulatory compliance, and zero tolerance for data loss. Review assumptions in this draft: a hosted capture/tokenization boundary returns an opaque payment-method reference; a payment service owns the lifecycle; and network, 3-D Secure, ledger, webhook, and settlement-file integrations exist behind adapters. The brief names no vendors, network contracts, region topology, retention periods, fraud thresholds, peak arrival shape, or numeric authorization SLO. These are design proposals, not facts about an existing system; they are not stated by the brief. This walkthrough does not establish PCI DSS compliance or prove zero data loss.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-requirement:9", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "cc_02_client",
+      "stepNumber": 2,
+      "phase": "Read the brief and protect card data",
+      "title": "Add the cardholder and merchant entry point",
+      "type": "add_component",
+      "content": "Proposed boundary: the client starts an intent with an opaque payment-method reference and stable idempotency key, then reads the server-owned status. Card entry goes directly to the tokenization boundary; the ordinary merchant request carries no PAN or CVV.",
+      "component": {"nodeId": "cc_client", "componentType": "web-app", "label": "Cardholder and Merchant Client", "description": "Payment entry, challenge, and status", "position": {"x": 0, "y": 260}, "properties": {"componentName": "Cardholder and Merchant Client", "purpose": "Submit an opaque payment-method reference with a stable idempotency key, complete a requested 3-D Secure challenge, and display server-owned pending or terminal status. Do not send PAN or CVV through the ordinary merchant API."}, "highlightReason": "The existing Web App catalog component represents the customer or merchant entry point."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:9"]
+    },
+    {
+      "id": "cc_03_gateway",
+      "stepNumber": 3,
+      "phase": "Read the brief and protect card data",
+      "title": "Add the authenticated payment API boundary",
+      "type": "add_component",
+      "content": "Proposed boundary: authenticate the merchant, validate amount and currency, authorize access to an intent, enforce transport encryption, and redact sensitive values from logs. The gateway is not the durable idempotency authority.",
+      "component": {"nodeId": "cc_gateway", "componentType": "api-gateway", "label": "Payment API Gateway", "description": "Authenticated intent and status boundary", "position": {"x": 360, "y": 260}, "properties": {"componentName": "Payment API Gateway", "purpose": "Authenticate merchant requests, validate payment fields, enforce encrypted transport and scoped access, route intent and status operations, and redact PAN, CVV, credentials, and unnecessary token data from logs. Durable duplicate prevention belongs to the payment transaction boundary."}, "highlightReason": "The existing API Gateway catalog component supports the public request boundary."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-requirement:9", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "cc_04_client_gateway",
+      "stepNumber": 4,
+      "phase": "Read the brief and protect card data",
+      "title": "Send an idempotent payment command",
+      "type": "add_connection",
+      "content": "The client submits the merchant-scoped idempotency key, amount, currency, and opaque instrument reference over the protected API. A retry uses the same key and payload; status reads do not infer approval from a client timeout.",
+      "connection": {"edgeId": "cc_client_gateway", "sourceNodeId": "cc_client", "targetNodeId": "cc_gateway", "connectionType": "http", "label": "Intent, token reference, and status", "description": "Protected merchant calls carry a stable idempotency key and opaque instrument reference."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:9", "legacy-constraint:3"]
+    },
+    {
+      "id": "cc_05_tokenizer",
+      "stepNumber": 5,
+      "phase": "Read the brief and protect card data",
+      "title": "Add the tokenization boundary",
+      "type": "add_component",
+      "content": "Design assumption: hosted fields or an equivalent controlled capture flow sends card entry to this boundary. It returns a scoped opaque reference and keeps PAN and CVV out of ordinary payment records; the chosen provider and exact security scope remain to be reviewed.",
+      "component": {"nodeId": "cc_tokenizer", "componentType": "payment-service", "label": "Hosted Card Tokenization", "description": "Card-data capture and opaque references", "position": {"x": 360, "y": 40}, "properties": {"componentName": "Hosted Card Tokenization", "purpose": "Capture card data only within the explicitly reviewed tokenization boundary, return an opaque scoped payment-method reference, and prevent PAN or CVV from entering merchant services, ledger rows, events, analytics, or routine logs. Provider and PCI scope are review decisions."}, "highlightReason": "The existing Payment Service catalog component exposes a tokenization property and fits this payment boundary."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "cc_06_client_tokenizer",
+      "stepNumber": 6,
+      "phase": "Read the brief and protect card data",
+      "title": "Capture card data only at the token boundary",
+      "type": "add_connection",
+      "content": "The protected card-entry flow sends instrument data directly to the tokenization boundary. Do not proxy raw card data through the merchant gateway, payment orchestrator, queue, or analytics path.",
+      "connection": {"edgeId": "cc_client_tokenizer", "sourceNodeId": "cc_client", "targetNodeId": "cc_tokenizer", "connectionType": "http", "label": "Protected card entry", "description": "Card data is submitted directly to the proposed tokenization boundary, not the ordinary payment API; transport encryption is required."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "cc_07_token_gateway",
+      "stepNumber": 7,
+      "phase": "Read the brief and protect card data",
+      "title": "Return only the token reference to payment services",
+      "type": "add_connection",
+      "content": "The tokenization boundary returns an opaque reference with the minimum metadata needed to route a payment. Treat tokens as sensitive, scope them to the intended merchant and use, and never assume tokenization alone removes every system from a compliance assessment.",
+      "connection": {"edgeId": "cc_tokenizer_gateway", "sourceNodeId": "cc_tokenizer", "targetNodeId": "cc_gateway", "connectionType": "api-call", "label": "Opaque instrument reference", "description": "Only a scoped token reference and necessary non-sensitive metadata reach the merchant API boundary."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "cc_08_keys",
+      "stepNumber": 8,
+      "phase": "Read the brief and protect card data",
+      "title": "Add managed encryption-key controls",
+      "type": "add_component",
+      "content": "Proposed control: separate key administration from payment data access, encrypt sensitive data in transit and at rest, restrict decrypt operations, rotate keys under an approved policy, and audit key use. The brief does not identify a key service or rotation schedule.",
+      "component": {"nodeId": "cc_keys", "componentType": "secrets-manager", "label": "Payment Key Management", "description": "Restricted key access and lifecycle", "position": {"x": 720, "y": -160}, "properties": {"componentName": "Payment Key Management", "purpose": "Protect encryption and signing keys behind least-privilege access, audited use, and an approved rotation policy. Keep key material out of application records and logs; provider and rotation schedule are not specified by the brief."}, "highlightReason": "The existing Secrets Manager catalog component covers managed key and secret controls."},
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "cc_09_token_keys",
+      "stepNumber": 9,
+      "phase": "Read the brief and protect card data",
+      "title": "Keep key operations behind a restricted interface",
+      "type": "add_connection",
+      "content": "The tokenization service requests cryptographic operations through a permissioned interface. It does not receive or log reusable key material; access failures stop token creation safely.",
+      "connection": {"edgeId": "cc_tokenizer_keys", "sourceNodeId": "cc_tokenizer", "targetNodeId": "cc_keys", "connectionType": "api-call", "label": "Audited cryptographic operations", "description": "The token service invokes restricted key operations without exporting key material."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "cc_10_orchestrator",
+      "stepNumber": 10,
+      "phase": "Read the brief and protect card data",
+      "title": "Add the payment lifecycle owner",
+      "type": "add_component",
+      "content": "Proposed design: this service owns versioned intent transitions and separate authorization, capture, void, and refund operation records. Each operation advances only from a valid predecessor; 3-D Secure cardholder authentication is distinct from issuer authorization, authorization is not capture, and capture is not settlement. Only explicit valid transitions can cause a financial side effect.",
+      "component": {"nodeId": "cc_orchestrator", "componentType": "backend-server", "label": "Payment Orchestrator", "description": "Versioned transaction lifecycle and commands", "position": {"x": 1080, "y": 260}, "properties": {"componentName": "Payment Orchestrator", "purpose": "Own a versioned payment-intent state machine, validate conditional transitions, bind merchant-scoped idempotency to a payload hash, and coordinate risk, 3-D Secure, network attempts, ledger commits, and honest status. External calls are not part of a local ACID transaction."}, "highlightReason": "The existing Backend Server catalog component represents application orchestration."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:9", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "cc_11_gateway_orchestrator",
+      "stepNumber": 11,
+      "phase": "Read the brief and protect card data",
+      "title": "Forward validated commands to the lifecycle owner",
+      "type": "add_connection",
+      "content": "Pass the authenticated merchant identity, normalized amount and currency, token reference, idempotency key, and correlation ID. The orchestrator revalidates the state and payload before any money-moving action.",
+      "connection": {"edgeId": "cc_gateway_orchestrator", "sourceNodeId": "cc_gateway", "targetNodeId": "cc_orchestrator", "connectionType": "api-call", "label": "Validated intent command", "description": "The orchestrator receives scoped identity and an opaque instrument reference, not raw card data."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:9", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "cc_12_limiter",
+      "stepNumber": 12,
+      "phase": "Read the brief and protect card data",
+      "title": "Add per-merchant and per-network admission controls",
+      "type": "add_component",
+      "content": "Use configurable limits and backpressure to protect the authorization path and honor network-specific capacity. The brief supplies daily scale language but no peak shape or numeric rate limits; derive thresholds from measured demand and external network contracts.",
+      "component": {"nodeId": "cc_limiter", "componentType": "rate-limiter", "label": "Payment Admission Controls", "description": "Configurable traffic and provider quotas", "position": {"x": 720, "y": 500}, "properties": {"componentName": "Payment Admission Controls", "purpose": "Apply configurable merchant and network admission limits, isolate noisy tenants, and signal backpressure before durable payment state is endangered. Set thresholds only from measured traffic and agreed provider limits; none are supplied by the brief."}, "highlightReason": "The existing Rate Limiter catalog component provides a configurable admission-control role."},
+      "requirementIds": ["legacy-requirement:8", "legacy-requirement:9", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "cc_13_gateway_limiter",
+      "stepNumber": 13,
+      "phase": "Read the brief and protect card data",
+      "title": "Apply admission control before financial work",
+      "type": "add_connection",
+      "content": "Check merchant and shared capacity before beginning authorization. Reject or defer excess work with a retryable response that preserves the original idempotency key; do not acknowledge a payment intent that was not durably recorded.",
+      "connection": {"edgeId": "cc_gateway_limiter", "sourceNodeId": "cc_gateway", "targetNodeId": "cc_limiter", "connectionType": "api-call", "label": "Merchant and network quota check", "description": "Admission decisions are made before work can overload the durable payment path."},
+      "requirementIds": ["legacy-requirement:8", "legacy-requirement:9", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "cc_14_limiter_orchestrator",
+      "stepNumber": 14,
+      "phase": "Read the brief and protect card data",
+      "title": "Continue only admitted commands",
+      "type": "add_connection",
+      "content": "Forward accepted work with the same idempotency identity and correlation ID. Capacity rejection is distinct from a card authorization decline and must not create a second payment attempt on client retry.",
+      "connection": {"edgeId": "cc_limiter_orchestrator", "sourceNodeId": "cc_limiter", "targetNodeId": "cc_orchestrator", "connectionType": "api-call", "label": "Admitted payment command", "description": "Pass through quota-approved work without changing its idempotency identity."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:8", "legacy-requirement:9", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "cc_15_idempotency",
+      "stepNumber": 15,
+      "phase": "Read the brief and protect card data",
+      "title": "Choose a durable idempotency contract",
+      "type": "decision_point",
+      "content": "Scope each money-moving command's stable idempotency identity to the merchant, payment intent, and operation kind. Persist its canonical payload hash and original result so an identical retry returns the same outcome; reject reuse with a different amount, currency, instrument, or operation. A new key alone does not authorize another capture or excess refund: lifecycle and amount invariants must also pass.",
+      "decision": {"question": "Where is duplicate-request correctness enforced?", "chosen": "A durable unique merchant-scoped idempotency record bound to the canonical payload and original outcome", "chosenReason": "A database uniqueness constraint and stored outcome survive client retries, worker redelivery, and process restarts. A reused key with a different payload is rejected rather than silently mapped to another amount or instrument.", "alternatives": [{"option": "Disable the submit button in the client", "tradeoff": "It does not cover multiple devices, network retries, or concurrent requests."}, {"option": "Use only a short-lived cache entry", "tradeoff": "Expiry or cache loss can forget a committed payment and permit duplication."}]},
+      "componentUpdate": {"nodeId": "cc_orchestrator", "properties": {"purpose": "Own a versioned payment-intent state machine, validate conditional transitions, bind merchant-scoped idempotency to a payload hash, and coordinate risk, 3-D Secure, network attempts, ledger commits, and honest status. External calls are not part of a local ACID transaction. A matching retry returns the stored outcome; a different payload under the same key is rejected."}},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:9", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "cc_16_token_boundary",
+      "stepNumber": 16,
+      "phase": "Read the brief and protect card data",
+      "title": "Keep the card-data boundary explicit",
+      "type": "decision_point",
+      "content": "Tokenization reduces exposure only when data flows, logs, access, and integrations preserve the boundary. Require a security and compliance review of the selected capture and token provider before treating the scope as established.",
+      "decision": {"question": "What enters the merchant payment domain?", "chosen": "A scoped opaque payment-method reference; PAN and CVV remain inside the reviewed capture/tokenization boundary and CVV is never retained", "chosenReason": "This follows the tokenization hint and minimizes sensitive data in services that need only to authorize a payment. The boundary and scope are proposed and require implementation review.", "alternatives": [{"option": "Store PAN and CVV in the payment database", "tradeoff": "It expands sensitive-data exposure and is not needed for the proposed token-reference flow."}, {"option": "Assume every token is out of scope", "tradeoff": "Token properties and connected systems still require a formal scope assessment."}]},
+      "componentUpdate": {"nodeId": "cc_tokenizer", "properties": {"purpose": "Capture card data only within the explicitly reviewed tokenization boundary, return an opaque scoped payment-method reference, and prevent PAN or CVV from entering merchant services, ledger rows, events, analytics, or routine logs. Provider and PCI scope are review decisions. CVV is never retained."}},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "cc_17_risk",
+      "stepNumber": 17,
+      "phase": "Make risk and 3-D Secure decisions",
+      "title": "Add synchronous fraud and velocity controls",
+      "type": "add_component",
+      "content": "Evaluate transaction and velocity signals before network authorization. Return a versioned allow, step-up, review, or decline decision with a reason reference; the brief does not define thresholds or an outage fallback policy.",
+      "component": {"nodeId": "cc_risk", "componentType": "auth-service", "label": "Fraud and Risk Policy", "description": "Versioned rules, velocity, and risk decisions", "position": {"x": 1440, "y": -40}, "properties": {"componentName": "Fraud and Risk Policy", "purpose": "Evaluate minimized transaction, merchant, and velocity signals before authorization; combine reviewed rules with an optional versioned model score and emit allow, step-up, review, or decline plus policy version and reason. Thresholds and unavailable-risk behavior require owner approval."}, "highlightReason": "The existing Auth Service catalog component supports identity and policy checks without a custom catalog node."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8", "legacy-requirement:9", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "cc_18_orchestrator_risk",
+      "stepNumber": 18,
+      "phase": "Make risk and 3-D Secure decisions",
+      "title": "Evaluate risk before authorizing",
+      "type": "add_connection",
+      "content": "Send only the transaction context and features needed for a decision. Do not include PAN, CVV, key material, or full customer documents in the risk request.",
+      "connection": {"edgeId": "cc_orchestrator_risk", "sourceNodeId": "cc_orchestrator", "targetNodeId": "cc_risk", "connectionType": "api-call", "label": "Minimized risk evaluation", "description": "The risk service receives tokenized transaction context and returns a versioned policy result."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:7", "legacy-requirement:9", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "cc_19_model",
+      "stepNumber": 19,
+      "phase": "Make risk and 3-D Secure decisions",
+      "title": "Add a versioned fraud-scoring adapter",
+      "type": "add_component",
+      "content": "The brief offers machine learning as a hint, so model inference is a proposed input to—not a replacement for—versioned fraud policy. Keep training and richer outcome analysis asynchronous; monitor drift and false positives before changing authorization behavior.",
+      "component": {"nodeId": "cc_model", "componentType": "backend-server", "label": "Fraud Model Scoring Adapter", "description": "Versioned inference behind a policy-owned interface", "position": {"x": 1800, "y": -220}, "properties": {"componentName": "Fraud Model Scoring Adapter", "purpose": "Serve a versioned fraud score using minimized features, return model version and reason signals to the policy service, and keep training or richer outcome analysis asynchronous. The model alone does not authorize, capture, or decline a payment."}, "highlightReason": "The existing Backend Server catalog component represents a model-serving adapter without adding an unsupported custom component."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "cc_20_risk_model",
+      "stepNumber": 20,
+      "phase": "Make risk and 3-D Secure decisions",
+      "title": "Request a bounded, minimized model score",
+      "type": "add_connection",
+      "content": "Call the model only with approved features and a transaction reference. Set the actual decision budget with product and network owners; no numeric authorization SLO appears in the brief.",
+      "connection": {"edgeId": "cc_risk_model", "sourceNodeId": "cc_risk", "targetNodeId": "cc_model", "connectionType": "api-call", "label": "Approved risk features", "description": "Versioned inference receives only the policy-approved minimal feature set."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-requirement:9", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "cc_21_model_risk",
+      "stepNumber": 21,
+      "phase": "Make risk and 3-D Secure decisions",
+      "title": "Return score metadata to the policy owner",
+      "type": "add_connection",
+      "content": "Return a score, model version, and bounded reason signals—not unnecessary raw features. The fraud policy applies reviewed rules and can send ambiguous cases to step-up or manual review instead of silently treating a missing score as approval.",
+      "connection": {"edgeId": "cc_model_risk", "sourceNodeId": "cc_model", "targetNodeId": "cc_risk", "connectionType": "api-call", "label": "Versioned score and reason signals", "description": "The policy service combines model output with explicit rules and an approved fallback."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-requirement:9", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "cc_22_risk_orchestrator",
+      "stepNumber": 22,
+      "phase": "Make risk and 3-D Secure decisions",
+      "title": "Apply the versioned risk outcome",
+      "type": "add_connection",
+      "content": "Return allow, step-up, review, or decline and persist its policy/model references with the intent. Define outage and false-positive handling with the responsible risk owner before enabling automatic capture.",
+      "connection": {"edgeId": "cc_risk_orchestrator", "sourceNodeId": "cc_risk", "targetNodeId": "cc_orchestrator", "connectionType": "api-call", "label": "Versioned risk disposition", "description": "The orchestrator advances only when the recorded risk disposition permits the next state."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:9", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "cc_23_3ds",
+      "stepNumber": 23,
+      "phase": "Make risk and 3-D Secure decisions",
+      "title": "Add a 3-D Secure integration boundary",
+      "type": "add_component",
+      "content": "Support the required 3-D Secure flow through an adapter for protocol messages, issuer results, and challenge continuation. Which transactions require a challenge depends on network and merchant policy that the brief does not specify.",
+      "component": {"nodeId": "cc_3ds", "componentType": "payment-service", "label": "3-D Secure Adapter", "description": "Authentication protocol and challenge coordination", "position": {"x": 1800, "y": 180}, "properties": {"componentName": "3-D Secure Adapter", "purpose": "Coordinate the required 3-D Secure protocol, bind challenge state and issuer result to the payment intent and version, and return verified authentication evidence. Challenge triggers, protocol version, and network contracts remain configuration and review decisions."}, "highlightReason": "The existing Payment Service catalog component is reusable for the 3-D Secure integration boundary."},
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:9", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "cc_24_orchestrator_3ds",
+      "stepNumber": 24,
+      "phase": "Make risk and 3-D Secure decisions",
+      "title": "Request step-up authentication when policy requires it",
+      "type": "add_connection",
+      "content": "Create a versioned authentication-pending state before starting a challenge. Do not authorize or capture on a stale or failed challenge result.",
+      "connection": {"edgeId": "cc_orchestrator_3ds", "sourceNodeId": "cc_orchestrator", "targetNodeId": "cc_3ds", "connectionType": "api-call", "label": "Intent-bound 3-D Secure request", "description": "A challenge request is bound to the intent, amount, currency, and expected state version."},
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:9", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "cc_25_3ds_client",
+      "stepNumber": 25,
+      "phase": "Make risk and 3-D Secure decisions",
+      "title": "Return the issuer challenge to the client",
+      "type": "add_connection",
+      "content": "Deliver only the challenge material needed by the client and maintain an intent-bound state. Expired, replayed, or mismatched challenge responses must not advance the payment.",
+      "connection": {"edgeId": "cc_3ds_client", "sourceNodeId": "cc_3ds", "targetNodeId": "cc_client", "connectionType": "http", "label": "Challenge continuation", "description": "The client renders an issuer challenge over protected transport without becoming the authority for its result."},
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "cc_26_client_gateway_3ds",
+      "stepNumber": 26,
+      "phase": "Make risk and 3-D Secure decisions",
+      "title": "Return the challenge result through the protected API",
+      "type": "add_connection",
+      "content": "The client returns the challenge completion reference; it does not assert authentication success. Validate the response with the 3-D Secure adapter and bind it to the original intent.",
+      "connection": {"edgeId": "cc_client_gateway_3ds", "sourceNodeId": "cc_client", "targetNodeId": "cc_gateway", "connectionType": "http", "label": "Challenge completion reference", "description": "The gateway accepts a continuation reference over protected transport, not a client-authored success decision."},
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:9", "legacy-constraint:3"]
+    },
+    {
+      "id": "cc_27_gateway_orchestrator_3ds",
+      "stepNumber": 27,
+      "phase": "Make risk and 3-D Secure decisions",
+      "title": "Resume only after verified authentication",
+      "type": "add_connection",
+      "content": "Forward the continuation reference for server-side verification. A verified result advances the expected state version; a failed or unavailable result remains explicit and cannot be treated as authorization.",
+      "connection": {"edgeId": "cc_gateway_orchestrator_3ds", "sourceNodeId": "cc_gateway", "targetNodeId": "cc_orchestrator", "connectionType": "api-call", "label": "Challenge continuation", "description": "The orchestrator waits for verified issuer authentication before the network authorization step."},
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:9", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "cc_28_risk_policy",
+      "stepNumber": 28,
+      "phase": "Make risk and 3-D Secure decisions",
+      "title": "Keep fraud and challenge policy reviewable",
+      "type": "decision_point",
+      "content": "Choose explicit outcomes for model uncertainty, risk-service failure, and issuer challenge failure. A fail-open policy can authorize fraud; a fail-closed policy can decline legitimate customers, so thresholds and fallback behavior need named owner approval.",
+      "decision": {"question": "What happens when a risk or 3-D Secure result is uncertain?", "chosen": "Keep the intent pending or require an approved step-up/review outcome; never infer approval from missing evidence", "chosenReason": "It preserves an honest state and prevents an unavailable model or issuer from becoming an implicit authorization. The merchant/network-specific policy remains an assumption to resolve.", "alternatives": [{"option": "Automatically approve when risk is unavailable", "tradeoff": "An outage can bypass a required fraud or authentication gate."}, {"option": "Automatically decline every uncertain case", "tradeoff": "It may create avoidable customer declines and requires an explicit business policy."}]},
+      "componentUpdate": {"nodeId": "cc_risk", "properties": {"purpose": "Evaluate minimized transaction, merchant, and velocity signals before authorization; combine reviewed rules with an optional versioned model score and emit allow, step-up, review, or decline plus policy version and reason. Thresholds and unavailable-risk behavior require owner approval. Missing risk or 3-D Secure evidence never implies approval."}},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:9", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "cc_29_networks",
+      "stepNumber": 29,
+      "phase": "Authorize through networks and commit locally",
+      "title": "Add adapters for multiple payment networks",
+      "type": "add_component",
+      "content": "Use provider-specific adapters behind a stable payment contract. Configure routing, credentials, protocol versions, idempotency behavior, timeouts, and settlement formats per supported network; the brief names no particular network or processor.",
+      "component": {"nodeId": "cc_networks", "componentType": "payment-service", "label": "Card Network Adapters", "description": "Isolated authorization, capture, and network protocol integrations", "position": {"x": 2520, "y": 180}, "properties": {"componentName": "Card Network Adapters", "purpose": "Isolate multiple network and processor contracts behind a stable payment interface for authorization, capture, void, refund, 3-D Secure, callbacks, and settlement reports. Keep credentials restricted and define idempotency and timeout semantics per provider; no provider is selected by the brief."}, "highlightReason": "The existing Payment Service catalog component provides the reusable network-adapter role."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:9", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "cc_30_breaker",
+      "stepNumber": 30,
+      "phase": "Authorize through networks and commit locally",
+      "title": "Isolate network outages without guessing outcomes",
+      "type": "add_component",
+      "content": "Apply bounded calls and provider-specific circuit breaking to protect the authorization path. A breaker can stop new calls during an outage, but it cannot resolve whether a timed-out authorization already succeeded.",
+      "component": {"nodeId": "cc_breaker", "componentType": "circuit-breaker", "label": "Network Failure Isolation", "description": "Provider-specific bounded calls and outage isolation", "position": {"x": 2160, "y": 460}, "properties": {"componentName": "Network Failure Isolation", "purpose": "Bound network calls and isolate provider-specific outages while preserving attempt identity. On timeout, return an unknown outcome for reconciliation; never route the same uncertain authorization to another network as a blind retry."}, "highlightReason": "The existing Circuit Breaker catalog component matches provider failure isolation."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-requirement:9", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "cc_31_orchestrator_breaker",
+      "stepNumber": 31,
+      "phase": "Authorize through networks and commit locally",
+      "title": "Dispatch a uniquely identified network attempt",
+      "type": "add_connection",
+      "content": "Send the intent and provider-attempt identity only after risk and required 3-D Secure checks permit authorization. Reuse the provider idempotency identity only according to that provider's documented contract.",
+      "connection": {"edgeId": "cc_orchestrator_breaker", "sourceNodeId": "cc_orchestrator", "targetNodeId": "cc_breaker", "connectionType": "api-call", "label": "Bounded authorization attempt", "description": "Each provider attempt is tied to one intent version and a provider-specific deduplication identity."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-requirement:9", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "cc_32_breaker_networks",
+      "stepNumber": 32,
+      "phase": "Authorize through networks and commit locally",
+      "title": "Call the selected network adapter",
+      "type": "add_connection",
+      "content": "Translate the stable intent into the chosen network's contract, protect credentials, and preserve the attempt reference. Do not send PAN or CVV unless the selected token/network contract explicitly requires a reviewed secure exchange.",
+      "connection": {"edgeId": "cc_breaker_networks", "sourceNodeId": "cc_breaker", "targetNodeId": "cc_networks", "connectionType": "api-call", "label": "Provider authorization request", "description": "A provider adapter translates one identified attempt under the selected network contract."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:9", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "cc_33_networks_breaker",
+      "stepNumber": 33,
+      "phase": "Authorize through networks and commit locally",
+      "title": "Preserve provider outcomes and uncertainty",
+      "type": "add_connection",
+      "content": "Record the provider reference and normalized approved, declined, or unknown result. A transport timeout is unknown, not proof of failure; retain enough attempt evidence to query, accept a late callback, and reconcile.",
+      "connection": {"edgeId": "cc_networks_breaker", "sourceNodeId": "cc_networks", "targetNodeId": "cc_breaker", "connectionType": "api-call", "label": "Provider result or timeout", "description": "Normalize explicit responses and preserve timeout as an unresolved attempt."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-requirement:9", "legacy-constraint:5"]
+    },
+    {
+      "id": "cc_34_breaker_orchestrator",
+      "stepNumber": 34,
+      "phase": "Authorize through networks and commit locally",
+      "title": "Return an honest authorization state",
+      "type": "add_connection",
+      "content": "Return approved, declined, or pending/unknown with the intent version and provider-attempt reference. Do not report capture or settlement merely because authorization was approved.",
+      "connection": {"edgeId": "cc_breaker_orchestrator", "sourceNodeId": "cc_breaker", "targetNodeId": "cc_orchestrator", "connectionType": "api-call", "label": "Normalized authorization outcome", "description": "An uncertain provider result remains pending until a verified event or reconciliation resolves it."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:9", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "cc_35_3ds_networks",
+      "stepNumber": 35,
+      "phase": "Authorize through networks and commit locally",
+      "title": "Validate 3-D Secure with the selected network",
+      "type": "add_connection",
+      "content": "Send protocol-bound authentication data through the selected network adapter and bind the result to the original intent and challenge. Do not treat a browser redirect alone as verified issuer authentication.",
+      "connection": {"edgeId": "cc_3ds_networks", "sourceNodeId": "cc_3ds", "targetNodeId": "cc_networks", "connectionType": "api-call", "label": "3-D Secure protocol exchange", "description": "The adapter validates issuer authentication through the selected network contract."},
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:9", "legacy-constraint:3"]
+    },
+    {
+      "id": "cc_36_networks_3ds",
+      "stepNumber": 36,
+      "phase": "Authorize through networks and commit locally",
+      "title": "Return a verifiable challenge result",
+      "type": "add_connection",
+      "content": "Accept a signed or otherwise provider-verified result under the actual protocol contract, prevent replay, and transition only the matching challenge version. Protocol-specific verification is an implementation review item.",
+      "connection": {"edgeId": "cc_networks_3ds", "sourceNodeId": "cc_networks", "targetNodeId": "cc_3ds", "connectionType": "api-call", "label": "Issuer authentication result", "description": "A network-verified result is matched to the stored challenge and payment intent."},
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:9", "legacy-constraint:3"]
+    },
+    {
+      "id": "cc_37_state_machine",
+      "stepNumber": 37,
+      "phase": "Authorize through networks and commit locally",
+      "title": "Keep authorization, capture, and settlement distinct",
+      "type": "explanation",
+      "content": "Keep the operations and their outcomes distinct. 3-D Secure authenticates the cardholder; issuer authorization approves or declines a request and may place a hold, but does not capture funds or mean settlement occurred. Capture is a later, separately identified command against a valid approved authorization; its amount, timing, and whether partial/repeated captures are allowed come from the selected network/processor contract. Void or reversal releases an uncaptured authorization when supported. Refund is a separate credit against a confirmed captured amount; it is not a void, and total confirmed refunds plus amounts reserved by concurrent/pending refunds must not exceed the captured amount under the provider's rules. Each operation has its own pending/confirmed/declined/unknown outcome and stable idempotency identity. Apply only valid versioned transitions; a late callback or retry cannot repeat a capture/refund or rewrite a later state. Capture is still distinct from later settlement.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:9", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "cc_38_ledger",
+      "stepNumber": 38,
+      "phase": "Authorize through networks and commit locally",
+      "title": "Add the authoritative transaction and ledger store",
+      "type": "add_component",
+      "content": "Proposed design choice: a relational OLTP boundary stores versioned intent state, idempotency result, immutable provider attempts, append-only balanced ledger entries, and an outbox. The brief requires ACID and no loss but does not name an engine or topology.",
+      "component": {"nodeId": "cc_ledger", "componentType": "database", "label": "Payment State and Double-Entry Ledger", "description": "Local ACID boundary for intent, deduplication, ledger, and outbox", "position": {"x": 1440, "y": 520}, "properties": {"componentName": "Payment State and Double-Entry Ledger", "purpose": "Proposed relational OLTP boundary for versioned intents, unique merchant-scoped idempotency records, immutable provider attempts, append-only balanced ledger entries, and transactional outbox rows. Encrypt and restrict access; exact engine, replication, backup, and recovery design require review against the zero-loss constraint."}, "highlightReason": "The existing Database catalog component supports a relational transactional store."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "cc_39_orchestrator_ledger",
+      "stepNumber": 39,
+      "phase": "Authorize through networks and commit locally",
+      "title": "Commit each local financial transition atomically",
+      "type": "add_connection",
+      "content": "In one local ACID transaction, conditionally update the intent, record the provider attempt and idempotency outcome, append balanced ledger effects when the business transition warrants them, and insert the outbox event. Enforce uniqueness and balance invariants in durable storage.",
+      "connection": {"edgeId": "cc_orchestrator_ledger", "sourceNodeId": "cc_orchestrator", "targetNodeId": "cc_ledger", "connectionType": "database-connection", "label": "Conditional state and ledger commit", "description": "Intent version, idempotency result, financial entries, and outbox share the stated local transaction boundary."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:9", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "cc_40_ledger_orchestrator",
+      "stepNumber": 40,
+      "phase": "Authorize through networks and commit locally",
+      "title": "Acknowledge only a confirmed durable commit",
+      "type": "add_connection",
+      "content": "Return the stored version and outcome only after the database confirms the local transaction. If the commit response is lost or ambiguous, read by the same idempotency identity before attempting another financial effect.",
+      "connection": {"edgeId": "cc_ledger_orchestrator", "sourceNodeId": "cc_ledger", "targetNodeId": "cc_orchestrator", "connectionType": "database-connection", "label": "Committed version and result", "description": "The service acknowledges from authoritative committed state, not an in-memory or cache result."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:9", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "cc_41_acid_boundary",
+      "stepNumber": 41,
+      "phase": "Authorize through networks and commit locally",
+      "title": "Choose the ACID and external-network boundary",
+      "type": "decision_point",
+      "content": "ACID can cover the local intent, deduplication record, ledger effects, and outbox in the selected database transaction. A card network, token vault, message broker, or issuer cannot join that transaction; use durable attempts, idempotency, conditional transitions, and reconciliation across those boundaries.",
+      "decision": {"question": "Where does the ACID guarantee apply?", "chosen": "Inside one local ledger transaction for state, idempotency, balanced entries, and outbox; external network effects are resolved through explicit state and reconciliation", "chosenReason": "This makes the transactional claim testable without implying distributed ACID across an issuer or broker. The chosen database and durability topology still need validation.", "alternatives": [{"option": "Claim one ACID transaction spans database and card network", "tradeoff": "The external network does not participate in the local database commit."}, {"option": "Write ledger state later from an asynchronous event", "tradeoff": "An acknowledged financial transition could lack its authoritative local record."}]},
+      "componentUpdate": {"nodeId": "cc_ledger", "properties": {"purpose": "Proposed relational OLTP boundary for versioned intents, unique merchant-scoped idempotency records, immutable provider attempts, append-only balanced ledger entries, and transactional outbox rows. Encrypt and restrict access; exact engine, replication, backup, and recovery design require review against the zero-loss constraint. ACID covers only this local commit, not the external issuer or broker."}},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:9", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "cc_42_events",
+      "stepNumber": 42,
+      "phase": "Publish and recover committed outcomes",
+      "title": "Add the asynchronous payment event backbone",
+      "type": "add_component",
+      "content": "Publish committed lifecycle, dispute, and settlement events for consumers that do not belong on the synchronous authorization path. Assume at-least-once delivery and design every consumer for deduplication and replay.",
+      "component": {"nodeId": "cc_events", "componentType": "message-broker", "label": "Payment Event Backbone", "description": "Replayable downstream payment events", "position": {"x": 1800, "y": 600}, "properties": {"componentName": "Payment Event Backbone", "purpose": "Carry committed payment, dispute, and reconciliation events with stable event IDs, durable retention, controlled replay, and at-least-once delivery. Consumers must deduplicate; the broker is not the financial source of truth."}, "highlightReason": "The existing Message Broker catalog component supports asynchronous event delivery."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "cc_43_ledger_events",
+      "stepNumber": 43,
+      "phase": "Publish and recover committed outcomes",
+      "title": "Publish through the transactional outbox",
+      "type": "add_connection",
+      "content": "A publisher reads outbox rows written with the ledger commit and may deliver them more than once. Mark progress by stable event ID only after broker acknowledgement; replay must not create a second ledger effect.",
+      "connection": {"edgeId": "cc_ledger_events", "sourceNodeId": "cc_ledger", "targetNodeId": "cc_events", "connectionType": "message-queue", "label": "Committed outbox events", "description": "The outbox bridges the local database commit to at-least-once asynchronous publication."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "cc_44_worker",
+      "stepNumber": 44,
+      "phase": "Publish and recover committed outcomes",
+      "title": "Add a deduplicating outcome and webhook worker",
+      "type": "add_component",
+      "content": "Handle outbox events and verified provider callbacks with bounded retries, backoff, deduplication, and an inspectable dead-letter/replay path. Keep attempt evidence immutable and do not log card secrets.",
+      "component": {"nodeId": "cc_worker", "componentType": "processing-worker", "label": "Payment Event and Webhook Worker", "description": "Deduplicated callbacks, retries, and lifecycle updates", "position": {"x": 2160, "y": 600}, "properties": {"componentName": "Payment Event and Webhook Worker", "purpose": "Consume outbox events and verified provider callbacks at least once, deduplicate by event and attempt identity, apply conditional state transitions, bound retries with backoff, and expose controlled dead-letter replay. Preserve immutable attempt evidence and exclude PAN, CVV, and credentials from logs."}, "highlightReason": "The existing Processing Worker catalog component matches asynchronous payment work."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "cc_45_events_worker",
+      "stepNumber": 45,
+      "phase": "Publish and recover committed outcomes",
+      "title": "Consume committed events idempotently",
+      "type": "add_connection",
+      "content": "A repeated event ID returns the previously applied result. A poison event is isolated for review; do not discard it or acknowledge financial work before its durable handling state is recorded.",
+      "connection": {"edgeId": "cc_events_worker", "sourceNodeId": "cc_events", "targetNodeId": "cc_worker", "connectionType": "message-queue", "label": "At-least-once event delivery", "description": "Stable event IDs and durable consumer checkpoints support deduplication and replay."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "cc_46_network_gateway_webhook",
+      "stepNumber": 46,
+      "phase": "Publish and recover committed outcomes",
+      "title": "Receive signed network callbacks",
+      "type": "add_connection",
+      "content": "Accept provider webhooks only through a restricted ingress that verifies the provider's actual signature scheme, timestamp/replay rules, and event identity. The network-specific verification contract must be configured; do not trust a callback body by itself.",
+      "connection": {"edgeId": "cc_networks_gateway_webhook", "sourceNodeId": "cc_networks", "targetNodeId": "cc_gateway", "connectionType": "http", "label": "Provider webhook ingress", "description": "Network callbacks enter a protected encrypted-transport endpoint for contract-specific signature and replay validation."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "cc_47_gateway_worker_webhook",
+      "stepNumber": 47,
+      "phase": "Publish and recover committed outcomes",
+      "title": "Queue verified callbacks for durable processing",
+      "type": "add_connection",
+      "content": "After verification, persist the callback identity and minimal payload before acknowledging receipt. Deduplicate provider event IDs and retain a safe path for late or out-of-order events.",
+      "connection": {"edgeId": "cc_gateway_worker_webhook", "sourceNodeId": "cc_gateway", "targetNodeId": "cc_worker", "connectionType": "message-queue", "label": "Verified callback work", "description": "Only signature-verified, replay-checked, minimized callback data reaches the worker."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "cc_48_worker_orchestrator",
+      "stepNumber": 48,
+      "phase": "Publish and recover committed outcomes",
+      "title": "Apply callbacks with conditional lifecycle transitions",
+      "type": "add_connection",
+      "content": "The worker asks the lifecycle owner to apply a verified event against the expected intent version. Duplicate, stale, or conflicting events remain auditable and cannot create a second capture or overwrite a later state.",
+      "connection": {"edgeId": "cc_worker_orchestrator", "sourceNodeId": "cc_worker", "targetNodeId": "cc_orchestrator", "connectionType": "api-call", "label": "Verified event and expected version", "description": "The orchestrator applies an idempotent conditional state transition and records its event identity."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:9", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "cc_49_retry_unknown",
+      "stepNumber": 49,
+      "phase": "Publish and recover committed outcomes",
+      "title": "Never blindly retry an uncertain payment operation",
+      "type": "decision_point",
+      "content": "A timed-out authorization, capture, void, or refund call may have succeeded even when its response was lost. Keep that exact operation unknown/pending, query the same provider attempt or await a verified callback, and reconcile before retrying or routing elsewhere. Replay only the same operation with its original provider idempotency identity where the provider contract guarantees safe replay; never mint a new key or issue a compensating capture/refund just because the response is missing.",
+      "decision": {"question": "How is an ambiguous provider timeout handled?", "chosen": "Persist unknown/pending, resolve the same attempt by provider reference or reconciliation, and retry only under documented idempotency semantics", "chosenReason": "This prevents a lost response from becoming a duplicate authorization or capture. A circuit breaker alone cannot reveal the provider's result.", "alternatives": [{"option": "Immediately retry on the same provider with a new key", "tradeoff": "The original request may already have authorized the card."}, {"option": "Fail over the uncertain payment to another network", "tradeoff": "The second network may authorize while the first attempt remains successful but unseen."}]},
+      "componentUpdate": {"nodeId": "cc_orchestrator", "properties": {"purpose": "Own a versioned payment-intent state machine, validate conditional transitions, bind merchant-scoped idempotency to a payload hash, and coordinate risk, 3-D Secure, network attempts, ledger commits, and honest status. External calls are not part of a local ACID transaction. A matching retry returns the stored outcome; a different payload under the same key is rejected. An ambiguous provider timeout remains unknown until the same attempt is resolved; never blindly retry or fail over."}},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-requirement:9", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "cc_50_disputes",
+      "stepNumber": 50,
+      "phase": "Resolve disputes and reconcile settlement",
+      "title": "Add chargeback and dispute case handling",
+      "type": "add_component",
+      "content": "Track dispute opening, reason, evidence requests, representment, outcome, and any financial adjustment as explicit lifecycle events. Network-specific evidence fields and deadlines must come from the applicable contracts and rules, not assumptions in this brief.",
+      "component": {"nodeId": "cc_disputes", "componentType": "processing-worker", "label": "Chargeback and Dispute Handler", "description": "Case lifecycle, evidence references, and controlled adjustments", "position": {"x": 2520, "y": 500}, "properties": {"componentName": "Chargeback and Dispute Handler", "purpose": "Open and track chargeback/dispute cases, associate verified network notices with the payment intent, collect minimized evidence references, record deadlines and outcomes from configured network rules, and request append-only ledger adjustments through the lifecycle owner."}, "highlightReason": "The existing Processing Worker catalog component can handle asynchronous dispute workflows."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "cc_51_worker_disputes",
+      "stepNumber": 51,
+      "phase": "Resolve disputes and reconcile settlement",
+      "title": "Create dispute work from committed payment events",
+      "type": "add_connection",
+      "content": "Route capture, refund, and dispute-related events with stable references. Case creation is idempotent so event replay cannot open duplicate cases or repeat a financial adjustment.",
+      "connection": {"edgeId": "cc_worker_disputes", "sourceNodeId": "cc_worker", "targetNodeId": "cc_disputes", "connectionType": "message-queue", "label": "Payment and dispute events", "description": "Deduplicated lifecycle events create or advance a dispute case."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:5"]
+    },
+    {
+      "id": "cc_52_network_disputes",
+      "stepNumber": 52,
+      "phase": "Resolve disputes and reconcile settlement",
+      "title": "Ingest network chargeback notices and outcomes",
+      "type": "add_connection",
+      "content": "Verify and deduplicate network notices, bind each to the correct payment and case, and preserve the received evidence reference. Apply network-specific timelines only after the actual supported network rules are configured.",
+      "connection": {"edgeId": "cc_networks_disputes", "sourceNodeId": "cc_networks", "targetNodeId": "cc_disputes", "connectionType": "http", "label": "Verified dispute notices and outcomes", "description": "Network events advance the chargeback case using configured provider identifiers and rules over protected transport."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "cc_53_evidence",
+      "stepNumber": 53,
+      "phase": "Resolve disputes and reconcile settlement",
+      "title": "Add restricted dispute-evidence storage",
+      "type": "add_component",
+      "content": "Store only evidence needed for a specific case, encrypt it, restrict access, audit reads and exports, and apply retention or legal hold rules from the relevant jurisdiction and network. Do not copy PAN or CVV into evidence bundles.",
+      "component": {"nodeId": "cc_evidence", "componentType": "object-storage", "label": "Restricted Dispute Evidence", "description": "Encrypted case documents and evidence references", "position": {"x": 2880, "y": 500}, "properties": {"componentName": "Restricted Dispute Evidence", "purpose": "Store minimized, encrypted dispute evidence under case-scoped access and audited export. Use network- and jurisdiction-approved retention/legal-hold rules; do not store PAN, CVV, credentials, or unnecessary payment payloads."}, "highlightReason": "The existing Object Storage catalog component represents restricted case evidence without adding a custom component."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "cc_54_disputes_evidence",
+      "stepNumber": 54,
+      "phase": "Resolve disputes and reconcile settlement",
+      "title": "Attach evidence by restricted reference",
+      "type": "add_connection",
+      "content": "The case handler stores and retrieves approved evidence through a case-scoped reference, leaving routine payment events with identifiers and checksums rather than document contents.",
+      "connection": {"edgeId": "cc_disputes_evidence", "sourceNodeId": "cc_disputes", "targetNodeId": "cc_evidence", "connectionType": "data-flow", "label": "Case-scoped evidence reference", "description": "Restricted documents remain separate from ordinary payment and ledger records."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "cc_55_reconciliation",
+      "stepNumber": 55,
+      "phase": "Resolve disputes and reconcile settlement",
+      "title": "Add a network-to-ledger reconciliation worker",
+      "type": "add_component",
+      "content": "Compare authorization, capture, refund, dispute, and settlement records across provider reports and internal state. Record differences as repair cases; never silently rewrite an immutable ledger entry to force a match.",
+      "component": {"nodeId": "cc_recon", "componentType": "processing-worker", "label": "Payment Reconciliation", "description": "Provider and settlement matching with auditable exceptions", "position": {"x": 2520, "y": 820}, "properties": {"componentName": "Payment Reconciliation", "purpose": "Match provider attempts, network settlement reports, disputes, and internal append-only ledger entries by stable references. Detect missing, duplicate, late, or misapplied effects and open auditable repair work; never silently edit history. Reconciliation cadence follows configured network settlement windows."}, "highlightReason": "The existing Processing Worker catalog component fits scheduled and event-driven reconciliation."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "cc_56_networks_recon",
+      "stepNumber": 56,
+      "phase": "Resolve disputes and reconcile settlement",
+      "title": "Supply provider reports and settlement records",
+      "type": "add_connection",
+      "content": "Ingest reports and status queries using provider-specific schemas, signatures, and settlement windows. Preserve the source object and import identity so a repeated file or callback is deduplicated.",
+      "connection": {"edgeId": "cc_networks_recon", "sourceNodeId": "cc_networks", "targetNodeId": "cc_recon", "connectionType": "data-flow", "label": "Provider status and settlement reports", "description": "Source records are identified and validated before reconciliation compares financial effects."},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "cc_57_ledger_recon",
+      "stepNumber": 57,
+      "phase": "Resolve disputes and reconcile settlement",
+      "title": "Compare reports with authoritative ledger entries",
+      "type": "add_connection",
+      "content": "Join by intent, provider attempt, settlement, and event references. A missing or duplicated effect becomes an explicit discrepancy with source evidence and owner; the ledger remains the internal financial authority.",
+      "connection": {"edgeId": "cc_ledger_recon", "sourceNodeId": "cc_ledger", "targetNodeId": "cc_recon", "connectionType": "database-connection", "label": "Committed entries and attempt references", "description": "Reconciliation reads immutable financial facts and records discrepancies separately."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "cc_58_recon_orchestrator",
+      "stepNumber": 58,
+      "phase": "Resolve disputes and reconcile settlement",
+      "title": "Resolve discrepancies through controlled transitions",
+      "type": "add_connection",
+      "content": "Send a discrepancy reference and proposed correction to the lifecycle owner. Any refund, reversal, or settlement adjustment is separately authorized, idempotent, and appended as a new ledger effect with its evidence trail.",
+      "connection": {"edgeId": "cc_recon_orchestrator", "sourceNodeId": "cc_recon", "targetNodeId": "cc_orchestrator", "connectionType": "api-call", "label": "Auditable repair request", "description": "Reconciliation proposes a controlled state transition; it cannot directly rewrite ledger history."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:9", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "cc_59_monitoring",
+      "stepNumber": 59,
+      "phase": "Operate and validate the payment path",
+      "title": "Add payment safety and operations monitoring",
+      "type": "add_component",
+      "content": "Observe authorization state age, provider errors, risk outcomes, duplicate attempts, ledger balance checks, outbox lag, dispute deadlines, and reconciliation gaps. Metrics and alerts support operations; they do not establish compliance or prove zero loss.",
+      "component": {"nodeId": "cc_monitor", "componentType": "monitoring", "label": "Payment Safety Operations", "description": "Financial invariants, risk, and recovery signals", "position": {"x": 3240, "y": 260}, "properties": {"componentName": "Payment Safety Operations", "purpose": "Monitor authorization latency distributions without an invented target, provider errors, unknown outcomes, duplicate attempts, ledger imbalance, outbox and webhook lag, dispute work, and reconciliation gaps. Alert on sensitive-data access and recovery evidence without placing PAN, CVV, or credentials in telemetry."}, "highlightReason": "The existing Monitoring catalog component covers operational and financial safety signals."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:7", "legacy-requirement:8", "legacy-requirement:9", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "cc_60_gateway_monitor",
+      "stepNumber": 60,
+      "phase": "Operate and validate the payment path",
+      "title": "Measure request latency and admission behavior",
+      "type": "add_connection",
+      "content": "Measure authorization request latency by stage, merchant cohort, and network, plus rejected/deferred work. Obtain an agreed numeric SLO from product and network owners before treating any latency distribution as a pass/fail target.",
+      "connection": {"edgeId": "cc_gateway_monitor", "sourceNodeId": "cc_gateway", "targetNodeId": "cc_monitor", "connectionType": "data-flow", "label": "Latency and admission metrics", "description": "Telemetry is aggregated without raw card data or credentials."},
+      "requirementIds": ["legacy-requirement:8", "legacy-requirement:9", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "cc_61_orchestrator_monitor",
+      "stepNumber": 61,
+      "phase": "Operate and validate the payment path",
+      "title": "Alert on lifecycle and idempotency anomalies",
+      "type": "add_connection",
+      "content": "Track old pending states, state-transition conflicts, idempotency payload mismatches, provider-attempt duplication, and client-visible unresolved outcomes. Use opaque identifiers and policy versions in telemetry.",
+      "connection": {"edgeId": "cc_orchestrator_monitor", "sourceNodeId": "cc_orchestrator", "targetNodeId": "cc_monitor", "connectionType": "data-flow", "label": "State-machine and duplicate signals", "description": "Operational signals expose stuck or conflicting intents without secret payment fields."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:8", "legacy-requirement:9", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "cc_62_risk_monitor",
+      "stepNumber": 62,
+      "phase": "Operate and validate the payment path",
+      "title": "Monitor fraud quality and model drift",
+      "type": "add_connection",
+      "content": "Compare policy/model versions with fraud outcomes, false positives, review volume, and missing-signal rates. Restrict features and dashboard access; recalibration requires a reviewed release rather than silent threshold changes.",
+      "connection": {"edgeId": "cc_risk_monitor", "sourceNodeId": "cc_risk", "targetNodeId": "cc_monitor", "connectionType": "data-flow", "label": "Risk quality and decision metrics", "description": "Aggregated versioned outcomes support fraud review without raw card data."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "cc_63_network_monitor",
+      "stepNumber": 63,
+      "phase": "Operate and validate the payment path",
+      "title": "Observe each network's authorization health",
+      "type": "add_connection",
+      "content": "Segment provider latency, decline codes, timeouts, unknown outcomes, webhook lag, and settlement import failures by network. Use documented provider limits and health evidence before routing changes.",
+      "connection": {"edgeId": "cc_networks_monitor", "sourceNodeId": "cc_networks", "targetNodeId": "cc_monitor", "connectionType": "data-flow", "label": "Per-network health and reconciliation signals", "description": "Provider-specific measures inform safe routing and outage response."},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-requirement:9", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "cc_64_ledger_monitor",
+      "stepNumber": 64,
+      "phase": "Operate and validate the payment path",
+      "title": "Alert on ledger and durability invariants",
+      "type": "add_connection",
+      "content": "Continuously check balanced entries, uniqueness conflicts, commit failures, backup/restore evidence, and failover behavior. Treat zero data loss as a requirement to demonstrate with the selected platform and recovery tests, not a property proved by this diagram.",
+      "connection": {"edgeId": "cc_ledger_monitor", "sourceNodeId": "cc_ledger", "targetNodeId": "cc_monitor", "connectionType": "data-flow", "label": "Ledger integrity and recovery evidence", "description": "Alerts surface imbalance and durability gaps without exposing payment secrets."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "cc_65_events_monitor",
+      "stepNumber": 65,
+      "phase": "Operate and validate the payment path",
+      "title": "Watch durable publication and consumer recovery",
+      "type": "add_connection",
+      "content": "Measure outbox age, broker backlog, duplicate delivery, dead-letter volume, replay progress, and verified webhook delay. Alert before backlog threatens retained evidence or customer-visible status.",
+      "connection": {"edgeId": "cc_events_monitor", "sourceNodeId": "cc_events", "targetNodeId": "cc_monitor", "connectionType": "data-flow", "label": "Outbox, backlog, and replay health", "description": "Delivery lag and recovery work remain observable across asynchronous boundaries."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:8", "legacy-requirement:9", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "cc_66_dispute_monitor",
+      "stepNumber": 66,
+      "phase": "Operate and validate the payment path",
+      "title": "Monitor case deadlines and evidence access",
+      "type": "add_connection",
+      "content": "Track open cases, configured network deadlines, evidence completeness, decision outcomes, and restricted-store access. Deadline rules come from the selected network and jurisdiction, not a universal value in this brief.",
+      "connection": {"edgeId": "cc_disputes_monitor", "sourceNodeId": "cc_disputes", "targetNodeId": "cc_monitor", "connectionType": "data-flow", "label": "Dispute and evidence operations", "description": "Case progress and evidence access are visible to authorized operators."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "cc_67_recon_monitor",
+      "stepNumber": 67,
+      "phase": "Operate and validate the payment path",
+      "title": "Track unmatched settlement and repair work",
+      "type": "add_connection",
+      "content": "Measure unmatched records, duplicate files, missing settlement effects, correction age, and closed-loop repair status by network. Reconciliation cadence and financial close rules require the actual settlement contracts.",
+      "connection": {"edgeId": "cc_recon_monitor", "sourceNodeId": "cc_recon", "targetNodeId": "cc_monitor", "connectionType": "data-flow", "label": "Reconciliation discrepancy metrics", "description": "Every mismatch remains visible until a reviewed, auditable resolution is recorded."},
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "cc_68_scale",
+      "stepNumber": 68,
+      "phase": "Operate and validate the payment path",
+      "title": "Scale against measured peaks and durable capacity",
+      "type": "scale_trigger",
+      "content": "The brief says millions of transactions per day but gives no peak arrival distribution. Load-test representative bursts, network quotas, database commit and failover behavior, outbox lag, and recovery backlog. Scale stateless ingress and consumers; partition financial state only if idempotency uniqueness and balanced local commits remain enforceable.",
+      "scaleTrigger": {"metric": "Measured peak arrivals, per-network response and quota behavior, database commit latency, unresolved attempts, outbox age, recovery backlog, and reconciliation gaps", "action": "Increase stateless gateway and worker capacity within provider quotas, apply admission backpressure at the tested durable limit, and evaluate partitioning only with proven uniqueness and ledger-transaction boundaries.", "impact": "Turns the stated daily scale requirement into a capacity test while preserving payment correctness; it does not invent a throughput or latency target."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-requirement:8", "legacy-requirement:9", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "cc_69_review",
+      "stepNumber": 69,
+      "phase": "Operate and validate the payment path",
+      "title": "Review the proof obligations before implementation",
+      "type": "explanation",
+      "content": "The proposed graph makes tokenization, duplicate prevention, fraud and 3-D Secure gates, network adapters, local ACID ledger effects, chargeback handling, minimized evidence, safe retries, and reconciliation explicit. Before implementation, resolve the selected network/token providers, risk and challenge policies, measured authorization SLO, peak traffic shape, retention and jurisdiction rules, and durability/failover topology. Validate security controls and PCI DSS scope with the responsible reviewers; this review draft is not a compliance attestation or a zero-loss guarantee.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-requirement:9", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

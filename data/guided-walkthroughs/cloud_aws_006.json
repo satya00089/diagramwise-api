@@ -1,0 +1,444 @@
+{
+  "problem_id": "cloud_aws_006",
+  "version": "1.0-review-draft",
+  "totalSteps": 31,
+  "phases": [
+    {
+      "name": "Frame the ML service objectives",
+      "stepRange": [1, 3],
+      "description": "Carry the supplied training, deployment, A/B testing, lineage, latency, throughput, and cost targets into explicit design decisions."
+    },
+    {
+      "name": "Build reproducible training and promotion",
+      "stepRange": [4, 12],
+      "description": "Separate source data, preprocessing, workflow control, training evidence, and approved model versions."
+    },
+    {
+      "name": "Connect deployment, inference, and feedback",
+      "stepRange": [13, 26],
+      "description": "Wire the training and deployment lifecycle to a protected API, a versioned SageMaker endpoint, and operational monitoring."
+    },
+    {
+      "name": "Set rollout and operating guardrails",
+      "stepRange": [27, 31],
+      "description": "Choose measurable A/B and retraining policies, then validate latency, throughput, and cost with representative load."
+    }
+  ],
+  "steps": [
+    {
+      "id": "mlpipe_scope",
+      "stepNumber": 1,
+      "phase": "Frame the ML service objectives",
+      "title": "Preserve the supplied problem brief",
+      "type": "explanation",
+      "content": "Problem: Build a Machine Learning Model Deployment Pipeline. Description: Design an end-to-end ML pipeline that automates model training, validation, deployment, and monitoring with A/B testing capabilities. Frozen metadata: difficulty Hard; category AWS - Machine Learning; estimated time 60-90 minutes. Functional requirements: Train models on large datasets; Version control for models; Deploy models as APIs; A/B test model versions; Monitor model performance; Retrain models automatically; Scale inference endpoints; Track experiments and metrics. Constraints: Inference latency under 100ms; Support 1000+ predictions per second; Automate model deployment; Maintain model lineage; Cost-effective training and inference. Hints: SageMaker for training and hosting; S3 for data and model storage; Step Functions for ML workflow; Lambda for preprocessing; API Gateway for model endpoints; CloudWatch for monitoring. These are target requirements and candidate services, not evidence that any target is already met.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlpipe_assumptions",
+      "stepNumber": 2,
+      "phase": "Frame the ML service objectives",
+      "title": "Identify workload facts still needed for sizing",
+      "type": "decision_point",
+      "content": "The brief states targets of 1000+ predictions per second and inference latency under 100ms, but supplies no payload size, burst profile, per-instance capacity, model size, accelerator, dataset volume, training cadence, warm-pool size, autoscaling threshold, latency percentile, or exact measurement boundary. Treat every concrete sizing value, percentile, and boundary chosen for the design as an assumption until representative workload measurements and stakeholders confirm it. Measure end-to-end latency from API ingress through response; model execution time alone does not establish the stated 100ms target.",
+      "decision": {
+        "question": "What should be fixed before choosing instance sizes and training schedules?",
+        "chosen": "Keep the supplied latency and throughput as acceptance targets, and size from representative payload, burst, dataset, and model measurements.",
+        "chosenReason": "Capacity and cost cannot be inferred from request rate alone; the missing workload shape materially changes both serving and training choices.",
+        "alternatives": [
+          {"option": "Assume a constant request rate and one fixed model size", "tradeoff": "Burst traffic and model-specific compute can invalidate the capacity estimate."},
+          {"option": "Claim the latency target from model runtime alone", "tradeoff": "It omits gateway, preprocessing, queueing, network, and serialization time."}
+        ]
+      },
+      "requirementIds": ["legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "mlpipe_latency_choice",
+      "stepNumber": 3,
+      "phase": "Frame the ML service objectives",
+      "title": "Keep online inference independent of training",
+      "type": "decision_point",
+      "content": "Training is asynchronous and can be long-running; prediction requests must use already approved model versions. Preserve a warm serving pool sized to the latency objective while allowing training capacity and schedules to be tuned separately.",
+      "decision": {
+        "question": "Should a live prediction wait for a training or model-promotion run?",
+        "chosen": "Serve only approved, already-loaded versions; run training and promotion out of band.",
+        "chosenReason": "This isolates online latency and keeps an in-progress candidate from changing the active prediction path.",
+        "alternatives": [
+          {"option": "Train or load a new model during a prediction request", "tradeoff": "Cold starts and long-running training are incompatible with a sub-100ms service objective."},
+          {"option": "Replace the active model before evaluating the candidate", "tradeoff": "A quality regression can affect all traffic before it is detected."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "mlpipe_data",
+      "stepNumber": 4,
+      "phase": "Build reproducible training and promotion",
+      "title": "Version datasets, code references, and model artifacts in S3",
+      "type": "add_component",
+      "content": "Use separate raw, prepared, and artifact prefixes with access controls, encryption, lifecycle rules, and object versioning. Store immutable dataset manifests and source-code or container digests alongside each training run so the exact inputs can be traced without copying large datasets into orchestration state.",
+      "component": {
+        "nodeId": "mlpipe_s3",
+        "componentType": "object-storage",
+        "label": "Amazon S3: Data and Model Artifacts",
+        "description": "Versioned dataset manifests, prepared training data, and model artifacts.",
+        "position": {"x": 0, "y": 180},
+        "properties": {"componentName": "ML Data and Artifact Store", "purpose": "Keep raw and prepared datasets, immutable manifests, and model artifacts in access-controlled versioned prefixes with encryption and lifecycle policies."},
+        "highlightReason": "Durable versioned storage anchors repeatable training and model lineage for large datasets."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlpipe_preprocess",
+      "stepNumber": 5,
+      "phase": "Build reproducible training and promotion",
+      "title": "Add Lambda preprocessing as a bounded workflow task",
+      "type": "add_component",
+      "content": "Use Lambda for lightweight validation, manifest handling, and preprocessing orchestration. Keep heavy transformations in an appropriate managed training or processing job when duration, memory, or data volume exceeds a function's practical bounds; pass S3 references rather than large payloads.",
+      "component": {
+        "nodeId": "mlpipe_preprocess",
+        "componentType": "serverless-function",
+        "label": "AWS Lambda: Validate and Prepare Data",
+        "description": "Validates run manifests and launches or coordinates bounded preprocessing.",
+        "position": {"x": 300, "y": 180},
+        "properties": {"componentName": "Training Data Preprocessor", "purpose": "Validate dataset manifests and schema, record preprocessing version, and write prepared-data references; delegate heavy transformations to a managed job."},
+        "highlightReason": "A bounded preprocessing boundary makes the training workflow repeatable without moving large datasets through function payloads."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlpipe_workflow",
+      "stepNumber": 6,
+      "phase": "Build reproducible training and promotion",
+      "title": "Coordinate training and automated deployment with Step Functions",
+      "type": "add_component",
+      "content": "Use AWS Step Functions to create a run identity, invoke preprocessing and training, wait for evaluation, record the registry outcome, and deploy only after the configured quality and approval gates pass. Keep run state and artifact references compact.",
+      "component": {
+        "nodeId": "mlpipe_workflow",
+        "componentType": "custom-component",
+        "label": "AWS Step Functions: ML Pipeline",
+        "description": "Coordinates preprocessing, training, evaluation, registration, and gated deployment.",
+        "position": {"x": 620, "y": 180},
+        "properties": {"componentName": "AWS Step Functions ML Pipeline", "purpose": "Coordinate versioned data preparation, training, evaluation, model registration, and gated deployment with durable run state.", "componentType": "Workflow Orchestrator", "technology": "AWS Step Functions"},
+        "highlightReason": "An explicit workflow automates the training-to-deployment lifecycle and makes retry boundaries visible."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "mlpipe_training",
+      "stepNumber": 7,
+      "phase": "Build reproducible training and promotion",
+      "title": "Train large datasets with SageMaker and checkpointed capacity",
+      "type": "add_component",
+      "content": "Run version-pinned SageMaker training jobs against S3 manifests. Training produces a candidate artifact and offline evaluation outputs; keep predictive-quality results separate from serving-package readiness, endpoint latency, capacity, and rollout health. For workloads that tolerate interruption, evaluate managed Spot training with checkpoints; compare successful-run cost and completion time against the agreed objective before selecting it. Record container, code, hyperparameters, input manifest, and evaluation split for each run.",
+      "component": {
+        "nodeId": "mlpipe_training",
+        "componentType": "model-training",
+        "label": "Amazon SageMaker Training Job",
+        "description": "Trains candidate models from versioned large-dataset manifests.",
+        "position": {"x": 920, "y": 80},
+        "properties": {"componentName": "SageMaker Candidate Training", "purpose": "Train from immutable S3 manifests with pinned code and containers; checkpoint interruptible jobs and record hyperparameters, evaluation splits, runtime, and cost for each run."},
+        "highlightReason": "Versioned inputs and recorded run settings make candidate quality and training cost reproducible."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:8", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlpipe_experiments",
+      "stepNumber": 8,
+      "phase": "Build reproducible training and promotion",
+      "title": "Persist experiment parameters and evaluation metrics",
+      "type": "add_component",
+      "content": "Persist run parameters, dataset and code digests, evaluation metrics, and artifact references together. This is offline model-quality evidence on a defined held-out set; it does not prove serving-package compatibility, endpoint latency, or inference capacity. Compare candidates on the same held-out data and record metric definitions; a score without its input and evaluation context is not reproducible evidence.",
+      "component": {
+        "nodeId": "mlpipe_experiments",
+        "componentType": "database",
+        "label": "Experiment Runs and Metrics",
+        "description": "Queryable metadata for training runs, comparisons, and evaluation evidence.",
+        "position": {"x": 920, "y": 330},
+        "properties": {"componentName": "Experiment Tracking Store", "purpose": "Persist run IDs, parameters, input and code digests, evaluation metric definitions and values, and artifact references for comparable experiments."},
+        "highlightReason": "The experiment record links tracked metrics to the exact training inputs and candidate artifact."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:4"]
+    },
+    {
+      "id": "mlpipe_registry",
+      "stepNumber": 9,
+      "phase": "Build reproducible training and promotion",
+      "title": "Register immutable serving packages with linked quality evidence",
+      "type": "add_component",
+      "content": "Register an immutable serving-package manifest with its artifact digest, source run, dataset manifest, code and container versions, serving configuration, linked offline evaluation report, approval status, and rollback reference. Keep model-quality evidence distinct from package compatibility/readiness: a registry entry versions a candidate but does not by itself prove either quality acceptance or that the package can serve successfully.",
+      "component": {
+        "nodeId": "mlpipe_registry",
+        "componentType": "model-registry",
+        "label": "SageMaker Model Registry",
+        "description": "Immutable candidate versions and lineage metadata for gated promotion.",
+        "position": {"x": 1220, "y": 80},
+        "properties": {"componentName": "SageMaker Model Registry", "purpose": "Version model artifacts with source run, dataset and code digests, evaluation evidence, approval state, compatible serving configuration, and rollback reference."},
+        "highlightReason": "The registry supplies version control and traceable lineage across training and serving."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "mlpipe_endpoint",
+      "stepNumber": 10,
+      "phase": "Build reproducible training and promotion",
+      "title": "Serve approved versions on a scalable SageMaker endpoint",
+      "type": "add_component",
+      "content": "Serve only an immutable package version that has passed the separate offline-quality approval and serving-package preflight. Configure production variants for an explicit A/B traffic split, keep enough warm capacity for the stated latency objective, and scale from measured invocations and saturation while testing the 1000+ predictions-per-second target. Validate instance type, model load time, preprocessing, and network overhead under representative bursts; the required capacity values are not supplied by the brief.",
+      "component": {
+        "nodeId": "mlpipe_endpoint",
+        "componentType": "model-serving",
+        "label": "SageMaker Multi-Variant Inference Endpoint",
+        "description": "Hosts approved model versions with controlled A/B routing and autoscaling.",
+        "position": {"x": 1530, "y": 80},
+        "properties": {"componentName": "SageMaker A/B Inference Endpoint", "purpose": "Serve approved versioned models through production variants; keep warm capacity for the under-100ms objective, split traffic for controlled comparison, and autoscale using measured request load and saturation."},
+        "highlightReason": "One endpoint boundary supports API inference, version comparison, and horizontal capacity scaling."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlpipe_api",
+      "stepNumber": 11,
+      "phase": "Build reproducible training and promotion",
+      "title": "Expose predictions through API Gateway",
+      "type": "add_component",
+      "content": "Place authentication, request validation, quotas, and request tracing at the API Gateway boundary. Keep the synchronous response path short and measure latency from API ingress through model response; route training and bulk evaluation through the workflow rather than the prediction API.",
+      "component": {
+        "nodeId": "mlpipe_api",
+        "componentType": "api-gateway",
+        "label": "Amazon API Gateway: Prediction API",
+        "description": "Protected prediction endpoint with request limits and tracing.",
+        "position": {"x": 1830, "y": 80},
+        "properties": {"componentName": "Model Prediction API", "purpose": "Expose authenticated, validated prediction requests with quotas and trace IDs; measure full request-to-response latency and keep bulk training off the synchronous path."},
+        "highlightReason": "The API edge provides a measurable and protected contract for online inference."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "mlpipe_monitoring",
+      "stepNumber": 12,
+      "phase": "Build reproducible training and promotion",
+      "title": "Observe endpoint health, model behavior, and retraining signals",
+      "type": "add_component",
+      "content": "Keep two monitoring tracks distinct: operational serving health (end-to-end latency, request volume, errors, saturation, and deployment variant) and predictive model quality (evaluation or production outcome metrics). The brief does not define an outcome-label source, quality metric, attribution window, or drift method; these are explicit design assumptions/open inputs. CloudWatch runtime metrics alone do not prove model quality. Route a qualified drift or scheduled retraining trigger to the pipeline, while retaining the independent quality and package-readiness gates before rollout.",
+      "component": {
+        "nodeId": "mlpipe_monitoring",
+        "componentType": "monitoring",
+        "label": "Amazon CloudWatch: Model Operations",
+        "description": "Operational and model signals with alarms that can trigger a gated retraining run.",
+        "position": {"x": 1530, "y": 360},
+        "properties": {"componentName": "ML Endpoint Monitoring", "purpose": "Track full-path latency, request rate, errors, saturation, variant metrics, and drift indicators; notify operators and start qualified retraining without bypassing evaluation and promotion gates."},
+        "highlightReason": "Operational signals close the monitoring and automated-retraining loop while retaining a promotion gate."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "mlpipe_data_preprocess_edge",
+      "stepNumber": 13,
+      "phase": "Connect deployment, inference, and feedback",
+      "title": "Read the selected dataset manifest for preprocessing",
+      "type": "add_connection",
+      "content": "The function resolves a versioned manifest and reads the referenced dataset. It records validation results and the preprocessing version with the output manifest.",
+      "connection": {"edgeId": "mlpipe_s3_to_preprocess", "sourceNodeId": "mlpipe_s3", "targetNodeId": "mlpipe_preprocess", "connectionType": "data-flow", "label": "Versioned dataset manifest", "description": "Read immutable input references and preserve the dataset version used by the run."},
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "mlpipe_workflow_preprocess_edge",
+      "stepNumber": 14,
+      "phase": "Connect deployment, inference, and feedback",
+      "title": "Invoke preprocessing as an idempotent workflow task",
+      "type": "add_connection",
+      "content": "Step Functions passes a run ID and manifest reference to Lambda. A retried task can identify its prior output instead of duplicating expensive work.",
+      "connection": {"edgeId": "mlpipe_workflow_to_preprocess", "sourceNodeId": "mlpipe_workflow", "targetNodeId": "mlpipe_preprocess", "connectionType": "api-call", "label": "Run ID and manifest", "description": "Start bounded validation and preprocessing for this workflow execution."},
+      "requirementIds": ["legacy-requirement:1"]
+    },
+    {
+      "id": "mlpipe_preprocess_data_edge",
+      "stepNumber": 15,
+      "phase": "Connect deployment, inference, and feedback",
+      "title": "Write prepared data and its provenance back to S3",
+      "type": "add_connection",
+      "content": "Persist prepared data and a new manifest that points to the source dataset and preprocessing version. Do not overwrite the raw input.",
+      "connection": {"edgeId": "mlpipe_preprocess_to_s3", "sourceNodeId": "mlpipe_preprocess", "targetNodeId": "mlpipe_s3", "connectionType": "data-flow", "label": "Prepared data and manifest", "description": "Write immutable prepared-data outputs with source and transformation references."},
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "mlpipe_training_edge",
+      "stepNumber": 16,
+      "phase": "Connect deployment, inference, and feedback",
+      "title": "Launch a version-pinned training job",
+      "type": "add_connection",
+      "content": "The workflow starts SageMaker with the prepared-data manifest, source revision, container digest, and run identity. These references make retries and later comparisons auditable.",
+      "connection": {"edgeId": "mlpipe_workflow_to_training", "sourceNodeId": "mlpipe_workflow", "targetNodeId": "mlpipe_training", "connectionType": "api-call", "label": "Versioned training run", "description": "Launch training from the prepared manifest and immutable run configuration."},
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "mlpipe_training_artifact_edge",
+      "stepNumber": 17,
+      "phase": "Connect deployment, inference, and feedback",
+      "title": "Store the candidate artifact and source references",
+      "type": "add_connection",
+      "content": "Write the model artifact to a run-specific S3 location and return its digest to the workflow. Keep artifacts immutable so registry versions cannot silently change.",
+      "connection": {"edgeId": "mlpipe_training_to_s3", "sourceNodeId": "mlpipe_training", "targetNodeId": "mlpipe_s3", "connectionType": "data-flow", "label": "Candidate artifact and digest", "description": "Persist an immutable model artifact and return its versioned reference."},
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "mlpipe_experiment_edge",
+      "stepNumber": 18,
+      "phase": "Connect deployment, inference, and feedback",
+      "title": "Record experiment parameters and measured results",
+      "type": "add_connection",
+      "content": "Write run configuration, dataset and code digests, evaluation results, runtime, and cost to the experiment store. Compare only runs whose evaluation data and metric definitions are compatible.",
+      "connection": {"edgeId": "mlpipe_training_to_experiments", "sourceNodeId": "mlpipe_training", "targetNodeId": "mlpipe_experiments", "connectionType": "data-flow", "label": "Run metadata and metrics", "description": "Persist measured training and evaluation evidence with its immutable input and artifact references."},
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlpipe_register_edge",
+      "stepNumber": 19,
+      "phase": "Connect deployment, inference, and feedback",
+      "title": "Register the candidate with its lineage record",
+      "type": "add_connection",
+      "content": "Register the immutable artifact and link it to the originating training run, prepared-data manifest, source revision, and evaluation report.",
+      "connection": {"edgeId": "mlpipe_training_to_registry", "sourceNodeId": "mlpipe_training", "targetNodeId": "mlpipe_registry", "connectionType": "api-call", "label": "Candidate package and lineage", "description": "Create a new versioned registry package from the completed training run."},
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "mlpipe_registry_workflow_edge",
+      "stepNumber": 20,
+      "phase": "Connect deployment, inference, and feedback",
+      "title": "Return registry approval state to the pipeline",
+      "type": "add_connection",
+      "content": "Pass two independent statuses to the pipeline: (1) offline model-quality evaluation and approval, and (2) serving-package compatibility/preflight. Continue only when both are accepted; A/B traffic rollout and runtime health checks happen later and cannot certify offline model quality. A rejected or pending candidate remains versioned but does not replace the serving model.",
+      "connection": {"edgeId": "mlpipe_registry_to_workflow", "sourceNodeId": "mlpipe_registry", "targetNodeId": "mlpipe_workflow", "connectionType": "event-stream", "label": "Approval and evaluation status", "description": "Send candidate status to the durable workflow so deployment remains gated."},
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "mlpipe_workflow_endpoint_edge",
+      "stepNumber": 21,
+      "phase": "Connect deployment, inference, and feedback",
+      "title": "Deploy only after the workflow's promotion gate",
+      "type": "add_connection",
+      "content": "After the independent model-quality gate and serving-package preflight both pass, deploy the immutable package to the endpoint using a controlled rollout policy. Treat package loading and endpoint health as release checks, not proof of model quality; keep the prior approved version available for rollback.",
+      "connection": {"edgeId": "mlpipe_workflow_to_endpoint", "sourceNodeId": "mlpipe_workflow", "targetNodeId": "mlpipe_endpoint", "connectionType": "api-call", "label": "Gated endpoint deployment", "description": "Apply a reviewed endpoint configuration only after candidate checks pass."},
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:3"]
+    },
+    {
+      "id": "mlpipe_registry_endpoint_edge",
+      "stepNumber": 22,
+      "phase": "Connect deployment, inference, and feedback",
+      "title": "Load the artifact by registry version",
+      "type": "add_connection",
+      "content": "The serving configuration references an immutable approved registry version rather than a mutable latest-artifact path.",
+      "connection": {"edgeId": "mlpipe_registry_to_endpoint", "sourceNodeId": "mlpipe_registry", "targetNodeId": "mlpipe_endpoint", "connectionType": "data-flow", "label": "Approved model version", "description": "Resolve the exact approved artifact and compatible serving configuration."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "mlpipe_api_endpoint_edge",
+      "stepNumber": 23,
+      "phase": "Connect deployment, inference, and feedback",
+      "title": "Route prediction requests to the active endpoint",
+      "type": "add_connection",
+      "content": "The API validates the request and forwards it with a trace ID. Avoid synchronous feature work that can be prepared or cached before the request arrives.",
+      "connection": {"edgeId": "mlpipe_api_to_endpoint", "sourceNodeId": "mlpipe_api", "targetNodeId": "mlpipe_endpoint", "connectionType": "api-call", "label": "Prediction request", "description": "Forward validated online inference requests to the currently approved endpoint variants."},
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "mlpipe_endpoint_api_edge",
+      "stepNumber": 24,
+      "phase": "Connect deployment, inference, and feedback",
+      "title": "Return the prediction through the API boundary",
+      "type": "add_connection",
+      "content": "Return the prediction and trace context through the same protected API contract. Measure serialization and network time as part of the under-100ms objective.",
+      "connection": {"edgeId": "mlpipe_endpoint_to_api", "sourceNodeId": "mlpipe_endpoint", "targetNodeId": "mlpipe_api", "connectionType": "api-call", "label": "Prediction response", "description": "Return the model response for full-path latency accounting and request tracing."},
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:1"]
+    },
+    {
+      "id": "mlpipe_endpoint_monitor_edge",
+      "stepNumber": 25,
+      "phase": "Connect deployment, inference, and feedback",
+      "title": "Send serving-health signals to CloudWatch, separate from model quality",
+      "type": "add_connection",
+      "content": "This connection carries operational serving health only: latency, request volume, errors, saturation, and deployment version/variant. It does not establish predictive correctness or model quality. Publish those health signals with deployment context; keep any labeled or proxy outcome metric on a distinct measurement path, and treat its source and attribution window as assumptions because the brief does not define them.",
+      "connection": {"edgeId": "mlpipe_endpoint_to_monitoring", "sourceNodeId": "mlpipe_endpoint", "targetNodeId": "mlpipe_monitoring", "connectionType": "event-stream", "label": "Endpoint and model metrics", "description": "Publish operational and variant-level metrics for dashboards, alarms, and comparisons."},
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "mlpipe_monitor_workflow_edge",
+      "stepNumber": 26,
+      "phase": "Connect deployment, inference, and feedback",
+      "title": "Feed qualified drift or schedule signals into retraining",
+      "type": "add_connection",
+      "content": "A schedule or qualified drift alarm may start a new workflow run. It creates a new candidate and preserves the current endpoint until evaluation and promotion complete.",
+      "connection": {"edgeId": "mlpipe_monitoring_to_workflow", "sourceNodeId": "mlpipe_monitoring", "targetNodeId": "mlpipe_workflow", "connectionType": "event-stream", "label": "Scheduled or drift-qualified retrain", "description": "Start a fresh versioned pipeline run while retaining the currently approved serving version."},
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "mlpipe_ab_policy",
+      "stepNumber": 27,
+      "phase": "Set rollout and operating guardrails",
+      "title": "Choose an A/B rollout with explicit guardrails",
+      "type": "decision_point",
+      "content": "Compare approved versions on the same live request mix, but evaluate predictive quality separately from operational guardrails such as latency, errors, and throughput. A/B assignment and a healthy endpoint do not prove model quality; online quality conclusions require a defined outcome-label or proxy signal, metric, and attribution window, none of which the brief specifies. Treat these as assumptions/open decisions. A 90/10 split is only an illustrative rollout assumption, not a target from the brief.",
+      "decision": {
+        "question": "How should a new model version first receive production traffic?",
+        "chosen": "Use an illustrative 90/10 A/B traffic split only as an explicit rollout assumption; keep model-quality evaluation separate from serving-health guardrails, then adjust or roll back after the agreed evidence is evaluated.",
+        "chosenReason": "A controlled split supports direct version comparison while limiting exposure to a candidate; the initial ratio must be validated against traffic volume and experiment design.",
+        "alternatives": [
+          {"option": "Send all traffic to the candidate immediately", "tradeoff": "A regression can affect every prediction before operators have evidence."},
+          {"option": "Evaluate only offline and never compare serving variants", "tradeoff": "Offline data may not reflect production traffic or live operational behavior."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "mlpipe_scale_trigger",
+      "stepNumber": 28,
+      "phase": "Set rollout and operating guardrails",
+      "title": "Scale inference from measured load while protecting latency",
+      "type": "scale_trigger",
+      "content": "Maintain enough warm endpoint capacity to avoid cold-start spikes, then tune horizontal scaling from measured invocation rate, concurrency, and saturation. Validate scaling lag during bursts against the stated throughput and latency objectives.",
+      "scaleTrigger": {
+        "metric": "The brief's 1000+ predictions-per-second and under-100ms targets, measured alongside invocations per instance, concurrency, saturation, and end-to-end latency",
+        "action": "Add endpoint instances when sustained load approaches tested per-instance capacity; retain a warm pool sized from measurements. The brief specifies no instance count, per-instance throughput, warm-pool size, scale threshold, or latency percentile; any selected values are assumptions to validate under representative load.",
+        "impact": "Tests the stated inference-scaling, latency, and throughput objectives while exposing the cost of idle warm capacity; measured serving health remains separate from predictive model-quality results."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "mlpipe_retrain_gate",
+      "stepNumber": 29,
+      "phase": "Set rollout and operating guardrails",
+      "title": "Automate retraining without automatic unreviewed promotion",
+      "type": "decision_point",
+      "content": "Scheduled and drift-qualified retraining can be automatic. Evaluate each candidate's predictive quality against versioned data and pre-agreed metrics, and record that result separately from serving-package compatibility/readiness. Registry promotion and endpoint rollout require both gates; stale labels, data shifts, or a package that fails its serving preflight must not silently replace a working model.",
+      "decision": {
+        "question": "What should automation do after a retraining trigger?",
+        "chosen": "Automatically create and evaluate a new versioned candidate, then permit deployment only when independent model-quality and serving-package readiness policies both pass.",
+        "chosenReason": "This automates repeatable pipeline work while preserving lineage, rollback, and a quality check before live traffic changes.",
+        "alternatives": [
+          {"option": "Deploy every completed training run", "tradeoff": "Completion proves that training ran, not that the candidate is fit for production."},
+          {"option": "Require a person to start every retraining run", "tradeoff": "It weakens the requested automated retraining loop and can delay response to qualified drift."}
+        ]
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "mlpipe_cost_validation",
+      "stepNumber": 30,
+      "phase": "Set rollout and operating guardrails",
+      "title": "Compare successful-run cost, not an isolated compute rate",
+      "type": "explanation",
+      "content": "Evaluate cost per accepted model and per prediction at the required load. Include interrupted training, retries, storage, data transfer, endpoint warm capacity, and idle time. Checkpointed Spot training and right-sized serving are candidates to measure, not guaranteed savings; do not trade away the latency or throughput objectives to lower an unrepresentative bill.",
+      "requirementIds": ["legacy-constraint:5", "legacy-requirement:1", "legacy-requirement:7"]
+    },
+    {
+      "id": "mlpipe_acceptance",
+      "stepNumber": 31,
+      "phase": "Set rollout and operating guardrails",
+      "title": "Validate lineage, load, and rollback before relying on the pipeline",
+      "type": "explanation",
+      "content": "Keep acceptance evidence in separate gates: (1) offline predictive-quality metrics and evaluation-data lineage; (2) serving-package compatibility/load checks; (3) endpoint health and capacity against the brief's under-100ms and 1000+ predictions-per-second targets; and (4) A/B outcome comparison by model version, only when an agreed label/proxy source and attribution window exist. The brief does not specify latency percentile/boundary, capacity per instance, or online outcome source, so those are assumptions to validate. Operational latency/error success is not proof of model quality. Also verify rollback and that automated retraining cannot bypass either promotion gate. These are acceptance checks; this walkthrough does not report them as passed.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

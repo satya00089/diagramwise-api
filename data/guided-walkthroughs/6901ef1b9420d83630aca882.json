@@ -1,0 +1,261 @@
+{
+  "problem_id": "6901ef1b9420d83630aca882",
+  "version": "1.0.0-review-draft",
+  "requirementRevision": null,
+  "totalSteps": 43,
+  "phases": [
+    {"name": "Define ranking and event semantics", "stepRange": [1, 3], "description": "Preserve the live brief, make unknown scale targets explicit, and define event identity and ranking semantics before choosing a data path."},
+    {"name": "Build durable ingestion and exact aggregation", "stepRange": [4, 23], "description": "Use existing catalog clients and services to validate and durably accept events, publish them through an outbox, and process keyed updates."},
+    {"name": "Materialize and serve top-K rankings", "stepRange": [24, 35], "description": "Persist exact aggregate state, project versioned ranking indexes, serve bounded queries, and expose freshness and failure signals."},
+    {"name": "Review correctness, scale, and operational limits", "stepRange": [36, 43], "description": "Work through deduplication, time windows, high-cardinality storage, large-K paging, concurrency, and the missing service-level targets."}
+  ],
+  "steps": [
+    {
+      "id": "rank_01_live_brief", "stepNumber": 1, "phase": "Define ranking and event semantics", "title": "Start from the live problem, not assumed targets", "type": "explanation",
+      "content": "Live problem: Top K Elements: App Store Rankings, Amazon Bestsellers. Brief: Design a system to track and display top K items (products, apps, etc.) based on various metrics in real-time. Requirements (verbatim): Track top K items by sales/downloads/ratings; Update rankings in real-time or near real-time; Support different time windows (daily, weekly, monthly); Handle millions of items; Support multiple ranking categories; Efficient query for top K items; Handle high update volume. Constraints (verbatim): Fast ranking updates; Memory efficient for large K; Handle concurrent updates; Support time-based rankings; Accurate counting at scale. Hints supplied: Min-heap or max-heap for top K; Redis sorted sets for rankings; Periodic batch updates vs real-time; Count-min sketch for approximation; Separate computation for different windows. The brief supplies no event rate, category cardinality, K limit, latency SLO, freshness target, availability, retention, or exact window-boundary convention. Agree those before sizing or promising performance.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "rank_02_capacity", "stepNumber": 2, "phase": "Define ranking and event semantics", "title": "Keep capacity estimates conditional", "type": "explanation",
+      "content": "Millions of items and high update volume are qualitative signals, not a workload model. Measure events per second and burst shape, distinct items per category and window, number of simultaneously queried windows, K distribution, late-event rate, retention, and read/write ratio. Use those measurements to choose partition count, broker retention, aggregate-store capacity, and ranking-index memory. Do not turn the phrase high volume into an invented request rate or latency guarantee.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2"]
+    },
+    {
+      "id": "rank_03_event_contract", "stepNumber": 3, "phase": "Define ranking and event semantics", "title": "Define a versioned ranking event", "type": "explanation",
+      "content": "Use a stable event_id, source, category_id, item_id, metric, occurred_at, schema_version, and correction or source sequence where available. Repeated delivery of one event_id must not increment a count twice. Sales and downloads can be additive events; ratings need a defined update model, such as rating_id plus version and replacement/compensation semantics, with score_sum and rating_count retained so averages are correct. Reject or quarantine malformed, unknown-metric, and unauthorized category events instead of silently changing rankings.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "rank_04_sources", "stepNumber": 4, "phase": "Build durable ingestion and exact aggregation", "title": "Represent the business event producers", "type": "add_component",
+      "content": "Reuse the catalog Backend Server for the upstream product, download, and rating services. Producers emit the same stable event identity on retry and include the category, item, metric, and event time; they do not compute or publish a top-K result themselves.",
+      "component": {"nodeId": "rank_sources", "componentType": "backend-server", "label": "Product, Download & Rating Services", "description": "Upstream systems emitting versioned business events", "position": {"x": 0, "y": 120}, "properties": {"componentName": "Product, Download & Rating Services", "purpose": "Emit validated sales, download, and rating-change events with stable event_id, category_id, item_id, metric, occurred_at, and schema_version; retry with the same event identity."}, "highlightReason": "The existing Backend Server represents the upstream business services; no new producer component type is needed."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "rank_05_dashboard", "stepNumber": 5, "phase": "Build durable ingestion and exact aggregation", "title": "Add the ranking client", "type": "add_component",
+      "content": "Use the existing Web App for category and metric selection, K, time window, and paginated results. Display the ranking's as-of time and freshness state so a lagging materialized view is not presented as current without qualification.",
+      "component": {"nodeId": "rank_dashboard", "componentType": "web-app", "label": "Rankings Client", "description": "Category, metric, window, and paginated top-K views", "position": {"x": 0, "y": 480}, "properties": {"componentName": "Rankings Client", "purpose": "Let users select category, sales/download/rating metric, daily/weekly/monthly window, and K; page large result sets and display the result as-of time and freshness status."}, "highlightReason": "The existing Web App covers the user-facing ranking experience with no problem-specific UI node."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "rank_06_gateway", "stepNumber": 6, "phase": "Build durable ingestion and exact aggregation", "title": "Add a validated API boundary", "type": "add_component",
+      "content": "Reuse API Gateway for authenticated producer writes and ranking reads. Validate category, metric, event shape, K bounds, and window choice; apply tenant/source policy and admission limits. Keep detailed event processing and top-K merging in backend services.",
+      "component": {"nodeId": "rank_gateway", "componentType": "api-gateway", "label": "Ranking API Gateway", "description": "Authenticated event-ingest and ranking-query boundary", "position": {"x": 320, "y": 300}, "properties": {"componentName": "Ranking API Gateway", "purpose": "Authenticate callers, validate event and ranking-query shapes, constrain category/metric/window/K inputs, enforce source authorization and admission limits, and route writes and reads to separate services.", "inputValidation": true, "authentication": "JWT", "rateLimiting": true, "tlsTermination": true}, "highlightReason": "The existing API Gateway exposes the needed validation, authentication, TLS, and rate-limit properties."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "rank_07_ingest", "stepNumber": 7, "phase": "Build durable ingestion and exact aggregation", "title": "Separate event intake from ranking reads", "type": "add_component",
+      "content": "The ingestion service validates source permissions and event semantics, enforces idempotency, and commits each accepted event with an outbox record before acknowledging durable acceptance. It must not synchronously update every ranking index or wait for a full window recomputation.",
+      "component": {"nodeId": "rank_ingest", "componentType": "backend-server", "label": "Ranking Event Ingestion", "description": "Validation, idempotency, and atomic event/outbox acceptance", "position": {"x": 640, "y": 120}, "properties": {"componentName": "Ranking Event Ingestion", "purpose": "Authorize producer identity, validate versioned metric events, deduplicate by stable event_id, and atomically persist the accepted event and outbox row before returning success; keep ranking aggregation asynchronous."}, "highlightReason": "The catalog Backend Server represents ingestion logic; its durable boundary is modeled separately."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "rank_08_event_store", "stepNumber": 8, "phase": "Build durable ingestion and exact aggregation", "title": "Persist accepted events and an outbox", "type": "add_component",
+      "content": "Reuse Database for an idempotency ledger and transactional outbox. A unique event identity and accepted payload are committed atomically; the outbox relay can safely retry after a crash. Partition and expire raw-event/deduplication records only after the agreed correction and replay horizon. The brief does not specify that horizon or a database vendor.",
+      "component": {"nodeId": "rank_event_store", "componentType": "database", "label": "Accepted Event Ledger & Outbox", "description": "Unique event identities and atomic publish intent", "position": {"x": 940, "y": 20}, "properties": {"componentName": "Accepted Event Ledger & Outbox", "purpose": "Atomically retain accepted event identities/payloads and outbox publish intent; enforce uniqueness on event_id, partition by an agreed access pattern, and retain dedupe data through the correction and replay horizon."}, "highlightReason": "The existing Database supports the durable uniqueness and outbox boundary required to avoid lost or double-counted accepted events."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "rank_09_outbox_relay", "stepNumber": 9, "phase": "Build durable ingestion and exact aggregation", "title": "Relay committed events without losing retries", "type": "add_component",
+      "content": "Use the catalog Processing Worker to claim outbox rows, publish versioned event envelopes, and mark a row delivered only after broker acknowledgement. A crash between publish and marking may redeliver; downstream event_id deduplication makes that safe.",
+      "component": {"nodeId": "rank_outbox_relay", "componentType": "processing-worker", "label": "Event Outbox Relay", "description": "Retryable publication of durably accepted ranking events", "position": {"x": 640, "y": 440}, "properties": {"componentName": "Event Outbox Relay", "purpose": "Claim committed outbox rows, publish stable versioned event envelopes, retry with bounded backoff, and mark delivery only after broker acknowledgement; tolerate duplicate publication after a crash."}, "highlightReason": "The existing Processing Worker fits the retryable outbox relay role."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "rank_10_broker", "stepNumber": 10, "phase": "Build durable ingestion and exact aggregation", "title": "Buffer and partition ranking events", "type": "add_component",
+      "content": "Reuse Message Broker as the durable event stream. Partition by a stable category/item key so events for one ranking item are serialized in broker partition order while unrelated items process concurrently. Treat this only as processing order: count each distinct additive event once, and use source versions or explicit correction semantics for mutable updates. Retention must cover the agreed replay/recovery horizon; partition counts and retention depend on measured traffic and item skew.",
+      "component": {"nodeId": "rank_broker", "componentType": "message-broker", "label": "Durable Ranking Event Stream", "description": "Partitioned, replayable event buffer", "position": {"x": 940, "y": 300}, "properties": {"componentName": "Durable Ranking Event Stream", "purpose": "Buffer versioned events durably, partition by stable category_id and item_id for per-item order and parallelism, retain through the agreed replay horizon, and expose consumer lag."}, "highlightReason": "The catalog Message Broker supplies the durable asynchronous boundary without introducing a new event-bus node."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "rank_11_stream", "stepNumber": 11, "phase": "Build durable ingestion and exact aggregation", "title": "Aggregate exact event-time metrics", "type": "add_component",
+      "content": "Use the existing stateful Stream Processor to deduplicate replayed event IDs, apply ordered corrections, and update per-item metric state for the configured windows. Keep exact counts/sums as the authoritative path; any approximate sketch is an explicitly labeled optional estimate, never a silent replacement for accurate counts.",
+      "component": {"nodeId": "rank_stream", "componentType": "stream-processor", "label": "Windowed Ranking Aggregator", "description": "Keyed exact counts, rating aggregates, and late-event handling", "position": {"x": 1240, "y": 300}, "properties": {"componentName": "Windowed Ranking Aggregator", "purpose": "Deduplicate event_id, process category/item keys in order, maintain exact sales/download counts and rating score_sum/rating_count, apply correction events, and update event-time window state with a declared late-event policy.", "engine": "Apache Flink", "windowing": true, "stateful": true}, "highlightReason": "The catalog Stream Processor explicitly supports stateful and windowed real-time processing."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "rank_12_state_store", "stepNumber": 12, "phase": "Build durable ingestion and exact aggregation", "title": "Keep exact aggregates as recoverable state", "type": "add_component",
+      "content": "Reuse Database for exact per-category, per-item, per-metric, per-window state, rating sum/count, source versions, and committed aggregate revisions. Use atomic conditional updates and a durable change outbox so retries cannot apply an increment twice and downstream index updates can resume.",
+      "component": {"nodeId": "rank_state_store", "componentType": "database", "label": "Exact Aggregate State", "description": "Partitioned counts, rating sums, window state, and change outbox", "position": {"x": 1540, "y": 20}, "properties": {"componentName": "Exact Aggregate State", "purpose": "Persist exact aggregate values keyed by category, item, metric, and time window; store rating score_sum and rating_count, enforce idempotent versioned updates, and atomically record ranking-index change intent for recovery."}, "highlightReason": "A durable aggregate store keeps exact counts independent of the derived cache and supports repair after projection loss."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "rank_13_index_projector", "stepNumber": 13, "phase": "Build durable ingestion and exact aggregation", "title": "Project committed rank changes", "type": "add_component",
+      "content": "A separate worker consumes durable aggregate-change intent and updates the Redis read index using monotonic aggregate revisions. If it falls behind or crashes, it resumes from the durable cursor; the index is rebuildable from exact aggregate state rather than treated as the source of truth.",
+      "component": {"nodeId": "rank_index_projector", "componentType": "processing-worker", "label": "Ranking Index Projector", "description": "Idempotent, versioned projection into sorted-set indexes", "position": {"x": 1540, "y": 440}, "properties": {"componentName": "Ranking Index Projector", "purpose": "Read durable aggregate change records, idempotently upsert item scores into Redis sorted sets using monotonic revisions, checkpoint only after successful projection, and rebuild indexes from exact aggregate state."}, "highlightReason": "The catalog Processing Worker separates durable aggregate commits from a recoverable low-latency read projection."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "rank_14_cache", "stepNumber": 14, "phase": "Build durable ingestion and exact aggregation", "title": "Add sharded ranking indexes", "type": "add_component",
+      "content": "Use the catalog Cache for Redis sorted sets keyed by category, metric, window, and rank shard. Keep exact scores for each indexed item and version each update; shard to bound per-key load and memory. Redis is a derived index, so cache loss triggers rebuild or an exact-store fallback, not data loss.",
+      "component": {"nodeId": "rank_cache", "componentType": "cache", "label": "Redis Ranking Indexes", "description": "Versioned sorted sets partitioned by category, metric, window, and shard", "position": {"x": 1840, "y": 280}, "properties": {"componentName": "Redis Ranking Indexes", "purpose": "Maintain versioned exact item scores in sorted sets keyed by category, metric, time window, and rank shard; bound shard memory, page large K reads, and rebuild from the durable aggregate store after loss.", "engine": "redis", "clusterMode": true, "persistence": true}, "highlightReason": "The existing Cache catalog component supports Redis and cluster mode; sorted sets provide efficient score-ordered reads."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "rank_15_query", "stepNumber": 15, "phase": "Build durable ingestion and exact aggregation", "title": "Serve bounded, deterministic top-K reads", "type": "add_component",
+      "content": "Use a separate query service to validate K and filters, read the requested category/metric/window from sorted-set shards, merge candidates using score plus a stable item-ID tie-breaker, and return an as-of revision. For a cache miss or stale shard, use the exact aggregate index or report partial/stale state; do not silently return an incomplete ranking as complete.",
+      "component": {"nodeId": "rank_query", "componentType": "backend-server", "label": "Top-K Query Service", "description": "Shard fan-out, deterministic merge, and bounded pagination", "position": {"x": 2160, "y": 300}, "properties": {"componentName": "Top-K Query Service", "purpose": "Validate K and category/metric/window, query rank shards, merge exact candidates by score and stable item_id, paginate large K responses, return as-of revision/freshness, and fall back or flag incomplete cache state."}, "highlightReason": "The catalog Backend Server keeps ranking reads separate from high-volume event intake."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "rank_16_monitoring", "stepNumber": 16, "phase": "Build durable ingestion and exact aggregation", "title": "Observe freshness and correctness", "type": "add_component",
+      "content": "Monitor accepted/rejected and duplicate events, outbox age, broker lag, late-event corrections, aggregate commit failures, projector lag, index rebuild progress, query latency, and result freshness. Set alert thresholds only after product and operations define objectives.",
+      "component": {"nodeId": "rank_monitoring", "componentType": "monitoring", "label": "Ranking Pipeline Monitoring", "description": "Freshness, correctness, lag, saturation, and alerts", "position": {"x": 1540, "y": 760}, "properties": {"componentName": "Ranking Pipeline Monitoring", "purpose": "Measure event acceptance and duplicates, outbox age, broker and projector lag, correction rate, exact aggregate conflicts, cache rebuild progress, query performance, and ranking as-of freshness; alert against agreed targets."}, "highlightReason": "The existing Monitoring catalog component exposes metrics and alerting for the update and query paths."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "rank_17_sources_gateway", "stepNumber": 17, "phase": "Build durable ingestion and exact aggregation", "title": "Submit producer events over the authenticated API", "type": "add_connection",
+      "content": "Business services send versioned events over TLS with a stable idempotency identity. A retry reuses the same event_id; a genuinely new sale, download, or rating change gets a new identity.",
+      "connection": {"edgeId": "rank_sources_gateway", "sourceNodeId": "rank_sources", "targetNodeId": "rank_gateway", "connectionType": "http", "label": "Versioned metric events", "description": "Authenticated event submissions with stable identity, category, item, metric, and event time."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "rank_18_dashboard_gateway", "stepNumber": 18, "phase": "Build durable ingestion and exact aggregation", "title": "Send ranking queries through the same boundary", "type": "add_connection",
+      "content": "The client requests category, metric, window, K, and a continuation cursor. Input validation and access policy happen before shard fan-out.",
+      "connection": {"edgeId": "rank_dashboard_gateway", "sourceNodeId": "rank_dashboard", "targetNodeId": "rank_gateway", "connectionType": "http", "label": "Top-K query and page cursor", "description": "Validated category, metric, time-window, K, and continuation requests."},
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "rank_19_gateway_ingest", "stepNumber": 19, "phase": "Build durable ingestion and exact aggregation", "title": "Route event writes to ingestion", "type": "add_connection",
+      "content": "Keep the write route separate from reads so an update burst can be admitted and buffered without starving ranking queries. Return success only after the event/outbox transaction is durable.",
+      "connection": {"edgeId": "rank_gateway_ingest", "sourceNodeId": "rank_gateway", "targetNodeId": "rank_ingest", "connectionType": "api-call", "label": "Validated event intake", "description": "Authorized, bounded writes routed to the idempotent ingestion service."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "rank_20_ingest_store", "stepNumber": 20, "phase": "Build durable ingestion and exact aggregation", "title": "Commit event identity and publish intent atomically", "type": "add_connection",
+      "content": "A uniqueness conflict for an already accepted event_id returns the prior acceptance result without applying another increment. Store accepted data and outbox intent in one transaction to close the database/broker dual-write gap.",
+      "connection": {"edgeId": "rank_ingest_event_store", "sourceNodeId": "rank_ingest", "targetNodeId": "rank_event_store", "connectionType": "database-connection", "label": "Idempotent event and outbox commit", "description": "Unique event record and durable publish intent committed together."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "rank_21_store_relay", "stepNumber": 21, "phase": "Build durable ingestion and exact aggregation", "title": "Make the outbox recoverable", "type": "add_connection",
+      "content": "The relay polls or claims committed outbox rows with a lease, publishes them, and advances its cursor only after acknowledgement. A crash can cause duplicate delivery, which downstream deduplication handles.",
+      "connection": {"edgeId": "rank_event_store_relay", "sourceNodeId": "rank_event_store", "targetNodeId": "rank_outbox_relay", "connectionType": "data-flow", "label": "Committed outbox records", "description": "Leased durable events replayable after relay or broker interruption."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "rank_22_relay_broker", "stepNumber": 22, "phase": "Build durable ingestion and exact aggregation", "title": "Publish into the durable stream", "type": "add_connection",
+      "content": "Partition messages by category_id and item_id, carry event_id and schema version, and retain enough history to replay the agreed recovery window. Monitor producer backpressure rather than dropping accepted events.",
+      "connection": {"edgeId": "rank_relay_broker", "sourceNodeId": "rank_outbox_relay", "targetNodeId": "rank_broker", "connectionType": "message-queue", "label": "Partitioned ranking events", "description": "Replayable event envelopes keyed by category and item for per-item ordering."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "rank_23_broker_stream", "stepNumber": 23, "phase": "Build durable ingestion and exact aggregation", "title": "Consume and checkpoint keyed updates", "type": "add_connection",
+      "content": "The stream processor replays from committed offsets, deduplicates by event identity, and checkpoints state with progress. Keyed partitioning serializes processing for one item in broker-arrival order, but it does not establish which concurrent mutable source update is authoritative; compare source sequence or revision, or apply explicit correction semantics, before committing. Preserve every distinct additive event through idempotency instead of dropping it as stale. Unrelated keys remain parallel.",
+      "connection": {"edgeId": "rank_broker_stream", "sourceNodeId": "rank_broker", "targetNodeId": "rank_stream", "connectionType": "message-queue", "label": "Ordered keyed event stream", "description": "Durable replay and partition checkpoints for exact keyed aggregation."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "rank_24_stream_state", "stepNumber": 24, "phase": "Materialize and serve top-K rankings", "title": "Commit exact aggregate revisions", "type": "add_connection",
+      "content": "Use atomic idempotent aggregate writes with a stable event/revision identity. Keep corrections explicit and recompute affected item/window scores; do not let a late duplicate silently inflate the rank.",
+      "connection": {"edgeId": "rank_stream_state_store", "sourceNodeId": "rank_stream", "targetNodeId": "rank_state_store", "connectionType": "database-connection", "label": "Exact versioned window aggregates", "description": "Idempotent counts, rating sums/counts, corrections, and durable projection intent."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "rank_25_state_projector", "stepNumber": 25, "phase": "Materialize and serve top-K rankings", "title": "Project from committed state, not transient memory", "type": "add_connection",
+      "content": "The projector reads durable aggregate-change records and uses monotonic revisions. It can retry or rebuild after downtime without losing the authoritative count or applying stale scores over newer ones.",
+      "connection": {"edgeId": "rank_state_store_projector", "sourceNodeId": "rank_state_store", "targetNodeId": "rank_index_projector", "connectionType": "data-flow", "label": "Committed aggregate change feed", "description": "Resumable revisions for rebuilding derived category/window ranking indexes."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "rank_26_projector_cache", "stepNumber": 26, "phase": "Materialize and serve top-K rankings", "title": "Maintain sorted-set projections idempotently", "type": "add_connection",
+      "content": "Update an item score only when the incoming aggregate revision is newer. Index keys include category, metric, window, and shard; the projection exposes its applied revision so query code can judge freshness.",
+      "connection": {"edgeId": "rank_projector_cache", "sourceNodeId": "rank_index_projector", "targetNodeId": "rank_cache", "connectionType": "data-flow", "label": "Versioned Redis score upserts", "description": "Idempotent item-score materialization for sorted-set top-K access."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "rank_27_gateway_query", "stepNumber": 27, "phase": "Materialize and serve top-K rankings", "title": "Route reads to a dedicated query service", "type": "add_connection",
+      "content": "Keep query fan-out, pagination, and merging isolated from event ingestion. Enforce agreed maximum K and response-size limits at the API boundary.",
+      "connection": {"edgeId": "rank_gateway_query", "sourceNodeId": "rank_gateway", "targetNodeId": "rank_query", "connectionType": "api-call", "label": "Validated ranking read", "description": "Bounded category, metric, window, K, and cursor request."},
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "rank_28_query_cache", "stepNumber": 28, "phase": "Materialize and serve top-K rankings", "title": "Fetch and merge shard candidates", "type": "add_connection",
+      "content": "Each shard returns enough candidates to prove the global first K under the exact-score and deterministic item-ID ordering, such as up to K candidates per shard followed by cursor-based refill when needed. Because each item has one stable shard owner, candidates do not double-count across shards. Use cursors for large K rather than allocating or transferring an unbounded result.",
+      "connection": {"edgeId": "rank_query_cache", "sourceNodeId": "rank_query", "targetNodeId": "rank_cache", "connectionType": "data-flow", "label": "Shard top-K reads", "description": "Bounded sorted-set page reads with stable ownership and revision metadata."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "rank_29_query_state", "stepNumber": 29, "phase": "Materialize and serve top-K rankings", "title": "Keep an exact fallback and repair path", "type": "add_connection",
+      "content": "When cache state is missing, stale, or rebuilding, query the exact aggregate index within the same bounded-response contract or return a clearly marked stale/partial result. Never treat approximate sketches as exact results.",
+      "connection": {"edgeId": "rank_query_state_store", "sourceNodeId": "rank_query", "targetNodeId": "rank_state_store", "connectionType": "database-connection", "label": "Exact fallback and reconciliation", "description": "Authoritative scores and revisions for cache misses, repair, and correctness checks."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "rank_30_gateway_monitor", "stepNumber": 30, "phase": "Materialize and serve top-K rankings", "title": "Measure API admission and query behavior", "type": "add_connection",
+      "content": "Track rejected events and requests, per-source throttling, query latency by K/category/window, response size, and errors without logging sensitive payloads.",
+      "connection": {"edgeId": "rank_gateway_monitor", "sourceNodeId": "rank_gateway", "targetNodeId": "rank_monitoring", "connectionType": "data-flow", "label": "API traffic and admission metrics", "description": "Rate-limit decisions, validation outcomes, request latency, and errors."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1"]
+    },
+    {
+      "id": "rank_31_broker_monitor", "stepNumber": 31, "phase": "Materialize and serve top-K rankings", "title": "Alert on durable backlog", "type": "add_connection",
+      "content": "Monitor broker availability, partition skew, producer backpressure, retention headroom, and consumer lag. A growing lag means the system is not meeting the agreed freshness target even if every event remains durable.",
+      "connection": {"edgeId": "rank_broker_monitor", "sourceNodeId": "rank_broker", "targetNodeId": "rank_monitoring", "connectionType": "data-flow", "label": "Durability, skew, and consumer lag", "description": "Signals for event backlog, replay capacity, and partition imbalance."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "rank_32_stream_monitor", "stepNumber": 32, "phase": "Materialize and serve top-K rankings", "title": "Watch exact aggregation health", "type": "add_connection",
+      "content": "Observe checkpoint age, duplicate suppression, correction rate, late-event watermarks, per-key skew, state size, and failed transactions. These distinguish correct-but-lagging output from dropped or double-applied events.",
+      "connection": {"edgeId": "rank_stream_monitor", "sourceNodeId": "rank_stream", "targetNodeId": "rank_monitoring", "connectionType": "data-flow", "label": "Checkpoint, correction, and window metrics", "description": "Correctness and processing-health evidence for stateful event aggregation."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "rank_33_state_monitor", "stepNumber": 33, "phase": "Materialize and serve top-K rankings", "title": "Reconcile aggregate commits", "type": "add_connection",
+      "content": "Compare committed event offsets and aggregate revisions; alert on stuck outbox rows, conditional-write conflicts, reconciliation drift, and storage headroom. Retain a repair/replay procedure with an auditable correction record.",
+      "connection": {"edgeId": "rank_state_monitor", "sourceNodeId": "rank_state_store", "targetNodeId": "rank_monitoring", "connectionType": "data-flow", "label": "Aggregate and outbox correctness", "description": "Durable revisions, reconciliation drift, write conflicts, and recovery signals."},
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "rank_34_cache_monitor", "stepNumber": 34, "phase": "Materialize and serve top-K rankings", "title": "Bound and rebuild ranking-index memory", "type": "add_connection",
+      "content": "Measure memory per category/metric/window/shard, key cardinality, eviction, index revision lag, and rebuild duration. Prefer bounded pages and deliberate sharding; evicting authoritative rank members without a fallback can return incorrect top-K results, so treat such eviction as a degraded state.",
+      "connection": {"edgeId": "rank_cache_monitor", "sourceNodeId": "rank_cache", "targetNodeId": "rank_monitoring", "connectionType": "data-flow", "label": "Index memory, revision, and rebuild metrics", "description": "Signals for memory efficiency, staleness, and cache recovery."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "rank_35_ingest_monitor", "stepNumber": 35, "phase": "Materialize and serve top-K rankings", "title": "Expose accepted-event and outbox health", "type": "add_connection",
+      "content": "Track dedupe hits, invalid events, transaction retries, outbox age, and acceptance latency. An API success means durable acceptance, not that the new event is already visible in every ranking window.",
+      "connection": {"edgeId": "rank_ingest_monitor", "sourceNodeId": "rank_ingest", "targetNodeId": "rank_monitoring", "connectionType": "data-flow", "label": "Accepted event and outbox metrics", "description": "Durable-acceptance latency, validation, deduplication, and retry signals."},
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "rank_36_exact_counts", "stepNumber": 36, "phase": "Review correctness, scale, and operational limits", "title": "Make exactness the default contract", "type": "explanation",
+      "content": "For sales/download totals, apply each accepted event once. For ratings, define whether a rating is an immutable event or a mutable entity; if mutable, use rating_id and versioned replacement/compensation so score_sum and rating_count reflect the latest accepted value. A count-min sketch can be an optional explicitly approximate discovery mode, but it cannot satisfy an exact ranking response by itself.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "rank_37_windows", "stepNumber": 37, "phase": "Review correctness, scale, and operational limits", "title": "Define window boundaries and late data", "type": "explanation",
+      "content": "Daily, weekly, and monthly can mean calendar periods or rolling durations; the brief does not decide. Pick a timezone and boundary convention, retain event time, and use watermarks plus a documented correction horizon. Apply a late event to affected windows and publish a new aggregate revision; outside the correction horizon, reconcile explicitly rather than silently ignoring it.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "rank_38_partitioning", "stepNumber": 38, "phase": "Review correctness, scale, and operational limits", "title": "Scale without splitting one item's ordering", "type": "explanation",
+      "content": "Assign each category/item to one stable rank shard so concurrent updates for that item are serialized and its score is not duplicated across shards. Query each shard for bounded candidates and merge globally. Measure hot-key skew; if one item dominates, introduce a documented partial-counter scheme whose exact merge and correction behavior is tested before routing that key differently.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "rank_39_large_k", "stepNumber": 39, "phase": "Review correctness, scale, and operational limits", "title": "Keep large-K reads memory bounded", "type": "explanation",
+      "content": "Do not materialize every matching item in one application response. Enforce a product-approved K ceiling or serve stable cursor pages; bound shard fan-out and page size, and use a deterministic score/item-ID order so ties do not repeat or disappear between pages. The maximum K and response budget are not specified by the live problem.",
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:2"]
+    },
+    {
+      "id": "rank_40_categories", "stepNumber": 40, "phase": "Review correctness, scale, and operational limits", "title": "Isolate category and metric namespaces", "type": "explanation",
+      "content": "Include category, metric, window, and shard in aggregate and index keys. Validate category membership and metric compatibility before accepting events; never let one category's score leak into another. Keep metric definitions versioned because a sales count, download count, and average rating have different aggregation and correction rules.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "rank_41_freshness", "stepNumber": 41, "phase": "Review correctness, scale, and operational limits", "title": "Turn near-real-time into a measurable objective", "type": "explanation",
+      "content": "The write path is durably accepted before asynchronous aggregation and index projection finish. Return as-of revision/time and measure event-to-visible-ranking lag. Agree a freshness percentile and query-latency objective with users and operators, then alert on broker, aggregate, and projector lag against it; the brief supplies no numeric SLO.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1"]
+    },
+    {
+      "id": "rank_42_recovery", "stepNumber": 42, "phase": "Review correctness, scale, and operational limits", "title": "Recover from duplicates, crashes, and cache loss", "type": "explanation",
+      "content": "Test producer retry, relay crash after publish, duplicate broker delivery, processor restart, concurrent same-item updates, late corrections, database retry, and Redis loss. Durable IDs, ordered partition offsets, atomic aggregate revisions, and a replayable index projection should preserve exact totals. Rebuild derived sorted sets from the exact store and report freshness during recovery.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "rank_43_close", "stepNumber": 43, "phase": "Review correctness, scale, and operational limits", "title": "Review the design and resolve open targets", "type": "conclusion",
+      "content": "The graph now has a durable event path, exact windowed aggregates, rebuildable ranking indexes, bounded top-K reads, and observable freshness. Before production sizing, decide event and item cardinality, update bursts, K limits, metric/rating correction rules, window timezone, replay/correction retention, freshness and query SLOs, availability, and budget. Validate shard memory and hot-key behavior from measured workloads rather than treating this review draft as a capacity guarantee.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    }
+  ]
+}

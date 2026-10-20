@@ -1,0 +1,618 @@
+{
+  "problem_id": "6901ef1b9420d83630aca883",
+  "version": "1.0",
+  "totalSteps": 33,
+  "phases": [
+    {
+      "name": "Frame the stated problem and open decisions",
+      "stepRange": [1, 2],
+      "description": "Keep the supplied brief intact, distinguish requirements from design choices, and identify workload questions before choosing thresholds or capacity."
+    },
+    {
+      "name": "Place the catalog-backed pricing components",
+      "stepRange": [3, 13],
+      "description": "Add existing client, API, messaging, streaming, compute, cache, database, notification, analytics, and monitoring components with editable responsibilities."
+    },
+    {
+      "name": "Connect real-time pricing and asynchronous history paths",
+      "stepRange": [14, 30],
+      "description": "Replay the signal-ingestion, zone-pricing, quote, notification, and historical-analysis connections as one connected architecture."
+    },
+    {
+      "name": "Review measurable scale, consistency, and safety gates",
+      "stepRange": [31, 33],
+      "description": "Translate the stated volume, freshness, accuracy, geography, consistency, fairness, and abuse constraints into explicit validation criteria without claiming they are already achieved."
+    }
+  ],
+  "steps": [
+    {
+      "id": "surge_brief",
+      "stepNumber": 1,
+      "phase": "Frame the stated problem and open decisions",
+      "title": "Start from the supplied problem brief",
+      "type": "explanation",
+      "content": "Problem: Surge Pricing System: Uber - Stream Processing. Slug: surge-pricing-system-uber-stream-processing. Description: Design a dynamic pricing system that adjusts prices based on supply-demand in real-time. Difficulty: Very Hard. Category: Pricing Systems. Domain: application. Estimated time: 90+ minutes. Requirements: Calculate real-time supply and demand; Dynamically adjust prices per area; Notify drivers and riders of price changes; Support geographical zones; Historical pricing data; Handle millions of price calculations per minute; Fair and transparent pricing; Prevent price manipulation. Constraints: Real-time price updates (<1 second); Accurate supply-demand calculation; Handle traffic spikes during events; Geospatial accuracy for zones; Consistent pricing within zones. Hints: Stream processing for real-time events; Geospatial hashing for zones; Machine learning for demand prediction; Event-driven architecture; Redis for fast price lookups. Tags: pricing, real-time, stream-processing, geospatial, ml. Companies: Uber, Lyft, DoorDash. The numbers and safeguards in this design are targets and policies to validate with product owners and measured workloads, not claims of achieved production performance.",
+      "requirementIds": []
+    },
+    {
+      "id": "surge_open_questions",
+      "stepNumber": 2,
+      "phase": "Frame the stated problem and open decisions",
+      "title": "Resolve workload and policy questions before sizing",
+      "type": "explanation",
+      "content": "Confirm which driver and rider events define supply and demand, their trusted source and arrival delay, how service zones are versioned, which fare components may surge, and what customer-approved fairness limits apply. Measure peak event and quote rates, zone skew, burst duration, and notification fan-out. The brief supplies no exact event schema, surge formula, cap, retention period, regional topology, or fairness policy; make those explicit assumptions rather than silently inventing values.",
+      "requirementIds": []
+    },
+    {
+      "id": "surge_clients",
+      "stepNumber": 3,
+      "phase": "Place the catalog-backed pricing components",
+      "title": "Represent driver and rider applications",
+      "type": "add_component",
+      "content": "Use the existing Mobile App component for authenticated driver and rider clients. Drivers submit eligible location and availability signals; riders request a quote and receive a clear zone price and material price-change notification. Client-supplied values are not trusted as authoritative supply or demand.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "surge_clients",
+        "componentType": "mobile-app",
+        "label": "Driver & Rider Apps",
+        "description": "Authenticated clients for supply signals, fare quotes, and price notices.",
+        "position": {"x": 0, "y": 260},
+        "properties": {
+          "componentName": "Driver & Rider Apps",
+          "purpose": "Submit authenticated driver availability/location events, request rider quotes, and display the applicable zone, price version, and understandable price-change notice. Treat client claims as untrusted until validated server-side."
+        },
+        "highlightReason": "The existing Mobile App catalog component covers both driver and rider client surfaces without inventing a node type."
+      }
+    },
+    {
+      "id": "surge_ingest_api",
+      "stepNumber": 4,
+      "phase": "Place the catalog-backed pricing components",
+      "title": "Add a validated signal-ingestion API",
+      "type": "add_component",
+      "content": "Accept location, availability, and trip-intent events only through authenticated, bounded APIs. Validate timestamps and coordinates, require event identity for deduplication, apply per-actor throttles, and reject malformed or implausible inputs before they influence pricing.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "surge_ingest_api",
+        "componentType": "api-gateway",
+        "label": "Mobility Signal API",
+        "description": "Authenticated, validated entry point for driver and rider signals.",
+        "position": {"x": 300, "y": 170},
+        "properties": {
+          "componentName": "Mobility Signal API",
+          "purpose": "Authenticate signal producers; validate schema, event IDs, timestamps, and coordinate bounds; apply per-actor rate limits and request-size limits; reject suspicious or duplicate submissions before enqueueing.",
+          "inputValidation": true,
+          "authentication": "OAuth 2.0",
+          "rateLimiting": true,
+          "deduplication": true,
+          "tlsTermination": true
+        },
+        "highlightReason": "The catalog API Gateway already exposes validation, authentication, throttling, and deduplication properties needed at this boundary."
+      }
+    },
+    {
+      "id": "surge_event_bus",
+      "stepNumber": 5,
+      "phase": "Place the catalog-backed pricing components",
+      "title": "Buffer and partition incoming mobility events",
+      "type": "add_component",
+      "content": "Use a durable event broker to absorb event surges and decouple intake from aggregation. Partition by a bounded, region-aware key that avoids a single hot zone; size partitions and retention from measured event volume, replay needs, and consumer throughput.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:3"],
+      "component": {
+        "nodeId": "surge_event_bus",
+        "componentType": "message-broker",
+        "label": "Mobility & Price Event Stream",
+        "description": "Durable partitioned buffer for signals and published price changes.",
+        "position": {"x": 600, "y": 170},
+        "properties": {
+          "componentName": "Mobility & Price Event Stream",
+          "purpose": "Durably buffer versioned, identified mobility signals and price-change events; partition to spread regional hot spots, expose consumer lag, retain enough history for replay, and apply backpressure rather than silently dropping accepted events.",
+          "durable": true
+        },
+        "highlightReason": "The existing Message Broker catalog node represents durable event-driven decoupling and exposes partition, replication, and retention controls."
+      }
+    },
+    {
+      "id": "surge_zone_aggregator",
+      "stepNumber": 6,
+      "phase": "Place the catalog-backed pricing components",
+      "title": "Aggregate fresh supply and demand by zone",
+      "type": "add_component",
+      "content": "Key state by versioned service zone and spatial cell. Deduplicate event IDs, use event-time windows and bounded lateness/watermarks, and compute fresh supply and demand features. Use geospatial hashing for candidate lookup, then resolve points against versioned zone boundaries so neighboring cells and boundary points are assigned accurately. Scale consumers and state by observed regional skew.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "surge_zone_aggregator",
+        "componentType": "stream-processor",
+        "label": "Zone Supply-Demand Aggregator",
+        "description": "Stateful event-time aggregation keyed by versioned service zone and spatial cell.",
+        "position": {"x": 900, "y": 170},
+        "properties": {
+          "componentName": "Zone Supply-Demand Aggregator",
+          "purpose": "Deduplicate identified events, map geohash/cell candidates through versioned zone geometry, resolve boundary points accurately, and maintain bounded event-time supply/demand windows with explicit lateness and freshness state. Scale and partition from measured hot-zone skew and replayable load tests for the stated millions-per-minute requirement.",
+          "engine": "Apache Flink",
+          "windowing": true,
+          "stateful": true
+        },
+        "highlightReason": "The existing Stream Processor component supports stateful windowed processing; zone geometry remains an explicit responsibility of its application logic."
+      }
+    },
+    {
+      "id": "surge_pricing_engine",
+      "stepNumber": 7,
+      "phase": "Place the catalog-backed pricing components",
+      "title": "Apply a versioned and reviewable pricing policy",
+      "type": "add_component",
+      "content": "Calculate a zone price from freshness-qualified supply and demand, then apply product-approved floors, caps, change-rate limits, and fairness rules. Exclude protected attributes, detect anomalous input patterns, and record a policy version plus concise reason factors so prices are explainable and auditable. Keep the baseline deterministic; an optional forecast may inform demand but must not bypass safeguards or block the reactive path.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "surge_pricing_engine",
+        "componentType": "backend-server",
+        "label": "Zone Pricing Policy Engine",
+        "description": "Computes explainable, policy-bounded prices from validated zone metrics.",
+        "position": {"x": 1200, "y": 170},
+        "properties": {
+          "componentName": "Zone Pricing Policy Engine",
+          "purpose": "Compute prices only from fresh, validated zone supply/demand; apply versioned product-approved floors, caps, fairness and change-rate rules; exclude protected attributes; detect suspicious signal patterns; and emit a price version with reason factors for audit. Optional demand forecasts are advisory and cannot bypass deterministic safeguards."
+        },
+        "highlightReason": "The existing Backend Server catalog component is an appropriate generic home for pricing policy; no pricing-specific custom node is needed."
+      }
+    },
+    {
+      "id": "surge_price_cache",
+      "stepNumber": 8,
+      "phase": "Place the catalog-backed pricing components",
+      "title": "Publish one current price snapshot per zone",
+      "type": "add_component",
+      "content": "Store immutable, versioned zone snapshots in a replicated in-memory cache for quote reads. Publish each complete snapshot atomically under its zone and version; retain the last approved snapshot as a bounded fallback, and never mix fields from different versions. Choose expiry and stale-read policy with product owners and validate it against the sub-second update objective.",
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:1", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "surge_price_cache",
+        "componentType": "cache",
+        "label": "Current Zone Price Cache",
+        "description": "Replicated low-latency store of atomic, versioned zone-price snapshots.",
+        "position": {"x": 1500, "y": 170},
+        "properties": {
+          "componentName": "Current Zone Price Cache",
+          "purpose": "Serve complete immutable zone-price snapshots by zone and version; atomically switch the current pointer only after a full write, retain a bounded last-approved fallback, and expose freshness/version metadata so readers never combine inconsistent prices.",
+          "engine": "redis",
+          "cacheStrategy": "write-through",
+          "replication": true,
+          "clusterMode": true,
+          "inMemory": true
+        },
+        "highlightReason": "The existing Cache catalog component supports in-memory replicated lookups and the Redis option suggested by the brief."
+      }
+    },
+    {
+      "id": "surge_quote_api",
+      "stepNumber": 9,
+      "phase": "Place the catalog-backed pricing components",
+      "title": "Serve quotes from the published zone snapshot",
+      "type": "add_component",
+      "content": "Resolve the rider pickup point to the same versioned service-zone map used by aggregation, read one complete price snapshot, and return its zone, version, effective time, and price explanation. Keep quote reads independent of stream computation and use an explicit last-approved/base-price response if the current snapshot is stale or unavailable.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "surge_quote_api",
+        "componentType": "api-gateway",
+        "label": "Rider Quote API",
+        "description": "Low-latency quote lookup using the canonical zone map and price version.",
+        "position": {"x": 1800, "y": 170},
+        "properties": {
+          "componentName": "Rider Quote API",
+          "purpose": "Resolve the pickup point with the canonical versioned zone geometry, fetch one complete price snapshot, and return its zone, price version, effective time, and approved reason factors. Enforce bounded stale fallback instead of mixing versions or waiting on stream processing.",
+          "inputValidation": true,
+          "rateLimiting": true,
+          "tlsTermination": true
+        },
+        "highlightReason": "A second existing API Gateway node separates the low-latency quote path from signal ingestion without creating a new component type."
+      }
+    },
+    {
+      "id": "surge_history_store",
+      "stepNumber": 10,
+      "phase": "Place the catalog-backed pricing components",
+      "title": "Retain auditable price and input history",
+      "type": "add_component",
+      "content": "Persist price-version records with zone and geometry version, effective interval, policy version, input-window references, freshness, and reason factors. Keep immutable history separate from the hot quote cache; define retention, privacy, correction, and access rules before selecting the storage engine.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:2"],
+      "component": {
+        "nodeId": "surge_history_store",
+        "componentType": "database",
+        "label": "Price History & Audit Store",
+        "description": "Durable historical snapshots, policy versions, and auditable reason metadata.",
+        "position": {"x": 1200, "y": 500},
+        "properties": {
+          "componentName": "Price History & Audit Store",
+          "purpose": "Persist append-only price versions, zone/geometry and policy revisions, effective times, freshness, input-window references, and approved reason factors for historical queries and audit; keep personal location data minimized and apply an explicit retention policy.",
+          "type": "Time-Series"
+        },
+        "highlightReason": "The existing Database catalog type covers durable history; the exact engine remains a workload and retention decision."
+      }
+    },
+    {
+      "id": "surge_notifications",
+      "stepNumber": 11,
+      "phase": "Place the catalog-backed pricing components",
+      "title": "Notify affected users from price-change events",
+      "type": "add_component",
+      "content": "Consume published zone-price events asynchronously. Notify affected drivers and riders only when a meaningful version change applies, use idempotent delivery keys and bounded fan-out, and keep push delivery off the quote and price-computation critical paths.",
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "surge_notifications",
+        "componentType": "notification-service",
+        "label": "Driver & Rider Price Notifications",
+        "description": "Asynchronous push delivery for relevant zone price changes.",
+        "position": {"x": 1500, "y": 500},
+        "properties": {
+          "componentName": "Driver & Rider Price Notifications",
+          "purpose": "Consume versioned zone price-change events, target only relevant opted-in driver/rider audiences, deduplicate by user and price version, and use bounded fan-out/retries so notification spikes cannot delay pricing or quote reads.",
+          "channels": "Push",
+          "fanout": true,
+          "batching": true
+        },
+        "highlightReason": "The existing Notification Service catalog component supports push delivery and fan-out controls."
+      }
+    },
+    {
+      "id": "surge_analytics",
+      "stepNumber": 12,
+      "phase": "Place the catalog-backed pricing components",
+      "title": "Analyze historical prices and service outcomes",
+      "type": "add_component",
+      "content": "Build asynchronous historical views for price changes, supply-demand inputs, zone coverage, policy versions, and fairness reviews. Analytics reads the durable history path and does not participate in live quote computation.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:2"],
+      "component": {
+        "nodeId": "surge_analytics",
+        "componentType": "analytics",
+        "label": "Pricing History Analytics",
+        "description": "Offline and near-real-time analysis over persisted price history.",
+        "position": {"x": 1800, "y": 500},
+        "properties": {
+          "componentName": "Pricing History Analytics",
+          "purpose": "Query retained price versions and aggregate supply/demand, zone coverage, price-change, and approved fairness-review metrics; run asynchronously and never block a quote or a sub-second update path.",
+          "realTime": true
+        },
+        "highlightReason": "The existing Analytics catalog node represents historical event analysis without adding a bespoke reporting component."
+      }
+    },
+    {
+      "id": "surge_monitoring",
+      "stepNumber": 13,
+      "phase": "Place the catalog-backed pricing components",
+      "title": "Measure freshness, accuracy, and overload behavior",
+      "type": "add_component",
+      "content": "Monitor event-to-published-price age, per-zone event-time lag and missingness, broker backlog, state/recovery health, quote latency and snapshot age, notification lag, rejected/anomalous inputs, fallback frequency, and fairness-policy outcomes. Alert on service objectives and data-quality regressions, not only process health.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:6", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "surge_monitoring",
+        "componentType": "monitoring",
+        "label": "Pricing SLO & Integrity Monitoring",
+        "description": "End-to-end freshness, service health, abuse, and fairness signals.",
+        "position": {"x": 900, "y": 760},
+        "properties": {
+          "componentName": "Pricing SLO & Integrity Monitoring",
+          "purpose": "Measure end-to-end event-to-price freshness against the stated under-one-second target, zone data quality and skew, quote latency and version consistency, backlog, recovery, fallback, manipulation signals, notification lag, and policy-approved fairness indicators; alert on sustained objective breaches.",
+          "metrics": true,
+          "alerts": true
+        },
+        "highlightReason": "The existing Monitoring catalog component provides editable metrics and alerting properties for the end-to-end targets."
+      }
+    },
+    {
+      "id": "surge_client_signal_edge",
+      "stepNumber": 14,
+      "phase": "Connect real-time pricing and asynchronous history paths",
+      "title": "Send authenticated mobility signals to intake",
+      "type": "add_connection",
+      "content": "Drivers and riders submit identified events through the validated ingestion boundary. The gateway authenticates producers and checks replay, timestamp, coordinate, and rate constraints before accepting an event.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "surge_clients_to_ingest",
+        "sourceNodeId": "surge_clients",
+        "targetNodeId": "surge_ingest_api",
+        "connectionType": "api-call",
+        "label": "Authenticated, identified signals",
+        "description": "Location, availability, and trip-intent events with event IDs and timestamps."
+      }
+    },
+    {
+      "id": "surge_ingest_buffer_edge",
+      "stepNumber": 15,
+      "phase": "Connect real-time pricing and asynchronous history paths",
+      "title": "Durably enqueue accepted events",
+      "type": "add_connection",
+      "content": "Acknowledge accepted signals only after the configured durable broker boundary. Rejected and duplicate events are observable; accepted events can be replayed after downstream recovery.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:6", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "surge_ingest_to_bus",
+        "sourceNodeId": "surge_ingest_api",
+        "targetNodeId": "surge_event_bus",
+        "connectionType": "event-stream",
+        "label": "Validated mobility events",
+        "description": "Durable, replayable signal envelope with event identity and source metadata."
+      }
+    },
+    {
+      "id": "surge_bus_aggregate_edge",
+      "stepNumber": 16,
+      "phase": "Connect real-time pricing and asynchronous history paths",
+      "title": "Feed the stateful zone aggregator",
+      "type": "add_connection",
+      "content": "The stream processor consumes partitioned event records, tracks offsets, and updates bounded zone/cell state. Consumer lag and late events remain visible so apparent freshness does not hide stale inputs.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "surge_bus_to_aggregator",
+        "sourceNodeId": "surge_event_bus",
+        "targetNodeId": "surge_zone_aggregator",
+        "connectionType": "event-stream",
+        "label": "Replayable mobility event stream",
+        "description": "Region-aware partitions and consumer offsets for scalable event-time aggregation."
+      }
+    },
+    {
+      "id": "surge_aggregate_pricing_edge",
+      "stepNumber": 17,
+      "phase": "Connect real-time pricing and asynchronous history paths",
+      "title": "Pass freshness-qualified zone metrics to pricing",
+      "type": "add_connection",
+      "content": "Emit zone and spatial-cell metrics with window bounds, geometry version, input counts, freshness, deduplication status, and late-event state. The pricing engine can hold or use a safe prior snapshot when the data-quality policy says an input is incomplete.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "surge_aggregator_to_pricing",
+        "sourceNodeId": "surge_zone_aggregator",
+        "targetNodeId": "surge_pricing_engine",
+        "connectionType": "data-flow",
+        "label": "Fresh zone supply-demand windows",
+        "description": "Metrics include zone/geometry revision, event-time window, freshness, and data-quality state."
+      }
+    },
+    {
+      "id": "surge_publish_price_edge",
+      "stepNumber": 18,
+      "phase": "Connect real-time pricing and asynchronous history paths",
+      "title": "Publish each approved price as a versioned event",
+      "type": "add_connection",
+      "content": "After deterministic policy checks, emit a complete zone-price event containing its version, effective time, policy revision, freshness, and approved reason factors. Consumers are idempotent and can recover by replaying events.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "surge_pricing_to_price_events",
+        "sourceNodeId": "surge_pricing_engine",
+        "targetNodeId": "surge_event_bus",
+        "connectionType": "event-stream",
+        "label": "Approved zone price versions",
+        "description": "Idempotent change event with zone, version, effective time, policy revision, and reason factors."
+      }
+    },
+    {
+      "id": "surge_notify_event_edge",
+      "stepNumber": 19,
+      "phase": "Connect real-time pricing and asynchronous history paths",
+      "title": "Deliver price-change events asynchronously",
+      "type": "add_connection",
+      "content": "Notifications consume the same versioned change stream independently of quote serving. Backlog or provider failures affect notification freshness, not calculation or quote availability.",
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "surge_events_to_notifications",
+        "sourceNodeId": "surge_event_bus",
+        "targetNodeId": "surge_notifications",
+        "connectionType": "message-queue",
+        "label": "Versioned price-change events",
+        "description": "Asynchronous, replayable events for targeted and idempotent user notifications."
+      }
+    },
+    {
+      "id": "surge_notification_delivery_edge",
+      "stepNumber": 20,
+      "phase": "Connect real-time pricing and asynchronous history paths",
+      "title": "Notify the affected drivers and riders",
+      "type": "add_connection",
+      "content": "Fan out only relevant price versions to affected audiences with idempotency and bounded retry. Include the applicable zone and effective version so a notice cannot be mistaken for a quote guarantee after the price changes again.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "surge_notifications_to_clients",
+        "sourceNodeId": "surge_notifications",
+        "targetNodeId": "surge_clients",
+        "connectionType": "data-flow",
+        "label": "Relevant zone price notices",
+        "description": "Push notices identify the affected zone, price version, effective time, and applicable explanation."
+      }
+    },
+    {
+      "id": "surge_price_snapshot_edge",
+      "stepNumber": 21,
+      "phase": "Connect real-time pricing and asynchronous history paths",
+      "title": "Atomically publish the current zone snapshot",
+      "type": "add_connection",
+      "content": "Write a complete approved price snapshot before switching the current-version pointer. A reader sees either the previous complete version or the new complete version, never a partial mix.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "surge_pricing_to_cache",
+        "sourceNodeId": "surge_pricing_engine",
+        "targetNodeId": "surge_price_cache",
+        "connectionType": "database-connection",
+        "label": "Atomic versioned price snapshot",
+        "description": "Complete zone snapshot and current-version pointer with freshness and reason metadata."
+      }
+    },
+    {
+      "id": "surge_quote_request_edge",
+      "stepNumber": 22,
+      "phase": "Connect real-time pricing and asynchronous history paths",
+      "title": "Route rider quote requests through the read boundary",
+      "type": "add_connection",
+      "content": "The rider request includes a pickup location and quote context. The API resolves it with the canonical zone revision, validates inputs, and reads a single published snapshot.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:4", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "surge_clients_to_quote_api",
+        "sourceNodeId": "surge_clients",
+        "targetNodeId": "surge_quote_api",
+        "connectionType": "api-call",
+        "label": "Pickup-based quote request",
+        "description": "Validated location and quote context resolved against the canonical zone map."
+      }
+    },
+    {
+      "id": "surge_quote_cache_read_edge",
+      "stepNumber": 23,
+      "phase": "Connect real-time pricing and asynchronous history paths",
+      "title": "Read one consistent cached price version",
+      "type": "add_connection",
+      "content": "Read the current complete zone snapshot by zone key and return its version and freshness. If it is stale or unavailable, apply the explicitly approved bounded fallback instead of calling the stream processor synchronously.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "surge_quote_to_cache",
+        "sourceNodeId": "surge_quote_api",
+        "targetNodeId": "surge_price_cache",
+        "connectionType": "database-connection",
+        "label": "Zone and current-version lookup",
+        "description": "Fast read of one complete snapshot; bounded fallback is explicit when freshness fails."
+      }
+    },
+    {
+      "id": "surge_quote_response_edge",
+      "stepNumber": 24,
+      "phase": "Connect real-time pricing and asynchronous history paths",
+      "title": "Return the versioned price and its explanation",
+      "type": "add_connection",
+      "content": "Return price, zone, policy/price version, effective time, and user-safe reason factors together. This makes per-zone consistency inspectable and gives both the rider and downstream support a shared reference.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "surge_cache_to_quote_api",
+        "sourceNodeId": "surge_price_cache",
+        "targetNodeId": "surge_quote_api",
+        "connectionType": "data-flow",
+        "label": "Complete price version and freshness",
+        "description": "The API receives the atomic snapshot, zone identity, effective time, and safe explanation fields."
+      }
+    },
+    {
+      "id": "surge_quote_client_response_edge",
+      "stepNumber": 25,
+      "phase": "Connect real-time pricing and asynchronous history paths",
+      "title": "Present the quote to the rider",
+      "type": "add_connection",
+      "content": "Keep the returned zone and price version visible with the quote, so repeated reads within a versioned zone use the same published price snapshot subject to the stated validity policy.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "surge_quote_api_to_clients",
+        "sourceNodeId": "surge_quote_api",
+        "targetNodeId": "surge_clients",
+        "connectionType": "api-call",
+        "label": "Zone-consistent rider quote",
+        "description": "Price and version are returned together for clear display and repeatable comparison."
+      }
+    },
+    {
+      "id": "surge_history_event_edge",
+      "stepNumber": 26,
+      "phase": "Connect real-time pricing and asynchronous history paths",
+      "title": "Persist price history outside the serving path",
+      "type": "add_connection",
+      "content": "Store price-change events asynchronously with policy and zone revisions, preserving an auditable history without putting durable history writes on the quote path.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3"],
+      "connection": {
+        "edgeId": "surge_events_to_history",
+        "sourceNodeId": "surge_event_bus",
+        "targetNodeId": "surge_history_store",
+        "connectionType": "message-queue",
+        "label": "Durable price and policy history",
+        "description": "Asynchronous append of versioned prices and audit metadata with replay and retention controls."
+      }
+    },
+    {
+      "id": "surge_analytics_history_edge",
+      "stepNumber": 27,
+      "phase": "Connect real-time pricing and asynchronous history paths",
+      "title": "Build historical and fairness views from durable records",
+      "type": "add_connection",
+      "content": "Analytics reads retained snapshots and event references for historical price trends and policy review. Corrections and late events are represented as revisions, not silent rewrites of what a user previously saw.",
+      "requirementIds": ["legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:2"],
+      "connection": {
+        "edgeId": "surge_history_to_analytics",
+        "sourceNodeId": "surge_history_store",
+        "targetNodeId": "surge_analytics",
+        "connectionType": "data-flow",
+        "label": "Versioned history for analysis",
+        "description": "Historical snapshots and corrections feed asynchronous trend and fairness-policy review."
+      }
+    },
+    {
+      "id": "surge_stream_monitor_edge",
+      "stepNumber": 28,
+      "phase": "Connect real-time pricing and asynchronous history paths",
+      "title": "Observe event freshness and zone data quality",
+      "type": "add_connection",
+      "content": "Export event-time lag, per-zone freshness, late/duplicate counts, skew, and state-recovery signals so the team can tell accurate current data from a healthy-looking but stale processor.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "surge_aggregator_to_monitoring",
+        "sourceNodeId": "surge_zone_aggregator",
+        "targetNodeId": "surge_monitoring",
+        "connectionType": "data-flow",
+        "label": "Freshness, lag, and zone quality metrics",
+        "description": "Operational telemetry exposes data quality, hot-zone skew, and recovery status."
+      }
+    },
+    {
+      "id": "surge_engine_monitor_edge",
+      "stepNumber": 29,
+      "phase": "Connect real-time pricing and asynchronous history paths",
+      "title": "Measure policy and publication objectives end to end",
+      "type": "add_connection",
+      "content": "Measure compute duration, policy rejection reasons, snapshot publication age, quote latency and version consistency, fallback rate, and price-change distribution. Alert before the under-one-second objective or approved fairness safeguards are breached.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "surge_pricing_to_monitoring",
+        "sourceNodeId": "surge_pricing_engine",
+        "targetNodeId": "surge_monitoring",
+        "connectionType": "data-flow",
+        "label": "Pricing, freshness, and integrity signals",
+        "description": "Policy outcomes, computation/publication latency, fallback use, and fairness checks."
+      }
+    },
+    {
+      "id": "surge_notification_monitor_edge",
+      "stepNumber": 30,
+      "phase": "Connect real-time pricing and asynchronous history paths",
+      "title": "Track notification delivery independently",
+      "type": "add_connection",
+      "content": "Monitor event-to-notice delay, fan-out backlog, retries, and deduplication separately from quote SLOs, ensuring delivery incidents are visible without conflating them with pricing correctness.",
+      "requirementIds": ["legacy-requirement:3", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "surge_notifications_to_monitoring",
+        "sourceNodeId": "surge_notifications",
+        "targetNodeId": "surge_monitoring",
+        "connectionType": "data-flow",
+        "label": "Notification lag and delivery metrics",
+        "description": "Independent delivery health and backlog telemetry for the asynchronous notice path."
+      }
+    },
+    {
+      "id": "surge_scale_gate",
+      "stepNumber": 31,
+      "phase": "Review measurable scale, consistency, and safety gates",
+      "title": "Prove the stated calculation volume under skew and bursts",
+      "type": "explanation",
+      "content": "Treat millions of price calculations per minute as an explicit workload test. Replay representative and event-spike traces with hot-zone skew, late/duplicate inputs, broker recovery, and notification fan-out. Validate partition balance, bounded keyed state, consumer catch-up, resource headroom, and cost; the brief does not provide a peak multiplier or measured capacity, so record those results rather than claiming a fixed capacity here.",
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "surge_consistency_gate",
+      "stepNumber": 32,
+      "phase": "Review measurable scale, consistency, and safety gates",
+      "title": "Validate freshness, zone accuracy, and price consistency",
+      "type": "explanation",
+      "content": "Measure end-to-end event-to-published-snapshot latency against the under-one-second target, input completeness and correction behavior, zone-boundary test accuracy, and agreement among repeated reads for a zone/version. Exercise stale snapshots, partial writes, processor restarts, and zone-map changes; verify the chosen fallback is safe and user-visible.",
+      "requirementIds": ["legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "surge_safety_gate",
+      "stepNumber": 33,
+      "phase": "Review measurable scale, consistency, and safety gates",
+      "title": "Review fairness and manipulation controls before launch",
+      "type": "conclusion",
+      "content": "Review the approved fairness policy with product and compliance stakeholders; test that protected attributes are excluded, reason factors are understandable, and caps/change-rate rules behave as intended. Red-team replay, spoofed locations, duplicate events, coordinated demand inflation, and bot bursts. This architecture is a design reference: publish only after measured objectives, data quality, policy review, and recovery behavior are demonstrated.",
+      "requirementIds": ["legacy-requirement:7", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    }
+  ]
+}
