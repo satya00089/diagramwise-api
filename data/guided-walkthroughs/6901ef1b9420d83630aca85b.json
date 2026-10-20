@@ -1,0 +1,862 @@
+{
+  "problem_id": "6901ef1b9420d83630aca85b",
+  "version": "1.0.0-review-draft",
+  "requirementRevision": null,
+  "totalSteps": 43,
+  "phases": [
+    {
+      "name": "Establish the share contract and request paths",
+      "stepRange": [1, 13],
+      "description": "Keep paste creation, bounded direct uploads, public retrieval, and edge delivery on explicit paths; identify the visibility assumption before relying on shared caching."
+    },
+    {
+      "name": "Reserve generated URLs and aliases safely",
+      "stepRange": [14, 18],
+      "description": "Generate short candidates through a key service, then make the metadata store authoritative for generated-code and custom-alias uniqueness."
+    },
+    {
+      "name": "Serve hot pastes and render code safely",
+      "stepRange": [19, 24],
+      "description": "Use edge and service caches for the read-heavy path, bound cached content by paste expiry, and render code as escaped text in the client."
+    },
+    {
+      "name": "Count views and retire expired content",
+      "stepRange": [25, 36],
+      "description": "Keep view aggregation off the retrieval response path and make expiry checks authoritative before background deletion catches up."
+    },
+    {
+      "name": "Operate and scale from measured behavior",
+      "stepRange": [37, 43],
+      "description": "Observe cache, API, storage, and worker behavior, then size capacity from measured request and paste distributions rather than inventing targets."
+    }
+  ],
+  "steps": [
+    {
+      "id": "paste_01_scope",
+      "stepNumber": 1,
+      "phase": "Establish the share contract and request paths",
+      "type": "explanation",
+      "title": "Read the brief and label the open policies",
+      "content": "The assigned problem is Design Pastebin. Its requirements are: Allow users to paste text content; Generate unique URL for each paste; Support custom URLs/aliases; Set expiration time for pastes; Support syntax highlighting for code; Track view counts; Handle millions of pastes per day. Its constraints are: URL should be short and unique; Read heavy system (100:1 read/write ratio); Low latency for paste retrieval; Support large text files (up to 10MB); Storage optimization for old/expired pastes. The hints are prompts, not additional requirements. The brief does not define visibility, alias case rules, an old-paste retention schedule, a burst profile, or a retrieval latency target. For this review draft, a share URL is an unlisted bearer link that anyone possessing it can read; it is not a confidentiality boundary. Confirm that visibility policy before enabling shared edge caching. View totals are eventually consistent so reads do not wait for counter writes.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    },
+    {
+      "id": "paste_02_client",
+      "stepNumber": 2,
+      "phase": "Establish the share contract and request paths",
+      "type": "add_component",
+      "title": "Add the paste web client",
+      "content": "The client accepts plain text, an optional custom alias, an optional expiry, and a language hint for code. It requests a bounded upload grant and shows a share URL only after the content and metadata are ready. The brief allows text files up to 10MB; this node represents the editor and result page, not the content store.",
+      "component": {
+        "nodeId": "paste_client",
+        "componentType": "web-app",
+        "label": "Paste Web App",
+        "description": "Text editor, paste submission, and shared-paste rendering",
+        "position": {"x": 0, "y": 260},
+        "properties": {
+          "componentName": "Paste Web App",
+          "purpose": "Accept plain text up to the brief's 10MB limit, optional alias and expiry, and a code-language hint; upload through a scoped grant; display a share URL only after the paste is ready; render retrieved text as escaped content."
+        },
+        "highlightReason": "The existing Web App catalog component represents the browser workflow and client-side code rendering without inventing a new component type."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "paste_03_edge",
+      "stepNumber": 3,
+      "phase": "Establish the share contract and request paths",
+      "type": "add_component",
+      "title": "Add the public delivery edge",
+      "content": "Serve static client assets and eligible completed-paste reads from the edge. The cache policy is restricted to the visibility policy chosen for shared pastes and must not turn an unlisted URL into a claim of secrecy.",
+      "component": {
+        "nodeId": "paste_edge",
+        "componentType": "cdn",
+        "label": "Paste Delivery CDN",
+        "description": "Static assets and expiry-bounded shared-paste delivery",
+        "position": {"x": 300, "y": 80},
+        "properties": {
+          "componentName": "Paste Delivery CDN",
+          "purpose": "Serve static client assets and cache only completed, active pastes permitted by the visibility policy; keep dynamic create and upload-control responses on the origin path and cap content freshness at paste expiry."
+        },
+        "highlightReason": "The existing CDN catalog item covers edge delivery and caching for a read-heavy public retrieval path."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "paste_04_client_edge",
+      "stepNumber": 4,
+      "phase": "Establish the share contract and request paths",
+      "type": "add_connection",
+      "title": "Send browser traffic through the delivery edge",
+      "content": "The browser uses the share URL for reads and the application route for creation. The edge can answer a fresh eligible paste read without waking the API, so its expiry and view-event policies must cover cache hits as well as misses.",
+      "connection": {
+        "edgeId": "paste_client_edge",
+        "sourceNodeId": "paste_client",
+        "targetNodeId": "paste_edge",
+        "connectionType": "http",
+        "label": "Paste pages and share reads",
+        "description": "HTTPS client traffic uses the edge for static assets and eligible shared-paste responses."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "paste_05_gateway",
+      "stepNumber": 5,
+      "phase": "Establish the share contract and request paths",
+      "type": "add_component",
+      "title": "Add the request boundary",
+      "content": "Validate text payload shape and the stated 10MB maximum, normalize aliases according to the chosen policy, and route create, completion, and origin-read requests. Avoid buffering large bodies at this boundary when the client can upload directly to object storage.",
+      "component": {
+        "nodeId": "paste_gateway",
+        "componentType": "api-gateway",
+        "label": "Paste API Gateway",
+        "description": "Request validation and routing for paste operations",
+        "position": {"x": 620, "y": 260},
+        "properties": {
+          "componentName": "Paste API Gateway",
+          "purpose": "Validate create and completion requests, enforce the brief's 10MB text limit, apply request quotas, attach a request identifier, and route paste operations without buffering large uploads at the gateway."
+        },
+        "highlightReason": "The catalog API Gateway supports request validation and routing; the walkthrough keeps domain uniqueness checks in the paste service and metadata store."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "paste_06_edge_gateway",
+      "stepNumber": 6,
+      "phase": "Establish the share contract and request paths",
+      "type": "add_connection",
+      "title": "Forward dynamic operations to the gateway",
+      "content": "Forward creation, upload-grant, completion, and cache-miss lookup routes to the gateway. Do not cache mutation responses or upload credentials at the edge.",
+      "connection": {
+        "edgeId": "paste_edge_gateway",
+        "sourceNodeId": "paste_edge",
+        "targetNodeId": "paste_gateway",
+        "connectionType": "http",
+        "label": "Dynamic API and origin misses",
+        "description": "Only dynamic operations and cache misses reach the validated API boundary; mutation and grant responses bypass shared caching."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "paste_07_api",
+      "stepNumber": 7,
+      "phase": "Establish the share contract and request paths",
+      "type": "add_component",
+      "title": "Add the paste API service",
+      "content": "Coordinate candidate generation, conditional metadata creation, upload grants, completion verification, expiry checks, and cache lookup. Keep the paste payload out of metadata rows and avoid synchronous view-counter writes on retrieval.",
+      "component": {
+        "nodeId": "paste_api",
+        "componentType": "backend-server",
+        "label": "Paste API Service",
+        "description": "Paste creation, URL resolution, and expiry enforcement",
+        "position": {"x": 940, "y": 260},
+        "properties": {
+          "componentName": "Paste API Service",
+          "purpose": "Coordinate short-code and alias reservation, metadata state, scoped object uploads, content-ready verification, cache reads, and expiry enforcement; keep text bytes out of metadata and keep view aggregation off the retrieval response path."
+        },
+        "highlightReason": "The existing Backend Server component represents the domain service while storage, identifiers, and asynchronous work remain explicit catalog nodes."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "paste_08_gateway_api",
+      "stepNumber": 8,
+      "phase": "Establish the share contract and request paths",
+      "type": "add_connection",
+      "title": "Route validated operations to the paste service",
+      "content": "The service owns paste lifecycle decisions after gateway validation. For a read, it checks active metadata and expiry before returning a redirect or content response; for a write, it does not expose a share URL before upload verification.",
+      "connection": {
+        "edgeId": "paste_gateway_api",
+        "sourceNodeId": "paste_gateway",
+        "targetNodeId": "paste_api",
+        "connectionType": "http",
+        "label": "Validated paste operations",
+        "description": "The service applies lifecycle, uniqueness, and expiry rules after boundary validation."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "paste_09_content_store",
+      "stepNumber": 9,
+      "phase": "Establish the share contract and request paths",
+      "type": "add_component",
+      "title": "Store paste bytes as objects",
+      "content": "Keep text content in object storage and metadata in the database. A scoped upload grant lets the client transfer a paste up to the brief's 10MB limit without making the API hold the full body in memory.",
+      "component": {
+        "nodeId": "paste_objects",
+        "componentType": "object-storage",
+        "label": "Paste Content Object Store",
+        "description": "Paste bytes separated from searchable URL and expiry metadata",
+        "position": {"x": 1260, "y": 500},
+        "properties": {
+          "componentName": "Paste Content Object Store",
+          "purpose": "Store immutable paste text under an opaque object key, validate the uploaded content before publication, support the brief's files up to 10MB, and make expired-object deletion retryable."
+        },
+        "highlightReason": "The existing Object Storage catalog item directly represents the brief's object-storage hint and separates large text from metadata."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "paste_10_client_objects",
+      "stepNumber": 10,
+      "phase": "Establish the share contract and request paths",
+      "type": "add_connection",
+      "title": "Upload text directly from the client",
+      "content": "The API first returns a short-lived grant scoped to one reserved object key; the browser then uploads the text directly and reports completion. The service verifies object presence and content metadata before publishing the URL.",
+      "connection": {
+        "edgeId": "paste_client_objects",
+        "sourceNodeId": "paste_client",
+        "targetNodeId": "paste_objects",
+        "connectionType": "http",
+        "label": "Scoped paste upload",
+        "description": "The client sends text directly to the reserved object key using a narrowly scoped upload grant."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:4"]
+    },
+    {
+      "id": "paste_11_api_objects",
+      "stepNumber": 11,
+      "phase": "Establish the share contract and request paths",
+      "type": "add_connection",
+      "title": "Issue upload grants and verify completion",
+      "content": "The API creates a scoped upload grant and checks the completed object's size and integrity metadata before changing the paste from pending to ready. A failed or abandoned upload must not yield a working share URL.",
+      "connection": {
+        "edgeId": "paste_api_objects",
+        "sourceNodeId": "paste_api",
+        "targetNodeId": "paste_objects",
+        "connectionType": "api-call",
+        "label": "Grant, verify, and resolve object",
+        "description": "The service controls upload authorization and validates the object before publication."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "paste_12_edge_objects",
+      "stepNumber": 12,
+      "phase": "Establish the share contract and request paths",
+      "type": "add_connection",
+      "title": "Fetch cache misses from object storage",
+      "content": "The edge fetches an eligible ready paste from object storage on a miss and caches it only for the remaining permitted lifetime. A cache hit and a miss must follow the same expiry and view-count definitions.",
+      "connection": {
+        "edgeId": "paste_edge_objects",
+        "sourceNodeId": "paste_edge",
+        "targetNodeId": "paste_objects",
+        "connectionType": "http",
+        "label": "Paste content on edge miss",
+        "description": "The object store is the source for edge fills of completed paste content."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "paste_13_visibility_decision",
+      "stepNumber": 13,
+      "phase": "Establish the share contract and request paths",
+      "type": "decision_point",
+      "title": "Choose what possession of a share URL means",
+      "content": "The brief promises sharing by generated URL but does not define private pastes or access control. This review draft chooses unlisted public reads: there is no browse index, but anyone with the URL can read it. If product intent is private sharing, add authorization and partition or disable shared caches before treating this architecture as suitable.",
+      "decision": {
+        "question": "What visibility contract should the generated URL carry?",
+        "chosen": "Treat a share URL as an unlisted bearer link and cache only completed active pastes allowed by that policy.",
+        "chosenReason": "This is the smallest explicit interpretation of sharing by URL; an unlisted URL is not a secrecy guarantee, and private access would change the read and cache keys.",
+        "alternatives": [
+          {"option": "Require authenticated access for every paste", "tradeoff": "Adds identity and authorization behavior absent from the brief and changes cache partitioning."},
+          {"option": "Make pastes discoverable", "tradeoff": "Adds indexing and moderation requirements absent from the brief."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "paste_edge",
+        "properties": {
+          "purpose": "Serve static assets and cache only completed, active unlisted pastes allowed by the confirmed visibility policy; never imply that a bearer URL is confidential; keep create and upload-grant responses uncached; cap content freshness at paste expiry."
+        }
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "paste_14_key_service",
+      "stepNumber": 14,
+      "phase": "Reserve generated URLs and aliases safely",
+      "type": "add_component",
+      "title": "Add a short-key generation service",
+      "content": "Generate compact random candidates independently of the metadata database's write path. Candidate generation does not establish uniqueness; the authoritative conditional reservation does.",
+      "component": {
+        "nodeId": "paste_keygen",
+        "componentType": "id-generator",
+        "label": "Paste Key Generator",
+        "description": "Short URL candidate generation",
+        "position": {"x": 620, "y": 40},
+        "properties": {
+          "componentName": "Paste Key Generator",
+          "purpose": "Generate compact random lowercase base36 URL-key candidates without relying on a central incrementing counter; treat each candidate as provisional until the metadata store conditionally reserves it."
+        },
+        "highlightReason": "The existing ID Generator catalog item matches the key-generation-service hint."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:1"]
+    },
+    {
+      "id": "paste_15_metadata",
+      "stepNumber": 15,
+      "phase": "Reserve generated URLs and aliases safely",
+      "type": "add_component",
+      "title": "Add the authoritative paste metadata store",
+      "content": "Keep the canonical URL key, optional alias, opaque object key, creation and expiry times, readiness state, content type, and language hint in indexed metadata. Enforce uniqueness at the write boundary so concurrent requests cannot claim one URL twice.",
+      "component": {
+        "nodeId": "paste_metadata",
+        "componentType": "database",
+        "label": "Paste Metadata Database",
+        "description": "Unique URL mappings, object references, and expiry state",
+        "position": {"x": 1260, "y": 250},
+        "properties": {
+          "componentName": "Paste Metadata Database",
+          "purpose": "Authoritatively map canonical short keys and custom aliases to object keys; store readiness, content type, language hint, createdAt, and expiresAt; use conditional uniqueness and a due-expiry index without storing paste bodies."
+        },
+        "highlightReason": "The existing Database catalog component represents transactional metadata and uniqueness enforcement; object bytes remain in object storage."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "paste_16_api_keygen",
+      "stepNumber": 16,
+      "phase": "Reserve generated URLs and aliases safely",
+      "type": "add_connection",
+      "title": "Request a generated key candidate",
+      "content": "For a paste without a custom alias, the service asks the key generator for a random lowercase base36 candidate, then submits it for conditional reservation. A collision causes a fresh candidate attempt rather than overwriting an existing paste.",
+      "connection": {
+        "edgeId": "paste_api_keygen",
+        "sourceNodeId": "paste_api",
+        "targetNodeId": "paste_keygen",
+        "connectionType": "api-call",
+        "label": "Generate short-key candidate",
+        "description": "The API receives a candidate; the metadata store remains the uniqueness authority."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-constraint:1"]
+    },
+    {
+      "id": "paste_17_api_metadata",
+      "stepNumber": 17,
+      "phase": "Reserve generated URLs and aliases safely",
+      "type": "add_connection",
+      "title": "Commit paste metadata conditionally",
+      "content": "Reserve the generated key or canonical alias with a conditional unique write before accepting content. Store an expiry timestamp and pending state with the object reference; publish the URL only after the object is verified and state changes to ready.",
+      "connection": {
+        "edgeId": "paste_api_metadata",
+        "sourceNodeId": "paste_api",
+        "targetNodeId": "paste_metadata",
+        "connectionType": "database-connection",
+        "label": "Reserve key and manage paste state",
+        "description": "Conditional writes serialize conflicting aliases and generated candidates."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "paste_18_alias_policy",
+      "stepNumber": 18,
+      "phase": "Reserve generated URLs and aliases safely",
+      "type": "decision_point",
+      "title": "Reject alias collisions instead of replacing a paste",
+      "content": "Choose one canonicalization rule before launch. This draft case-folds alias candidates and generated keys before reservation, preserves a submitted alias separately for display, and returns a conflict when a key is already claimed. The same unique namespace prevents an alias from shadowing a generated URL.",
+      "decision": {
+        "question": "How should concurrent generated-key and custom-alias claims be resolved?",
+        "chosen": "Canonicalize the lookup key, reserve generated keys and aliases in one unique namespace, retry generated collisions, and reject a claimed custom alias with a conflict response.",
+        "chosenReason": "A conditional unique claim is the final authority under concurrency; case folding avoids visually ambiguous aliases, while the exact alias policy remains a product decision to confirm.",
+        "alternatives": [
+          {"option": "Allow an alias to overwrite an existing generated key", "tradeoff": "A previously issued share URL could silently point at different text."},
+          {"option": "Check for conflicts only in application memory", "tradeoff": "Concurrent service instances can both observe a free alias and claim it."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "paste_metadata",
+        "properties": {
+          "purpose": "Authoritatively map case-folded generated keys and custom aliases in one unique namespace; retain the submitted alias for display; reject alias conflicts, retry generated-key collisions, and store object reference, ready state, language hint, createdAt, and expiresAt."
+        }
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:1"]
+    },
+    {
+      "id": "paste_19_cache",
+      "stepNumber": 19,
+      "phase": "Serve hot pastes and render code safely",
+      "type": "add_component",
+      "title": "Add a hot-paste cache",
+      "content": "Cache active paste metadata and frequently requested content to reduce repeated origin reads. Treat the cache as disposable: a miss or eviction returns to the metadata and object stores, and it cannot override an expiry decision.",
+      "component": {
+        "nodeId": "paste_cache",
+        "componentType": "cache",
+        "label": "Hot Paste Cache",
+        "description": "Frequently read active-paste metadata and content",
+        "position": {"x": 1580, "y": 250},
+        "properties": {
+          "componentName": "Hot Paste Cache",
+          "purpose": "Accelerate repeated reads of active, cache-eligible pastes; key entries by canonical paste key and content version; treat entries as disposable and never use cache presence to bypass expiry or visibility checks."
+        },
+        "highlightReason": "The existing Cache catalog component directly supports the popular-paste caching hint."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "paste_20_api_cache",
+      "stepNumber": 20,
+      "phase": "Serve hot pastes and render code safely",
+      "type": "add_connection",
+      "title": "Check the hot cache on origin reads",
+      "content": "On a cache miss, the service loads authoritative metadata, verifies visibility and expiry, and fetches the object. Populate only after that check; a stale cache entry must not revive an expired paste.",
+      "connection": {
+        "edgeId": "paste_api_cache",
+        "sourceNodeId": "paste_api",
+        "targetNodeId": "paste_cache",
+        "connectionType": "tcp",
+        "label": "Hot metadata and content lookup",
+        "description": "The service uses cache entries only after lifecycle and visibility checks."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "paste_21_cache_policy",
+      "stepNumber": 21,
+      "phase": "Serve hot pastes and render code safely",
+      "type": "decision_point",
+      "title": "Bound cache freshness by remaining paste life",
+      "content": "Paste content is immutable after publication, which makes caching useful, but expiry still wins. Cap every edge and service cache lifetime at the remaining expiresAt interval and recheck authoritative state on an origin miss; do not cache upload grants or pending content.",
+      "decision": {
+        "question": "What cache policy preserves low-latency reads without serving expired content?",
+        "chosen": "Cache only ready content permitted by visibility policy, with freshness no longer than the remaining paste lifetime; keep pending and upload-control data uncached.",
+        "chosenReason": "The cache serves the 100:1 read-heavy workload while expiry remains a correctness boundary rather than a best-effort cleanup detail.",
+        "alternatives": [
+          {"option": "Give every paste a fixed cache lifetime independent of expiry", "tradeoff": "The edge could serve an expired paste after its metadata becomes unavailable."},
+          {"option": "Disable all caching", "tradeoff": "Every repeated read returns to origin despite the stated read-heavy pattern and popular-paste hint."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "paste_cache",
+        "properties": {
+          "purpose": "Cache only ready content permitted by the confirmed visibility policy, keyed by canonical paste key and immutable content version; cap edge and service freshness at remaining expiresAt; exclude pending records and upload grants; on misses, defer to authoritative metadata and expiry checks."
+        }
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "paste_22_highlighting",
+      "stepNumber": 22,
+      "phase": "Serve hot pastes and render code safely",
+      "type": "decision_point",
+      "title": "Render code as escaped text in the browser",
+      "content": "Keep syntax highlighting in the web client using a declared or detected language and a client-side lexer. Treat paste bytes as untrusted text: escape output and never evaluate or execute pasted code. If no language is known, show plain text.",
+      "decision": {
+        "question": "Where should syntax highlighting happen?",
+        "chosen": "Highlight in the client after retrieval, using language metadata when available and escaped text rendering with a plain-text fallback.",
+        "chosenReason": "This keeps stored paste content plain text and avoids adding an unlisted server-side code execution path.",
+        "alternatives": [
+          {"option": "Execute pasted code on the server to infer its output", "tradeoff": "Execution is unnecessary for highlighting and adds an unsafe processing boundary."},
+          {"option": "Require every paste to be code", "tradeoff": "The brief accepts plain text as well as code."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "paste_client",
+        "properties": {
+          "purpose": "Accept plain text up to the brief's 10MB limit; upload through a scoped grant; display a share URL only after readiness; use language metadata for client-side syntax highlighting; escape all pasted text, never execute it, and fall back to plain text when language is unknown."
+        }
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "paste_23_scale_trigger",
+      "stepNumber": 23,
+      "phase": "Serve hot pastes and render code safely",
+      "type": "scale_trigger",
+      "title": "Scale against measured request shape",
+      "content": "Millions of pastes per day and a 100:1 read/write ratio are supplied, but they do not define peak arrival shape, paste-size distribution, hot-key skew, or a latency target. Measure those inputs and benchmark cache misses, origin reads, object delivery, and metadata contention before choosing capacity or partition boundaries.",
+      "scaleTrigger": {
+        "metric": "API saturation, cache hit and miss behavior, hot-key skew, metadata write contention, object-delivery latency, and oldest background-work age",
+        "action": "Scale stateless API and worker capacity and adjust cache or metadata partitioning only when representative workload measurements show a bottleneck; set service targets with product owners.",
+        "impact": "More replicas and partitions add cost and operational coordination; an unmeasured daily volume does not justify a fabricated peak or latency objective, so scale from evidence rather than inventing targets."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "paste_24_read_flow",
+      "stepNumber": 24,
+      "phase": "Serve hot pastes and render code safely",
+      "type": "explanation",
+      "title": "Trace the retrieval path end to end",
+      "content": "A shared URL reaches the CDN; an eligible hit returns cached content, while a miss reaches the API, which checks metadata, visibility, and expiry before fetching the object. The client renders the returned text and optional syntax highlighting. Both paths must emit the same defined view event and neither may return a paste past expiresAt.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "paste_25_view_queue",
+      "stepNumber": 25,
+      "phase": "Count views and retire expired content",
+      "type": "add_component",
+      "title": "Add a durable view-event queue",
+      "content": "Buffer delivery events so counting does not add a synchronous write to each paste read. Preserve event identity and retry failed consumption; queue delay is visible as analytics lag, not as a failed paste response.",
+      "component": {
+        "nodeId": "paste_view_queue",
+        "componentType": "queue",
+        "label": "Paste View Event Queue",
+        "description": "Asynchronous view-count events from edge delivery",
+        "position": {"x": 940, "y": 650},
+        "properties": {
+          "componentName": "Paste View Event Queue",
+          "purpose": "Durably buffer successful paste-view events including edge cache hits; retain stable event identifiers for deduplication and retries so analytics work does not block paste retrieval."
+        },
+        "highlightReason": "The existing Queue catalog item represents asynchronous view aggregation and separates count writes from the read path."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:2"]
+    },
+    {
+      "id": "paste_26_edge_views",
+      "stepNumber": 26,
+      "phase": "Count views and retire expired content",
+      "type": "add_connection",
+      "title": "Emit view events at the delivery edge",
+      "content": "The edge observes both cache hits and origin fills, so it can count successful paste GETs consistently. Emit an event identifier and canonical paste key asynchronously; do not make a view depend on a queue acknowledgment.",
+      "connection": {
+        "edgeId": "paste_edge_view_queue",
+        "sourceNodeId": "paste_edge",
+        "targetNodeId": "paste_view_queue",
+        "connectionType": "data-flow",
+        "label": "Successful edge delivery events",
+        "description": "Includes cache hits and misses so edge-served reads are not omitted from view totals."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:2"]
+    },
+    {
+      "id": "paste_27_worker",
+      "stepNumber": 27,
+      "phase": "Count views and retire expired content",
+      "type": "add_component",
+      "title": "Add background aggregation and expiry workers",
+      "content": "Consume view events with deduplication and aggregate counts away from request handling. In a separate worker task, scan due-expiry metadata, hide expired pastes immediately, and retry object cleanup independently so one backlog does not delay the other.",
+      "component": {
+        "nodeId": "paste_worker",
+        "componentType": "processing-worker",
+        "label": "Paste Background Workers",
+        "description": "View aggregation and expired-object cleanup",
+        "position": {"x": 1260, "y": 650},
+        "properties": {
+          "componentName": "Paste Background Workers",
+          "purpose": "Deduplicate and aggregate view events off the read path; independently scan due-expiry metadata, tombstone expired pastes, retry object deletion idempotently, and expose backlog and failure state."
+        },
+        "highlightReason": "The existing Processing Worker catalog component covers both asynchronous aggregation and the hinted background cleanup job."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "paste_28_queue_worker",
+      "stepNumber": 28,
+      "phase": "Count views and retire expired content",
+      "type": "add_connection",
+      "title": "Consume view events away from the API",
+      "content": "Workers retry queue delivery and deduplicate by event identifier before changing aggregates. Keep expiry scanning in an independently scheduled worker task so view backlog cannot starve cleanup.",
+      "connection": {
+        "edgeId": "paste_view_queue_worker",
+        "sourceNodeId": "paste_view_queue",
+        "targetNodeId": "paste_worker",
+        "connectionType": "message-queue",
+        "label": "View events for aggregation",
+        "description": "Durable asynchronous delivery with idempotent consumer behavior."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "paste_29_analytics_store",
+      "stepNumber": 29,
+      "phase": "Count views and retire expired content",
+      "type": "add_component",
+      "title": "Persist view aggregates separately",
+      "content": "Keep aggregate view state separate from the hot URL and expiry metadata so popular-paste counters do not turn metadata reads into synchronous counter writes. Store the latest processed event position for safe replay.",
+      "component": {
+        "nodeId": "paste_analytics_store",
+        "componentType": "database",
+        "label": "Paste View Aggregate Store",
+        "description": "Deduplicated asynchronous counts by paste key",
+        "position": {"x": 1580, "y": 650},
+        "properties": {
+          "componentName": "Paste View Aggregate Store",
+          "purpose": "Persist deduplicated aggregate view counts and consumer progress separately from paste metadata; allow safe replay after worker failure without a synchronous write on every retrieval."
+        },
+        "highlightReason": "A second existing Database catalog node models the distinct aggregate workload without adding a custom analytics component."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:2"]
+    },
+    {
+      "id": "paste_30_worker_analytics_store",
+      "stepNumber": 30,
+      "phase": "Count views and retire expired content",
+      "type": "add_connection",
+      "title": "Write deduplicated view aggregates",
+      "content": "Apply each accepted event once to the aggregate and persist consumer progress with it, or use an equivalent idempotent transaction. A worker restart must not silently double-count a retried delivery.",
+      "connection": {
+        "edgeId": "paste_worker_analytics_store",
+        "sourceNodeId": "paste_worker",
+        "targetNodeId": "paste_analytics_store",
+        "connectionType": "database-connection",
+        "label": "Idempotent aggregate updates",
+        "description": "Persist count changes and replay progress with duplicate-event protection."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:2"]
+    },
+    {
+      "id": "paste_31_api_analytics_store",
+      "stepNumber": 31,
+      "phase": "Count views and retire expired content",
+      "type": "add_connection",
+      "title": "Read the latest available view count",
+      "content": "Expose the latest processed aggregate through a count endpoint or page field without waiting for the current request's event to be consumed. The response is an as-of value, not a promise of synchronous exactness.",
+      "connection": {
+        "edgeId": "paste_api_analytics_store",
+        "sourceNodeId": "paste_api",
+        "targetNodeId": "paste_analytics_store",
+        "connectionType": "api-call",
+        "label": "Read aggregate view count",
+        "description": "Returns the latest committed aggregate without coupling paste retrieval to event consumption."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:3"]
+    },
+    {
+      "id": "paste_32_worker_metadata",
+      "stepNumber": 32,
+      "phase": "Count views and retire expired content",
+      "type": "add_connection",
+      "title": "Find and tombstone due pastes",
+      "content": "The background task scans an index by expiresAt, conditionally marks due records expired, and leaves a tombstone or cleanup state until object deletion succeeds. The retrieval path rejects the expired state even if physical cleanup is delayed.",
+      "connection": {
+        "edgeId": "paste_worker_metadata",
+        "sourceNodeId": "paste_worker",
+        "targetNodeId": "paste_metadata",
+        "connectionType": "database-connection",
+        "label": "Expiry index and tombstones",
+        "description": "Due-time scans and conditional state changes make expiry independent of request traffic."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "paste_33_worker_objects",
+      "stepNumber": 33,
+      "phase": "Count views and retire expired content",
+      "type": "add_connection",
+      "title": "Delete expired object bytes idempotently",
+      "content": "After an expired paste is hidden, delete its object and retry safely if storage is temporarily unavailable. Remove metadata only after deletion is confirmed or retain cleanup state for a later retry; never make stale content visible again during recovery.",
+      "connection": {
+        "edgeId": "paste_worker_objects",
+        "sourceNodeId": "paste_worker",
+        "targetNodeId": "paste_objects",
+        "connectionType": "api-call",
+        "label": "Expired object cleanup",
+        "description": "Repeatable deletion reclaims content while the metadata tombstone prevents stale reads."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "paste_34_view_semantics",
+      "stepNumber": 34,
+      "phase": "Count views and retire expired content",
+      "type": "decision_point",
+      "title": "Define a view and accept visible aggregation lag",
+      "content": "Count a successful paste GET once whether the edge serves a hit or a miss; exclude failed lookups and HEAD requests. Keep event identifiers through retries and expose the latest aggregate with its processing lag. The brief asks to track views but does not require a synchronous exact count.",
+      "decision": {
+        "question": "How should a paste view be counted without adding a write to every read?",
+        "chosen": "Emit one identified event for each successful GET at the edge, deduplicate it asynchronously, and report an eventually consistent aggregate with observable lag.",
+        "chosenReason": "The edge sees cached deliveries that never reach the API; asynchronous aggregation preserves those views and protects the 100:1 read-heavy path from counter writes.",
+        "alternatives": [
+          {"option": "Increment a metadata counter synchronously in the API", "tradeoff": "Edge cache hits are missed and popular keys receive a write on every origin-handled read."},
+          {"option": "Count every HTTP request", "tradeoff": "Failed lookups and HEAD requests would inflate the user-facing view total."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "paste_analytics_store",
+        "properties": {
+          "purpose": "Persist an eventually consistent count of successful paste GETs, including edge cache hits; exclude failed and HEAD requests; deduplicate stable event identifiers and expose aggregate freshness so clients can see processing lag."
+        }
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:2"]
+    },
+    {
+      "id": "paste_35_expiry_semantics",
+      "stepNumber": 35,
+      "phase": "Count views and retire expired content",
+      "type": "decision_point",
+      "title": "Make expiry authoritative before cleanup",
+      "content": "Persist expiresAt with the paste and reject reads at or after that time, even if an edge object or backend cache has not yet been evicted. A worker tombstone prevents stale resurrection while object deletion retries. Expiry is a correctness check; background cleanup is storage reclamation.",
+      "decision": {
+        "question": "What happens if expiry arrives while cache invalidation or object deletion is delayed?",
+        "chosen": "Deny the read from authoritative expiry state, tombstone the metadata, then retry object deletion idempotently before final metadata removal.",
+        "chosenReason": "A delayed cleanup job must not extend a paste's lifetime, and a storage retry must not republish an expired object.",
+        "alternatives": [
+          {"option": "Treat cache eviction as the expiry mechanism", "tradeoff": "A stale edge or service entry can outlive the intended paste lifetime."},
+          {"option": "Delete metadata before deleting the object", "tradeoff": "A failed object deletion loses the durable reference needed for cleanup."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "paste_metadata",
+        "properties": {
+          "purpose": "Map canonical keys and aliases to object keys; store readiness, language hint, createdAt, and expiresAt; conditionally reserve unique keys; reject reads at expiry, tombstone before cleanup, and retain cleanup state until idempotent object deletion completes."
+        }
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "paste_36_storage_lifecycle",
+      "stepNumber": 36,
+      "phase": "Count views and retire expired content",
+      "type": "decision_point",
+      "title": "Separate expiry deletion from cold-tier policy",
+      "content": "Delete expired objects through the retryable cleanup path. For older but unexpired pastes, do not guess an age threshold or transition them to a slower tier until retention, access frequency, and retrieval-latency policy are known; measure those inputs and apply a lifecycle rule only after owners approve the tradeoff.",
+      "decision": {
+        "question": "How should storage reclamation treat expired and merely old pastes?",
+        "chosen": "Delete expired objects after the read path is fenced; defer cold-tier transitions for unexpired objects until retention and restore-latency policy is defined.",
+        "chosenReason": "Expiry is specified, but the brief gives no age threshold or permission to slow retrieval for old live pastes.",
+        "alternatives": [
+          {"option": "Move all older objects to a cold tier using an invented age cutoff", "tradeoff": "The cutoff and restore delay would be unsupported by the brief."},
+          {"option": "Keep expired bytes indefinitely", "tradeoff": "That defeats the stated storage-optimization goal and retains content after its configured lifetime."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "paste_objects",
+        "properties": {
+          "purpose": "Store immutable paste text up to the brief's 10MB limit; verify content before publication; retry expired-object deletion after reads are fenced; consider cold tiers for older unexpired objects only after retention, access-frequency, and restore-latency policy is approved."
+        }
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "paste_37_monitoring",
+      "stepNumber": 37,
+      "phase": "Operate and scale from measured behavior",
+      "type": "add_component",
+      "title": "Add service and lifecycle monitoring",
+      "content": "Observe correctness and capacity signals across URL reservation, cache delivery, upload verification, view aggregation, and expiry cleanup. Keep content out of logs and traces; the paste text itself is not an operational metric.",
+      "component": {
+        "nodeId": "paste_monitoring",
+        "componentType": "monitoring",
+        "label": "Paste Service Monitoring",
+        "description": "Latency, cache, upload, view, and cleanup health",
+        "position": {"x": 1900, "y": 360},
+        "properties": {
+          "componentName": "Paste Service Monitoring",
+          "purpose": "Track request latency, conditional-key conflicts, upload verification failures, cache behavior, view-event lag, due-expiry backlog, object deletion retries, and storage use without recording paste bodies."
+        },
+        "highlightReason": "The existing Monitoring catalog component covers the operational signals needed to scale and recover this service."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "paste_38_api_monitoring",
+      "stepNumber": 38,
+      "phase": "Operate and scale from measured behavior",
+      "type": "add_connection",
+      "title": "Observe request and reservation outcomes",
+      "content": "Report latency and success by operation, alias conflicts, generated-key retries, payload-size rejection, and metadata-store saturation. Do not log submitted paste text or upload credentials.",
+      "connection": {
+        "edgeId": "paste_api_monitoring",
+        "sourceNodeId": "paste_api",
+        "targetNodeId": "paste_monitoring",
+        "connectionType": "data-flow",
+        "label": "API health and key outcomes",
+        "description": "Service metrics show retrieval, creation, uniqueness, and upload-verification behavior without paste contents."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "paste_39_edge_monitoring",
+      "stepNumber": 39,
+      "phase": "Operate and scale from measured behavior",
+      "type": "add_connection",
+      "title": "Observe edge delivery and view-event lag",
+      "content": "Track cache hit behavior, origin fills, expiry denials, successful view-event publication, and event delivery lag. This distinguishes a fast edge response from a healthy count pipeline.",
+      "connection": {
+        "edgeId": "paste_edge_monitoring",
+        "sourceNodeId": "paste_edge",
+        "targetNodeId": "paste_monitoring",
+        "connectionType": "data-flow",
+        "label": "Edge cache and view delivery",
+        "description": "Metrics include cache-hit deliveries and the freshness of asynchronous view events."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "paste_40_cache_monitoring",
+      "stepNumber": 40,
+      "phase": "Operate and scale from measured behavior",
+      "type": "add_connection",
+      "title": "Observe hot-key pressure and cache health",
+      "content": "Measure hit and miss distribution, eviction behavior, hot-key skew, and stale-expiry denials. Use these observations to decide whether cache capacity or key distribution needs attention.",
+      "connection": {
+        "edgeId": "paste_cache_monitoring",
+        "sourceNodeId": "paste_cache",
+        "targetNodeId": "paste_monitoring",
+        "connectionType": "data-flow",
+        "label": "Cache effectiveness and pressure",
+        "description": "Cache signals support measured low-latency tuning without assuming a hit-rate target."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "paste_41_queue_monitoring",
+      "stepNumber": 41,
+      "phase": "Operate and scale from measured behavior",
+      "type": "add_connection",
+      "title": "Watch view-event backlog",
+      "content": "Track oldest event age, retry volume, consumer progress, and deduplication outcomes. Alert on agreed impact thresholds after the service target is defined; do not invent one in this design.",
+      "connection": {
+        "edgeId": "paste_queue_monitoring",
+        "sourceNodeId": "paste_view_queue",
+        "targetNodeId": "paste_monitoring",
+        "connectionType": "data-flow",
+        "label": "Event backlog and retry state",
+        "description": "Queue signals make eventual view-count freshness and delivery failures visible."
+      },
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:2"]
+    },
+    {
+      "id": "paste_42_worker_monitoring",
+      "stepNumber": 42,
+      "phase": "Operate and scale from measured behavior",
+      "type": "add_connection",
+      "title": "Watch aggregation and expiry cleanup separately",
+      "content": "Report worker throughput and failures by task lane, including view aggregation lag, due-expiry backlog, and object deletion retries. Separate signals let operators see whether counts or storage reclamation are delayed.",
+      "connection": {
+        "edgeId": "paste_worker_monitoring",
+        "sourceNodeId": "paste_worker",
+        "targetNodeId": "paste_monitoring",
+        "connectionType": "data-flow",
+        "label": "Worker task health",
+        "description": "Independent aggregation and cleanup signals guide recovery and measured scaling."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "paste_43_review",
+      "stepNumber": 43,
+      "phase": "Operate and scale from measured behavior",
+      "type": "explanation",
+      "title": "Review the complete paste lifecycle",
+      "content": "Create: client → edge/gateway → API → key generator and conditional metadata reservation → scoped object upload → verified ready state. Read: share URL → edge cache or API miss path → expiry and visibility check → object content → escaped client rendering. Count: successful edge delivery → durable event → deduplicating worker → aggregate store. Expire: authoritative expiry denial → metadata tombstone → retryable object deletion. Confirm the visibility, alias-canonicalization, retention, and latency policies that the brief leaves open before treating this review draft as a final product contract.",
+      "requirementIds": [
+        "legacy-requirement:1",
+        "legacy-requirement:2",
+        "legacy-requirement:3",
+        "legacy-requirement:4",
+        "legacy-requirement:5",
+        "legacy-requirement:6",
+        "legacy-requirement:7",
+        "legacy-constraint:1",
+        "legacy-constraint:2",
+        "legacy-constraint:3",
+        "legacy-constraint:4",
+        "legacy-constraint:5"
+      ]
+    }
+  ]
+}

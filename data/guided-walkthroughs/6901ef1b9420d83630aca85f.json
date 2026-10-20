@@ -1,0 +1,459 @@
+{
+  "problem_id": "6901ef1b9420d83630aca85f",
+  "version": "1.0.0-review-draft",
+  "requirementRevision": null,
+  "totalSteps": 23,
+  "phases": [
+    {
+      "name": "Define the enforcement contract",
+      "stepRange": [1, 10],
+      "description": "Keep the supplied rate-limit brief visible, state provisional identity and policy assumptions, and add the existing catalog components for the request, decision, state, and operations paths."
+    },
+    {
+      "name": "Connect the synchronous request path",
+      "stepRange": [11, 16],
+      "description": "Route callers through the gateway, check shared state and policy, forward only allowed requests, and return a useful limit response at the API boundary."
+    },
+    {
+      "name": "Observe breaches asynchronously",
+      "stepRange": [17, 19],
+      "description": "Send bounded breach telemetry off the request path, aggregate it, and alert from operational signals."
+    },
+    {
+      "name": "Review algorithm, accuracy, and scale tradeoffs",
+      "stepRange": [20, 23],
+      "description": "Choose a default algorithm while preserving policy-level alternatives, address clock and state-store behavior, and scale from measured hot spots and latency."
+    }
+  ],
+  "steps": [
+    {
+      "id": "rl_01",
+      "stepNumber": 1,
+      "phase": "Define the enforcement contract",
+      "type": "explanation",
+      "title": "Read the frozen brief and label assumptions",
+      "content": "The frozen problem is Design an API Rate Limiter: Design a rate limiting system to control the number of requests a user can make to an API. Requirements are: Limit requests per user/IP within time window; Support different rate limit tiers; Provide clear error messages when limit exceeded; Track and reset limits per time window; Support distributed rate limiting; Monitor and alert on rate limit breaches; Handle millions of requests per second. Constraints are: Low latency overhead (<10ms); Accurate counting in distributed system; Handle clock skew across servers; Memory efficient implementation; Support multiple rate limit algorithms. Hints are token bucket or leaky bucket, Redis for distributed counters, sliding window log or fixed window counter, in-memory cache for performance, and rate limit headers. Treat hints as options. Provisional assumptions to review: authenticated requests use the validated principal as their subject; anonymous requests use a normalized client IP obtained through trusted proxy metadata; versioned tier policies are configured outside the request path; and one authoritative Redis partition owns each subject's counter decisions. The brief supplies no tier values, window lengths, regional topology, state-store failure posture, or consistency allowance between regions. Do not turn these unknowns into numeric service promises.",
+      "requirementIds": []
+    },
+    {
+      "id": "rl_02",
+      "stepNumber": 2,
+      "phase": "Define the enforcement contract",
+      "type": "add_component",
+      "title": "Add an API caller",
+      "content": "Use this existing Web App as a representative API consumer. Other clients use the same public request and response contract; the limiter keys decisions from validated identity or trusted client network metadata rather than trusting a caller-supplied forwarding header.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3"],
+      "component": {
+        "nodeId": "rl_client",
+        "componentType": "web-app",
+        "label": "API Client",
+        "description": "Representative consumer of the rate-limited API",
+        "position": {"x": 0, "y": 360},
+        "properties": {
+          "componentName": "API Client",
+          "purpose": "Call the public API with its authenticated identity when available; display the documented rate-limit error and retry guidance without attempting to override trusted client identity metadata."
+        },
+        "highlightReason": "The existing Web App catalog component represents a caller without inventing a client-specific component type."
+      }
+    },
+    {
+      "id": "rl_03",
+      "stepNumber": 3,
+      "phase": "Define the enforcement contract",
+      "type": "add_component",
+      "title": "Distribute ingress traffic",
+      "content": "Spread requests across gateway instances and perform health-aware routing. The balancer is not the authoritative limiter: sticky routing alone would allow a caller's state to split across gateway instances.",
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1"],
+      "component": {
+        "nodeId": "rl_ingress",
+        "componentType": "loadbalancer",
+        "label": "API Ingress Load Balancer",
+        "description": "Health-aware routing to API gateway instances",
+        "position": {"x": 260, "y": 360},
+        "properties": {
+          "componentName": "API Ingress Load Balancer",
+          "purpose": "Distribute API requests across healthy gateway instances while preserving trusted client address metadata; do not rely on instance affinity for rate-limit correctness."
+        },
+        "highlightReason": "The existing Load Balancer catalog item covers ingress distribution and health-aware routing."
+      }
+    },
+    {
+      "id": "rl_04",
+      "stepNumber": 4,
+      "phase": "Define the enforcement contract",
+      "type": "add_component",
+      "title": "Enforce limits at the API gateway",
+      "content": "Validate the request identity, resolve the applicable subject and tier policy, evaluate the selected algorithm, and forward only allowed requests. On denial, return HTTP 429 with a stable error code and message plus RateLimit-Limit, RateLimit-Remaining, RateLimit-Reset, and Retry-After where the selected algorithm can provide them.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"],
+      "component": {
+        "nodeId": "rl_gateway",
+        "componentType": "api-gateway",
+        "label": "Rate-Limiting API Gateway",
+        "description": "Identity-aware policy evaluation and API throttling boundary",
+        "position": {"x": 540, "y": 360},
+        "properties": {
+          "componentName": "Rate-Limiting API Gateway",
+          "purpose": "Validate JWT identity and trusted client metadata, resolve versioned tier policy from a bounded local policy cache, run the configured rate-limit algorithm against shared state, and route only allowed calls to the application. Return actionable HTTP 429 errors with limit, remaining, reset, and retry guidance when available; never treat a local counter as the globally authoritative count.",
+          "authentication": "JWT",
+          "rateLimiting": true,
+          "throttling": true
+        },
+        "highlightReason": "The existing API Gateway catalog component already exposes authentication, rateLimiting, and throttling properties; no custom limiter component is needed."
+      }
+    },
+    {
+      "id": "rl_05",
+      "stepNumber": 5,
+      "phase": "Define the enforcement contract",
+      "type": "add_component",
+      "title": "Add shared Redis counter state",
+      "content": "Keep the decision state shared across gateway instances. An atomic server-side operation reads and updates the subject's selected policy state together; expiry follows that algorithm's window or idle-refill semantics so inactive keys can be reclaimed without silently splitting live counts across local caches.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "rl_counters",
+        "componentType": "cache",
+        "label": "Redis Rate-Limit State",
+        "description": "Atomic distributed counters and compact algorithm state",
+        "position": {"x": 850, "y": 130},
+        "properties": {
+          "componentName": "Redis Rate-Limit State",
+          "purpose": "Hold compact per-subject and per-policy counter or token state shared by gateway instances; apply check-and-update atomically on the authoritative shard, use datastore time for window/refill decisions, and expire state according to policy semantics. This is correctness state, not an independently incremented local cache.",
+          "engine": "redis",
+          "inMemory": true
+        },
+        "highlightReason": "The existing Cache catalog item supports Redis and in-memory storage, which represent the hinted shared counter store without a custom component."
+      }
+    },
+    {
+      "id": "rl_06",
+      "stepNumber": 6,
+      "phase": "Define the enforcement contract",
+      "type": "add_component",
+      "title": "Store versioned tier policies",
+      "content": "Keep policy configuration separate from hot request counters. A policy identifies its subject scope, tier, algorithm, window or refill behavior, response guidance, and policy version; the brief defines none of the tier values, so leave them as configuration rather than inventing quotas.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5"],
+      "component": {
+        "nodeId": "rl_policies",
+        "componentType": "database",
+        "label": "Rate-Limit Policy Store",
+        "description": "Versioned per-tier algorithm and window configuration",
+        "position": {"x": 850, "y": 410},
+        "properties": {
+          "componentName": "Rate-Limit Policy Store",
+          "purpose": "Persist versioned policies for user and IP scopes, tier selection, supported algorithm, window or refill semantics, and client response guidance; publish policy changes so gateways can refresh their bounded local policy cache. Do not store per-request hot counters here."
+        },
+        "highlightReason": "The existing Database catalog item represents durable policy configuration; the concept does not require a custom component."
+      }
+    },
+    {
+      "id": "rl_07",
+      "stepNumber": 7,
+      "phase": "Define the enforcement contract",
+      "type": "add_component",
+      "title": "Protect the application service",
+      "content": "Keep business handling behind the gateway. Rejected calls stop before this service; allowed calls continue with the validated identity and applicable policy context where the application needs it.",
+      "requirementIds": ["legacy-requirement:7"],
+      "component": {
+        "nodeId": "rl_application",
+        "componentType": "backend-server",
+        "label": "Protected API Service",
+        "description": "Business API reached only after gateway admission",
+        "position": {"x": 850, "y": 650},
+        "properties": {
+          "componentName": "Protected API Service",
+          "purpose": "Handle business API requests only after the gateway admits them; keep rate-limit enforcement at the shared ingress boundary so calls cannot bypass the policy by reaching an application instance directly."
+        },
+        "highlightReason": "The existing Backend Server catalog component represents the protected application without introducing a rate-limiter-specific type."
+      }
+    },
+    {
+      "id": "rl_08",
+      "stepNumber": 8,
+      "phase": "Define the enforcement contract",
+      "type": "add_component",
+      "title": "Buffer breach telemetry off the hot path",
+      "content": "Export bounded, privacy-safe breach and evaluation telemetry asynchronously. Aggregate or batch repetitive denials instead of blocking a user request on an individual event write or emitting raw credentials and untrusted identity headers.",
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "rl_breach_queue",
+        "componentType": "queue",
+        "label": "Rate-Limit Telemetry Queue",
+        "description": "Asynchronous transport for aggregated breach signals",
+        "position": {"x": 850, "y": 850},
+        "properties": {
+          "componentName": "Rate-Limit Telemetry Queue",
+          "purpose": "Buffer privacy-safe, aggregated limit denials and evaluation health signals for downstream monitoring; keep publication asynchronous and define bounded retry and retention behavior so telemetry backpressure does not add request-path latency.",
+          "durable": true
+        },
+        "highlightReason": "The existing Queue catalog item can carry operational events without adding a custom telemetry component."
+      }
+    },
+    {
+      "id": "rl_09",
+      "stepNumber": 9,
+      "phase": "Define the enforcement contract",
+      "type": "add_component",
+      "title": "Aggregate operational signals",
+      "content": "Aggregate accepted and denied decisions, evaluation latency, datastore errors, policy versions, and memory/key-cardinality signals by safe dimensions such as route and tier. Avoid cardinality explosions from raw subject identifiers.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "rl_analytics",
+        "componentType": "analytics",
+        "label": "Rate-Limit Metrics Aggregator",
+        "description": "Aggregate denial, latency, state-store, and capacity signals",
+        "position": {"x": 1120, "y": 850},
+        "properties": {
+          "componentName": "Rate-Limit Metrics Aggregator",
+          "purpose": "Consume batched rate-limit telemetry and aggregate breach volume, allow/deny outcomes, evaluation latency, Redis errors, policy-version skew, and state cardinality by bounded operational dimensions; exclude raw credentials and avoid per-subject metric labels."
+        },
+        "highlightReason": "The existing Analytics catalog item covers metrics aggregation using supported catalog properties."
+      }
+    },
+    {
+      "id": "rl_10",
+      "stepNumber": 10,
+      "phase": "Define the enforcement contract",
+      "type": "add_component",
+      "title": "Alert on breaches and limiter health",
+      "content": "Alert on sustained breach patterns and on failures that can invalidate enforcement, including elevated evaluation latency, datastore errors, memory pressure, key growth, policy propagation delay, and observed clock drift. Set alert thresholds from operating evidence because the brief supplies no alert thresholds.",
+      "requirementIds": ["legacy-requirement:6", "legacy-constraint:1", "legacy-constraint:3", "legacy-constraint:4"],
+      "component": {
+        "nodeId": "rl_monitoring",
+        "componentType": "monitoring",
+        "label": "Rate-Limit Monitoring and Alerts",
+        "description": "Operational dashboards and breach/health alerting",
+        "position": {"x": 1400, "y": 850},
+        "properties": {
+          "componentName": "Rate-Limit Monitoring and Alerts",
+          "purpose": "Monitor aggregated breach patterns, request evaluation latency, Redis errors and memory pressure, policy propagation delay, and clock drift; route actionable alerts to operators without labeling raw user or IP identifiers.",
+          "alerts": true,
+          "metrics": true
+        },
+        "highlightReason": "The existing Monitoring catalog item explicitly supports metrics and alerts for this operational requirement."
+      }
+    },
+    {
+      "id": "rl_11",
+      "stepNumber": 11,
+      "phase": "Connect the synchronous request path",
+      "type": "add_connection",
+      "title": "Route the caller to ingress",
+      "content": "Send the consumer request to the health-aware public ingress. Preserve only trusted network metadata for anonymous IP-based policies.",
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:1"],
+      "connection": {
+        "edgeId": "rl_client_ingress",
+        "sourceNodeId": "rl_client",
+        "targetNodeId": "rl_ingress",
+        "connectionType": "http",
+        "label": "API request",
+        "description": "Public API traffic with trusted client network metadata."
+      }
+    },
+    {
+      "id": "rl_12",
+      "stepNumber": 12,
+      "phase": "Connect the synchronous request path",
+      "type": "add_connection",
+      "title": "Forward requests to gateway instances",
+      "content": "Route each request to a healthy gateway. Correctness comes from the shared subject state, not from keeping all of a caller's requests on one gateway instance.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2"],
+      "connection": {
+        "edgeId": "rl_ingress_gateway",
+        "sourceNodeId": "rl_ingress",
+        "targetNodeId": "rl_gateway",
+        "connectionType": "http",
+        "label": "Load-balanced API request",
+        "description": "Trusted ingress metadata accompanies the request; gateway affinity is not the rate-limit state mechanism."
+      }
+    },
+    {
+      "id": "rl_13",
+      "stepNumber": 13,
+      "phase": "Connect the synchronous request path",
+      "type": "add_connection",
+      "title": "Make an atomic shared-state decision",
+      "content": "The gateway asks the authoritative Redis shard to atomically check and update the selected user or IP policy. Co-locate all state required for one subject decision where the datastore requires same-shard scripts; do not independently increment per-gateway counters and sum them later when the policy requires an exact decision.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "rl_gateway_counters",
+        "sourceNodeId": "rl_gateway",
+        "targetNodeId": "rl_counters",
+        "connectionType": "database-connection",
+        "label": "Atomic policy check and state update",
+        "description": "One authoritative per-subject decision updates compact shared Redis state and its algorithm-specific expiry."
+      }
+    },
+    {
+      "id": "rl_14",
+      "stepNumber": 14,
+      "phase": "Connect the synchronous request path",
+      "type": "add_connection",
+      "title": "Resolve tier and algorithm policy",
+      "content": "Evaluate a local bounded cache of versioned tier policies on the request path; refresh snapshots asynchronously or from policy-change notifications. Define explicit behavior for a cache miss or stale version, and do not synchronously read the policy database for each request. Keep counters out of this configuration path.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:5", "legacy-constraint:1", "legacy-constraint:4", "legacy-constraint:5"],
+      "connection": {
+        "edgeId": "rl_gateway_policies",
+        "sourceNodeId": "rl_gateway",
+        "targetNodeId": "rl_policies",
+        "connectionType": "database-connection",
+        "label": "Versioned tier policy refresh",
+        "description": "Off-path policy snapshot refresh and change propagation; the gateway serves requests from its bounded local cache, while live per-request counters remain in shared Redis state."
+      }
+    },
+    {
+      "id": "rl_15",
+      "stepNumber": 15,
+      "phase": "Connect the synchronous request path",
+      "type": "add_connection",
+      "title": "Forward admitted requests only",
+      "content": "After the limiter admits a request, the gateway forwards it to the protected business API. A deny decision terminates at the gateway and never consumes application capacity unnecessarily.",
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1"],
+      "connection": {
+        "edgeId": "rl_gateway_application",
+        "sourceNodeId": "rl_gateway",
+        "targetNodeId": "rl_application",
+        "connectionType": "api-call",
+        "label": "Admitted API request",
+        "description": "Only requests that pass the applicable user/IP and tier policy reach business handling."
+      }
+    },
+    {
+      "id": "rl_16",
+      "stepNumber": 16,
+      "phase": "Connect the synchronous request path",
+      "type": "add_connection",
+      "title": "Return a clear limit response",
+      "content": "For an over-limit request, return HTTP 429 with a stable error body and the applicable limit headers. Derive reset and retry guidance from the selected algorithm rather than promising a reset time that algorithm does not define.",
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4"],
+      "connection": {
+        "edgeId": "rl_gateway_client_response",
+        "sourceNodeId": "rl_gateway",
+        "targetNodeId": "rl_client",
+        "connectionType": "http",
+        "label": "429 response and rate-limit headers",
+        "description": "Stable error code/message plus RateLimit-Limit, RateLimit-Remaining, RateLimit-Reset, and Retry-After when applicable."
+      }
+    },
+    {
+      "id": "rl_17",
+      "stepNumber": 17,
+      "phase": "Observe breaches asynchronously",
+      "type": "add_connection",
+      "title": "Export aggregated breach telemetry",
+      "content": "Publish bounded metrics asynchronously so queue or analytics slowness does not add a synchronous dependency to the under-10ms overhead budget. Prefer aggregation over a separate event for every denied request at millions of requests per second.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "rl_gateway_breach_events",
+        "sourceNodeId": "rl_gateway",
+        "targetNodeId": "rl_breach_queue",
+        "connectionType": "message-queue",
+        "label": "Batched breach and health metrics",
+        "description": "Asynchronous, privacy-safe telemetry; the request decision does not wait for analytics or alert delivery."
+      }
+    },
+    {
+      "id": "rl_18",
+      "stepNumber": 18,
+      "phase": "Observe breaches asynchronously",
+      "type": "add_connection",
+      "title": "Aggregate the operational stream",
+      "content": "Consume telemetry into bounded-cardinality views for breaches, latency, counter-store health, and policy freshness.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "rl_queue_analytics",
+        "sourceNodeId": "rl_breach_queue",
+        "targetNodeId": "rl_analytics",
+        "connectionType": "message-queue",
+        "label": "Rate-limit telemetry stream",
+        "description": "Batched operational signals for aggregation and trend detection."
+      }
+    },
+    {
+      "id": "rl_19",
+      "stepNumber": 19,
+      "phase": "Observe breaches asynchronously",
+      "type": "add_connection",
+      "title": "Drive breach and health alerts",
+      "content": "Send aggregated operational findings to monitoring. Tune alert thresholds from observed traffic and incident history; do not infer thresholds from the problem statement.",
+      "requirementIds": ["legacy-requirement:6", "legacy-requirement:7", "legacy-constraint:3", "legacy-constraint:4"],
+      "connection": {
+        "edgeId": "rl_analytics_monitoring",
+        "sourceNodeId": "rl_analytics",
+        "targetNodeId": "rl_monitoring",
+        "connectionType": "data-flow",
+        "label": "Breach and limiter-health signals",
+        "description": "Aggregated alert inputs without per-user or raw-IP metric labels."
+      }
+    },
+    {
+      "id": "rl_20",
+      "stepNumber": 20,
+      "phase": "Review algorithm, accuracy, and scale tradeoffs",
+      "type": "decision_point",
+      "title": "Select a default algorithm without hard-coding every tier",
+      "content": "Make the default explicit, but retain an algorithm selector in versioned policy so tiers can choose an algorithm that matches their burst and precision needs.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:5"],
+      "decision": {
+        "question": "Which algorithm should the gateway use by default while preserving support for other policy choices?",
+        "chosen": "Use token bucket as the default policy algorithm and select the algorithm per versioned tier policy.",
+        "chosenReason": "Token bucket state is compact, supports refill over time, and permits a configured burst while enforcing a sustained rate. A per-policy selector preserves the brief's requirement to support multiple algorithms.",
+        "alternatives": [
+          {
+            "option": "Fixed window counter",
+            "tradeoff": "Simple and memory-efficient with a clear reset boundary, but a caller can concentrate traffic on opposite sides of a boundary."
+          },
+          {
+            "option": "Sliding window log",
+            "tradeoff": "Tracks events precisely within the moving window, but state grows with request volume and requires cleanup."
+          },
+          {
+            "option": "Sliding window counter",
+            "tradeoff": "Uses less state than a per-request log and smooths fixed-window boundaries, but estimates traffic across adjacent windows."
+          },
+          {
+            "option": "Leaky bucket",
+            "tradeoff": "Smooths output toward a steady rate; queueing can add latency, while a reject-on-full form trades smoothing for immediate denial."
+          }
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "rl_gateway",
+        "properties": {
+          "purpose": "Validate JWT identity and trusted client metadata, resolve versioned tier policy from a bounded local policy cache, and apply the algorithm selected by that policy. Use token bucket as the default with compact shared Redis state and an atomic decision; retain fixed-window, sliding-window log/counter, and leaky-bucket implementations for policies whose boundary, precision, memory, or smoothing tradeoffs fit. Route only allowed calls to the application and return actionable HTTP 429 errors with applicable limit, remaining, reset, and retry guidance."
+        }
+      }
+    },
+    {
+      "id": "rl_21",
+      "stepNumber": 21,
+      "phase": "Review algorithm, accuracy, and scale tradeoffs",
+      "type": "explanation",
+      "title": "Make window and reset behavior algorithm-specific",
+      "content": "A fixed window stores a count and window identity, then expires or resets that state at the boundary. A token bucket refills from elapsed time and reports when capacity is available rather than pretending to have a discrete reset. Sliding log and sliding counter have different precision and memory costs. Use atomic check-and-update on the authoritative Redis primary for each subject decision; hash-partition subjects to spread independent keys. If a globally exact quota must span regions, route a subject to one authoritative home or accept the latency/availability cost of coordination. Regional token allocations can reduce coordination but change utilization and consistency behavior; make that product choice explicit.",
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "rl_22",
+      "stepNumber": 22,
+      "phase": "Review algorithm, accuracy, and scale tradeoffs",
+      "type": "explanation",
+      "title": "Bound clock, cache, and failure behavior",
+      "content": "Use the authoritative datastore's time inside the atomic operation rather than gateway wall clocks, and observe clock drift across Redis primaries and failovers. Clamp backward elapsed time so clock corrections do not create negative refill; a primary clock jump still needs detection and an explicit recovery policy. Keep only versioned policy metadata in a bounded in-memory gateway cache; do not cache independent correctness counters there. Expire compact Redis algorithm state according to each policy, monitor key cardinality and memory pressure, and avoid silently evicting live counters. The brief does not decide fail-open versus fail-closed behavior when Redis is unavailable; define it per route risk, expose the degraded mode, and do not imply accurate enforcement while state is unreachable.",
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:3", "legacy-constraint:4"]
+    },
+    {
+      "id": "rl_23",
+      "stepNumber": 23,
+      "phase": "Review algorithm, accuracy, and scale tradeoffs",
+      "type": "scale_trigger",
+      "title": "Scale from measured request-path and hot-key pressure",
+      "content": "The brief calls for millions of requests per second and less than 10ms of rate-limit overhead; these are supplied requirements, not evidence that a particular deployment meets them. Measure gateway evaluation latency, Redis round trips, shard saturation, hot subjects/IPs, memory per active policy key, and denial telemetry lag. Scale gateway instances and Redis partitions from those observations. A single hot subject remains a serialization point for exact atomic counting; consider subject affinity or reserved regional budgets only after reviewing their latency, availability, utilization, and consistency tradeoffs.",
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:4"],
+      "scaleTrigger": {
+        "metric": "Gateway evaluation latency, Redis round trips and shard saturation, hot-subject concentration, active-key memory, and telemetry lag",
+        "action": "Scale gateway capacity and repartition independent subjects; review hot-key ownership and any regional budget allocation against the required counting semantics",
+        "impact": "Addresses observed throughput or state pressure while making any exactness, latency, or utilization tradeoff visible."
+      }
+    }
+  ]
+}

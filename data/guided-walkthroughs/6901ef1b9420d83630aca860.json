@@ -1,0 +1,666 @@
+{
+  "problem_id": "6901ef1b9420d83630aca860",
+  "version": "1.0.0-review-draft",
+  "requirementRevision": null,
+  "totalSteps": 35,
+  "phases": [
+    {
+      "name": "Define collection and ingestion",
+      "stepRange": [1, 7],
+      "description": "Preserve metric meaning from distributed agents through a validated, authenticated ingestion boundary."
+    },
+    {
+      "name": "Buffer bursts and aggregate safely",
+      "stepRange": [8, 14],
+      "description": "Decouple producers from consumers, preserve delivery semantics, and control high-cardinality growth."
+    },
+    {
+      "name": "Store, query, and visualize",
+      "stepRange": [15, 26],
+      "description": "Use a time-series hot path and a compressed historical tier, then expose bounded range-and-dimension queries."
+    },
+    {
+      "name": "Evaluate alerts and operate",
+      "stepRange": [27, 35],
+      "description": "Evaluate thresholds against explicit windows, deliver actionable notifications, and scale from observed pressure."
+    }
+  ],
+  "steps": [
+    {
+      "id": "metrics_01",
+      "stepNumber": 1,
+      "phase": "Define collection and ingestion",
+      "title": "Keep the brief and its unknowns visible",
+      "type": "explanation",
+      "content": "The frozen brief requires collection from thousands of distributed servers, counters, gauges and histograms, real-time aggregation and analysis, range-and-dimension queries, threshold alerts, dashboards, billions of data points per day, and historical storage. It also calls for high write throughput, low query latency, burst handling, retention policies, and efficient time-series storage. It does not give a peak ingest rate, latency or freshness objective, cardinality ceiling, retention duration, regional topology, or loss policy. Treat those as workload and product decisions; do not turn the daily volume into a fabricated per-second target."
+    },
+    {
+      "id": "metrics_02",
+      "stepNumber": 2,
+      "phase": "Define collection and ingestion",
+      "title": "Collect at each distributed server",
+      "type": "add_component",
+      "content": "Place a lightweight agent beside each instrumented server. It batches samples, attaches a stable host and metric identity, applies only semantics-safe local aggregation, and uses a bounded local spool when the network is unavailable. Preserve dimensions needed to distinguish hosts or workloads; do not merge away a dimension merely to reduce writes.",
+      "component": {
+        "nodeId": "metrics_agent",
+        "componentType": "monitoring",
+        "label": "Per-host Metrics Agents",
+        "description": "Collect and batch metric samples at distributed hosts",
+        "position": {"x": 0, "y": 300},
+        "properties": {
+          "componentName": "Per-host Metrics Agents",
+          "purpose": "Collect counters, gauges, and histogram observations on thousands of distributed servers; attach stable host and metric dimensions, batch samples, and use bounded local buffering while preserving metric-specific aggregation semantics.",
+          "metrics": true,
+          "alerts": false
+        },
+        "highlightReason": "The existing Monitoring catalog entry explicitly supports metrics collection and represents the per-host telemetry agent without a custom component."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "metrics_03",
+      "stepNumber": 3,
+      "phase": "Define collection and ingestion",
+      "title": "Add the protected ingestion boundary",
+      "type": "add_component",
+      "content": "Terminate agent connections at a horizontally scalable gateway. Authenticate machine identities, validate metric names, timestamps, units, and label shape, and enforce per-client quotas or backpressure so one noisy host cannot consume unbounded shared capacity. The brief does not name a wire protocol or identity provider.",
+      "component": {
+        "nodeId": "metrics_gateway",
+        "componentType": "api-gateway",
+        "label": "Metrics Ingest Gateway",
+        "description": "Authenticated entry point with payload validation and admission control",
+        "position": {"x": 300, "y": 300},
+        "properties": {
+          "componentName": "Metrics Ingest Gateway",
+          "purpose": "Accept authenticated agent batches over an encrypted transport, validate timestamps, units, metric names, and label shape, and apply client-aware admission control so high write throughput and bursts do not overwhelm ingestion.",
+          "inputValidation": true
+        },
+        "highlightReason": "The existing API Gateway provides the supported ingress and input-validation concept; the transport and identity implementation remain replaceable choices."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "metrics_04",
+      "stepNumber": 4,
+      "phase": "Define collection and ingestion",
+      "title": "Send batched telemetry to the gateway",
+      "type": "add_connection",
+      "content": "Use an agent-to-gateway transport that supports authenticated batches, retry with bounded backoff, and explicit rejection or retry responses. Keep retry behavior bounded by the local spool policy so an outage does not create unbounded host disk use.",
+      "connection": {
+        "edgeId": "metrics_agent_gateway",
+        "sourceNodeId": "metrics_agent",
+        "targetNodeId": "metrics_gateway",
+        "connectionType": "http",
+        "label": "Authenticated metric batches",
+        "description": "Batched host telemetry with bounded retry and explicit admission outcomes."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "metrics_05",
+      "stepNumber": 5,
+      "phase": "Define collection and ingestion",
+      "title": "Normalize without erasing metric type",
+      "type": "add_component",
+      "content": "Normalize accepted samples into a versioned internal envelope containing metric identity, dimensions, event time, unit, source, and type-specific payload. Reject malformed data with a reason and bounded diagnostic evidence. Keep counters, gauges, and histogram schemas distinguishable through storage and aggregation.",
+      "component": {
+        "nodeId": "metrics_ingest",
+        "componentType": "backend-server",
+        "label": "Metric Ingestion Service",
+        "description": "Validate, normalize, and hand off typed metric batches",
+        "position": {"x": 600, "y": 300},
+        "properties": {
+          "componentName": "Metric Ingestion Service",
+          "purpose": "Normalize validated batches into a versioned envelope with metric type, name, unit, dimensions, event time, and source; preserve counter, gauge, and histogram semantics, reject malformed samples explicitly, and hand accepted batches to durable buffering."
+        },
+        "highlightReason": "The existing Backend Server represents the ingestion logic and requires no metrics-specific catalog extension."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:1"]
+    },
+    {
+      "id": "metrics_06",
+      "stepNumber": 6,
+      "phase": "Define collection and ingestion",
+      "title": "Route validated batches into ingestion",
+      "type": "add_connection",
+      "content": "Forward only validated, identity-scoped batches. Make accepted, retryable, and rejected outcomes unambiguous so agents do not silently drop data or retry permanent schema errors forever.",
+      "connection": {
+        "edgeId": "metrics_gateway_ingest",
+        "sourceNodeId": "metrics_gateway",
+        "targetNodeId": "metrics_ingest",
+        "connectionType": "http",
+        "label": "Validated batch handoff",
+        "description": "Gateway admission and identity context accompany each batch."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "metrics_07",
+      "stepNumber": 7,
+      "phase": "Define collection and ingestion",
+      "title": "Choose type-aware aggregation rules",
+      "type": "decision_point",
+      "content": "Define aggregation per metric type before combining samples. Counters need reset-aware deltas or rates; gauges need an explicit sample or time-weighted interpretation; histogram buckets can be merged only when their schema is compatible, and quantiles must not be averaged as if they were additive. Keep event time and schema version so late samples and schema changes can be handled deliberately.",
+      "decision": {
+        "question": "How should collection and ingestion aggregate the supported metric types?",
+        "chosen": "Use type-specific, schema-aware aggregation and preserve event time",
+        "chosenReason": "It supports collection-time reduction where valid while keeping counter resets, gauge meaning, and histogram bucket compatibility observable.",
+        "alternatives": [
+          {"option": "Treat every sample as an interchangeable number", "tradeoff": "Produces incorrect rates, gauge interpretations, and histogram quantiles."},
+          {"option": "Store only raw samples and never aggregate", "tradeoff": "Preserves detail but increases write, query, and storage pressure for the stated scale."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "metrics_ingest",
+        "properties": {
+          "purpose": "Normalize validated batches into a versioned envelope with metric type, name, unit, dimensions, event time, and source; preserve counter reset semantics, explicit gauge interpretation, compatible histogram bucket schemas, and late-sample metadata; reject malformed samples explicitly and hand accepted batches to durable buffering."
+        }
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-constraint:5"]
+    },
+    {
+      "id": "metrics_08",
+      "stepNumber": 8,
+      "phase": "Buffer bursts and aggregate safely",
+      "title": "Add a durable burst buffer",
+      "type": "add_component",
+      "content": "Put a durable broker between synchronous ingestion and downstream aggregation. It absorbs short bursts and consumer restarts, permits independent consumer scaling, and exposes lag as a first-class signal. Retention and producer backpressure must bound how long the broker can absorb a sustained overload.",
+      "component": {
+        "nodeId": "metrics_broker",
+        "componentType": "message-broker",
+        "label": "Durable Metrics Stream",
+        "description": "Decouple ingestion from aggregation and absorb bounded bursts",
+        "position": {"x": 900, "y": 300},
+        "properties": {
+          "componentName": "Durable Metrics Stream",
+          "purpose": "Persist accepted metric batches between ingestion and consumers, absorb bounded bursts, allow replay after consumer failure, and expose lag for backpressure and scaling decisions; broker retention is an operational buffer policy, not historical metrics retention.",
+          "durable": true
+        },
+        "highlightReason": "The existing Message Broker catalog entry models durable asynchronous buffering and decoupled consumers."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "metrics_09",
+      "stepNumber": 9,
+      "phase": "Buffer bursts and aggregate safely",
+      "title": "Publish normalized batches to the stream",
+      "type": "add_connection",
+      "content": "Acknowledge ingestion only at the durability point chosen for the product's loss policy. Carry stable batch or sample identity so a consumer replay can avoid double-counting; document whether the service promises retryable acceptance or stronger delivery semantics.",
+      "connection": {
+        "edgeId": "metrics_ingest_broker",
+        "sourceNodeId": "metrics_ingest",
+        "targetNodeId": "metrics_broker",
+        "connectionType": "message-queue",
+        "label": "Durable batch publish",
+        "description": "Typed metric batches enter the replayable stream with stable identity."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:3"]
+    },
+    {
+      "id": "metrics_10",
+      "stepNumber": 10,
+      "phase": "Buffer bursts and aggregate safely",
+      "title": "Make replay and backpressure explicit",
+      "type": "decision_point",
+      "content": "Assume delivery can be repeated after a timeout or consumer restart. Make aggregation idempotent for a stable series, time window, and source sequence, or retain enough identity to detect duplicates. Bound producer retries and local spooling; when the buffer remains pressured, shed only according to an explicit metric-priority policy and report what was dropped.",
+      "decision": {
+        "question": "What happens when a consumer restarts or burst traffic outlasts available buffer capacity?",
+        "chosen": "Replay durable batches with duplicate-safe aggregation and bounded backpressure",
+        "chosenReason": "The design can recover short interruptions without silently double-counting, while a visible overload policy prevents an unbounded queue from hiding sustained capacity shortfall.",
+        "alternatives": [
+          {"option": "Acknowledge before durable buffering", "tradeoff": "A process or broker failure can lose samples already reported as accepted."},
+          {"option": "Retry indefinitely without backpressure", "tradeoff": "Can exhaust host spools or shared broker capacity and amplify an outage."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "metrics_broker",
+        "properties": {
+          "purpose": "Persist accepted metric batches between ingestion and consumers, absorb bounded bursts, and replay after consumer failure; carry stable batch identity for duplicate-safe aggregation, expose lag, and apply bounded producer backpressure when sustained load exceeds consumption. Broker retention is an operational buffer policy, not historical metrics retention."
+        }
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "metrics_11",
+      "stepNumber": 11,
+      "phase": "Buffer bursts and aggregate safely",
+      "title": "Aggregate and analyze the stream",
+      "type": "add_component",
+      "content": "Consume partitioned batches, maintain type-aware window state, compute rollups needed by common dashboards and alerts, and emit corrected aggregates when permitted late data arrives. Keep raw or sufficiently detailed data for questions that cannot be answered from a rollup.",
+      "component": {
+        "nodeId": "metrics_aggregator",
+        "componentType": "stream-processor",
+        "label": "Streaming Aggregator",
+        "description": "Real-time, type-aware aggregation and rollup generation",
+        "position": {"x": 1200, "y": 300},
+        "properties": {
+          "componentName": "Streaming Aggregator",
+          "purpose": "Consume metric batches, maintain reset-aware counter and schema-compatible histogram windows, apply the declared gauge interpretation, calculate real-time rollups for analysis, and handle permitted late samples without merging incompatible series."
+        },
+        "highlightReason": "The existing Stream Processor catalog entry represents stateful streaming aggregation without a custom metrics node."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "metrics_12",
+      "stepNumber": 12,
+      "phase": "Buffer bursts and aggregate safely",
+      "title": "Consume buffered batches continuously",
+      "type": "add_connection",
+      "content": "Partition work by a stable series or source key that keeps related counter resets and histogram schemas together. Monitor consumer lag and rebalance behavior; a hot key or skewed partition can bottleneck the pipeline even when average capacity appears available.",
+      "connection": {
+        "edgeId": "metrics_broker_aggregator",
+        "sourceNodeId": "metrics_broker",
+        "targetNodeId": "metrics_aggregator",
+        "connectionType": "message-queue",
+        "label": "Replayable metric stream",
+        "description": "Partitioned batches feed parallel aggregation while preserving per-series ordering where needed."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "metrics_13",
+      "stepNumber": 13,
+      "phase": "Buffer bursts and aggregate safely",
+      "title": "Control high-cardinality dimensions deliberately",
+      "type": "decision_point",
+      "content": "Dimensions enable filtering but unbounded labels such as request IDs can create a distinct series for every event. Define allowed dimensions and cardinality ownership, aggregate or sample only the high-cardinality metrics whose semantics tolerate it, and preserve unsampled critical signals. Record the sampling or rollup policy so users can interpret the result.",
+      "decision": {
+        "question": "How should the pipeline control high-cardinality metrics?",
+        "chosen": "Apply dimension allowlists and policy-driven aggregation or sampling to selected series",
+        "chosenReason": "It limits series growth while keeping sampling scoped and visible; counters, gauges, and histogram populations must not be treated as interchangeable samples.",
+        "alternatives": [
+          {"option": "Accept every label value as a new series", "tradeoff": "Series indexes, memory, write amplification, and query fanout can grow without a useful bound."},
+          {"option": "Sample all metrics uniformly", "tradeoff": "Can erase rare events or distort operationally important counters and histogram distributions."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "metrics_aggregator",
+        "properties": {
+          "purpose": "Consume metric batches, maintain reset-aware counter and schema-compatible histogram windows, apply the declared gauge interpretation, calculate real-time rollups, and enforce dimension allowlists; aggregate or sample only policy-selected high-cardinality series with provenance, preserving critical unsampled signals and compatible series identity."
+        }
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:7", "legacy-constraint:5"]
+    },
+    {
+      "id": "metrics_14",
+      "stepNumber": 14,
+      "phase": "Buffer bursts and aggregate safely",
+      "title": "Scale from observed ingestion pressure",
+      "type": "scale_trigger",
+      "content": "Treat the daily point volume as a scale signal, not a uniform-rate promise. Correlate broker lag, producer backpressure, rejected or sampled points, partition skew, and aggregator state size. A sustained bottleneck can trigger repartitioning or more consumer capacity; each choice changes ordering, state movement, or sampling fidelity, so base it on the measured workload.",
+      "scaleTrigger": {
+        "metric": "Broker lag, producer backpressure, partition skew, rejected or sampled points, and aggregation state size",
+        "action": "Locate the hot partition or constrained stage, then adjust partitioning, consumer capacity, or the approved cardinality policy",
+        "impact": "More parallel capacity can reduce backlog but adds coordination and state movement; sampling reduces work but changes data fidelity."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "metrics_15",
+      "stepNumber": 15,
+      "phase": "Store, query, and visualize",
+      "title": "Add a time-series hot store",
+      "type": "add_component",
+      "content": "Store recent samples and query-serving rollups in a time-series engine. Partition or shard by time and series identity, index only useful dimensions, and use compressed chunks or blocks. Keep the hot retention boundary configurable because the brief names retention policies but supplies no duration.",
+      "component": {
+        "nodeId": "metrics_tsdb",
+        "componentType": "database",
+        "label": "Time-series Hot Store",
+        "description": "Recent samples and indexed, compressed query-serving rollups",
+        "position": {"x": 1500, "y": 300},
+        "properties": {
+          "componentName": "Time-series Hot Store",
+          "purpose": "Persist recent typed samples and query-serving rollups in time-partitioned, compressed series storage; index approved dimensions for bounded time-range queries and expire hot data according to a configurable retention policy.",
+          "type": "Time-Series"
+        },
+        "highlightReason": "The existing Database component has a supported Time-Series type and can represent Prometheus-, InfluxDB-, or equivalent storage without fixing a vendor."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "metrics_16",
+      "stepNumber": 16,
+      "phase": "Store, query, and visualize",
+      "title": "Write typed samples and rollups to the hot store",
+      "type": "add_connection",
+      "content": "Write idempotently by series identity, event time, and aggregation version. Keep raw-versus-rollup provenance and histogram schema boundaries so a query can explain whether it returned observed samples or a derived representation.",
+      "connection": {
+        "edgeId": "metrics_aggregator_tsdb",
+        "sourceNodeId": "metrics_aggregator",
+        "targetNodeId": "metrics_tsdb",
+        "connectionType": "data-flow",
+        "label": "Typed samples + query rollups",
+        "description": "Compressed time-series writes retain type, event time, dimensions, and rollup provenance."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "metrics_17",
+      "stepNumber": 17,
+      "phase": "Store, query, and visualize",
+      "title": "Add a vendor-neutral historical tier",
+      "type": "add_component",
+      "content": "Keep historical blocks or rollups in object storage with compression and lifecycle controls. Choose whether to retain raw points, downsampled series, or both from query needs, compliance obligations, and cost; the brief does not prescribe a storage provider or retention duration.",
+      "component": {
+        "nodeId": "metrics_archive",
+        "componentType": "object-storage",
+        "label": "Historical Metrics Archive",
+        "description": "Compressed historical blocks with policy-managed lifecycle",
+        "position": {"x": 1800, "y": 300},
+        "properties": {
+          "componentName": "Historical Metrics Archive",
+          "purpose": "Store compressed historical metric blocks or rollups using policy-managed lifecycle; retain raw or downsampled data according to approved query, retention, and compliance needs without fixing a provider or duration not stated in the brief."
+        },
+        "highlightReason": "The existing Object Storage catalog entry represents the historical archive; its provider is intentionally left open."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "metrics_18",
+      "stepNumber": 18,
+      "phase": "Store, query, and visualize",
+      "title": "Archive compressed historical data",
+      "type": "add_connection",
+      "content": "Export immutable, time-partitioned blocks with a manifest that identifies covered series, time ranges, schema versions, and rollup level. Make archive creation retry-safe and verify that lifecycle expiration does not remove data still required by the approved retention policy.",
+      "connection": {
+        "edgeId": "metrics_aggregator_archive",
+        "sourceNodeId": "metrics_aggregator",
+        "targetNodeId": "metrics_archive",
+        "connectionType": "data-flow",
+        "label": "Compressed historical blocks",
+        "description": "Validated, partitioned history moves to lower-cost storage with schema and range metadata."
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "metrics_19",
+      "stepNumber": 19,
+      "phase": "Store, query, and visualize",
+      "title": "Choose hot and historical retention policies",
+      "type": "decision_point",
+      "content": "Separate broker replay retention from metrics retention. Define retention by metric class and data tier, including whether raw points are downsampled before archival, how late corrections are handled, and which policies govern deletion. Keep durations configurable until owners supply the required history and any compliance constraints.",
+      "decision": {
+        "question": "How should raw and aggregated data move across retention tiers?",
+        "chosen": "Use configurable per-class hot retention and compressed historical blocks with explicit lifecycle policy",
+        "chosenReason": "It bounds hot-store pressure and supports long-term queries while leaving retention duration and raw-versus-rollup requirements for product and compliance owners to set.",
+        "alternatives": [
+          {"option": "Keep every raw point in the hot tier indefinitely", "tradeoff": "Makes storage and index cost grow with the full history and competes with recent writes and queries."},
+          {"option": "Discard raw points immediately after rollup", "tradeoff": "Prevents later fine-grained investigation or recomputation when the chosen rollup loses detail."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "metrics_tsdb",
+        "properties": {
+          "purpose": "Persist recent typed samples and query-serving rollups in time-partitioned, compressed series storage; index approved dimensions for bounded time-range queries, apply configurable per-class hot retention, and hand off history only after archive verification and lifecycle policy checks."
+        }
+      },
+      "requirementIds": ["legacy-requirement:8", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "metrics_20",
+      "stepNumber": 20,
+      "phase": "Store, query, and visualize",
+      "title": "Add a bounded metrics query service",
+      "type": "add_component",
+      "content": "Expose queries by explicit time range, metric name, and approved dimensions. Validate range and filter shape, cap result cardinality and fanout according to a policy that still needs workload input, and select raw data or a compatible rollup without silently changing histogram meaning.",
+      "component": {
+        "nodeId": "metrics_query",
+        "componentType": "backend-server",
+        "label": "Metrics Query Service",
+        "description": "Validate range-and-dimension queries across hot and historical tiers",
+        "position": {"x": 1200, "y": 0},
+        "properties": {
+          "componentName": "Metrics Query Service",
+          "purpose": "Validate metric name, explicit time range, and approved dimension filters; choose compatible raw data or rollups from hot and historical tiers, bound series fanout, and return data-quality and sampling provenance with results."
+        },
+        "highlightReason": "The existing Backend Server catalog entry represents query API and planning logic using supported component properties."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:2"]
+    },
+    {
+      "id": "metrics_21",
+      "stepNumber": 21,
+      "phase": "Store, query, and visualize",
+      "title": "Read recent ranges from the time-series store",
+      "type": "add_connection",
+      "content": "Push the validated time range and dimension predicates into the hot store so it can prune time partitions and series early. Return only the requested aggregation level and identify whether data is raw, rolled up, sampled, or incomplete.",
+      "connection": {
+        "edgeId": "metrics_query_tsdb",
+        "sourceNodeId": "metrics_query",
+        "targetNodeId": "metrics_tsdb",
+        "connectionType": "database-connection",
+        "label": "Recent range + dimension read",
+        "description": "The query plan prunes time partitions and filters approved series in the hot tier."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "metrics_22",
+      "stepNumber": 22,
+      "phase": "Store, query, and visualize",
+      "title": "Read older ranges from the archive",
+      "type": "add_connection",
+      "content": "When a requested range crosses the hot retention boundary, fetch only matching archived blocks and merge compatible rollups. Older queries may have different resolution or latency; disclose that tier tradeoff rather than implying historical data has the same detail as hot samples.",
+      "connection": {
+        "edgeId": "metrics_query_archive",
+        "sourceNodeId": "metrics_query",
+        "targetNodeId": "metrics_archive",
+        "connectionType": "api-call",
+        "label": "Historical block lookup",
+        "description": "Range and dimension predicates select compressed historical blocks and their declared resolution."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:4"]
+    },
+    {
+      "id": "metrics_23",
+      "stepNumber": 23,
+      "phase": "Store, query, and visualize",
+      "title": "Add dashboards for metric exploration",
+      "type": "add_component",
+      "content": "Render time-range charts, dimension filters, histogram distributions, and dashboard panels from the query API. Show units, aggregation interval, sampling or rollup state, and missing-data gaps so visualizations do not imply precision the stored data cannot support.",
+      "component": {
+        "nodeId": "metrics_dashboard",
+        "componentType": "web-app",
+        "label": "Metrics Dashboards",
+        "description": "Time-range charts, dimensions, and histogram views",
+        "position": {"x": 900, "y": 0},
+        "properties": {
+          "componentName": "Metrics Dashboards",
+          "purpose": "Render time-range charts, approved dimension filters, counter rates, gauge trends, histogram distributions, and dashboard panels through the query API; label units, rollup resolution, sampling, and missing-data gaps."
+        },
+        "highlightReason": "The existing Web App catalog entry covers dashboard visualization; no dashboard-specific component is needed."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:2"]
+    },
+    {
+      "id": "metrics_24",
+      "stepNumber": 24,
+      "phase": "Store, query, and visualize",
+      "title": "Send dashboard queries through the API",
+      "type": "add_connection",
+      "content": "Keep dashboards as clients of the query service rather than exposing storage credentials or engine-specific query syntax to browsers. Apply the same time-range and dimension limits to interactive charts and saved panels.",
+      "connection": {
+        "edgeId": "metrics_dashboard_query",
+        "sourceNodeId": "metrics_dashboard",
+        "targetNodeId": "metrics_query",
+        "connectionType": "http",
+        "label": "Dashboard range queries",
+        "description": "Charts and saved panels use the shared validated query contract."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:2"]
+    },
+    {
+      "id": "metrics_25",
+      "stepNumber": 25,
+      "phase": "Store, query, and visualize",
+      "title": "Make dimension queries safe and predictable",
+      "type": "explanation",
+      "content": "A dimension is useful only when its values are bounded, governed, and indexed or otherwise efficient to filter. Reject or warn on unapproved labels, cap broad queries according to an agreed product policy, and separate a fast dashboard rollup from an ad hoc raw-data exploration path. The brief gives no numeric latency objective or dimension budget."
+    },
+    {
+      "id": "metrics_26",
+      "stepNumber": 26,
+      "phase": "Store, query, and visualize",
+      "title": "Scale the read path from query evidence",
+      "type": "scale_trigger",
+      "content": "Observe query latency distributions, series fanout, partition-pruning effectiveness, hot-store saturation, archive reads, rollup use, and dashboard freshness. If common ranges repeatedly scan raw history, add or refine rollups; if a tier is saturated, change partitioning or capacity based on the observed query mix. Agree on latency and freshness objectives before treating any threshold as a service target.",
+      "scaleTrigger": {
+        "metric": "Query latency distribution, series fanout, partition pruning, tier saturation, rollup use, and dashboard freshness",
+        "action": "Optimize the measured hot query path with dimension indexes, compatible rollups, partition changes, or tier capacity",
+        "impact": "Rollups can reduce scan work but consume storage and reduce resolution; indexes can improve selected filters while increasing write and storage cost."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:6", "legacy-constraint:2", "legacy-constraint:5"]
+    },
+    {
+      "id": "metrics_27",
+      "stepNumber": 27,
+      "phase": "Evaluate alerts and operate",
+      "title": "Add a threshold evaluator",
+      "type": "add_component",
+      "content": "Evaluate configured thresholds against typed series or approved aggregates over explicit windows. Track alert state, deduplicate repeated evaluations, and define how late samples, missing data, counter resets, and histogram-derived values affect firing and recovery.",
+      "component": {
+        "nodeId": "metrics_alerts",
+        "componentType": "monitoring",
+        "label": "Threshold Alert Evaluator",
+        "description": "Windowed threshold evaluation with explicit alert state",
+        "position": {"x": 1500, "y": 600},
+        "properties": {
+          "componentName": "Threshold Alert Evaluator",
+          "purpose": "Evaluate configured thresholds over explicit windows using typed metrics or approved aggregates; track firing and recovery state, deduplicate repeated evaluations, and define behavior for late samples, missing data, resets, and histogram-derived values.",
+          "metrics": true,
+          "alerts": true
+        },
+        "highlightReason": "The existing Monitoring catalog entry supports threshold alerting as well as metrics, so no custom alert component is needed."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:2"]
+    },
+    {
+      "id": "metrics_28",
+      "stepNumber": 28,
+      "phase": "Evaluate alerts and operate",
+      "title": "Evaluate streaming aggregates promptly",
+      "type": "add_connection",
+      "content": "Feed the alert evaluator compatible aggregate updates with event-time and completeness metadata. If an alert depends on a rollup, ensure the rollup window and alert window agree; avoid claiming a real-time guarantee when late data or backpressure delays evaluation.",
+      "connection": {
+        "edgeId": "metrics_aggregator_alerts",
+        "sourceNodeId": "metrics_aggregator",
+        "targetNodeId": "metrics_alerts",
+        "connectionType": "data-flow",
+        "label": "Windowed metric updates",
+        "description": "Typed aggregates and event-time completeness feed threshold evaluation."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:5", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "metrics_29",
+      "stepNumber": 29,
+      "phase": "Evaluate alerts and operate",
+      "title": "Read stored context for alert evaluation",
+      "type": "add_connection",
+      "content": "Use the hot store for alert windows that need persisted context or recovery after evaluator restart. Persist rule version and evaluation watermark so a restart can resume without silently re-firing every historical point.",
+      "connection": {
+        "edgeId": "metrics_alerts_tsdb",
+        "sourceNodeId": "metrics_alerts",
+        "targetNodeId": "metrics_tsdb",
+        "connectionType": "database-connection",
+        "label": "Alert window + checkpoint reads",
+        "description": "The evaluator reloads needed series context and its persisted evaluation position."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:2"]
+    },
+    {
+      "id": "metrics_30",
+      "stepNumber": 30,
+      "phase": "Evaluate alerts and operate",
+      "title": "Add notification delivery",
+      "type": "add_component",
+      "content": "Deliver state transitions to configured notification destinations with grouping, deduplication, retry, and delivery status. Keep notification outages from blocking ingestion or aggregation, and do not emit a resolved event merely because the evaluator lost its input.",
+      "component": {
+        "nodeId": "metrics_notifications",
+        "componentType": "notification-service",
+        "label": "Alert Notification Service",
+        "description": "Grouped and retryable alert state delivery",
+        "position": {"x": 1800, "y": 600},
+        "properties": {
+          "componentName": "Alert Notification Service",
+          "purpose": "Deliver deduplicated alert state transitions to configured destinations with grouping, retry, and delivery status; isolate notification failures from metric ingestion and aggregation and never infer recovery from missing input."
+        },
+        "highlightReason": "The existing Notification Service catalog entry handles delivery without fixing a notification channel not specified by the brief."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:2"]
+    },
+    {
+      "id": "metrics_31",
+      "stepNumber": 31,
+      "phase": "Evaluate alerts and operate",
+      "title": "Route alert transitions asynchronously",
+      "type": "add_connection",
+      "content": "Send alert transitions with a stable alert and rule identity. Retry transient delivery failures and expose pending or failed notification state for operators; keep delivery retries from re-running metric aggregation.",
+      "connection": {
+        "edgeId": "metrics_alerts_notifications",
+        "sourceNodeId": "metrics_alerts",
+        "targetNodeId": "metrics_notifications",
+        "connectionType": "api-call",
+        "label": "Alert state delivery",
+        "description": "Stable firing and recovery transitions are delivered independently of metric processing."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:2"]
+    },
+    {
+      "id": "metrics_32",
+      "stepNumber": 32,
+      "phase": "Evaluate alerts and operate",
+      "title": "Choose threshold windows and missing-data behavior",
+      "type": "decision_point",
+      "content": "Make threshold expression, aggregation, evaluation window, and recovery behavior part of a versioned rule. Distinguish a healthy below-threshold value from absent or delayed data. Use hysteresis or a pending state where it prevents flapping, but leave window lengths and thresholds to service owners because the brief sets no values.",
+      "decision": {
+        "question": "How should threshold rules handle noisy values, delayed samples, and missing data?",
+        "chosen": "Evaluate versioned rules over explicit windows with separate firing, pending, no-data, and recovery states",
+        "chosenReason": "Operators can distinguish a real threshold breach from input loss or late data, while owners retain control of thresholds and windows.",
+        "alternatives": [
+          {"option": "Fire on each individual sample", "tradeoff": "Transient noise can create alert flapping and duplicate notifications."},
+          {"option": "Treat missing input as a healthy value", "tradeoff": "An ingestion or aggregation outage can hide a real incident."}
+        ]
+      },
+      "componentUpdate": {
+        "nodeId": "metrics_alerts",
+        "properties": {
+          "purpose": "Evaluate versioned threshold rules over explicit windows using typed metrics or approved aggregates; track pending, firing, no-data, and recovery state, deduplicate repeated evaluations, and define behavior for late samples, missing data, resets, and histogram-derived values. Thresholds and window lengths are owner-configured because the brief supplies no values."
+        }
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:2"]
+    },
+    {
+      "id": "metrics_33",
+      "stepNumber": 33,
+      "phase": "Evaluate alerts and operate",
+      "title": "Expose freshness and data-quality state",
+      "type": "explanation",
+      "content": "Monitor accepted and rejected points, duplicate suppression, broker lag, aggregation watermark, late-sample corrections, storage write errors, archive completion, query latency, and notification delivery. Show data gaps and freshness beside dashboards and alerts; otherwise a quiet graph or cleared alert can be mistaken for healthy systems. Agree on service objectives with owners before turning any observed value into a pass/fail target."
+    },
+    {
+      "id": "metrics_34",
+      "stepNumber": 34,
+      "phase": "Evaluate alerts and operate",
+      "title": "Scale on the limiting stage, not average volume",
+      "type": "scale_trigger",
+      "content": "Compare per-partition ingest and consumer pressure with query and archive behavior. Bursty traffic, hot dimensions, expensive histogram aggregation, or alert fanout can create different bottlenecks. Scale or reshape only the constrained stage, then re-check ordering, duplicate handling, data fidelity, and query resolution.",
+      "scaleTrigger": {
+        "metric": "Per-partition ingest rate, broker lag, series cardinality, aggregation state, query fanout, archive backlog, and notification backlog",
+        "action": "Scale or repartition the measured bottleneck and validate the resulting data and alert semantics",
+        "impact": "Targeted changes avoid adding cost everywhere, but repartitioning and sampling can affect ordering, state, fidelity, or resolution."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:1", "legacy-constraint:3"]
+    },
+    {
+      "id": "metrics_35",
+      "stepNumber": 35,
+      "phase": "Evaluate alerts and operate",
+      "title": "Close with explicit assumptions and decisions",
+      "type": "explanation",
+      "content": "Assumptions: distributed agents can batch and retry, a durable stream can be operated, and the selected time-series engine supports the required typed writes and range queries. The brief does not select a vendor, protocol, peak rate, latency or freshness objective, cardinality limit, alert channel, or retention duration. Validate those with workload owners before sizing partitions, indexes, storage, sampling, or service objectives. The main tradeoff is reduced write and query cost through aggregation, rollups, compression, and selective sampling versus preserving raw detail and resolution."
+    }
+  ]
+}

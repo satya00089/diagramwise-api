@@ -1,9 +1,11 @@
 """Loopback-only E2E harness: real product routers/service, isolated storage/auth.
 
-Only the configured AI provider may be called. No AWS resource is constructed.
+Only the configured AI provider may be called in live-provider mode. Local-only
+mode serves review drafts with a forced provider outage. No AWS resource is constructed.
 This harness is not imported by the deployed application. Draft catalog specs
-are test fixtures, not human approval or publication. Require explicit opt-in:
-E2E_LIVE_PROVIDER=1 python -m uvicorn scripts.e2e_assessment_app:app --host 127.0.0.1 --port 8010
+are not injected into the problem brief; the harness serves only the stored
+problem fields. Require explicit opt-in:
+E2E_LIVE_PROVIDER=1 or E2E_LOCAL_ONLY=1 python -m uvicorn scripts.e2e_assessment_app:app --host 127.0.0.1 --port 8010
 """
 
 from copy import deepcopy
@@ -11,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
 from unittest.mock import patch
+import base64
 import json
 import os
 
@@ -18,8 +21,10 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-if os.environ.get("E2E_LIVE_PROVIDER") != "1":
-    raise RuntimeError("Explicit E2E_LIVE_PROVIDER=1 required; this is a local test harness")
+LOCAL_ONLY = os.environ.get("E2E_LOCAL_ONLY") == "1"
+LIVE_PROVIDER = os.environ.get("E2E_LIVE_PROVIDER") == "1"
+if LOCAL_ONLY == LIVE_PROVIDER:
+    raise RuntimeError("Choose exactly one E2E_LOCAL_ONLY=1 or E2E_LIVE_PROVIDER=1")
 
 ROOT = Path(__file__).resolve().parents[1]
 RUN_DIR = Path(os.environ.get("E2E_RUN_DIR", str(ROOT / "data/e2e-20261010-01"))).resolve()
@@ -51,17 +56,20 @@ from app.utils.config import get_settings
 
 problem_rows = json.loads((ROOT / "tests/fixtures/walkthroughs/problems.json").read_text(encoding="utf-8"))
 problem_data = {row["id"]: row for row in problem_rows}
-draft = json.loads((ROOT / "docs/requirements-catalog-draft.json").read_text(encoding="utf-8"))
-for change in draft["changes"]:
-    problem_data[change["id"]]["requirementSpec"] = change["proposedSpec"]
 guide_data = {path.stem: json.loads(path.read_text(encoding="utf-8"))
               for path in (ROOT / "data/assessment-reference-candidates/walkthroughs").glob("*.json")}
+if LOCAL_ONLY or LIVE_PROVIDER:
+    guide_data.update({path.stem: json.loads(path.read_text(encoding="utf-8"))
+                       for path in (ROOT / "data/guided-walkthroughs").glob("*.json")})
+    for problem_id in guide_data:
+        if problem_id in problem_data:
+            problem_data[problem_id]["has_guided_walkthrough"] = True
 
 lock = RLock()
 events = []
 assessment_inputs = []
 assessment_outputs = []
-mode = {"outage": False}
+mode = {"outage": LOCAL_ONLY}
 
 
 class MemoryAttempts:
@@ -121,12 +129,14 @@ class OutageLLM:
 
 
 def assessor_service():
-    return AIAssessorService(settings=settings, llm=OutageLLM() if mode["outage"] else None)
+    return AIAssessorService(settings=settings, llm=OutageLLM() if LOCAL_ONLY or mode["outage"] else None)
 
 
 interview.AIAssessorService = assessor_service
 app = FastAPI(title="Local assessment E2E (isolated storage/auth)")
-app.add_middleware(CORSMiddleware, allow_origins=["http://127.0.0.1:5181"],
+app.add_middleware(CORSMiddleware, allow_origins=["http://127.0.0.1:5181", "http://127.0.0.1:5182",
+                                                   "http://127.0.0.1:5183", "http://127.0.0.1:5190",
+                                                   "http://127.0.0.1:5191"],
                    allow_methods=["*"], allow_headers=["*"], allow_credentials=True)
 app.dependency_overrides[get_current_user] = lambda: {"user_id": "e2e-learner", "email": "e2e@example.invalid"}
 app.dependency_overrides[assessment.get_problem_lookup] = lambda: service.get_problem_by_id
@@ -136,6 +146,9 @@ app.dependency_overrides[assessment.get_assessor_service] = assessor_service
 def snapshot():
     return {"scope": "local-only", "awsWrites": 0, "authentication": "isolated synthetic user",
             "storage": "in-memory adapter; real attempt service", "humanLabelsApproved": False,
+            "problemBriefSource": "frozen catalog fields; no proposed specs injected",
+            "problemRecordsWithRequirementSpec": sum(1 for row in problem_data.values()
+                                                     if row.get("requirementSpec")),
             "provider": settings.llm_provider, "outage": mode["outage"], "events": events,
             "assessmentInputs": assessment_inputs, "assessmentOutputs": assessment_outputs,
             "attempts": convert_decimal_to_float(list(storage.items.values()))}
@@ -145,7 +158,22 @@ def snapshot():
 async def record_public_test_requests(request: Request, call_next):
     started = datetime.now(timezone.utc)
     if request.url.path == "/api/v1/assess" and request.method == "POST":
-        assessment_inputs.append(await request.json())
+        # Buffer and replay the body. Reading request.json() consumes the ASGI
+        # receive channel; without replaying it, FastAPI's downstream body
+        # parser can hang and the browser reports a misleading "Failed to
+        # fetch" before the assessment route is reached.
+        body = await request.body()
+        assessment_inputs.append(json.loads(body))
+        body_sent = False
+
+        async def replay_body():
+            nonlocal body_sent
+            if body_sent:
+                return {"type": "http.request", "body": b"", "more_body": False}
+            body_sent = True
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        request._receive = replay_body
     response = await call_next(request)
     # CORS preflight returns plain "OK", not an assessment JSON object.
     # Observe only actual assessment responses, leaving OPTIONS untouched.
@@ -173,6 +201,8 @@ def test_state():
 def test_mode(value: dict):
     if set(value) != {"outage"} or not isinstance(value["outage"], bool):
         raise HTTPException(400, "Only the explicit boolean outage flag is accepted")
+    if LOCAL_ONLY and not value["outage"]:
+        raise HTTPException(400, "Local-only review cannot call an AI provider")
     mode.update(value)
     return mode
 
@@ -181,6 +211,19 @@ def test_mode(value: dict):
 def local_user():
     return {"id": "e2e-learner", "email": "e2e@example.invalid", "name": "E2E Learner",
             "createdAt": "2026-10-10T00:00:00Z", "updatedAt": "2026-10-10T00:00:00Z"}
+
+
+@app.post("/api/v1/auth/login")
+def local_login(credentials: dict):
+    if credentials != {"email": "e2e@example.invalid", "password": "local-e2e-only"}:
+        raise HTTPException(401, "Invalid local E2E credentials")
+
+    def encode(payload: dict) -> str:
+        raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+    token = f"{encode({'alg': 'none', 'typ': 'JWT'})}.{encode({'sub': 'e2e-learner', 'exp': 4102444800})}."
+    return {"user": local_user(), "token": token}
 
 
 @app.get("/api/v1/auth/me/preferences")
@@ -211,7 +254,10 @@ def local_analytics():
 
 @app.get("/health")
 def health():
-    return {"status": "ready", "scope": "loopback-only", "guides": len(guide_data), "awsWrites": 0}
+    return {"status": "ready", "scope": "loopback-only", "guides": len(guide_data), "awsWrites": 0,
+            "problemBriefSource": "frozen catalog fields; no proposed specs injected",
+            "problemRecordsWithRequirementSpec": sum(1 for row in problem_data.values()
+                                                     if row.get("requirementSpec"))}
 
 
 for module in (problems, walkthroughs, assessment, interview, attempts):

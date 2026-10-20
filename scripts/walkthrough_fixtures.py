@@ -19,7 +19,21 @@ SEMANTIC_TYPES = {
     "message-broker", "queue", "cdn", "monitoring", "analytics", "external-api",
     "storage", "security", "custom",
 }
-TYPE_ALIASES = {"object-storage": "storage"}
+TYPE_ALIASES = {
+    "object-storage": "storage",
+    "web-app": "frontend",
+    "mobile-app": "frontend",
+    "desktop-app": "frontend",
+    "backend-server": "backend",
+    "auth-service": "security",
+    "loadbalancer": "load-balancer",
+    "processing-worker": "backend",
+    "recommendation-service": "backend",
+    "payment-service": "backend",
+    "search-engine": "backend",
+    "notification-service": "backend",
+    "stream-processor": "analytics",
+}
 LAYOUT_FIELDS = {"position", "positionAbsolute", "width", "height", "selected", "dragging",
                  "measured", "icon", "iconUrl", "style", "className", "zIndex"}
 

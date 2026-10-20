@@ -1,0 +1,947 @@
+{
+  "problem_id": "6901ef1b9420d83630aca85c",
+  "version": "1.0.0-review-draft",
+  "requirementRevision": null,
+  "totalSteps": 52,
+  "phases": [
+    {
+      "name": "Scope the product and establish identity",
+      "stepRange": [1, 9],
+      "description": "Translate the stated social features into an API boundary and an authoritative user and follow graph, while recording unspecified service targets as open decisions."
+    },
+    {
+      "name": "Publish and deliver media",
+      "stepRange": [10, 22],
+      "description": "Keep media objects separate from post metadata, accept resilient uploads, process reusable renditions, and serve them through a CDN."
+    },
+    {
+      "name": "Build feeds, stories, and discovery",
+      "stepRange": [23, 42],
+      "description": "Use events and cached feed materializations for common traffic, preserve a read path for celebrity authors, expire stories by time, and index searchable profiles and hashtags."
+    },
+    {
+      "name": "Deliver messages and notifications; revisit scale",
+      "stepRange": [43, 52],
+      "description": "Persist direct messages, deliver interaction events asynchronously, and state the fan-out and consistency choices without inventing service-level numbers."
+    }
+  ],
+  "steps": [
+    {
+      "id": "ig_01",
+      "stepNumber": 1,
+      "phase": "Scope the product and establish identity",
+      "title": "Read the brief as written",
+      "type": "explanation",
+      "content": "The requested product uploads and shares photos and videos, supports follows, likes, comments, a personalized feed, stories with 24-hour expiry, user and hashtag search, direct messages, and billions of photos. The constraints call for low-latency feed generation, highly available uploads, efficient media storage, real-time notifications, and handling celebrity accounts with millions of followers. No numerical latency, availability, retention, traffic mix, or regional target is supplied; do not invent one."
+    },
+    {
+      "id": "ig_02",
+      "stepNumber": 2,
+      "phase": "Scope the product and establish identity",
+      "title": "Add the Instagram client",
+      "type": "add_component",
+      "content": "Give users one client surface for uploads, feed reads, follows, likes and comments, stories, search, and direct messages. Keep media delivery on the CDN path and send user actions through the API boundary.",
+      "component": {
+        "nodeId": "ig_client",
+        "componentType": "mobile-app",
+        "label": "Instagram Client",
+        "description": "Photo and video sharing client for feed, stories, discovery, and messages",
+        "position": {"x": 0, "y": 360},
+        "properties": {
+          "componentName": "Instagram Client",
+          "purpose": "Let signed-in users upload photos and videos, browse personalized feeds and stories, follow accounts, like and comment on posts, search users and hashtags, and exchange direct messages. Request media from the CDN and receive push notifications without routing large media bodies through application servers."
+        },
+        "highlightReason": "The existing Mobile App catalog component represents the user-facing social client."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7"]
+    },
+    {
+      "id": "ig_03",
+      "stepNumber": 3,
+      "phase": "Scope the product and establish identity",
+      "title": "Add the API boundary",
+      "type": "add_component",
+      "content": "Authenticate requests, validate action payloads, and apply per-user authorization before forwarding work to domain services. Issue short-lived upload authorization rather than accepting unbounded media bodies at this boundary.",
+      "component": {
+        "nodeId": "ig_gateway",
+        "componentType": "api-gateway",
+        "label": "Social API Gateway",
+        "description": "Authenticated entry point for client actions and reads",
+        "position": {"x": 300, "y": 360},
+        "properties": {
+          "componentName": "Social API Gateway",
+          "purpose": "Authenticate client calls, validate post and interaction payloads, enforce user and object authorization, route feed, profile, story, search, and message requests, and issue scoped short-lived authorization for direct object uploads. Apply request limits based on observed service capacity rather than an invented fixed rate."
+        },
+        "highlightReason": "The catalog API Gateway exposes the validation and authentication boundary needed by the client API."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7"]
+    },
+    {
+      "id": "ig_04",
+      "stepNumber": 4,
+      "phase": "Scope the product and establish identity",
+      "title": "Route user actions through the API",
+      "type": "add_connection",
+      "content": "Send feed, profile, post, interaction, story, search, and messaging commands through the gateway. The gateway returns upload authorization separately so clients can transfer media directly to object storage.",
+      "connection": {
+        "edgeId": "ig_client_gateway",
+        "sourceNodeId": "ig_client",
+        "targetNodeId": "ig_gateway",
+        "connectionType": "http",
+        "label": "Authenticated social API",
+        "description": "Validated requests for posts, follows, feed, stories, search, and messages."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:6", "legacy-requirement:7"]
+    },
+    {
+      "id": "ig_05",
+      "stepNumber": 5,
+      "phase": "Scope the product and establish identity",
+      "title": "Add the profile and social graph service",
+      "type": "add_component",
+      "content": "Resolve user profiles and authorize follow or unfollow commands. Keep the write model for relationship state authoritative; publish profile changes for search indexing rather than making search the source of truth.",
+      "component": {
+        "nodeId": "ig_identity",
+        "componentType": "backend-server",
+        "label": "Profile and Social Graph Service",
+        "description": "User profiles and follow relationship operations",
+        "position": {"x": 600, "y": 140},
+        "properties": {
+          "componentName": "Profile and Social Graph Service",
+          "purpose": "Own profile reads and follow/unfollow commands, check that the caller may change the relationship, write the authoritative follow state, and expose follower and following lookups to the feed service. Emit profile and relationship changes for asynchronous consumers while retaining the database as the source of truth."
+        },
+        "highlightReason": "The existing Backend Server component can model the profile and relationship domain service."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:6"]
+    },
+    {
+      "id": "ig_06",
+      "stepNumber": 6,
+      "phase": "Scope the product and establish identity",
+      "title": "Send profile and follow operations to their owner",
+      "type": "add_connection",
+      "content": "The service validates and applies follow changes before reporting success. Avoid having the gateway write relationship rows directly, so authorization and relationship invariants stay in one domain boundary.",
+      "connection": {
+        "edgeId": "ig_gateway_identity",
+        "sourceNodeId": "ig_gateway",
+        "targetNodeId": "ig_identity",
+        "connectionType": "api-call",
+        "label": "Profile and follow commands",
+        "description": "Authorized user lookups and follow/unfollow writes."
+      },
+      "requirementIds": ["legacy-requirement:2"]
+    },
+    {
+      "id": "ig_07",
+      "stepNumber": 7,
+      "phase": "Scope the product and establish identity",
+      "title": "Add the authoritative social graph store",
+      "type": "add_component",
+      "content": "Persist relationship edges and the profile fields needed by the service. Choose partitioning and indexes from measured follower/following access patterns; the brief does not identify a database engine or consistency contract.",
+      "component": {
+        "nodeId": "ig_social_store",
+        "componentType": "database",
+        "label": "User and Follow Store",
+        "description": "Authoritative profile and follow relationship data",
+        "position": {"x": 920, "y": 140},
+        "properties": {
+          "componentName": "User and Follow Store",
+          "purpose": "Persist user profile records and authoritative follower/following edges with access paths for account lookup and relationship traversal. Select partition keys, indexes, and consistency behavior after validating real read/write patterns and the product's follow visibility requirements."
+        },
+        "highlightReason": "The existing Database catalog component covers the authoritative profile and relationship store."
+      },
+      "requirementIds": ["legacy-requirement:2"]
+    },
+    {
+      "id": "ig_08",
+      "stepNumber": 8,
+      "phase": "Scope the product and establish identity",
+      "title": "Persist relationship state before indexing it",
+      "type": "add_connection",
+      "content": "Commit follow and unfollow state to the authoritative store. Search and feed projections can update asynchronously, but their lag must not turn them into the source of truth for whether a relationship exists.",
+      "connection": {
+        "edgeId": "ig_identity_social_store",
+        "sourceNodeId": "ig_identity",
+        "targetNodeId": "ig_social_store",
+        "connectionType": "database-connection",
+        "label": "Profile and follow records",
+        "description": "Authoritative writes and relationship lookups."
+      },
+      "requirementIds": ["legacy-requirement:2"]
+    },
+    {
+      "id": "ig_09",
+      "stepNumber": 9,
+      "phase": "Scope the product and establish identity",
+      "title": "Record the open product contracts",
+      "type": "explanation",
+      "content": "The brief does not specify identity provider, profile privacy rules, feed ordering, read-after-write behavior, or a region strategy. Keep authorization in the service boundary and make those product contracts explicit before selecting database guarantees or deployment topology."
+    },
+    {
+      "id": "ig_10",
+      "stepNumber": 10,
+      "phase": "Publish and deliver media",
+      "title": "Add the post and interaction service",
+      "type": "add_component",
+      "content": "Create post records and own likes and comments. Validate ownership and visibility, make retryable client writes idempotent, and publish a post only after its media upload and processing state are known.",
+      "component": {
+        "nodeId": "ig_posts",
+        "componentType": "backend-server",
+        "label": "Post and Interaction Service",
+        "description": "Post lifecycle, likes, and comments",
+        "position": {"x": 600, "y": 380},
+        "properties": {
+          "componentName": "Post and Interaction Service",
+          "purpose": "Create and read post metadata, validate media ownership and visibility, and own like and comment operations. Use idempotent mutation keys for safe retries, keep counters or derived views repairable from interaction records, and expose publish state only after required media processing completes."
+        },
+        "highlightReason": "The existing Backend Server component represents post and interaction logic without adding a custom component."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3"]
+    },
+    {
+      "id": "ig_11",
+      "stepNumber": 11,
+      "phase": "Publish and deliver media",
+      "title": "Route post and interaction commands",
+      "type": "add_connection",
+      "content": "Send create-post, like, comment, and post-read requests to the service so it can enforce ownership and update rules consistently.",
+      "connection": {
+        "edgeId": "ig_gateway_posts",
+        "sourceNodeId": "ig_gateway",
+        "targetNodeId": "ig_posts",
+        "connectionType": "api-call",
+        "label": "Post and interaction API",
+        "description": "Validated post creation, likes, comments, and reads."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3"]
+    },
+    {
+      "id": "ig_12",
+      "stepNumber": 12,
+      "phase": "Publish and deliver media",
+      "title": "Separate post metadata from media bytes",
+      "type": "add_component",
+      "content": "Store captions, ownership, timestamps, visibility, and interaction records separately from photo and video objects. Partition and index for the actual post and author access patterns rather than placing large media blobs in this database.",
+      "component": {
+        "nodeId": "ig_post_store",
+        "componentType": "database",
+        "label": "Post Metadata Store",
+        "description": "Post, caption, like, and comment metadata",
+        "position": {"x": 920, "y": 380},
+        "properties": {
+          "componentName": "Post Metadata Store",
+          "purpose": "Persist post IDs, authors, captions, visibility, media object references, timestamps, and like/comment records or their authoritative representation. Keep metadata separate from media bytes and create indexes for author timelines, post lookup, and interaction access patterns."
+        },
+        "highlightReason": "The existing Database catalog component models structured post and interaction metadata."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3", "legacy-requirement:8"]
+    },
+    {
+      "id": "ig_13",
+      "stepNumber": 13,
+      "phase": "Publish and deliver media",
+      "title": "Persist post metadata and interactions",
+      "type": "add_connection",
+      "content": "Commit post ownership and media references before publishing the post. Store likes and comments through the same service-owned consistency boundary; derive display counters so retries do not silently double-apply an interaction.",
+      "connection": {
+        "edgeId": "ig_posts_post_store",
+        "sourceNodeId": "ig_posts",
+        "targetNodeId": "ig_post_store",
+        "connectionType": "database-connection",
+        "label": "Post and interaction records",
+        "description": "Authoritative metadata, visibility, likes, comments, and media references."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:3"]
+    },
+    {
+      "id": "ig_14",
+      "stepNumber": 14,
+      "phase": "Publish and deliver media",
+      "title": "Add durable object storage for media",
+      "type": "add_component",
+      "content": "Keep originals and generated renditions in object storage, with object keys referenced by post metadata. Configure availability, access control, encryption, and lifecycle behavior for the chosen provider; the brief does not name a provider or retention policy for ordinary posts.",
+      "component": {
+        "nodeId": "ig_media_store",
+        "componentType": "object-storage",
+        "label": "Photo and Video Object Store",
+        "description": "Original media and processed renditions, separate from metadata",
+        "position": {"x": 1220, "y": 380},
+        "properties": {
+          "componentName": "Photo and Video Object Store",
+          "purpose": "Store original photos and videos plus processed thumbnail and delivery renditions as objects, while metadata keeps only references and ownership. Use the selected provider's documented durability and availability controls, restricted access, integrity validation, and an explicitly reviewed lifecycle policy to support billions of photos efficiently."
+        },
+        "highlightReason": "The existing Object Storage catalog component covers high-volume media objects."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:8", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "ig_15",
+      "stepNumber": 15,
+      "phase": "Publish and deliver media",
+      "title": "Upload directly to object storage",
+      "type": "add_connection",
+      "content": "The API authorizes a scoped upload and the client transfers bytes directly to object storage. Make incomplete uploads resumable where the selected provider supports it, validate completion and checksums, and retry with stable object and request identities before the post becomes visible.",
+      "connection": {
+        "edgeId": "ig_client_media_upload",
+        "sourceNodeId": "ig_client",
+        "targetNodeId": "ig_media_store",
+        "connectionType": "data-flow",
+        "label": "Authorized photo/video upload",
+        "description": "Direct, retryable media transfer with completion and integrity checks."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "ig_16",
+      "stepNumber": 16,
+      "phase": "Publish and deliver media",
+      "title": "Add the media processing worker",
+      "type": "add_component",
+      "content": "Generate thumbnails and delivery renditions asynchronously after upload. Validate file type and integrity, keep processing off the upload request path, and record failure state so the client or operator can distinguish a pending post from a publishable one.",
+      "component": {
+        "nodeId": "ig_media_worker",
+        "componentType": "processing-worker",
+        "label": "Media Processing Worker",
+        "description": "Asynchronous validation and thumbnail/rendition generation",
+        "position": {"x": 1520, "y": 540},
+        "properties": {
+          "componentName": "Media Processing Worker",
+          "purpose": "Consume completed upload work, validate media type and integrity, generate thumbnails and delivery renditions, and report success or retryable failure. Keep CPU-heavy image and video processing off the client upload path and make jobs idempotent by media object and processing version."
+        },
+        "highlightReason": "The existing Processing Worker catalog component represents asynchronous media transformation."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "ig_17",
+      "stepNumber": 17,
+      "phase": "Publish and deliver media",
+      "title": "Trigger processing from completed objects",
+      "type": "add_connection",
+      "content": "Start processing only after object storage confirms a completed upload. Preserve a durable retry path for worker failures so a transient image-processing error does not require the user to upload the original again.",
+      "connection": {
+        "edgeId": "ig_media_store_worker",
+        "sourceNodeId": "ig_media_store",
+        "targetNodeId": "ig_media_worker",
+        "connectionType": "data-flow",
+        "label": "Completed upload work",
+        "description": "Verified object reference and processing request."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-constraint:2", "legacy-constraint:3"]
+    },
+    {
+      "id": "ig_18",
+      "stepNumber": 18,
+      "phase": "Publish and deliver media",
+      "title": "Write renditions beside the original",
+      "type": "add_connection",
+      "content": "Write versioned thumbnails and delivery renditions to object storage and attach their references to the post metadata. Preserve the original for later reprocessing; select rendition sizes and formats from client needs and observed media cost, not an assumed fixed count.",
+      "connection": {
+        "edgeId": "ig_media_worker_store",
+        "sourceNodeId": "ig_media_worker",
+        "targetNodeId": "ig_media_store",
+        "connectionType": "data-flow",
+        "label": "Validated renditions",
+        "description": "Generated thumbnails and delivery variants stored separately from metadata."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "ig_19",
+      "stepNumber": 19,
+      "phase": "Publish and deliver media",
+      "title": "Add the media CDN",
+      "type": "add_component",
+      "content": "Serve public or authorized renditions from edge caches rather than making every viewer read the object store. Respect post visibility and signed access rules when caching private media.",
+      "component": {
+        "nodeId": "ig_cdn",
+        "componentType": "cdn",
+        "label": "Media CDN",
+        "description": "Cached image and video delivery close to viewers",
+        "position": {"x": 1520, "y": 180},
+        "properties": {
+          "componentName": "Media CDN",
+          "purpose": "Cache and deliver versioned photo, video, and thumbnail renditions near viewers. Keep origin reads on object storage, invalidate or version changed objects deliberately, and enforce authorization for non-public media so feed and story reads do not expose private content."
+        },
+        "highlightReason": "The existing CDN catalog component directly covers the brief's image and video delivery hint."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "ig_20",
+      "stepNumber": 20,
+      "phase": "Publish and deliver media",
+      "title": "Fetch cache misses from object storage",
+      "type": "add_connection",
+      "content": "Configure object storage as the CDN origin for renditions. Choose cache keys, authorization behavior, and invalidation policy based on visibility and versioning requirements.",
+      "connection": {
+        "edgeId": "ig_cdn_media_origin",
+        "sourceNodeId": "ig_cdn",
+        "targetNodeId": "ig_media_store",
+        "connectionType": "data-flow",
+        "label": "Rendition origin reads",
+        "description": "CDN cache misses fetch authorized, versioned objects."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "ig_21",
+      "stepNumber": 21,
+      "phase": "Publish and deliver media",
+      "title": "Deliver media from the edge",
+      "type": "add_connection",
+      "content": "Return media URLs or authorized CDN references in feed and story responses. The client streams the rendition from the edge, keeping large media responses off the API servers.",
+      "connection": {
+        "edgeId": "ig_cdn_client",
+        "sourceNodeId": "ig_cdn",
+        "targetNodeId": "ig_client",
+        "connectionType": "data-flow",
+        "label": "Cached media delivery",
+        "description": "Photo, video, and thumbnail reads from edge locations."
+      },
+      "requirementIds": ["legacy-requirement:1", "legacy-requirement:8", "legacy-constraint:3"]
+    },
+    {
+      "id": "ig_22",
+      "stepNumber": 22,
+      "phase": "Publish and deliver media",
+      "title": "Review the upload availability tradeoff",
+      "type": "explanation",
+      "content": "Direct-to-object-storage uploads reduce dependence on API-server bandwidth and allow provider-supported retry or multipart behavior, but require scoped authorization, completion checks, and cleanup for abandoned uploads. Provider, region, retry policy, and upload availability objective remain to be selected from actual deployment requirements."
+    },
+    {
+      "id": "ig_23",
+      "stepNumber": 23,
+      "phase": "Build feeds, stories, and discovery",
+      "title": "Add a durable event broker",
+      "type": "add_component",
+      "content": "Publish post, interaction, story, and message events after their authoritative writes. Durable delivery and replay let feed projections and notifications recover independently when a consumer is unavailable.",
+      "component": {
+        "nodeId": "ig_events",
+        "componentType": "message-broker",
+        "label": "Social Event Broker",
+        "description": "Durable events for feed projections and notifications",
+        "position": {"x": 920, "y": 640},
+        "properties": {
+          "componentName": "Social Event Broker",
+          "purpose": "Carry versioned post, like, comment, story, follow, and message events from authoritative services to feed and notification consumers. Preserve retryable delivery and replay, expose consumer lag, and require idempotent handlers so duplicate delivery does not duplicate visible effects."
+        },
+        "highlightReason": "The existing Message Broker catalog component represents asynchronous fan-out between services."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:4", "legacy-constraint:5"]
+    },
+    {
+      "id": "ig_24",
+      "stepNumber": 24,
+      "phase": "Build feeds, stories, and discovery",
+      "title": "Publish committed post and interaction events",
+      "type": "add_connection",
+      "content": "Emit an event only after the post or interaction is committed. Include stable event and object IDs so consumers can retry, deduplicate, and rebuild derived feed or notification state.",
+      "connection": {
+        "edgeId": "ig_posts_events",
+        "sourceNodeId": "ig_posts",
+        "targetNodeId": "ig_events",
+        "connectionType": "message-queue",
+        "label": "Committed post and interaction events",
+        "description": "Durable publish, like, and comment changes for downstream consumers."
+      },
+      "requirementIds": ["legacy-requirement:3", "legacy-requirement:4", "legacy-constraint:4"]
+    },
+    {
+      "id": "ig_25",
+      "stepNumber": 25,
+      "phase": "Build feeds, stories, and discovery",
+      "title": "Add the personalized feed service",
+      "type": "add_component",
+      "content": "Compose a user's feed from followed authors, eligible posts, interaction signals, and cached candidates. Keep authorization and ranking inputs explicit; cache derived feed entries but retain a path to authoritative post and relationship data.",
+      "component": {
+        "nodeId": "ig_feed",
+        "componentType": "backend-server",
+        "label": "Personalized Feed Service",
+        "description": "Feed candidate generation, ranking, and pagination",
+        "position": {"x": 1220, "y": 760},
+        "properties": {
+          "componentName": "Personalized Feed Service",
+          "purpose": "Generate a personalized, paginated feed from followed accounts, eligible post metadata, and interaction signals. Use cached candidates for the common path, verify visibility before returning posts, and combine asynchronous fan-out-on-write for ordinary authors with fan-out-on-read for celebrity authors."
+        },
+        "highlightReason": "The existing Backend Server component models feed generation with no added product-specific component."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "ig_26",
+      "stepNumber": 26,
+      "phase": "Build feeds, stories, and discovery",
+      "title": "Send asynchronous events to feed projection",
+      "type": "add_connection",
+      "content": "Update candidate feed materializations after committed posts and interactions. Keep this work off the user-facing publish path and make replay safe; a celebrity's millions of followers should not force one synchronous write per follower.",
+      "connection": {
+        "edgeId": "ig_events_feed",
+        "sourceNodeId": "ig_events",
+        "targetNodeId": "ig_feed",
+        "connectionType": "message-queue",
+        "label": "Feed projection events",
+        "description": "Asynchronous, replayable inputs for ordinary-author fan-out and feed updates."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "ig_27",
+      "stepNumber": 27,
+      "phase": "Build feeds, stories, and discovery",
+      "title": "Resolve followed accounts for a feed request",
+      "type": "add_connection",
+      "content": "Read the user's follow set from the social graph store when assembling or refreshing feed candidates. Use pagination and a measured access pattern; do not load an unbounded graph into one request.",
+      "connection": {
+        "edgeId": "ig_feed_social_store",
+        "sourceNodeId": "ig_feed",
+        "targetNodeId": "ig_social_store",
+        "connectionType": "database-connection",
+        "label": "Follow graph lookup",
+        "description": "Follower and following relationships for feed candidate selection."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "ig_28",
+      "stepNumber": 28,
+      "phase": "Build feeds, stories, and discovery",
+      "title": "Read eligible post metadata",
+      "type": "add_connection",
+      "content": "Fetch post records and visibility metadata for candidates. Keep media bytes on the object-storage and CDN path, and use stable cursors so feed pagination does not require repeatedly scanning a user's full history.",
+      "connection": {
+        "edgeId": "ig_feed_post_store",
+        "sourceNodeId": "ig_feed",
+        "targetNodeId": "ig_post_store",
+        "connectionType": "database-connection",
+        "label": "Eligible post metadata",
+        "description": "Post ordering, author, visibility, and media references for feed assembly."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-requirement:8", "legacy-constraint:1"]
+    },
+    {
+      "id": "ig_29",
+      "stepNumber": 29,
+      "phase": "Build feeds, stories, and discovery",
+      "title": "Add a feed and popular-post cache",
+      "type": "add_component",
+      "content": "Cache feed candidate pages and reusable popular-post data to reduce repeated reads. Treat cache entries as derived and invalidatable; authorization and post visibility still come from current authoritative state.",
+      "component": {
+        "nodeId": "ig_feed_cache",
+        "componentType": "cache",
+        "label": "Feed and Popular Post Cache",
+        "description": "Cached feed pages and frequently read post summaries",
+        "position": {"x": 1520, "y": 760},
+        "properties": {
+          "componentName": "Feed and Popular Post Cache",
+          "purpose": "Cache personalized feed candidate pages and hot post summaries to reduce repeated metadata reads and support low-latency feed generation. Use versioned or invalidatable entries, bounded lifetimes selected from freshness needs, and authorization checks against current visibility before serving cached content."
+        },
+        "highlightReason": "The existing Cache catalog component directly represents the feed and popular-post caching hint."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "ig_30",
+      "stepNumber": 30,
+      "phase": "Build feeds, stories, and discovery",
+      "title": "Refresh derived feed candidates",
+      "type": "add_connection",
+      "content": "Write or refresh feed candidate pages after processing events for ordinary authors. Keep large celebrity fan-outs on the separate read-time path described in the scale trigger, and expose queue lag so stale materializations are visible.",
+      "connection": {
+        "edgeId": "ig_feed_cache_write",
+        "sourceNodeId": "ig_feed",
+        "targetNodeId": "ig_feed_cache",
+        "connectionType": "data-flow",
+        "label": "Feed materialization and hot-post refresh",
+        "description": "Derived cached candidates for the common feed read path."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "ig_31",
+      "stepNumber": 31,
+      "phase": "Build feeds, stories, and discovery",
+      "title": "Serve feed pages from cache when safe",
+      "type": "add_connection",
+      "content": "Read cached candidate pages first, then fill or refresh them from graph and post data on a miss. Apply current privacy and deletion rules before returning each item.",
+      "connection": {
+        "edgeId": "ig_feed_cache_read",
+        "sourceNodeId": "ig_feed_cache",
+        "targetNodeId": "ig_feed",
+        "connectionType": "data-flow",
+        "label": "Cached feed candidates",
+        "description": "Reusable candidate pages with authoritative visibility rechecks."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "ig_32",
+      "stepNumber": 32,
+      "phase": "Build feeds, stories, and discovery",
+      "title": "Route feed reads to the feed service",
+      "type": "add_connection",
+      "content": "Keep feed pagination and personalization in the feed domain service. Return post metadata and CDN references rather than embedding media bytes in the API response.",
+      "connection": {
+        "edgeId": "ig_gateway_feed",
+        "sourceNodeId": "ig_gateway",
+        "targetNodeId": "ig_feed",
+        "connectionType": "api-call",
+        "label": "Personalized feed request",
+        "description": "Authorized cursor-based feed page and media references."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1"]
+    },
+    {
+      "id": "ig_33",
+      "stepNumber": 33,
+      "phase": "Build feeds, stories, and discovery",
+      "title": "Add the stories service",
+      "type": "add_component",
+      "content": "Create and list stories with an explicit creation and expiry timestamp. Enforce expiry in reads even if asynchronous database cleanup has not yet removed an expired row.",
+      "component": {
+        "nodeId": "ig_stories",
+        "componentType": "backend-server",
+        "label": "Stories Service",
+        "description": "Story publication, audience checks, and 24-hour expiry",
+        "position": {"x": 600, "y": 900},
+        "properties": {
+          "componentName": "Stories Service",
+          "purpose": "Authorize story publication and viewer access, store creation and expiresAt timestamps, and exclude a story after its 24-hour expiry on every read. Use background TTL cleanup only for storage reclamation; correctness must not depend on when that cleanup runs."
+        },
+        "highlightReason": "The existing Backend Server catalog role can own story lifecycle and expiry rules."
+      },
+      "requirementIds": ["legacy-requirement:5"]
+    },
+    {
+      "id": "ig_34",
+      "stepNumber": 34,
+      "phase": "Build feeds, stories, and discovery",
+      "title": "Add story metadata storage",
+      "type": "add_component",
+      "content": "Store the author, audience, media reference, creation time, and expiresAt for each story. Apply a TTL index or equivalent cleanup after 24 hours while filtering expired records during reads.",
+      "component": {
+        "nodeId": "ig_story_store",
+        "componentType": "database",
+        "label": "Story Metadata Store",
+        "description": "Story audience, media reference, and expiry metadata",
+        "position": {"x": 920, "y": 900},
+        "properties": {
+          "componentName": "Story Metadata Store",
+          "purpose": "Persist story author, audience, media object reference, creation time, and expiresAt. Apply a TTL index or provider-equivalent cleanup for the 24-hour story lifetime, while the service independently rejects expired stories because TTL deletion can be delayed."
+        },
+        "highlightReason": "The existing Database catalog component stores story metadata and expiry timestamps."
+      },
+      "requirementIds": ["legacy-requirement:5"]
+    },
+    {
+      "id": "ig_35",
+      "stepNumber": 35,
+      "phase": "Build feeds, stories, and discovery",
+      "title": "Route story requests to the lifecycle owner",
+      "type": "add_connection",
+      "content": "Validate story audiences and expiry in the Stories Service for publication and viewer requests. Keep its API separate from feed candidate generation so each path can enforce its own visibility rules.",
+      "connection": {
+        "edgeId": "ig_gateway_stories",
+        "sourceNodeId": "ig_gateway",
+        "targetNodeId": "ig_stories",
+        "connectionType": "api-call",
+        "label": "Story publish and read API",
+        "description": "Authorized story operations with expiry enforcement."
+      },
+      "requirementIds": ["legacy-requirement:5"]
+    },
+    {
+      "id": "ig_36",
+      "stepNumber": 36,
+      "phase": "Build feeds, stories, and discovery",
+      "title": "Persist story metadata and media references",
+      "type": "add_connection",
+      "content": "Write story metadata separately from media bytes and return a CDN reference to viewers. An expired metadata row must not make its object publicly readable; apply matching access and cleanup rules to media objects.",
+      "connection": {
+        "edgeId": "ig_stories_story_store",
+        "sourceNodeId": "ig_stories",
+        "targetNodeId": "ig_story_store",
+        "connectionType": "database-connection",
+        "label": "Story and expiry records",
+        "description": "Audience, timestamps, and object references for 24-hour stories."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "ig_37",
+      "stepNumber": 37,
+      "phase": "Build feeds, stories, and discovery",
+      "title": "Store story media as objects",
+      "type": "add_connection",
+      "content": "Send story media to object storage through the authorized upload path, then persist only its object reference in story metadata. Reuse processing and CDN delivery while preserving the story's expiry and audience controls.",
+      "connection": {
+        "edgeId": "ig_stories_media_store",
+        "sourceNodeId": "ig_stories",
+        "targetNodeId": "ig_media_store",
+        "connectionType": "data-flow",
+        "label": "Story media object reference",
+        "description": "Story bytes use the shared object storage and rendition pipeline."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:3"]
+    },
+    {
+      "id": "ig_38",
+      "stepNumber": 38,
+      "phase": "Build feeds, stories, and discovery",
+      "title": "Publish story events for downstream consumers",
+      "type": "add_connection",
+      "content": "Publish story-created events only after metadata and media state are ready. Feed and notification consumers can update independently, while story expiry remains enforced by the story read path.",
+      "connection": {
+        "edgeId": "ig_stories_events",
+        "sourceNodeId": "ig_stories",
+        "targetNodeId": "ig_events",
+        "connectionType": "message-queue",
+        "label": "Published story events",
+        "description": "Story availability events for feed and notification consumers."
+      },
+      "requirementIds": ["legacy-requirement:5", "legacy-constraint:4"]
+    },
+    {
+      "id": "ig_39",
+      "stepNumber": 39,
+      "phase": "Build feeds, stories, and discovery",
+      "title": "Add the user and hashtag search index",
+      "type": "add_component",
+      "content": "Index searchable profile fields and public post hashtags. Keep privacy and deletion checks in the query path, and treat the search index as a derived projection that can be rebuilt from authoritative services.",
+      "component": {
+        "nodeId": "ig_search",
+        "componentType": "search-engine",
+        "label": "User and Hashtag Search Index",
+        "description": "Search projection for users and public hashtags",
+        "position": {"x": 1220, "y": 160},
+        "properties": {
+          "componentName": "User and Hashtag Search Index",
+          "purpose": "Index searchable profile names and public post hashtags for query and discovery. Treat indexed documents as derived data, filter results by current privacy and visibility rules, propagate deletions, and support rebuilding from profile and post sources."
+        },
+        "highlightReason": "The existing Search Engine catalog component directly covers user and hashtag search."
+      },
+      "requirementIds": ["legacy-requirement:6"]
+    },
+    {
+      "id": "ig_40",
+      "stepNumber": 40,
+      "phase": "Build feeds, stories, and discovery",
+      "title": "Route discovery queries to search",
+      "type": "add_connection",
+      "content": "Send user and hashtag searches to the index, then recheck visibility before presenting results. Search results must not bypass profile privacy or post audience rules.",
+      "connection": {
+        "edgeId": "ig_gateway_search",
+        "sourceNodeId": "ig_gateway",
+        "targetNodeId": "ig_search",
+        "connectionType": "api-call",
+        "label": "User and hashtag queries",
+        "description": "Authorized search requests with visibility filtering."
+      },
+      "requirementIds": ["legacy-requirement:6"]
+    },
+    {
+      "id": "ig_41",
+      "stepNumber": 41,
+      "phase": "Build feeds, stories, and discovery",
+      "title": "Index profile changes",
+      "type": "add_connection",
+      "content": "Update searchable profile documents from service-owned changes. Preserve a rebuild path and remove or restrict documents when profile privacy changes.",
+      "connection": {
+        "edgeId": "ig_identity_search",
+        "sourceNodeId": "ig_identity",
+        "targetNodeId": "ig_search",
+        "connectionType": "data-flow",
+        "label": "Searchable profile updates",
+        "description": "Derived user documents from authoritative profile state."
+      },
+      "requirementIds": ["legacy-requirement:6"]
+    },
+    {
+      "id": "ig_42",
+      "stepNumber": 42,
+      "phase": "Build feeds, stories, and discovery",
+      "title": "Index public hashtag content",
+      "type": "add_connection",
+      "content": "Extract hashtags from eligible post captions and update the search projection after post commits. Exclude private or deleted content according to current post visibility.",
+      "connection": {
+        "edgeId": "ig_posts_search",
+        "sourceNodeId": "ig_posts",
+        "targetNodeId": "ig_search",
+        "connectionType": "data-flow",
+        "label": "Eligible post and hashtag updates",
+        "description": "Search projection updates from committed, visibility-filtered posts."
+      },
+      "requirementIds": ["legacy-requirement:6"]
+    },
+    {
+      "id": "ig_43",
+      "stepNumber": 43,
+      "phase": "Deliver messages and notifications; revisit scale",
+      "title": "Add the direct messaging service",
+      "type": "add_component",
+      "content": "Authorize conversations and participants, persist each message before acknowledging it, and publish delivery events after commit. Keep message history and feed/post data in separate access-controlled domains.",
+      "component": {
+        "nodeId": "ig_messages",
+        "componentType": "backend-server",
+        "label": "Direct Messaging Service",
+        "description": "Conversation authorization, message history, and delivery events",
+        "position": {"x": 600, "y": 1160},
+        "properties": {
+          "componentName": "Direct Messaging Service",
+          "purpose": "Authorize conversation membership, persist and retrieve direct messages in conversation order, and emit delivery events after a durable write. Make client retries idempotent, enforce participant privacy, and keep message retention and encryption policy explicit because the brief does not define them."
+        },
+        "highlightReason": "The existing Backend Server catalog role represents direct message domain behavior."
+      },
+      "requirementIds": ["legacy-requirement:7"]
+    },
+    {
+      "id": "ig_44",
+      "stepNumber": 44,
+      "phase": "Deliver messages and notifications; revisit scale",
+      "title": "Add durable message history storage",
+      "type": "add_component",
+      "content": "Store messages by conversation and ordered message identifier, with participant checks enforced by the service. Select retention, encryption, and backup policy after product and privacy requirements are confirmed.",
+      "component": {
+        "nodeId": "ig_message_store",
+        "componentType": "database",
+        "label": "Conversation Message Store",
+        "description": "Durable, conversation-scoped direct message history",
+        "position": {"x": 920, "y": 1160},
+        "properties": {
+          "componentName": "Conversation Message Store",
+          "purpose": "Persist direct message records with conversation ID, ordered message identity, sender, timestamps, and delivery state. Support conversation history reads and durable acknowledgement while applying the retention, encryption, backup, and deletion policy approved for private messages."
+        },
+        "highlightReason": "The existing Database catalog component models durable conversation history."
+      },
+      "requirementIds": ["legacy-requirement:7"]
+    },
+    {
+      "id": "ig_45",
+      "stepNumber": 45,
+      "phase": "Deliver messages and notifications; revisit scale",
+      "title": "Route direct messages through the service",
+      "type": "add_connection",
+      "content": "Send message sends and conversation reads through the service so it can enforce participant membership and durable-write-before-acknowledgement behavior.",
+      "connection": {
+        "edgeId": "ig_gateway_messages",
+        "sourceNodeId": "ig_gateway",
+        "targetNodeId": "ig_messages",
+        "connectionType": "api-call",
+        "label": "Conversation and message API",
+        "description": "Authorized direct-message writes and history reads."
+      },
+      "requirementIds": ["legacy-requirement:7"]
+    },
+    {
+      "id": "ig_46",
+      "stepNumber": 46,
+      "phase": "Deliver messages and notifications; revisit scale",
+      "title": "Persist messages before acknowledging them",
+      "type": "add_connection",
+      "content": "Commit the message and its stable identity before returning success. A retry with the same idempotency identity must not create a duplicate message.",
+      "connection": {
+        "edgeId": "ig_messages_message_store",
+        "sourceNodeId": "ig_messages",
+        "targetNodeId": "ig_message_store",
+        "connectionType": "database-connection",
+        "label": "Durable conversation history",
+        "description": "Ordered messages and delivery state, acknowledged after commit."
+      },
+      "requirementIds": ["legacy-requirement:7"]
+    },
+    {
+      "id": "ig_47",
+      "stepNumber": 47,
+      "phase": "Deliver messages and notifications; revisit scale",
+      "title": "Publish message delivery events",
+      "type": "add_connection",
+      "content": "Emit recipient delivery work only after the message write commits. Notification retries may be delayed or duplicated, so consumers should deduplicate by message and recipient identity.",
+      "connection": {
+        "edgeId": "ig_messages_events",
+        "sourceNodeId": "ig_messages",
+        "targetNodeId": "ig_events",
+        "connectionType": "message-queue",
+        "label": "Committed message delivery event",
+        "description": "Asynchronous recipient notification after durable message storage."
+      },
+      "requirementIds": ["legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "ig_48",
+      "stepNumber": 48,
+      "phase": "Deliver messages and notifications; revisit scale",
+      "title": "Add the notification service",
+      "type": "add_component",
+      "content": "Deliver follow, like, comment, story, and message notifications through the client's supported push or live channel. Retry transient delivery failures from durable events and preserve user notification preferences.",
+      "component": {
+        "nodeId": "ig_notifications",
+        "componentType": "notification-service",
+        "label": "Real-Time Notification Service",
+        "description": "Asynchronous push and live notification delivery",
+        "position": {"x": 1220, "y": 1160},
+        "properties": {
+          "componentName": "Real-Time Notification Service",
+          "purpose": "Consume committed follow, like, comment, story, and message events, apply user preferences, and deliver through configured push or live channels. Retry transient provider failures, deduplicate repeated events, and expose delivery and queue lag without claiming a numerical real-time objective absent from the brief."
+        },
+        "highlightReason": "The existing Notification Service catalog component covers user-facing event delivery."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "ig_49",
+      "stepNumber": 49,
+      "phase": "Deliver messages and notifications; revisit scale",
+      "title": "Consume social events for notifications",
+      "type": "add_connection",
+      "content": "Deliver notification work asynchronously after authoritative actions commit. Track the oldest event age, retries, and provider failures so the team can distinguish a healthy pipeline from delayed delivery.",
+      "connection": {
+        "edgeId": "ig_events_notifications",
+        "sourceNodeId": "ig_events",
+        "targetNodeId": "ig_notifications",
+        "connectionType": "message-queue",
+        "label": "Follow and interaction events",
+        "description": "Durable inputs for real-time notification delivery and retry."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "ig_50",
+      "stepNumber": 50,
+      "phase": "Deliver messages and notifications; revisit scale",
+      "title": "Deliver notifications to the client",
+      "type": "add_connection",
+      "content": "Send a compact notification or wake-up signal to the intended user. The client fetches authorized current state from the relevant service instead of trusting potentially stale or sensitive event payloads.",
+      "connection": {
+        "edgeId": "ig_notifications_client",
+        "sourceNodeId": "ig_notifications",
+        "targetNodeId": "ig_client",
+        "connectionType": "data-flow",
+        "label": "Push and live notification delivery",
+        "description": "User-scoped signal for new follows, interactions, stories, or messages."
+      },
+      "requirementIds": ["legacy-requirement:2", "legacy-requirement:3", "legacy-requirement:5", "legacy-requirement:7", "legacy-constraint:4"]
+    },
+    {
+      "id": "ig_51",
+      "stepNumber": 51,
+      "phase": "Deliver messages and notifications; revisit scale",
+      "title": "Choose a hybrid fan-out path for celebrity accounts",
+      "type": "scale_trigger",
+      "content": "The brief explicitly includes celebrity accounts with millions of followers. Avoid synchronously writing every new post into every follower's feed. Use asynchronous fan-out-on-write for ordinary authors and fan-out-on-read for celebrity authors, combining the celebrity's recent posts during a feed request. Route by observed author skew and queue/materialization cost; do not invent a follower threshold.",
+      "scaleTrigger": {
+        "metric": "Per-author follower distribution, feed materialization work, and event queue lag",
+        "action": "Keep ordinary authors on asynchronous fan-out-on-write and serve celebrity posts through fan-out-on-read in the feed service.",
+        "impact": "Avoids a synchronous write proportional to a celebrity's millions of followers while retaining cached feeds for the common path."
+      },
+      "requirementIds": ["legacy-requirement:4", "legacy-constraint:1", "legacy-constraint:5"]
+    },
+    {
+      "id": "ig_52",
+      "stepNumber": 52,
+      "phase": "Deliver messages and notifications; revisit scale",
+      "title": "State consistency and sizing assumptions",
+      "type": "explanation",
+      "content": "This design assumes eventual feed visibility for committed posts and follows; if the product requires immediate read-after-write visibility, overlay the caller's newest authoritative changes or strengthen the relevant read path. Durable post and message writes precede acknowledgements, event consumers are idempotent, and story reads enforce the 24-hour expiry independently of cleanup. The brief supplies no latency, availability, traffic, region, ordinary-post retention, or fan-out threshold targets, so those remain workload and product decisions."
+    }
+  ]
+}
