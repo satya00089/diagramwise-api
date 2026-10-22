@@ -440,6 +440,21 @@ async def _send_invalid_message_error(websocket: WebSocket) -> None:
     )
 
 
+async def _receive_and_process_collaboration_message(
+    websocket: WebSocket,
+    diagram_id: str,
+    user_id: str,
+    user_info: Dict[str, Any],
+    token: str,
+    last_session_check: float,
+) -> float:
+    data = await _receive_message_or_timeout(websocket)
+    last_session_check = _validate_collaboration_session(token, last_session_check)
+    if data is not None:
+        await _process_collaboration_message(websocket, diagram_id, user_id, user_info, data)
+    return last_session_check
+
+
 async def _receive_collaboration_messages(
     websocket: WebSocket,
     diagram_id: str,
@@ -450,10 +465,9 @@ async def _receive_collaboration_messages(
     last_session_check = time.monotonic()
     while True:
         try:
-            data = await _receive_message_or_timeout(websocket)
-            last_session_check = _validate_collaboration_session(token, last_session_check)
-            if data is not None:
-                await _process_collaboration_message(websocket, diagram_id, user_id, user_info, data)
+            last_session_check = await _receive_and_process_collaboration_message(
+                websocket, diagram_id, user_id, user_info, token, last_session_check
+            )
         except HTTPException as exc:
             code = "AUTH_UNAVAILABLE" if exc.status_code == status.HTTP_503_SERVICE_UNAVAILABLE else "INVALID_TOKEN"
             message = "Authentication is temporarily unavailable" if code == "AUTH_UNAVAILABLE" else "Session is invalid or revoked"
