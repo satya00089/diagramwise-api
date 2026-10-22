@@ -1,6 +1,6 @@
 """Service for assessing system design diagrams using AI and rule-based methods."""
 
-from typing import Mapping, TypeAlias, cast
+from typing import Any, Mapping, TypeAlias, cast
 import asyncio
 import json
 import logging
@@ -626,7 +626,7 @@ class AIAssessorService:
         if "requirement_coverage" not in ai_result:
             raise ValueError("AI output must include requirement_coverage")
 
-        assessment = AssessmentResponse(
+        assessment = AssessmentResponse.model_validate(dict(
             is_valid=verdict == AssessmentVerdict.STRONG_ALIGNMENT,
             overall_score=overall_score,
             score_available=True,
@@ -649,7 +649,7 @@ class AIAssessorService:
             problem_id=request.problem.id if request and request.problem else None,
             model_version=self._model_version(),
             source=AssessmentSource.AI,
-        )
+        ))
         if request is not None:
             self._validate_grounding(assessment, request)
         return assessment

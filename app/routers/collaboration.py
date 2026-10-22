@@ -352,6 +352,17 @@ async def _process_collaboration_message(
     data: Dict[str, Any],
 ) -> None:
     message_type = data.get("type")
+    if not isinstance(message_type, str):
+        await websocket.send_json(
+            {
+                "type": "error",
+                "message": "Message type must be a string",
+                "code": "INVALID_MESSAGE_FORMAT",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        return
+
     is_valid, validation_error = validate_message(message_type, data)
     if not is_valid:
         await websocket.send_json(

@@ -41,10 +41,15 @@ def _validate_bundle_metadata(bundle: dict) -> None:
 
 
 def _validate_case_ids(cases: list[dict]) -> set[str]:
-    ids = [case.get("id") for case in cases]
-    if not ids or len(ids) != len(set(ids)):
+    ids: set[str] = set()
+    for case in cases:
+        case_id = case.get("id")
+        if not isinstance(case_id, str) or not case_id or case_id in ids:
+            raise FixtureError("Missing/duplicate evaluation case IDs")
+        ids.add(case_id)
+    if not ids:
         raise FixtureError("Missing/duplicate evaluation case IDs")
-    return set(ids)
+    return ids
 
 
 def _validate_bundle_case(case: dict, ids: set[str]) -> None:

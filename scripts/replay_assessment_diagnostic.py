@@ -34,9 +34,10 @@ def repository_path(path: Path) -> Path:
 
 
 # Prevent even constructing the DynamoDB singleton on the fallback path.
-reference = ModuleType("app.services.walkthrough_reference")
-reference.get_fallback_reference_checks = no_reference_lookup
-sys.modules[reference.__name__] = reference
+reference_name = "app.services.walkthrough_reference"
+reference_module = ModuleType(reference_name)
+setattr(reference_module, "get_fallback_reference_checks", no_reference_lookup)
+sys.modules[reference_name] = reference_module
 
 
 class DiagnosticAssessor(AIAssessorService):

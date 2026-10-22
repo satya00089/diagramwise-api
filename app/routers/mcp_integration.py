@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hmac
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, TypedDict
 from uuid import NAMESPACE_URL, uuid5
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -96,6 +96,11 @@ class McpArchitectureCreateResponse(BaseModel):
     public: bool = True
 
 
+class McpResponseLinks(TypedDict, total=False):
+    previewUrl: str
+    editorUrl: str
+
+
 def _require_mcp_service(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
@@ -145,6 +150,14 @@ def _require_mcp_service(
         )
         return delegated_user.id, author_name, True
 
+    if service_user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "MCP_INTEGRATION_NOT_CONFIGURED",
+                "message": "MCP architecture persistence is not configured",
+            },
+        )
     return service_user_id, settings.mcp_integration_author_name, False
 
 
@@ -152,9 +165,9 @@ def _stable_diagram_id(user_id: str, idempotency_key: str) -> str:
     return str(uuid5(NAMESPACE_URL, f"diagramwise:mcp:{user_id}:{idempotency_key}"))
 
 
-def _response_links(public_id: str, canonical_id: str, delegated_user: bool) -> dict[str, str]:
+def _response_links(public_id: str, canonical_id: str, delegated_user: bool) -> McpResponseLinks:
     settings = get_settings()
-    links = {
+    links: McpResponseLinks = {
         "previewUrl": (
             f"{getattr(settings, 'public_api_url', 'https://api.diagramwise.com').rstrip('/')}/api/v1/public/diagrams/"
             f"{public_id}/preview.png"

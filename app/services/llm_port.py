@@ -57,6 +57,7 @@ class LLMPort(Protocol):
 
     async def generate(self, request: LLMRequest) -> LLMResponse:
         """Generate one normalized response for an application task."""
+        ...
 
 
 class MockLLMAdapter:

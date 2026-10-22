@@ -251,9 +251,9 @@ def audit_catalog(snapshot: dict, guide_dir: Path) -> dict:
     matrix = []
     for item in items:
         slug = item.get("slug")
-        if slug:
+        if isinstance(slug, str) and slug:
             live.setdefault(slug, []).append(item["id"])
-        guide = guides.get(slug, {})
+        guide = guides.get(slug, {}) if isinstance(slug, str) else {}
         public_requirements = guide.get("requirements", {})
         live_texts = [row["text"] for row in source_rows(item)]
         guide_texts = [text for bucket in ("functional", "nonFunctional")
@@ -668,7 +668,7 @@ def rollback_manifest(table: Any, manifest: dict, journal: dict, *, apply: bool 
         return {"kind": "requirement-rollback-dry-run", "remoteWrites": False,
                 "changes": [{"id": row["id"], "expected": row["written"],
                              "restore": {key: row["original"][key] for key in WRITE_FIELDS}}
-                            for row in entries]}
+                            for row in result["entries"]]}
     if save_journal is None:
         raise MigrationError("Durable rollback journal required")
     for entry in reversed(result["entries"]):
@@ -766,26 +766,37 @@ def main(argv: list[str] | None = None) -> int:
             manifest = read_json(path)
             if args.apply:
                 require_approval(manifest)  # Gate before SDK initialization/credential lookup.
-                if not args.journal or args.journal.resolve() == args.output.resolve():
+                if args.journal is None or args.output is None:
+                    parser.error("Apply requires --journal and --output paths")
+                journal_path = args.journal
+                output_path = args.output
+                if journal_path.resolve() == output_path.resolve():
                     parser.error("Use separate --journal and --output paths")
-                if args.output.exists() or (args.command == "apply" and args.journal.exists()):
+                if output_path.exists() or (args.command == "apply" and journal_path.exists()):
                     raise MigrationError("Output/journal already exists; refusing to overwrite")
             if args.command == "apply":
+                journal_path = args.journal
                 initialized = False
                 def save(value: dict) -> None:
                     nonlocal initialized
-                    write_json(args.journal, value, replace=initialized)
+                    if journal_path is None:
+                        raise MigrationError("Apply requires the original --journal path")
+                    write_json(journal_path, value, replace=initialized)
                     initialized = True
                 result = apply_manifest(aws_table(manifest["source"], args.profile) if args.apply else None,
                                         manifest, apply=args.apply, save_journal=save if args.apply else None)
             else:
-                if not args.journal:
+                journal_path = args.journal
+                if journal_path is None:
                     parser.error("rollback requires the original --journal")
                 result = rollback_manifest(aws_table(manifest["source"], args.profile) if args.apply else None,
-                                           manifest, read_json(args.journal), apply=args.apply,
-                                           save_journal=lambda value: write_json(args.journal, value, replace=True))
-        write_json(args.output, result)
-        print(json.dumps({"command": args.command, "output": str(args.output),
+                                           manifest, read_json(journal_path), apply=args.apply,
+                                           save_journal=lambda value: write_json(journal_path, value, replace=True))
+        output_path = args.output
+        if output_path is None:
+            parser.error("This command requires --output")
+        write_json(output_path, result)
+        print(json.dumps({"command": args.command, "output": str(output_path),
                           "remoteMutation": bool(getattr(args, "apply", False))}))
         return 0
     except (MigrationError, OSError, KeyError, TypeError) as error:

@@ -12,6 +12,7 @@ from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import ClientError
 from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
 from mypy_boto3_dynamodb.service_resource import Table
+from mypy_boto3_dynamodb.type_defs import TransactWriteItemTypeDef
 from pydantic import BaseModel
 
 from app.utils.config import get_settings
@@ -727,7 +728,7 @@ class DynamoDBService:
         self.diagrams_table.put_item(Item=item)
 
         # Return with original float values for response
-        return Diagram(
+        return Diagram.model_validate(dict(
             id=diagram_id,
             userId=user_id,
             title=title,
@@ -743,7 +744,7 @@ class DynamoDBService:
             recordType="remix" if source_diagram_id else "canonical",
             familyId=family_id or diagram_id,
             sourceDiagramId=source_diagram_id,
-        )
+        ))
 
     def get_diagrams_by_user(self, user_id: str) -> List[Diagram]:
         """Get all diagrams for a user."""
@@ -785,12 +786,14 @@ class DynamoDBService:
             response = self.diagrams_table.query(**query_kwargs)
             items.extend(response.get("Items", []))
 
-            while response.get("LastEvaluatedKey"):
+            last_evaluated_key = response.get("LastEvaluatedKey")
+            while last_evaluated_key:
                 response = self.diagrams_table.query(
                     **query_kwargs,
-                    ExclusiveStartKey=response["LastEvaluatedKey"],
+                    ExclusiveStartKey=last_evaluated_key,
                 )
                 items.extend(response.get("Items", []))
+                last_evaluated_key = response.get("LastEvaluatedKey")
 
             items = [item for item in items if not _is_canvas_record(item)]
             items_float = [convert_decimal_to_float(item) for item in items]
@@ -953,7 +956,7 @@ class DynamoDBService:
             if not diagram:
                 return False
 
-            transaction: List[Dict[str, Any]] = [
+            transaction: List[TransactWriteItemTypeDef] = [
                 {
                     "Delete": {
                         "TableName": self.diagrams_table.name,
@@ -1276,11 +1279,13 @@ class DynamoDBService:
         }
         response = self.diagram_shares_table.query(**query)
         items.extend(response.get("Items", []))
-        while response.get("LastEvaluatedKey"):
+        last_evaluated_key = response.get("LastEvaluatedKey")
+        while last_evaluated_key:
             response = self.diagram_shares_table.query(
-                **query, ExclusiveStartKey=response["LastEvaluatedKey"]
+                **query, ExclusiveStartKey=last_evaluated_key
             )
             items.extend(response.get("Items", []))
+            last_evaluated_key = response.get("LastEvaluatedKey")
         return items
 
     def _load_shared_diagrams(
@@ -1557,7 +1562,7 @@ class DynamoDBService:
             and normalized.get("verdict") != "unavailable"
         )
         normalized["scoreAvailable"] = bool(available)
-        normalized["score"] = int(score) if available else None
+        normalized["score"] = int(score) if available and score is not None else None
         if "score_available" in normalized:
             normalized["score_available"] = normalized["scoreAvailable"]
         if "overall_score" in normalized:
@@ -1784,7 +1789,7 @@ class DynamoDBService:
             if request.interviewSession
             else prepared.existing_data.get("interviewSession")
         )
-        return AttemptResponse(
+        return AttemptResponse.model_validate(dict(
             id=f"{state.user_id}#{request.problemId}",
             userId=state.user_id,
             problemId=request.problemId,
@@ -1810,7 +1815,7 @@ class DynamoDBService:
             authorName=state.existing_attempt.authorName if state.existing_attempt else None,
             authorPicture=state.existing_attempt.authorPicture if state.existing_attempt else None,
             viewCount=state.existing_attempt.viewCount if state.existing_attempt else 0,
-        )
+        ))
 
     @staticmethod
     def _attempt_update_condition(
@@ -2049,7 +2054,10 @@ class DynamoDBService:
             )
             if not existing:
                 return None
-            if self._qualifying_attempt_assessment(existing.model_dump()) is None:
+            qualifying_assessment = self._qualifying_attempt_assessment(
+                existing.model_dump()
+            )
+            if qualifying_assessment is None:
                 raise ValueError("A scored AI assessment is required to publish this attempt")
 
             now = datetime.now(timezone.utc).isoformat()
@@ -2080,7 +2088,7 @@ class DynamoDBService:
                     ":pic": author_picture or "",
                     ":leaderboard_problem": problem_id,
                     ":leaderboard_score": convert_floats_to_decimal(
-                        self._qualifying_attempt_assessment(existing.model_dump())["score"]
+                        qualifying_assessment["score"]
                     ),
                     DDB_ZERO_VALUE: 0,
                     ":assessment": convert_floats_to_decimal(existing.lastAssessment),
