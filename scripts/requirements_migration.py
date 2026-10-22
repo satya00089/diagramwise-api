@@ -350,14 +350,7 @@ def _original_item(change: dict, prefix: str) -> tuple[dict | None, list[str]]:
     )
 
 
-def _validate_provenance_row(
-    row: dict,
-    source: dict,
-    prior_entries: dict,
-    *,
-    publish: bool,
-    prefix: str,
-) -> tuple[list[str], str | None, dict | None]:
+def _validate_provenance_source(row: dict, source: dict, prior_entries: dict, prefix: str) -> list[str]:
     errors = []
     if any(row.get(key) != value for key, value in source.items()):
         errors.append(prefix + "Original sentence/source/scope altered")
@@ -367,7 +360,11 @@ def _validate_provenance_row(
         previous = prior_entries[source["text"]]
         if row.get("id") != previous["id"] or row.get("scope") != previous["scope"]:
             errors.append(prefix + "Existing requirement ID/scope altered")
+    return errors
 
+
+def _validated_classification(row: dict, prefix: str) -> tuple[list[str], str | None, dict | None]:
+    errors = []
     bucket = row.get("classification")
     if bucket not in ("functional", "nonFunctional", "constraint") or row.get("scope") not in ("core", "extension"):
         errors.append(prefix + "Invalid classification/scope")
@@ -379,8 +376,27 @@ def _validate_provenance_row(
         entry = {key: row.get(key) for key in ("id", "text", "scope")}
         if row.get("category"):
             entry["category"] = row["category"]
+    return errors, bucket, entry
+
+
+def _validate_review_status(row: dict, publish: bool, prefix: str) -> list[str]:
     if publish and (row.get("status") != "reviewed" or not row.get("reviewer") or not row.get("reason")):
-        errors.append(prefix + "Unreviewed/ambiguous sentence blocks publishing")
+        return [prefix + "Unreviewed/ambiguous sentence blocks publishing"]
+    return []
+
+
+def _validate_provenance_row(
+    row: dict,
+    source: dict,
+    prior_entries: dict,
+    *,
+    publish: bool,
+    prefix: str,
+) -> tuple[list[str], str | None, dict | None]:
+    errors = _validate_provenance_source(row, source, prior_entries, prefix)
+    classification_errors, bucket, entry = _validated_classification(row, prefix)
+    errors.extend(classification_errors)
+    errors.extend(_validate_review_status(row, publish, prefix))
     return errors, bucket, entry
 
 

@@ -9,12 +9,14 @@ from __future__ import annotations
 import json
 import hashlib
 import argparse
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SNAPSHOTS = ROOT / "tests/fixtures/walkthroughs"
 OUTPUT = ROOT / "data/assessment-reference-candidates/walkthroughs"
 DOCUMENT_ID = "6901ef1b9420d83630aca871"
+SNAPSHOT_STEM_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
 
 def requirement_id(problem: dict, field: str, index: int) -> str:
@@ -217,6 +219,8 @@ def repository_path(path: Path) -> Path:
 
 def repository_output_file(directory: Path, name: str) -> Path:
     """Reject generated child paths redirected through pre-existing symlinks."""
+    if Path(name).name != name or name in (".", ".."):
+        raise ValueError("Generated fixture filenames must be simple child names")
     target = directory / name
     if target.is_symlink():
         raise ValueError("Generated fixture files must not be symlinks")
@@ -226,7 +230,7 @@ def repository_output_file(directory: Path, name: str) -> Path:
     return resolved
 
 
-def main() -> None:
+def _parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--frontend-fixture", type=Path, help="Optional generated document apply-path fixture for the frontend test suite")
     parser.add_argument("--frontend-fixture-dir", type=Path, help="Optional generated apply-path fixtures for all five frontend tests")
@@ -235,51 +239,88 @@ def main() -> None:
         args.frontend_fixture = repository_path(args.frontend_fixture)
     if args.frontend_fixture_dir:
         args.frontend_fixture_dir = repository_path(args.frontend_fixture_dir)
+    return args
+
+
+def _prepare_directories() -> tuple[Path, Path]:
     snapshot_dir = repository_path(SNAPSHOTS)
     output_dir = repository_path(OUTPUT)
     if snapshot_dir != SNAPSHOTS or output_dir != OUTPUT:
         raise ValueError("Fixture input/output directories must not redirect through symlinks")
     output_dir.mkdir(parents=True, exist_ok=True)
+    return snapshot_dir, output_dir
+
+
+def _load_problems(snapshot_dir: Path) -> dict:
     problems_path = repository_path(snapshot_dir / "problems.json")
     if problems_path.parent != snapshot_dir:
         raise ValueError("Problem snapshot must stay inside the walkthrough fixtures directory")
-    problems = {p["id"]: p for p in json.loads(problems_path.read_text(encoding="utf-8"))}
+    return {problem["id"]: problem for problem in json.loads(problems_path.read_text(encoding="utf-8"))}
+
+
+def _snapshot_sources(snapshot_dir: Path):
     for source in sorted(snapshot_dir.glob("*.json")):
         source = repository_path(source)
         if source.parent != snapshot_dir:
             raise ValueError("Walkthrough snapshots must stay inside their fixture directory")
         if source.name == "problems.json":
             continue
-        guide = json.loads(source.read_text(encoding="utf-8"))
-        guide["steps"].sort(key=lambda step: step["stepNumber"])
-        guide["version"] = "2.1-candidate" if guide["problem_id"] == "6901ef1b9420d83630aca869" else "2.0-candidate"
-        guide["requirementRevision"] = "requirements-v2-preserved"
-        if guide["problem_id"] == DOCUMENT_ID:
-            update_document(guide, problems[DOCUMENT_ID])
-        capture_explicit_choices(guide)
-        fill_required_behaviors(guide)
-        repository_output_file(output_dir, source.name).write_text(
-            json.dumps(guide, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-        )
-        if args.frontend_fixture and guide["problem_id"] == DOCUMENT_ID:
-            # Derived test data, not an independently edited guide or runtime source.
-            fixture = {"problem_id": guide["problem_id"], "version": guide["version"],
-                       "requirementRevision": guide["requirementRevision"],
-                       "steps": [step for step in guide["steps"] if step.get("component") or step.get("connection") or step.get("componentUpdate")]}
-            args.frontend_fixture.parent.mkdir(parents=True, exist_ok=True)
-            frontend_fixture = repository_output_file(
-                args.frontend_fixture.parent, args.frontend_fixture.name
-            )
-            frontend_fixture.write_text(
-                json.dumps(fixture, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-            )
-        if args.frontend_fixture_dir:
-            fixture = {"problem_id": guide["problem_id"], "version": guide["version"], "requirementRevision": guide["requirementRevision"],
-                       "steps": [step for step in guide["steps"] if step.get("component") or step.get("connection") or step.get("componentUpdate")]}
-            args.frontend_fixture_dir.mkdir(parents=True, exist_ok=True)
-            repository_output_file(args.frontend_fixture_dir, source.name).write_text(
-                json.dumps(fixture, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-            )
+        yield source
+
+
+def _candidate_filename(source: Path) -> str:
+    """Use only a validated fixture basename for output paths, never JSON fields."""
+    if source.suffix != ".json" or not SNAPSHOT_STEM_PATTERN.fullmatch(source.stem):
+        raise ValueError("Walkthrough snapshot filename is invalid")
+    return source.name
+
+
+def _prepare_guide(source: Path, problems: dict) -> dict:
+    guide = json.loads(source.read_text(encoding="utf-8"))
+    if guide.get("problem_id") != source.stem:
+        raise ValueError("Walkthrough ID must match its snapshot filename")
+    guide["steps"].sort(key=lambda step: step["stepNumber"])
+    guide["version"] = "2.1-candidate" if guide["problem_id"] == "6901ef1b9420d83630aca869" else "2.0-candidate"
+    guide["requirementRevision"] = "requirements-v2-preserved"
+    if guide["problem_id"] == DOCUMENT_ID:
+        update_document(guide, problems[DOCUMENT_ID])
+    capture_explicit_choices(guide)
+    fill_required_behaviors(guide)
+    return guide
+
+
+def _frontend_fixture(guide: dict) -> dict:
+    return {
+        "problem_id": guide["problem_id"],
+        "version": guide["version"],
+        "requirementRevision": guide["requirementRevision"],
+        "steps": [step for step in guide["steps"]
+                  if step.get("component") or step.get("connection") or step.get("componentUpdate")],
+    }
+
+
+def _write_frontend_fixture(path: Path, fixture: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    output = repository_output_file(path.parent, path.name)
+    output.write_text(json.dumps(fixture, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _write_candidate_outputs(guide: dict, filename: str, output_dir: Path, args: argparse.Namespace) -> None:
+    payload = json.dumps(guide, indent=2, ensure_ascii=False) + "\n"
+    repository_output_file(output_dir, filename).write_text(payload, encoding="utf-8")
+    if args.frontend_fixture and guide["problem_id"] == DOCUMENT_ID:
+        _write_frontend_fixture(args.frontend_fixture, _frontend_fixture(guide))
+    if args.frontend_fixture_dir:
+        _write_frontend_fixture(args.frontend_fixture_dir / filename, _frontend_fixture(guide))
+
+
+def main() -> None:
+    args = _parse_arguments()
+    snapshot_dir, output_dir = _prepare_directories()
+    problems = _load_problems(snapshot_dir)
+    for source in _snapshot_sources(snapshot_dir):
+        guide = _prepare_guide(source, problems)
+        _write_candidate_outputs(guide, _candidate_filename(source), output_dir, args)
     print(json.dumps({"candidateGuides": len(list(output_dir.glob("*.json"))), "status": "not_published"}))
 
 

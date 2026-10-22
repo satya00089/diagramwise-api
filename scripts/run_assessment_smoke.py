@@ -71,7 +71,7 @@ async def run(args) -> None:
     service = SmokeAssessor()
     frozen = _frozen_metadata(service, args.walkthrough)
     results = await _run_assessments(service, request, args.repeats)
-    _write_smoke_output(args, guide, request, frozen, results)
+    _write_smoke_output(args.output, args.negative, guide, request, frozen, results)
 
 
 def _load_requirement_spec(manifest_path: Path | None, problem_id: str) -> dict | None:
@@ -126,15 +126,28 @@ async def _run_assessments(service: SmokeAssessor, request: dict, repeats: int) 
     return results
 
 
-def _write_smoke_output(args, guide: dict, request: dict, frozen: dict, results: list[dict]) -> None:
-    args.output.parent.mkdir(parents=True, exist_ok=True)
+def _write_smoke_output(
+    output_path: Path,
+    negative: str | None,
+    guide: dict,
+    request: dict,
+    frozen: dict,
+    results: list[dict],
+) -> None:
+    if output_path.is_symlink():
+        raise ValueError("Assessment smoke output must not be a symlink")
+    safe_output = repository_path(output_path)
+    if safe_output.exists():
+        raise ValueError("Assessment smoke output already exists")
+    safe_output.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "kind": "live-public-fixture-smoke", "frozen": frozen,
         "walkthroughVersion": guide["version"], "notReleaseAcceptance": True,
-        "humanLabelsReviewed": False, "negativeMutation": args.negative,
+        "humanLabelsReviewed": False, "negativeMutation": negative,
         "request": request, "runs": results,
     }
-    args.output.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    with safe_output.open("x", encoding="utf-8") as output_file:
+        output_file.write(json.dumps(payload, indent=2) + "\n")
 
 
 def main() -> None:

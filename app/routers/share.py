@@ -26,12 +26,6 @@ logger = logging.getLogger(__name__)
 PUBLIC_DIAGRAM_NOT_FOUND = "Diagram not found or not publicly available."
 
 
-def _safe_log_identifier(value: str) -> str:
-    """Keep request-controlled identifiers on one bounded log line."""
-    return "".join(character if character.isprintable() and character not in "\r\n" else "?"
-                   for character in value)[:128]
-
-
 async def _capture_browser_preview(diagram_id: str) -> bytes | None:
     """Ask the isolated Chromium renderer for a product-faithful PNG.
 
@@ -46,7 +40,6 @@ async def _capture_browser_preview(diagram_id: str) -> bytes | None:
     if not renderer_url or not renderer_token:
         return None
 
-    safe_diagram_id = _safe_log_identifier(diagram_id)
     try:
         async with httpx.AsyncClient(timeout=32.0, follow_redirects=False) as client:
             response = await client.get(
@@ -57,18 +50,16 @@ async def _capture_browser_preview(diagram_id: str) -> bytes | None:
         content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
         if response.status_code != 200 or content_type != "image/png":
             logger.warning(
-                "Browser preview unavailable status=%s content_type=%s diagram_id=%s",
+                "Browser preview unavailable status=%s",
                 response.status_code,
-                content_type or "<missing>",
-                safe_diagram_id,
             )
             return None
         if len(response.content) > 5_000_000:
-            logger.warning("Browser preview too large diagram_id=%s", safe_diagram_id)
+            logger.warning("Browser preview too large")
             return None
         return response.content
-    except httpx.HTTPError:
-        logger.warning("Browser preview request failed diagram_id=%s", safe_diagram_id, exc_info=True)
+    except httpx.HTTPError as error:
+        logger.warning("Browser preview request failed error_type=%s", type(error).__name__)
         return None
 
 

@@ -309,7 +309,7 @@ def _collect_runs(bundle: dict, recorded: dict, experiment: dict) -> tuple[dict,
     return cases, evaluated, fallback_count, failures
 
 
-def _missing_run_failures(cases: dict, evaluated: list[dict], runs: dict) -> list[dict]:
+def _missing_run_failures(cases: dict, runs: dict) -> list[dict]:
     return [
         {"kind": "missing_run", "caseId": case_id, "repeat": repeat}
         for case_id in cases
@@ -388,7 +388,7 @@ def evaluate_results(bundle: dict, recorded: dict) -> dict:
     failures.extend(run_failures)
     runs = {(row["caseId"], row["repeat"]): row for row in recorded.get("runs", [])
             if row.get("caseId") in cases and type(row.get("repeat")) is int and row["repeat"] in range(1, 6)}
-    failures.extend(_missing_run_failures(cases, evaluated, runs))
+    failures.extend(_missing_run_failures(cases, runs))
     _compare_negative_runs(evaluated, cases)
     _append_run_failures(failures, evaluated)
     counts = _case_counts(cases)
