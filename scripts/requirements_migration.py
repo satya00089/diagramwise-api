@@ -687,7 +687,7 @@ def aws_table(source: dict, profile: str | None) -> Any:
     return boto3.Session(profile_name=profile, region_name=source["region"]).resource("dynamodb").Table(source["table"])
 
 
-def main(argv: list[str] | None = None) -> int:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     export = sub.add_parser("export")
@@ -718,87 +718,138 @@ def main(argv: list[str] | None = None) -> int:
         command.add_argument("--profile")
         command.add_argument("--journal", type=Path)
         command.add_argument("--output", type=Path, required=True)
+    return parser
+
+
+def _validate_cli_paths(args: argparse.Namespace) -> None:
+    if args.output is not None:
+        args.output = _validated_local_path(args.output, writing=True)
+    for name in ("input", "snapshot", "manifest", "approved", "journal"):
+        value = getattr(args, name, None)
+        if value is not None:
+            setattr(args, name, _validated_local_path(value))
+    if getattr(args, "guide_dir", None) is not None:
+        args.guide_dir = _validated_local_path(args.guide_dir)
+
+
+def _run_export_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> dict:
+    if args.remote_read == bool(args.input):
+        parser.error("export needs exactly one of --input or explicit --remote-read")
+    source = {"kind": "aws-public-catalog" if args.remote_read else "local-public-snapshot",
+              "table": args.table, "region": args.region}
+    if args.input:
+        source["inputHash"] = digest(read_json(args.input))
+    items = scan_public(aws_table(source, args.profile)) if args.remote_read else records(read_json(args.input))
+    return export_snapshot(items, source)
+
+
+def _run_validate_command(args: argparse.Namespace) -> int:
+    manifest = read_json(args.manifest)
+    errors = validation_errors(manifest, publish=args.publish or bool(args.approve_by))
+    result = {"valid": not errors, "errors": errors,
+              "diff": None if errors else dry_run(manifest)}
+    if args.approve_by:
+        if errors or not args.output:
+            raise MigrationError("Approval requires passing publish checks and a new --output path")
+        manifest["approved"] = True
+        manifest["approval"] = {"reviewer": args.approve_by, "approvedAt": now(),
+                                "digest": approval_digest(manifest)}
+        result = manifest
+    if args.output:
+        write_json(args.output, result)
+    print(json.dumps({"valid": not errors, "errors": errors, "output": str(args.output)}, indent=2))
+    return 1 if errors else 0
+
+
+def _read_migration_manifest(args: argparse.Namespace, parser: argparse.ArgumentParser) -> dict:
+    if args.apply and not args.approved:
+        parser.error("Remote mutation requires both --apply and --approved MANIFEST")
+    path = args.approved or args.manifest
+    if not path:
+        parser.error("Provide --manifest for local dry run or --approved for reviewed apply")
+    return read_json(path)
+
+
+def _validate_apply_outputs(args: argparse.Namespace, manifest: dict,
+                            parser: argparse.ArgumentParser) -> None:
+    if not args.apply:
+        return
+    require_approval(manifest)  # Gate before SDK initialization/credential lookup.
+    if args.journal is None or args.output is None:
+        parser.error("Apply requires --journal and --output paths")
+    if args.journal.resolve() == args.output.resolve():
+        parser.error("Use separate --journal and --output paths")
+    if args.output.exists() or (args.command == "apply" and args.journal.exists()):
+        raise MigrationError("Output/journal already exists; refusing to overwrite")
+
+
+def _make_journal_saver(journal_path: Path | None) -> Callable[[dict], None]:
+    initialized = False
+
+    def save(value: dict) -> None:
+        nonlocal initialized
+        if journal_path is None:
+            raise MigrationError("Apply requires the original --journal path")
+        write_json(journal_path, value, replace=initialized)
+        initialized = True
+
+    return save
+
+
+def _run_apply_command(args: argparse.Namespace, manifest: dict) -> dict:
+    save_journal = _make_journal_saver(args.journal)
+    table = aws_table(manifest["source"], args.profile) if args.apply else None
+    return apply_manifest(table, manifest, apply=args.apply,
+                          save_journal=save_journal if args.apply else None)
+
+
+def _run_rollback_command(args: argparse.Namespace, manifest: dict,
+                          parser: argparse.ArgumentParser) -> dict:
+    if args.journal is None:
+        parser.error("rollback requires the original --journal")
+    table = aws_table(manifest["source"], args.profile) if args.apply else None
+    return rollback_manifest(
+        table, manifest, read_json(args.journal), apply=args.apply,
+        save_journal=lambda value: write_json(args.journal, value, replace=True),
+    )
+
+
+def _run_mutation_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> dict:
+    manifest = _read_migration_manifest(args, parser)
+    _validate_apply_outputs(args, manifest, parser)
+    if args.command == "apply":
+        return _run_apply_command(args, manifest)
+    return _run_rollback_command(args, manifest, parser)
+
+
+def _dispatch_command(args: argparse.Namespace,
+                      parser: argparse.ArgumentParser) -> tuple[int, Any | None]:
+    if args.command == "export":
+        return 0, _run_export_command(args, parser)
+    if args.command == "audit":
+        return 0, audit_catalog(read_json(args.snapshot), args.guide_dir)
+    if args.command == "draft":
+        return 0, make_draft(read_json(args.snapshot), args.revision)
+    if args.command == "validate":
+        return _run_validate_command(args), None
+    return 0, _run_mutation_command(args, parser)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
     args = parser.parse_args(argv)
     try:
-        if args.output is not None:
-            args.output = _validated_local_path(args.output, writing=True)
-        for name in ("input", "snapshot", "manifest", "approved", "journal"):
-            value = getattr(args, name, None)
-            if value is not None:
-                setattr(args, name, _validated_local_path(value))
-        if getattr(args, "guide_dir", None) is not None:
-            args.guide_dir = _validated_local_path(args.guide_dir)
-        if args.command == "export":
-            if args.remote_read == bool(args.input):
-                parser.error("export needs exactly one of --input or explicit --remote-read")
-            source = {"kind": "aws-public-catalog" if args.remote_read else "local-public-snapshot",
-                      "table": args.table, "region": args.region}
-            if args.input:
-                source["inputHash"] = digest(read_json(args.input))
-            items = scan_public(aws_table(source, args.profile)) if args.remote_read else records(read_json(args.input))
-            result = export_snapshot(items, source)
-        elif args.command == "audit":
-            result = audit_catalog(read_json(args.snapshot), args.guide_dir)
-        elif args.command == "draft":
-            result = make_draft(read_json(args.snapshot), args.revision)
-        elif args.command == "validate":
-            manifest = read_json(args.manifest)
-            errors = validation_errors(manifest, publish=args.publish or bool(args.approve_by))
-            result = {"valid": not errors, "errors": errors,
-                      "diff": None if errors else dry_run(manifest)}
-            if args.approve_by:
-                if errors or not args.output:
-                    raise MigrationError("Approval requires passing publish checks and a new --output path")
-                manifest["approved"] = True
-                manifest["approval"] = {"reviewer": args.approve_by, "approvedAt": now(),
-                                        "digest": approval_digest(manifest)}
-                result = manifest
-            if args.output:
-                write_json(args.output, result)
-            print(json.dumps({"valid": not errors, "errors": errors, "output": str(args.output)}, indent=2))
-            return 1 if errors else 0
-        else:
-            if args.apply and not args.approved:
-                parser.error("Remote mutation requires both --apply and --approved MANIFEST")
-            path = args.approved or args.manifest
-            if not path:
-                parser.error("Provide --manifest for local dry run or --approved for reviewed apply")
-            manifest = read_json(path)
-            if args.apply:
-                require_approval(manifest)  # Gate before SDK initialization/credential lookup.
-                if args.journal is None or args.output is None:
-                    parser.error("Apply requires --journal and --output paths")
-                journal_path = args.journal
-                output_path = args.output
-                if journal_path.resolve() == output_path.resolve():
-                    parser.error("Use separate --journal and --output paths")
-                if output_path.exists() or (args.command == "apply" and journal_path.exists()):
-                    raise MigrationError("Output/journal already exists; refusing to overwrite")
-            if args.command == "apply":
-                journal_path = args.journal
-                initialized = False
-                def save(value: dict) -> None:
-                    nonlocal initialized
-                    if journal_path is None:
-                        raise MigrationError("Apply requires the original --journal path")
-                    write_json(journal_path, value, replace=initialized)
-                    initialized = True
-                result = apply_manifest(aws_table(manifest["source"], args.profile) if args.apply else None,
-                                        manifest, apply=args.apply, save_journal=save if args.apply else None)
-            else:
-                journal_path = args.journal
-                if journal_path is None:
-                    parser.error("rollback requires the original --journal")
-                result = rollback_manifest(aws_table(manifest["source"], args.profile) if args.apply else None,
-                                           manifest, read_json(journal_path), apply=args.apply,
-                                           save_journal=lambda value: write_json(journal_path, value, replace=True))
+        _validate_cli_paths(args)
+        exit_code, result = _dispatch_command(args, parser)
+        if result is None:
+            return exit_code
         output_path = args.output
         if output_path is None:
             parser.error("This command requires --output")
         write_json(output_path, result)
         print(json.dumps({"command": args.command, "output": str(output_path),
                           "remoteMutation": bool(getattr(args, "apply", False))}))
-        return 0
+        return exit_code
     except (MigrationError, OSError, KeyError, TypeError) as error:
         parser.exit(1, f"{error}\n")
 
