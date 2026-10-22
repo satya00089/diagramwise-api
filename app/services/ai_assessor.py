@@ -626,30 +626,32 @@ class AIAssessorService:
         if "requirement_coverage" not in ai_result:
             raise ValueError("AI output must include requirement_coverage")
 
-        assessment = AssessmentResponse.model_validate(dict(
-            is_valid=verdict == AssessmentVerdict.STRONG_ALIGNMENT,
-            overall_score=overall_score,
-            score_available=True,
-            verdict=verdict,
-            scores=scores,
-            feedback=ai_result.get("feedback", []),
-            summary=ai_result.get("summary"),
-            findings=findings,
-            requirement_coverage=ai_result["requirement_coverage"],
-            strengths=ai_result.get("strengths", []),
-            improvements=ai_result.get("improvements", []),
-            missing_components=ai_result.get("missing_components", []),
-            missing_descriptions=ai_result.get("missing_descriptions", []),
-            unclear_connections=ai_result.get("unclear_connections", []),
-            suggestions=ai_result.get("suggestions", []),
-            detailed_analysis=ai_result.get("detailed_analysis"),
-            interview_questions=ai_result.get("interview_questions", []),
-            rubric_version=self.RUBRIC_VERSION,
-            requirement_revision=self._requirement_revision(request) if request else None,
-            problem_id=request.problem.id if request and request.problem else None,
-            model_version=self._model_version(),
-            source=AssessmentSource.AI,
-        ))
+        assessment = AssessmentResponse.model_validate(
+            {
+                "is_valid": verdict == AssessmentVerdict.STRONG_ALIGNMENT,
+                "overall_score": overall_score,
+                "score_available": True,
+                "verdict": verdict,
+                "scores": scores,
+                "feedback": ai_result.get("feedback", []),
+                "summary": ai_result.get("summary"),
+                "findings": findings,
+                "requirement_coverage": ai_result["requirement_coverage"],
+                "strengths": ai_result.get("strengths", []),
+                "improvements": ai_result.get("improvements", []),
+                "missing_components": ai_result.get("missing_components", []),
+                "missing_descriptions": ai_result.get("missing_descriptions", []),
+                "unclear_connections": ai_result.get("unclear_connections", []),
+                "suggestions": ai_result.get("suggestions", []),
+                "detailed_analysis": ai_result.get("detailed_analysis"),
+                "interview_questions": ai_result.get("interview_questions", []),
+                "rubric_version": self.RUBRIC_VERSION,
+                "requirement_revision": self._requirement_revision(request) if request else None,
+                "problem_id": request.problem.id if request and request.problem else None,
+                "model_version": self._model_version(),
+                "source": AssessmentSource.AI,
+            }
+        )
         if request is not None:
             self._validate_grounding(assessment, request)
         return assessment

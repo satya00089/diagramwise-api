@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import hashlib
 import argparse
+import os
 import re
 from pathlib import Path
 
@@ -217,15 +218,34 @@ def repository_path(path: Path) -> Path:
     return resolved
 
 
+def repository_output_path(path: Path) -> Path:
+    """Keep output paths lexical so the writer can reject every symlink hop."""
+    target = Path(os.path.abspath(path))
+    resolved = target.resolve()
+    allowed_roots = (ROOT.resolve(), (ROOT.parent / "diagramwise").resolve())
+    if not any(target == root or root in target.parents for root in allowed_roots):
+        raise ValueError("Fixture paths must stay inside the API or frontend repository")
+    if not any(resolved == root or root in resolved.parents for root in allowed_roots):
+        raise ValueError("Fixture paths must stay inside the API or frontend repository")
+    if resolved != target:
+        raise ValueError("Fixture output paths must not traverse symlinks")
+    return target
+
+
 def repository_output_file(directory: Path, name: str) -> Path:
     """Reject generated child paths redirected through pre-existing symlinks."""
     if Path(name).name != name or name in (".", ".."):
         raise ValueError("Generated fixture filenames must be simple child names")
-    target = directory / name
+    directory = Path(os.path.abspath(directory))
+    if directory.resolve() != directory:
+        raise ValueError("Generated fixture directory must not traverse symlinks")
+    target = Path(os.path.abspath(directory / name))
+    if target.parent != directory:
+        raise ValueError("Generated fixture files must stay inside their output directory")
     if target.is_symlink():
         raise ValueError("Generated fixture files must not be symlinks")
     resolved = target.resolve()
-    if resolved.parent != directory:
+    if resolved != target:
         raise ValueError("Generated fixture files must stay inside their output directory")
     return resolved
 
@@ -236,9 +256,9 @@ def _parse_arguments() -> argparse.Namespace:
     parser.add_argument("--frontend-fixture-dir", type=Path, help="Optional generated apply-path fixtures for all five frontend tests")
     args = parser.parse_args()
     if args.frontend_fixture:
-        args.frontend_fixture = repository_path(args.frontend_fixture)
+        args.frontend_fixture = repository_output_path(args.frontend_fixture)
     if args.frontend_fixture_dir:
-        args.frontend_fixture_dir = repository_path(args.frontend_fixture_dir)
+        args.frontend_fixture_dir = repository_output_path(args.frontend_fixture_dir)
     return args
 
 
@@ -300,14 +320,20 @@ def _frontend_fixture(guide: dict) -> dict:
 
 
 def _write_frontend_fixture(path: Path, fixture: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path = repository_output_path(path)
     output = repository_output_file(path.parent, path.name)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output = repository_output_file(output.parent, output.name)
     output.write_text(json.dumps(fixture, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-def _write_candidate_outputs(guide: dict, filename: str, output_dir: Path, args: argparse.Namespace) -> None:
+def _write_candidate_outputs(guide: dict, source: Path, output_dir: Path, args: argparse.Namespace) -> None:
+    filename = _candidate_filename(source)
+    if guide.get("problem_id") != source.stem:
+        raise ValueError("Candidate problem ID must match its validated snapshot filename")
     payload = json.dumps(guide, indent=2, ensure_ascii=False) + "\n"
-    repository_output_file(output_dir, filename).write_text(payload, encoding="utf-8")
+    output = repository_output_file(output_dir, filename)
+    output.write_text(payload, encoding="utf-8")
     if args.frontend_fixture and guide["problem_id"] == DOCUMENT_ID:
         _write_frontend_fixture(args.frontend_fixture, _frontend_fixture(guide))
     if args.frontend_fixture_dir:
@@ -320,7 +346,7 @@ def main() -> None:
     problems = _load_problems(snapshot_dir)
     for source in _snapshot_sources(snapshot_dir):
         guide = _prepare_guide(source, problems)
-        _write_candidate_outputs(guide, _candidate_filename(source), output_dir, args)
+        _write_candidate_outputs(guide, source, output_dir, args)
     print(json.dumps({"candidateGuides": len(list(output_dir.glob("*.json"))), "status": "not_published"}))
 
 

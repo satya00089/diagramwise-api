@@ -728,23 +728,25 @@ class DynamoDBService:
         self.diagrams_table.put_item(Item=item)
 
         # Return with original float values for response
-        return Diagram.model_validate(dict(
-            id=diagram_id,
-            userId=user_id,
-            title=title,
-            description=description,
-            nodes=nodes,
-            edges=edges,
-            canonicalDocument=canonical_document,
-            nodeCount=len(nodes),
-            edgeCount=len(edges),
-            reasoningContext=reasoning_context,
-            createdAt=now,
-            updatedAt=now,
-            recordType="remix" if source_diagram_id else "canonical",
-            familyId=family_id or diagram_id,
-            sourceDiagramId=source_diagram_id,
-        ))
+        return Diagram.model_validate(
+            {
+                "id": diagram_id,
+                "userId": user_id,
+                "title": title,
+                "description": description,
+                "nodes": nodes,
+                "edges": edges,
+                "canonicalDocument": canonical_document,
+                "nodeCount": len(nodes),
+                "edgeCount": len(edges),
+                "reasoningContext": reasoning_context,
+                "createdAt": now,
+                "updatedAt": now,
+                "recordType": "remix" if source_diagram_id else "canonical",
+                "familyId": family_id or diagram_id,
+                "sourceDiagramId": source_diagram_id,
+            }
+        )
 
     def get_diagrams_by_user(self, user_id: str) -> List[Diagram]:
         """Get all diagrams for a user."""
@@ -1789,33 +1791,35 @@ class DynamoDBService:
             if request.interviewSession
             else prepared.existing_data.get("interviewSession")
         )
-        return AttemptResponse.model_validate(dict(
-            id=f"{state.user_id}#{request.problemId}",
-            userId=state.user_id,
-            problemId=request.problemId,
-            title=request.title,
-            difficulty=request.difficulty or "Medium",
-            category=request.category or "General",
-            nodes=request.nodes,
-            edges=request.edges,
-            elapsedTime=request.elapsedTime,
-            lastAssessment=convert_decimal_to_float(prepared.preserved_assessment),
-            lastAssessmentCheck=prepared.preserved_check,
-            problemRequirementSpec=state.problem_requirement_spec,
-            reasoningContext=reasoning_context,
-            interviewSession=interview_session,
-            assessmentCount=prepared.assessment_count,
-            assessmentHistory=prepared.assessment_history,
-            addressedFindingIds=prepared.addressed_finding_ids,
-            createdAt=item["createdAt"],
-            updatedAt=state.updated_at,
-            lastAttemptedAt=state.updated_at,
-            isPublic=state.existing_attempt.isPublic if state.existing_attempt else False,
-            publishedAt=state.existing_attempt.publishedAt if state.existing_attempt else None,
-            authorName=state.existing_attempt.authorName if state.existing_attempt else None,
-            authorPicture=state.existing_attempt.authorPicture if state.existing_attempt else None,
-            viewCount=state.existing_attempt.viewCount if state.existing_attempt else 0,
-        ))
+        return AttemptResponse.model_validate(
+            {
+                "id": f"{state.user_id}#{request.problemId}",
+                "userId": state.user_id,
+                "problemId": request.problemId,
+                "title": request.title,
+                "difficulty": request.difficulty or "Medium",
+                "category": request.category or "General",
+                "nodes": request.nodes,
+                "edges": request.edges,
+                "elapsedTime": request.elapsedTime,
+                "lastAssessment": convert_decimal_to_float(prepared.preserved_assessment),
+                "lastAssessmentCheck": prepared.preserved_check,
+                "problemRequirementSpec": state.problem_requirement_spec,
+                "reasoningContext": reasoning_context,
+                "interviewSession": interview_session,
+                "assessmentCount": prepared.assessment_count,
+                "assessmentHistory": prepared.assessment_history,
+                "addressedFindingIds": prepared.addressed_finding_ids,
+                "createdAt": item["createdAt"],
+                "updatedAt": state.updated_at,
+                "lastAttemptedAt": state.updated_at,
+                "isPublic": state.existing_attempt.isPublic if state.existing_attempt else False,
+                "publishedAt": state.existing_attempt.publishedAt if state.existing_attempt else None,
+                "authorName": state.existing_attempt.authorName if state.existing_attempt else None,
+                "authorPicture": state.existing_attempt.authorPicture if state.existing_attempt else None,
+                "viewCount": state.existing_attempt.viewCount if state.existing_attempt else 0,
+            }
+        )
 
     @staticmethod
     def _attempt_update_condition(
