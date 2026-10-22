@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 from decimal import Decimal
 import time
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, List, Optional, Tuple, cast
 from uuid import uuid4
 
 import boto3
@@ -383,7 +383,9 @@ class DynamoDBService:
             }
             return {user_id: by_id.get(user_id) for user_id in ids}
         except (ClientError, RuntimeError):
-            return {user_id: None for user_id in ids}
+            return cast(
+                Dict[str, Optional[Dict[str, Any]]], dict.fromkeys(ids, None)
+            )
 
     def update_user_profile(
         self, user_id: str, first_name: str, last_name: str
@@ -931,10 +933,10 @@ class DynamoDBService:
                     "Delete": {
                         "TableName": self.diagrams_table.name,
                         "Key": self._serialize_item({"userId": user_id, "id": diagram_id}),
-                        "ConditionExpression": "#updated = :updated",
+                        "ConditionExpression": f"#updated = {DDB_UPDATED_VALUE}",
                         "ExpressionAttributeNames": {"#updated": "updatedAt"},
                         "ExpressionAttributeValues": self._serialize_item(
-                            {":updated": diagram.updatedAt}
+                            {DDB_UPDATED_VALUE: diagram.updatedAt}
                         ),
                     }
                 }
@@ -1024,6 +1026,96 @@ class DynamoDBService:
             "addedAt": collaborator.addedAt,
         }
 
+    @staticmethod
+    def _collaborators_after_change(
+        diagram: Diagram,
+        collaborator_user_id: str,
+        collaborator: Optional[Collaborator],
+    ) -> Tuple[List[Collaborator], Optional[Collaborator]]:
+        collaborators = list(diagram.collaborators or [])
+        existing = next(
+            (item for item in collaborators if item.userId == collaborator_user_id),
+            None,
+        )
+        if collaborator is None:
+            collaborators = [
+                item for item in collaborators
+                if item.userId != collaborator_user_id
+            ]
+        elif existing:
+            collaborators = [
+                collaborator if item.userId == collaborator_user_id else item
+                for item in collaborators
+            ]
+        else:
+            collaborators.append(collaborator)
+        return collaborators, existing
+
+    def _collaborator_update_request(
+        self,
+        diagram: Diagram,
+        diagram_id: str,
+        owner_id: str,
+        collaborators: List[Collaborator],
+    ) -> Dict[str, Any]:
+        names = {
+            "#id": "id",
+            "#updated": "updatedAt",
+            "#collaborators": "collaborators",
+        }
+        values: Dict[str, Any] = {
+            ":collaborators": convert_floats_to_decimal(
+                [item.model_dump(mode="json") for item in collaborators]
+            ),
+            DDB_UPDATED_VALUE: datetime.now(timezone.utc).isoformat(),
+        }
+        condition = "attribute_exists(#id)"
+        if diagram.updatedAt:
+            condition += " AND #updated = :old_updated"
+            values[":old_updated"] = diagram.updatedAt
+        else:
+            condition += " AND attribute_not_exists(#updated)"
+        return {
+            "TableName": self.diagrams_table.name,
+            "Key": self._serialize_item({"userId": owner_id, "id": diagram_id}),
+            "UpdateExpression": (
+                f"SET #collaborators = :collaborators, #updated = {DDB_UPDATED_VALUE}"
+            ),
+            "ConditionExpression": condition,
+            "ExpressionAttributeNames": names,
+            "ExpressionAttributeValues": self._serialize_item(values),
+        }
+
+    def _collaborator_membership_operation(
+        self,
+        diagram_id: str,
+        owner_id: str,
+        collaborator_user_id: str,
+        collaborator: Optional[Collaborator],
+        existing: Optional[Collaborator],
+    ) -> Dict[str, Any]:
+        share = collaborator or existing
+        if share is not None:
+            return {
+                "Put": {
+                    "TableName": self.diagram_shares_table.name,
+                    "Item": self._serialize_item(
+                        self._diagram_share_item(diagram_id, owner_id, share)
+                    ),
+                }
+            }
+        return {
+            "Delete": {
+                "TableName": self.diagram_shares_table.name,
+                "Key": self._serialize_item(
+                    {
+                        "collaboratorUserId": collaborator_user_id,
+                        "diagramId": diagram_id,
+                    }
+                ),
+            }
+        }
+
     def _persist_collaborator_change(
         self,
         diagram_id: str,
@@ -1037,77 +1129,23 @@ class DynamoDBService:
                 diagram = self.get_diagram(owner_id, diagram_id, consistent_read=True)
                 if not diagram:
                     return False
-
-                collaborators = list(diagram.collaborators or [])
-                existing = next(
-                    (item for item in collaborators if item.userId == collaborator_user_id),
-                    None,
+                collaborators, existing = self._collaborators_after_change(
+                    diagram, collaborator_user_id, collaborator
                 )
-                if collaborator is None:
-                    collaborators = [
-                        item for item in collaborators
-                        if item.userId != collaborator_user_id
-                    ]
-                elif existing:
-                    collaborators = [
-                        collaborator if item.userId == collaborator_user_id else item
-                        for item in collaborators
-                    ]
-                else:
-                    collaborators.append(collaborator)
-
-                now = datetime.now(timezone.utc).isoformat()
-                names = {"#id": "id", "#updated": "updatedAt", "#collaborators": "collaborators"}
-                values: Dict[str, Any] = {
-                    ":collaborators": convert_floats_to_decimal(
-                        [item.model_dump(mode="json") for item in collaborators]
-                    ),
-                    ":updated": now,
-                }
-                condition = "attribute_exists(#id)"
-                if diagram.updatedAt:
-                    condition += " AND #updated = :old_updated"
-                    values[":old_updated"] = diagram.updatedAt
-                else:
-                    condition += " AND attribute_not_exists(#updated)"
-
-                update_request: Dict[str, Any] = {
-                    "TableName": self.diagrams_table.name,
-                    "Key": self._serialize_item({"userId": owner_id, "id": diagram_id}),
-                    "UpdateExpression": "SET #collaborators = :collaborators, #updated = :updated",
-                    "ConditionExpression": condition,
-                    "ExpressionAttributeNames": names,
-                    "ExpressionAttributeValues": self._serialize_item(values),
-                }
-                share_item = self._diagram_share_item(
+                update_request = self._collaborator_update_request(
+                    diagram, diagram_id, owner_id, collaborators
+                )
+                membership_operation = self._collaborator_membership_operation(
                     diagram_id,
                     owner_id,
-                    collaborator or existing,
-                ) if collaborator or existing else None
-                transaction: List[Dict[str, Any]] = [{"Update": update_request}]
-                if share_item:
-                    transaction.append(
-                        {
-                            "Put": {
-                                "TableName": self.diagram_shares_table.name,
-                                "Item": self._serialize_item(share_item),
-                            }
-                        }
-                    )
-                else:
-                    transaction.append(
-                        {
-                            "Delete": {
-                                "TableName": self.diagram_shares_table.name,
-                                "Key": self._serialize_item(
-                                    {
-                                        "collaboratorUserId": collaborator_user_id,
-                                        "diagramId": diagram_id,
-                                    }
-                                ),
-                            }
-                        }
-                    )
+                    collaborator_user_id,
+                    collaborator,
+                    existing,
+                )
+                transaction = [
+                    {"Update": update_request},
+                    membership_operation,
+                ]
 
                 try:
                     self.diagrams_table.meta.client.transact_write_items(
@@ -1391,18 +1429,15 @@ class DynamoDBService:
 
     def get_problem_by_slug(self, slug: str) -> Optional[Dict[str, Any]]:
         """Get a problem by its public slug."""
-        try:
-            response = self.problems_table.query(
-                IndexName="slug-index",
-                KeyConditionExpression=Key("slug").eq(slug),
-                Limit=2,
-            )
-            items = response.get("Items", [])
-            if len(items) > 1:
-                raise RuntimeError(f"Multiple problems use the slug '{slug}'")
-            return items[0] if items else None
-        except ClientError:
-            raise
+        response = self.problems_table.query(
+            IndexName="slug-index",
+            KeyConditionExpression=Key("slug").eq(slug),
+            Limit=2,
+        )
+        items = response.get("Items", [])
+        if len(items) > 1:
+            raise RuntimeError(f"Multiple problems use the slug '{slug}'")
+        return items[0] if items else None
 
     def get_problems_by_category(self, category: str) -> List[Dict[str, Any]]:
         """Get problems by category using GSI."""
@@ -1757,6 +1792,87 @@ class DynamoDBService:
             viewCount=existing_attempt.viewCount if existing_attempt else 0,
         )
 
+    @staticmethod
+    def _attempt_update_condition(
+        existing_attempt: Optional[AttemptResponse],
+        names: Dict[str, str],
+        values: Dict[str, Any],
+    ) -> str:
+        names["#condition_user"] = "userId"
+        if existing_attempt is None:
+            return "attribute_not_exists(#condition_user)"
+
+        condition_parts = ["attribute_exists(#condition_user)"]
+        names["#condition_updated"] = "updatedAt"
+        if existing_attempt.updatedAt is None:
+            condition_parts.append("attribute_not_exists(#condition_updated)")
+        else:
+            condition_parts.append("#condition_updated = :expected_updated")
+            values[":expected_updated"] = existing_attempt.updatedAt
+
+        names["#condition_public"] = "isPublic"
+        values[":expected_public"] = existing_attempt.isPublic
+        if existing_attempt.isPublic:
+            condition_parts.append("#condition_public = :expected_public")
+        else:
+            condition_parts.append(
+                "(attribute_not_exists(#condition_public) "
+                "OR #condition_public = :expected_public)"
+            )
+        return " AND ".join(condition_parts)
+
+    @staticmethod
+    def _attempt_update_fields(
+        item: Dict[str, Any],
+    ) -> tuple[Dict[str, str], Dict[str, Any], str]:
+        attributes = {
+            key: value for key, value in item.items()
+            if key not in ("userId", "problemId")
+        }
+        names = {f"#a{i}": key for i, key in enumerate(attributes)}
+        values = {
+            f":a{i}": convert_floats_to_decimal(value)
+            for i, value in enumerate(attributes.values())
+        }
+        updates = []
+        for i, key in enumerate(attributes):
+            value = f":a{i}"
+            if key in ("createdAt", "problemRequirementSpec"):
+                value = f"if_not_exists(#a{i}, :a{i})"
+            updates.append(f"#a{i} = {value}")
+
+        remove_attributes = [
+            key
+            for key in ("leaderboardProblemId", "leaderboardScore")
+            if key not in attributes
+        ]
+        remove_expression = ""
+        if remove_attributes:
+            for index, key in enumerate(remove_attributes):
+                names[f"#remove{index}"] = key
+            remove_expression = " REMOVE " + ", ".join(
+                f"#remove{index}" for index in range(len(remove_attributes))
+            )
+        return names, values, "SET " + ", ".join(updates) + remove_expression
+
+    def _attempt_update_request(
+        self,
+        user_id: str,
+        problem_id: str,
+        item: Dict[str, Any],
+        existing_attempt: Optional[AttemptResponse],
+    ) -> Dict[str, Any]:
+        names, values, update_expression = self._attempt_update_fields(item)
+        condition = self._attempt_update_condition(existing_attempt, names, values)
+        return {
+            "Key": {"userId": user_id, "problemId": problem_id},
+            "UpdateExpression": update_expression,
+            "ConditionExpression": condition,
+            "ExpressionAttributeNames": names,
+            "ExpressionAttributeValues": values,
+            "ReturnValues": "ALL_NEW",
+        }
+
     def create_or_update_attempt(
         self,
         user_id: str,
@@ -1825,66 +1941,11 @@ class DynamoDBService:
                 pinned_spec,
             )
 
-            # Update only attempt-owned attributes; put_item would erase fields
-            # written by other workflows, including concurrent sharing changes.
-            attributes = {
-                key: value for key, value in item.items()
-                if key not in ("userId", "problemId")
-            }
-            names = {f"#a{i}": key for i, key in enumerate(attributes)}
-            values = {
-                f":a{i}": convert_floats_to_decimal(value)
-                for i, value in enumerate(attributes.values())
-            }
-            updates = []
-            for i, key in enumerate(attributes):
-                value = f":a{i}"
-                if key in ("createdAt", "problemRequirementSpec"):
-                    value = f"if_not_exists(#a{i}, :a{i})"
-                updates.append(f"#a{i} = {value}")
-            remove_attributes = [
-                key
-                for key in ("leaderboardProblemId", "leaderboardScore")
-                if key not in attributes
-            ]
-            remove_expression = ""
-            if remove_attributes:
-                for index, key in enumerate(remove_attributes):
-                    names[f"#remove{index}"] = key
-                remove_expression = " REMOVE " + ", ".join(
-                    f"#remove{index}" for index in range(len(remove_attributes))
-                )
-            condition_parts = []
-            names["#condition_user"] = "userId"
-            if existing_attempt is None:
-                condition_parts.append("attribute_not_exists(#condition_user)")
-            else:
-                condition_parts.append("attribute_exists(#condition_user)")
-                names["#condition_updated"] = "updatedAt"
-                if existing_attempt.updatedAt is None:
-                    condition_parts.append("attribute_not_exists(#condition_updated)")
-                else:
-                    condition_parts.append("#condition_updated = :expected_updated")
-                    values[":expected_updated"] = existing_attempt.updatedAt
-                names["#condition_public"] = "isPublic"
-                values[":expected_public"] = existing_attempt.isPublic
-                if existing_attempt.isPublic:
-                    condition_parts.append("#condition_public = :expected_public")
-                else:
-                    condition_parts.append(
-                        "(attribute_not_exists(#condition_public) "
-                        "OR #condition_public = :expected_public)"
-                    )
-
+            update_request = self._attempt_update_request(
+                user_id, problem_id, item, existing_attempt
+            )
             try:
-                saved = self.attempts_table.update_item(
-                    Key={"userId": user_id, "problemId": problem_id},
-                    UpdateExpression="SET " + ", ".join(updates) + remove_expression,
-                    ConditionExpression=" AND ".join(condition_parts),
-                    ExpressionAttributeNames=names,
-                    ExpressionAttributeValues=values,
-                    ReturnValues="ALL_NEW",
-                )
+                saved = self.attempts_table.update_item(**update_request)
             except ClientError as error:
                 is_conflict = (
                     error.response.get("Error", {}).get("Code")

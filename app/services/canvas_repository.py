@@ -26,6 +26,8 @@ from app.services.dynamodb_service import (
 )
 
 UPDATED_AT_PLACEHOLDER = "#updatedAt"
+CANVAS_NODES_ALIAS = "#nodes"
+CANVAS_EDGES_ALIAS = "#edges"
 
 
 class CanvasVersionConflict(Exception):
@@ -78,6 +80,112 @@ class CanvasRepository:
         data.pop("recordType", None)
         return CanvasRecord(**data)
 
+    def _query_canvas_metadata(
+        self, workspace_id: str, names: Dict[str, str]
+    ) -> List[Dict[str, Any]]:
+        query: Dict[str, Any] = {
+            "KeyConditionExpression": Key("userId").eq(self.owner_id)
+            & Key("id").begins_with(canvas_item_prefix(workspace_id)),
+            "ProjectionExpression": ", ".join(names),
+            "ExpressionAttributeNames": names,
+        }
+        items: List[Dict[str, Any]] = []
+        while True:
+            response = self.table.query(**query)
+            items.extend(response.get("Items", []))
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                return items
+            query["ExclusiveStartKey"] = last_key
+
+    def _canvas_summary(
+        self, item: Dict[str, Any], legacy_items: Dict[str, Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        if item.get("deletedAt") is not None:
+            return None
+        node_count = item.get("nodeCount")
+        edge_count = item.get("edgeCount")
+        if node_count is None or edge_count is None:
+            legacy_item = legacy_items.get(str(item["canvasId"]))
+            if legacy_item is None or legacy_item.get("deletedAt") is not None:
+                return None
+            node_count = len(legacy_item.get("nodes") or [])
+            edge_count = len(legacy_item.get("edges") or [])
+        return {
+            "id": item["canvasId"],
+            "title": self.design_title,
+            "name": item["name"],
+            "kind": item["kind"],
+            "order": item["order"],
+            "nodeCount": int(node_count),
+            "edgeCount": int(edge_count),
+            "version": item["version"],
+            "updatedAt": item["updatedAt"],
+        }
+
+    @staticmethod
+    def _deserialize_legacy_items(
+        raw_items: List[Dict[str, Any]], deserializer: TypeDeserializer
+    ) -> Dict[str, Dict[str, Any]]:
+        items: Dict[str, Dict[str, Any]] = {}
+        for raw_item in raw_items:
+            item = {
+                name: deserializer.deserialize(value)
+                for name, value in raw_item.items()
+            }
+            if item.get("canvasId"):
+                items[str(item["canvasId"])] = item
+        return items
+
+    def _batch_get_legacy_canvas_chunk(
+        self,
+        workspace_id: str,
+        canvas_ids: List[str],
+        serializer: TypeSerializer,
+        deserializer: TypeDeserializer,
+    ) -> Dict[str, Dict[str, Any]]:
+        keys = [self._key(workspace_id, canvas_id) for canvas_id in canvas_ids]
+        request: Dict[str, Any] = {
+            "Keys": [
+                {name: serializer.serialize(value) for name, value in key.items()}
+                for key in keys
+            ],
+            "ProjectionExpression": (
+                f"#user, #sort, #canvas, {CANVAS_NODES_ALIAS}, "
+                f"{CANVAS_EDGES_ALIAS}, #deleted"
+            ),
+            "ExpressionAttributeNames": {
+                "#user": "userId",
+                "#sort": "id",
+                "#canvas": "canvasId",
+                CANVAS_NODES_ALIAS: "nodes",
+                CANVAS_EDGES_ALIAS: "edges",
+                "#deleted": "deletedAt",
+            },
+        }
+        client = self.table.meta.client
+        table_name = self.table.name
+        pending: Dict[str, Any] = {table_name: request}
+        items: Dict[str, Dict[str, Any]] = {}
+        retries = 0
+        while pending:
+            response = client.batch_get_item(RequestItems=pending)
+            items.update(
+                self._deserialize_legacy_items(
+                    response.get("Responses", {}).get(table_name, []),
+                    deserializer,
+                )
+            )
+            pending = response.get("UnprocessedKeys", {})
+            if pending:
+                retries += 1
+                if retries >= 5:
+                    raise RuntimeError(
+                        "DynamoDB left legacy canvas keys unprocessed"
+                    )
+                time.sleep(0.05 * (2 ** (retries - 1)))
+        return items
+
     def _to_item(self, canvas: CanvasRecord) -> Dict[str, Any]:
         # mode="json" keeps enums (canvas kind) as plain strings that DynamoDB can store.
         data = canvas.model_dump(mode="json")
@@ -121,24 +229,10 @@ class CanvasRepository:
             "#version": "version",
             "#updated": "updatedAt",
             "#deleted": "deletedAt",
-            "#nodes": "nodeCount",
-            "#edges": "edgeCount",
+            CANVAS_NODES_ALIAS: "nodeCount",
+            CANVAS_EDGES_ALIAS: "edgeCount",
         }
-        query: Dict[str, Any] = {
-            "KeyConditionExpression": Key("userId").eq(self.owner_id)
-            & Key("id").begins_with(canvas_item_prefix(workspace_id)),
-            "ProjectionExpression": ", ".join(names),
-            "ExpressionAttributeNames": names,
-        }
-        items: List[Dict[str, Any]] = []
-        while True:
-            response = self.table.query(**query)
-            items.extend(response.get("Items", []))
-            last_key = response.get("LastEvaluatedKey")
-            if not last_key:
-                break
-            query["ExclusiveStartKey"] = last_key
-
+        items = self._query_canvas_metadata(workspace_id, names)
         legacy_canvas_ids = [
             str(item["canvasId"])
             for item in items
@@ -149,83 +243,25 @@ class CanvasRepository:
 
         summaries: List[Dict[str, Any]] = []
         for item in items:
-            if item.get("deletedAt") is not None:
-                continue
-            node_count = item.get("nodeCount")
-            edge_count = item.get("edgeCount")
-            if node_count is None or edge_count is None:
-                # Legacy rows lack counts; fetch only those rows until their next save.
-                legacy_item = legacy_items.get(str(item["canvasId"]))
-                if legacy_item is None or legacy_item.get("deletedAt") is not None:
-                    continue
-                node_count = len(legacy_item.get("nodes") or [])
-                edge_count = len(legacy_item.get("edges") or [])
-            summaries.append(
-                {
-                    "id": item["canvasId"],
-                    "title": self.design_title,
-                    "name": item["name"],
-                    "kind": item["kind"],
-                    "order": item["order"],
-                    "nodeCount": int(node_count),
-                    "edgeCount": int(edge_count),
-                    "version": item["version"],
-                    "updatedAt": item["updatedAt"],
-                }
-            )
+            summary = self._canvas_summary(item, legacy_items)
+            if summary is not None:
+                summaries.append(summary)
         return sorted(summaries, key=lambda canvas: canvas["order"])
 
     def _batch_get_legacy_canvases(
         self, workspace_id: str, canvas_ids: List[str]
     ) -> Dict[str, Dict[str, Any]]:
         """Load old canvas graph payloads in bounded batches for missing counts."""
-        if not canvas_ids:
-            return {}
-
-        client = self.table.meta.client
         serializer = TypeSerializer()
         deserializer = TypeDeserializer()
         items: Dict[str, Dict[str, Any]] = {}
-        table_name = self.table.name
         for offset in range(0, len(canvas_ids), 100):
-            keys = [
-                self._key(workspace_id, canvas_id)
-                for canvas_id in canvas_ids[offset : offset + 100]
-            ]
-            request: Dict[str, Any] = {
-                "Keys": [
-                    {name: serializer.serialize(value) for name, value in key.items()}
-                    for key in keys
-                ],
-                "ProjectionExpression": (
-                    "#user, #sort, #canvas, #nodes, #edges, #deleted"
-                ),
-                "ExpressionAttributeNames": {
-                    "#user": "userId",
-                    "#sort": "id",
-                    "#canvas": "canvasId",
-                    "#nodes": "nodes",
-                    "#edges": "edges",
-                    "#deleted": "deletedAt",
-                },
-            }
-            pending: Dict[str, Any] = {table_name: request}
-            retries = 0
-            while pending:
-                response = client.batch_get_item(RequestItems=pending)
-                for raw_item in response.get("Responses", {}).get(table_name, []):
-                    item = {
-                        name: deserializer.deserialize(value)
-                        for name, value in raw_item.items()
-                    }
-                    if item.get("canvasId"):
-                        items[str(item["canvasId"])] = item
-                pending = response.get("UnprocessedKeys", {})
-                if pending:
-                    retries += 1
-                    if retries >= 5:
-                        raise RuntimeError("DynamoDB left legacy canvas keys unprocessed")
-                    time.sleep(0.05 * (2 ** (retries - 1)))
+            chunk = canvas_ids[offset : offset + 100]
+            items.update(
+                self._batch_get_legacy_canvas_chunk(
+                    workspace_id, chunk, serializer, deserializer
+                )
+            )
         return items
 
     def get_canvas(self, workspace_id: str, canvas_id: str) -> Optional[CanvasRecord]:
@@ -296,13 +332,14 @@ class CanvasRepository:
             response = self.table.update_item(
                 Key=self._key(workspace_id, canvas_id),
                 UpdateExpression=(
-                    "SET #nodes = :nodes, #edges = :edges, #nodeCount = :nodeCount, "
+                    f"SET {CANVAS_NODES_ALIAS} = :nodes, "
+                    f"{CANVAS_EDGES_ALIAS} = :edges, #nodeCount = :nodeCount, "
                     "#edgeCount = :edgeCount, #version = :next, "
                     f"{UPDATED_AT_PLACEHOLDER} = :updatedAt"
                 ),
                 ExpressionAttributeNames={
-                    "#nodes": "nodes",
-                    "#edges": "edges",
+                    CANVAS_NODES_ALIAS: "nodes",
+                    CANVAS_EDGES_ALIAS: "edges",
                     "#nodeCount": "nodeCount",
                     "#edgeCount": "edgeCount",
                     "#version": "version",

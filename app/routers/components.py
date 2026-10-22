@@ -227,7 +227,11 @@ async def get_categories():
         ) from exc
 
 
-@router.post("/batch/by-ids", response_model=ComponentsResponse)
+@router.post(
+    "/batch/by-ids",
+    response_model=ComponentsResponse,
+    responses={500: {"description": "Error fetching components."}},
+)
 async def get_components_by_ids(request: ComponentBatchRequest):
     """Fetch up to 100 component records with one DynamoDB batch request."""
     try:

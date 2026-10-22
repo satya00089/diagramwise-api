@@ -81,34 +81,8 @@ def enrich_diagram_response(
 ) -> DiagramResponse:
     """Enrich diagram with ownership and permission information."""
     is_owner = diagram.userId == current_user_id
-
-    # Determine user's permission
-    if is_owner:
-        permission = "owner"
-    else:
-        # Find user's permission from collaborators list
-        permission = None
-        for collab in diagram.collaborators or []:
-            if collab.userId == current_user_id:
-                permission = collab.permission.value
-                break
-        if not permission:
-            permission = "read"  # Default fallback
-
-    # Get owner information
-    owner_info = None
-    if owner_cache is not None and diagram.userId:
-        owner_info = _owner_info(diagram.userId, owner_cache)
-    elif diagram.userId:
-        owner = dynamodb_service.get_user_by_id(diagram.userId)
-        if owner:
-            owner_info = {
-                "id": owner.id,
-                "name": owner.name or "Anonymous",
-                "email": owner.email,
-                "pictureUrl": owner.picture or None,
-                "avatarKey": owner.avatarKey,
-            }
+    permission = _diagram_permission(diagram, current_user_id, is_owner)
+    owner_info = _diagram_owner_info(diagram, owner_cache)
 
     return DiagramResponse(
         id=diagram.id,
@@ -135,6 +109,37 @@ def enrich_diagram_response(
         permission=permission,
         owner=owner_info,
     )
+
+
+def _diagram_permission(
+    diagram: Diagram, current_user_id: str, is_owner: bool
+) -> str:
+    if is_owner:
+        return "owner"
+    for collaborator in diagram.collaborators or []:
+        if collaborator.userId == current_user_id:
+            return collaborator.permission.value
+    return "read"
+
+
+def _diagram_owner_info(
+    diagram: Diagram,
+    owner_cache: Optional[Dict[str, Optional[Dict[str, Any]]]],
+) -> Optional[Dict[str, Any]]:
+    if not diagram.userId:
+        return None
+    if owner_cache is not None:
+        return _owner_info(diagram.userId, owner_cache)
+    owner = dynamodb_service.get_user_by_id(diagram.userId)
+    if not owner:
+        return None
+    return {
+        "id": owner.id,
+        "name": owner.name or "Anonymous",
+        "email": owner.email,
+        "pictureUrl": owner.picture or None,
+        "avatarKey": owner.avatarKey,
+    }
 
 
 def _owner_info(

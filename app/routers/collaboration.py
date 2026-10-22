@@ -261,11 +261,12 @@ def _get_diagram_data(user_id: str, diagram_id: str) -> Optional[Dict[str, Any]]
             return None
 
         is_owner = diagram.userId == user_id
-        permission = (
-            "owner"
-            if is_owner
-            else access_permission.value if access_permission else None
-        )
+        if is_owner:
+            permission = "owner"
+        elif access_permission:
+            permission = access_permission.value
+        else:
+            permission = None
         owner_info = None
         if diagram.userId:
             owner = dynamodb_service.get_user_by_id(diagram.userId)
