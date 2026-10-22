@@ -11,7 +11,15 @@ from starlette.concurrency import run_in_threadpool
 from app.models.problem_models import RequirementSpec
 from app.models.request_models import AssessmentRequest
 from app.models.response_models import AssessmentResponse
+from app.models.simulation_models import (
+    SimulationPreparationRequest,
+    SimulationPreparationResponse,
+)
 from app.services.ai_assessor import AIAssessorService
+from app.services.simulation_preparation import (
+    SimulationPreparationError,
+    SimulationPreparationService,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -21,6 +29,11 @@ ProblemLookup = Callable[[str], dict[str, Any] | None]
 def get_assessor_service() -> AIAssessorService:
     """Dependency injection for AIAssessorService."""
     return AIAssessorService()
+
+
+def get_simulation_preparation_service() -> SimulationPreparationService:
+    """Inject the provider-neutral AI graph interpreter."""
+    return SimulationPreparationService()
 
 
 def get_problem_lookup() -> ProblemLookup:
@@ -126,6 +139,34 @@ async def assess_system_design(
         raise HTTPException(
             status_code=500, detail=f"Assessment failed: {str(e)}"
         ) from e
+
+
+@router.post(
+    "/simulation/prepare",
+    response_model=SimulationPreparationResponse,
+    responses={
+        422: {"description": "The diagram could not be safely prepared."},
+        503: {"description": "AI preparation is temporarily unavailable."},
+    },
+)
+async def prepare_simulation(
+    request: SimulationPreparationRequest,
+    preparer: Annotated[
+        SimulationPreparationService,
+        Depends(get_simulation_preparation_service),
+    ],
+) -> SimulationPreparationResponse:
+    """Interpret a diagram for the supported educational simulation model."""
+    try:
+        return await preparer.prepare(request)
+    except SimulationPreparationError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except Exception as error:
+        logger.exception("Unexpected simulation preparation failure")
+        raise HTTPException(
+            status_code=503,
+            detail="AI preparation is temporarily unavailable. No simulation metrics were produced.",
+        ) from error
 
 
 @router.get("/health")

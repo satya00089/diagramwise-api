@@ -1,0 +1,314 @@
+"""AI-assisted graph interpretation for the bounded local simulator."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+
+from pydantic import ValidationError
+
+from app.models.simulation_models import (
+    SimulationPreparationDraft,
+    SimulationPreparationRequest,
+    SimulationPreparationResponse,
+    SimulationRole,
+)
+from app.services.llm_client import create_llm_provider
+from app.services.llm_port import LLMPort, LLMRequest
+from app.utils.config import Settings, get_settings
+
+
+logger = logging.getLogger(__name__)
+
+
+class SimulationPreparationError(RuntimeError):
+    """Raised when the diagram cannot be safely interpreted for simulation."""
+
+
+class SimulationPreparationService:
+    MAX_TIMEOUT_SECONDS = 35.0
+
+    def __init__(
+        self,
+        llm: LLMPort | None = None,
+        settings: Settings | None = None,
+    ) -> None:
+        self.settings = settings or get_settings()
+        self.llm = llm or create_llm_provider(self.settings)
+        configured_timeout = float(
+            getattr(self.settings, "llm_assessment_timeout_seconds", 45.0)
+        )
+        self.timeout_seconds = min(
+            max(configured_timeout, 1.0), self.MAX_TIMEOUT_SECONDS
+        )
+
+    async def prepare(
+        self, request: SimulationPreparationRequest
+    ) -> SimulationPreparationResponse:
+        """Map a diagram into supported paths and validate all references."""
+
+        system_prompt = """
+You prepare architecture diagrams for a small educational request-capacity simulator.
+Return only the exact JSON object requested by the supplied schema. Do not write code,
+invent components, invent connections, infer measured capacity, or make cloud-provider
+performance claims.
+
+Use only these component roles: client, ingress, compute, cache, database, queue, other.
+Only client, ingress, compute, cache, and database have behavior in this first model.
+Classify every supplied component from its catalog type, label, properties, and problem
+context. Use `other` when evidence is insufficient; never silently treat an unknown
+component as unlimited-capacity pass-through.
+
+Check every supplied connection in context. The status `incompatible` means the edge
+cannot perform its apparent job in this scenario; `uncertain` means the evidence is not
+enough to decide. An API gateway or other ingress connected directly to Redis/cache or a
+database bypasses application logic and is incompatible for this read/write request
+model. A cache or database should be reached from a compute component. Do not claim
+that this is a universal cloud-product limitation: explain that it is unsupported by
+this scenario model. Do not mark an edge incompatible only because it is unusual.
+
+Provide at most one directed `read` route and one directed `write` route, in execution
+order, using only the exact supplied node and edge IDs. Each route must start at a client,
+include a compute component, and end at a database. A read route may pass through a cache
+before the database; a write route should reflect the supplied graph. If a route cannot
+be supported by the graph, return empty node_ids and edge_ids for that operation and add
+a concise unresolved item. Paths must not invent missing application layers.
+
+Distinguish explicit graph facts from assumptions. Keep the result concise and tied to
+the supplied IDs. The simulator will calculate capacity from editable educational
+profiles; do not provide numeric capacity, latency, failure-rate, or reliability claims.
+""".strip()
+        user_prompt = (
+            "Prepare this graph for the read/write capacity model. Return one JSON "
+            "object that follows this schema exactly:\n"
+            + json.dumps(SimulationPreparationDraft.model_json_schema())
+            + "\nDiagram input:\n"
+            + request.model_dump_json(exclude_none=True)
+        )
+
+        try:
+            response = await asyncio.wait_for(
+                self.llm.generate(
+                    LLMRequest(
+                        task="simulation-preparation",
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        max_tokens=min(
+                            int(self.settings.llm_assessment_max_tokens), 5000
+                        ),
+                        response_format={"type": "json_object"},
+                        temperature=0.0,
+                        reasoning_effort=getattr(
+                            self.settings,
+                            "llm_assessment_reasoning_effort",
+                            None,
+                        ),
+                        tags=("diagramwise", "simulation", "preparation"),
+                        metadata={
+                            "component_count": len(request.components),
+                            "connection_count": len(request.connections),
+                            "problem_title": request.problem.title
+                            if request.problem
+                            else None,
+                        },
+                    )
+                ),
+                timeout=self.timeout_seconds,
+            )
+        except asyncio.TimeoutError as error:
+            raise SimulationPreparationError(
+                "AI preparation timed out. Retry after the diagram is stable."
+            ) from error
+        except Exception as error:
+            logger.warning(
+                "Simulation preparation failed error_type=%s", type(error).__name__
+            )
+            raise SimulationPreparationError(
+                "AI could not prepare this diagram. No simulation metrics were produced."
+            ) from error
+
+        if response.refusal_present:
+            raise SimulationPreparationError(
+                "AI could not prepare this diagram. No simulation metrics were produced."
+            )
+        if not response.content:
+            raise SimulationPreparationError(
+                "AI returned no simulation preparation. Retry the check."
+            )
+
+        try:
+            raw = json.loads(response.content)
+            draft = SimulationPreparationDraft.model_validate(raw)
+        except (json.JSONDecodeError, ValidationError, TypeError) as error:
+            logger.warning(
+                "Simulation preparation output rejected error_type=%s",
+                type(error).__name__,
+            )
+            raise SimulationPreparationError(
+                "AI returned an unsupported preparation. Retry the check."
+            ) from error
+
+        return self._validate_graph_mapping(request, draft)
+
+    @staticmethod
+    def _validate_graph_mapping(
+        request: SimulationPreparationRequest,
+        draft: SimulationPreparationDraft,
+    ) -> SimulationPreparationResponse:
+        component_by_id = {component.id: component for component in request.components}
+        connection_by_id = {connection.id: connection for connection in request.connections}
+        role_by_id = {item.node_id: item.role for item in draft.component_roles}
+        check_by_id = {item.edge_id: item for item in draft.connection_checks}
+        blockers: list[str] = []
+        unresolved = list(draft.unresolved)
+
+        if len(role_by_id) != len(draft.component_roles) or set(role_by_id) != set(
+            component_by_id
+        ):
+            raise SimulationPreparationError(
+                "AI did not classify every diagram component exactly once. Retry the check."
+            )
+        if len(check_by_id) != len(draft.connection_checks) or set(check_by_id) != set(
+            connection_by_id
+        ):
+            raise SimulationPreparationError(
+                "AI did not check every diagram connection exactly once. Retry the check."
+            )
+        routes_by_operation = {route.operation: route for route in draft.routes}
+        if len(routes_by_operation) != len(draft.routes) or set(
+            routes_by_operation
+        ) != {"read", "write"}:
+            raise SimulationPreparationError(
+                "AI did not return one read route and one write route. Retry the check."
+            )
+
+        # Core catalog roles have explicit identities, so retain those facts even if
+        # the model proposes a conflicting interpretation. Provider-specific aliases
+        # and custom nodes remain the interpreter's responsibility.
+        known_catalog_roles: dict[str, SimulationRole] = {
+            "client": "client",
+            "frontend": "client",
+            "api-gateway": "ingress",
+            "load-balancer": "ingress",
+            "web-server": "compute",
+            "application-server": "compute",
+            "microservice": "compute",
+            "backend": "compute",
+            "cache": "cache",
+            "database": "database",
+        }
+        for role_item in draft.component_roles:
+            component_type = component_by_id[role_item.node_id].type.casefold().replace(
+                "_", "-"
+            )
+            known_role = known_catalog_roles.get(component_type)
+            if known_role and role_item.role != known_role:
+                role_item.role = known_role
+                role_item.evidence = (
+                    f"Catalog type {component_by_id[role_item.node_id].type}"
+                )
+                role_by_id[role_item.node_id] = known_role
+
+        # Enforce a small role-level boundary independent of model judgment. This is
+        # specific to the supported request model, not a universal component-pair catalog.
+        for edge in request.connections:
+            source_role = role_by_id[edge.source]
+            target_role = role_by_id[edge.target]
+            if source_role == "ingress" and target_role in {"cache", "database"}:
+                source = component_by_id[edge.source].label
+                target = component_by_id[edge.target].label
+                reason = (
+                    f"{source} connects directly to {target}. This model requires "
+                    "application logic between ingress and a cache or database."
+                )
+                check_by_id[edge.id].status = "incompatible"
+                check_by_id[edge.id].explanation = reason
+
+        for edge_id, check in check_by_id.items():
+            edge = connection_by_id[edge_id]
+            if check.status == "incompatible":
+                blockers.append(
+                    f"{component_by_id[edge.source].label} → "
+                    f"{component_by_id[edge.target].label}: {check.explanation}"
+                )
+            elif check.status == "uncertain":
+                unresolved.append(
+                    f"Connection {component_by_id[edge.source].label} → "
+                    f"{component_by_id[edge.target].label}: {check.explanation}"
+                )
+
+        for operation, route in routes_by_operation.items():
+            if not route.node_ids or not route.edge_ids:
+                blockers.append(
+                    f"AI could not map a supported {operation} route through this graph."
+                )
+                continue
+            if len(route.node_ids) != len(route.edge_ids) + 1:
+                raise SimulationPreparationError(
+                    f"AI returned a malformed {operation} route. Retry the check."
+                )
+            if len(route.node_ids) != len(set(route.node_ids)):
+                blockers.append(
+                    f"The {operation} route contains a loop that this model does not support."
+                )
+            if any(node_id not in component_by_id for node_id in route.node_ids):
+                raise SimulationPreparationError(
+                    f"AI invented a component in the {operation} route. Retry the check."
+                )
+            roles = [role_by_id[node_id] for node_id in route.node_ids]
+            if roles[0] != "client" or roles[-1] != "database" or "compute" not in roles:
+                blockers.append(
+                    f"The {operation} route must run from a client through application "
+                    "logic to a database for this model."
+                )
+            if any(role in {"other", "queue"} for role in roles):
+                blockers.append(
+                    f"The {operation} route contains a component role not modeled yet."
+                )
+            for index, edge_id in enumerate(route.edge_ids):
+                edge = connection_by_id.get(edge_id)
+                if edge is None:
+                    raise SimulationPreparationError(
+                        f"AI invented a connection in the {operation} route. Retry the check."
+                    )
+                if (edge.source, edge.target) != (
+                    route.node_ids[index],
+                    route.node_ids[index + 1],
+                ):
+                    raise SimulationPreparationError(
+                        f"AI returned a disconnected {operation} route. Retry the check."
+                    )
+                if check_by_id[edge_id].status != "supported":
+                    blockers.append(
+                        f"The {operation} route uses a connection that is not validated."
+                    )
+
+        # Preserve the model's declared role and edge order for stable UI rendering.
+        checked_roles = [
+            draft_role
+            for draft_role in draft.component_roles
+            if draft_role.node_id in component_by_id
+        ]
+        checked_edges = [
+            check_by_id[edge.id] for edge in request.connections
+        ]
+        status = (
+            "blocked"
+            if blockers
+            else "needs_review"
+            if unresolved
+            else "ready"
+        )
+        return SimulationPreparationResponse(
+            status=status,
+            component_roles=checked_roles,
+            connection_checks=checked_edges,
+            routes=[routes_by_operation["read"], routes_by_operation["write"]],
+            assumptions=draft.assumptions,
+            unresolved=list(dict.fromkeys(unresolved)),
+            summary=draft.summary,
+            blockers=list(dict.fromkeys(blockers)),
+        )
