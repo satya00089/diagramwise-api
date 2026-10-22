@@ -7,7 +7,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
 from app.models.canvas_models import (
     CanvasRecord,
@@ -74,7 +74,11 @@ def _decode_diagram_cursor(cursor: Optional[str]) -> Dict[str, Any]:
     return state
 
 
-def enrich_diagram_response(diagram: Diagram, current_user_id: str) -> DiagramResponse:
+def enrich_diagram_response(
+    diagram: Diagram,
+    current_user_id: str,
+    owner_cache: Optional[Dict[str, Optional[Dict[str, Any]]]] = None,
+) -> DiagramResponse:
     """Enrich diagram with ownership and permission information."""
     is_owner = diagram.userId == current_user_id
 
@@ -93,7 +97,9 @@ def enrich_diagram_response(diagram: Diagram, current_user_id: str) -> DiagramRe
 
     # Get owner information
     owner_info = None
-    if diagram.userId:
+    if owner_cache is not None and diagram.userId:
+        owner_info = _owner_info(diagram.userId, owner_cache)
+    elif diagram.userId:
         owner = dynamodb_service.get_user_by_id(diagram.userId)
         if owner:
             owner_info = {
@@ -253,7 +259,6 @@ async def get_diagrams(
     """Get one cursor-paginated page of diagram metadata and counts."""
     user_id = current_user["user_id"]
     page_state = _decode_diagram_cursor(cursor)
-    owner_cache: Dict[str, Optional[Dict[str, Any]]] = {}
     page_items: List[Diagram] = []
     next_state: Optional[Dict[str, Any]] = None
 
@@ -302,6 +307,9 @@ async def get_diagrams(
                 "shared_cursor": shared_cursor,
             }
 
+    owner_cache = dynamodb_service.get_user_profiles_by_ids(
+        [diagram.userId for diagram in page_items if diagram.userId]
+    )
     return DiagramPage(
         items=[
             enrich_diagram_summary_response(diagram, user_id, owner_cache)
@@ -319,42 +327,22 @@ async def get_diagram(
     """Get a specific diagram (requires authentication and access permission)."""
     user_id = current_user["user_id"]
 
-    # First check if user owns the diagram
-    diagram = dynamodb_service.get_diagram(user_id, diagram_id)
-
-    if not diagram:
-        # Check if user has collaborator access
-        has_access, error_msg = validate_diagram_access(user_id, diagram_id, "read")
-        if not has_access:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=error_msg)
-
-        # Find the diagram in shared diagrams
-        shared_diagrams = dynamodb_service.get_shared_diagrams_for_user(user_id)
-        diagram = next((d for d in shared_diagrams if d.id == diagram_id), None)
-
-        if not diagram:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail=DIAGRAM_NOT_FOUND
-            )
+    diagram, permission = dynamodb_service.get_diagram_for_user(user_id, diagram_id)
+    if not diagram or permission is None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
 
     return enrich_diagram_response(_with_primary_canvas_content(diagram), user_id)
 
 
 def _get_diagram_for_update(user_id: str, diagram_id: str) -> Diagram:
     """Load an owned or shared diagram after checking edit permission."""
-    has_access, error_msg = validate_diagram_access(user_id, diagram_id, "update")
-    if not has_access:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=error_msg)
-
-    diagram = dynamodb_service.get_diagram(user_id, diagram_id)
-    if diagram:
-        return diagram
-
-    shared_diagrams = dynamodb_service.get_shared_diagrams_for_user(user_id)
-    diagram = next((item for item in shared_diagrams if item.id == diagram_id), None)
-    if not diagram:
+    diagram, permission = dynamodb_service.get_diagram_for_user(user_id, diagram_id)
+    if not diagram or permission is None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+    if permission == Permission.READ:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail=DIAGRAM_NOT_FOUND
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied: You only have read permission for this diagram",
         )
     return diagram
 
@@ -655,12 +643,21 @@ async def remove_collaborator(
 
 
 @router.get("/shared-diagrams", response_model=List[DiagramResponse])
-async def get_shared_diagrams(current_user: Dict[str, Any] = Depends(get_current_user)):
+async def get_shared_diagrams(
+    response: Response,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
     """Get all diagrams shared with the current user."""
+    response.headers["Deprecation"] = "true"
     user_id = current_user["user_id"]
     diagrams = dynamodb_service.get_shared_diagrams_for_user(user_id)
+    owner_cache = dynamodb_service.get_user_profiles_by_ids(
+        [diagram.userId for diagram in diagrams if diagram.userId]
+    )
 
     return [
-        enrich_diagram_response(_with_primary_canvas_content(diagram), user_id)
+        enrich_diagram_response(
+            _with_primary_canvas_content(diagram), user_id, owner_cache
+        )
         for diagram in diagrams
     ]

@@ -6,7 +6,7 @@ API endpoints for component management
 import logging
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.services.components_service import components_service
 
@@ -43,6 +43,11 @@ class CategoriesResponse(BaseModel):
 
     categories: list[str]
     count: int
+
+
+class ComponentBatchRequest(BaseModel):
+    ids: List[str] = Field(..., min_length=1, max_length=100)
+    minimal: bool = False
 
 
 def _decoded_key(encoded_key: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -219,6 +224,21 @@ async def get_categories():
         logger.exception("Error in get_categories")
         raise HTTPException(
             status_code=500, detail="Error fetching categories"
+        ) from exc
+
+
+@router.post("/batch/by-ids", response_model=ComponentsResponse)
+async def get_components_by_ids(request: ComponentBatchRequest):
+    """Fetch up to 100 component records with one DynamoDB batch request."""
+    try:
+        items = components_service.get_components_by_ids(
+            request.ids, minimal=request.minimal
+        )
+        return ComponentsResponse(items=items, count=len(items))
+    except Exception as exc:
+        logger.exception("Error fetching components by ID")
+        raise HTTPException(
+            status_code=500, detail="Error fetching components"
         ) from exc
 
 

@@ -162,6 +162,10 @@ class Settings(BaseSettings):
     dynamodb_diagrams_table: str = Field(
         "diagrammatic_diagrams", validation_alias="DYNAMODB_DIAGRAMS_TABLE"
     )
+    dynamodb_diagram_shares_table: str = Field(
+        "diagrammatic_diagram_shares",
+        validation_alias="DYNAMODB_DIAGRAM_SHARES_TABLE",
+    )
     dynamodb_problems_table: str = Field(
         "diagrammatic_problems", validation_alias="DYNAMODB_PROBLEMS_TABLE"
     )

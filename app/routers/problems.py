@@ -201,16 +201,17 @@ async def get_attempted_problems(
 async def problems_health_check() -> Dict[str, str | int]:
     """Health check for problems service and database connection."""
     try:
-        # Try to query a single item to check if DynamoDB is accessible
-        problems = dynamodb_service.get_all_problems()
-
-        return {
+        dynamodb_service.check_problems_table()
+        result: Dict[str, str | int] = {
             "status": "healthy",
             "service": "problems",
             "database": "dynamodb",
             "connection": "connected",
-            "problem_count": len(problems) if problems else 0,
         }
+        count = problem_catalog_count_cache.get_cached_count()
+        if count is not None:
+            result["problem_count"] = count
+        return result
     except Exception as exc:
         logger.exception("Error in problems health check")
         raise HTTPException(

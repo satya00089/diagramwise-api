@@ -131,12 +131,8 @@ def debounced_save_diagram(
             title = update_data.get("title")
             description = update_data.get("description")
 
-            # Get the diagram to find the owner
-            diagram = dynamodb_service.get_diagram(user_id, diagram_id)
-            if not diagram:
-                # Find in shared diagrams
-                shared_diagrams = dynamodb_service.get_shared_diagrams_for_user(user_id)
-                diagram = next((d for d in shared_diagrams if d.id == diagram_id), None)
+            # Resolve the owner directly through the collaborator membership.
+            diagram, _ = dynamodb_service.get_diagram_for_user(user_id, diagram_id)
 
             if diagram:
                 # Update the diagram
@@ -242,33 +238,33 @@ def _user_summary(user: Any) -> Dict[str, Any]:
 
 
 def _get_active_collaborators(diagram_id: str, user_id: str) -> List[Dict[str, Any]]:
+    collaborator_ids = [
+        collaborator_id
+        for _, collaborator_id in active_connections.get(diagram_id, [])
+        if collaborator_id != user_id
+    ]
+    profiles = dynamodb_service.get_user_profiles_by_ids(collaborator_ids)
     collaborators: List[Dict[str, Any]] = []
-    for _, collaborator_id in active_connections.get(diagram_id, []):
-        if collaborator_id == user_id:
-            continue
-        collaborator = dynamodb_service.get_user_by_id(collaborator_id)
-        if collaborator:
-            collaborators.append(_user_summary(collaborator))
+    for collaborator_id in collaborator_ids:
+        profile = profiles.get(collaborator_id)
+        if profile:
+            collaborators.append(profile)
     return collaborators
 
 
 def _get_diagram_data(user_id: str, diagram_id: str) -> Optional[Dict[str, Any]]:
     try:
-        diagram = dynamodb_service.get_diagram(user_id, diagram_id)
-        is_owner = diagram is not None
-        if not diagram:
-            shared_diagrams = dynamodb_service.get_shared_diagrams_for_user(user_id)
-            diagram = next((item for item in shared_diagrams if item.id == diagram_id), None)
+        diagram, access_permission = dynamodb_service.get_diagram_for_user(
+            user_id, diagram_id
+        )
         if not diagram:
             return None
 
-        permission = "owner" if is_owner else next(
-            (
-                collaborator.permission.value
-                for collaborator in diagram.collaborators or []
-                if collaborator.userId == user_id
-            ),
-            None,
+        is_owner = diagram.userId == user_id
+        permission = (
+            "owner"
+            if is_owner
+            else access_permission.value if access_permission else None
         )
         owner_info = None
         if diagram.userId:
