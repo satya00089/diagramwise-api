@@ -12,7 +12,7 @@ from pathlib import Path
 import sys
 import time
 from decimal import Decimal
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import boto3
 from botocore.exceptions import ClientError
@@ -439,6 +439,8 @@ def _qualifying_score(item: Dict[str, Any]) -> Optional[int]:
     if latest_check and not _assessment_is_available(latest_check):
         return None
     score = assessment.get("score", assessment.get("overall_score"))
+    if isinstance(score, bool) or not isinstance(score, (int, float, Decimal)):
+        return None
     return int(score)
 
 

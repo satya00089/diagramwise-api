@@ -20,9 +20,9 @@ def _role(catalog_id: str) -> str:
     return aliases.get(value, value)
 
 
-def compare_walkthrough_structure(request: AssessmentRequest, walkthrough: dict[str, Any]) -> list[dict[str, str]]:
-    """One-to-one role matching checks structure, never architectural quality."""
-    steps = walkthrough.get("steps", [])
+def _match_reference_components(
+    request: AssessmentRequest, steps: list[dict]
+) -> tuple[dict[str, str], list[dict[str, str]]]:
     expected = [step["component"] for step in steps if step.get("type") == "add_component" and step.get("component")]
     used: set[str] = set()
     mapping: dict[str, str] = {}
@@ -41,6 +41,15 @@ def compare_walkthrough_structure(request: AssessmentRequest, walkthrough: dict[
                        "status": "supported" if candidate else "needs_clarification",
                        "explanation": "A matching role is visible; this does not verify its behavior."
                        if candidate else "No unambiguous matching role was found. A different architecture may still be valid."})
+    return mapping, checks
+
+
+def _check_reference_connections(
+    request: AssessmentRequest,
+    steps: list[dict],
+    mapping: dict[str, str],
+) -> list[dict[str, str]]:
+    checks = []
     actual_connections = {(edge.source, edge.target) for edge in request.connections or []}
     for step in steps:
         connection = step.get("connection")
@@ -52,6 +61,14 @@ def compare_walkthrough_structure(request: AssessmentRequest, walkthrough: dict[
                        "status": "supported" if supported else "needs_clarification",
                        "explanation": "The relationship is visible; correctness has not been assessed."
                        if supported else "This reference relationship could not be confirmed from the submitted structure."})
+    return checks
+
+
+def compare_walkthrough_structure(request: AssessmentRequest, walkthrough: dict[str, Any]) -> list[dict[str, str]]:
+    """One-to-one role matching checks structure, never architectural quality."""
+    steps = walkthrough.get("steps", [])
+    mapping, checks = _match_reference_components(request, steps)
+    checks.extend(_check_reference_connections(request, steps, mapping))
     return checks
 
 

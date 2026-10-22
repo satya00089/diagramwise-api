@@ -71,14 +71,13 @@ def _allow_submission(actor: str) -> bool:
 
 @router.post(
     "/feedback",
-    response_model=FeedbackResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Submit product feedback",
 )
 async def submit_feedback(
     feedback: FeedbackCreate,
     request: Request,
-    current_user: Optional[Dict[str, Any]] = Depends(get_optional_user),
+    current_user: Annotated[Optional[Dict[str, Any]], Depends(get_optional_user)],
 ) -> FeedbackResponse:
     """Persist feedback from an anonymous or authenticated visitor."""
     if not _allow_submission(_actor_key(request, current_user)):

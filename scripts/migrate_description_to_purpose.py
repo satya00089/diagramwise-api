@@ -48,60 +48,80 @@ def _migrate_canvas_item(
     updated = dict(item)
     changed = False
     skipped = False
-
     for collection_name in ("nodes", "edges"):
         collection = item.get(collection_name)
         if collection is None:
             continue
         if not isinstance(collection, list):
-            report["skipped_records"] += 1
-            report["skipped_details"].append(
-                f"{item.get('id', item.get('problemId', '<unknown>'))}: invalid {collection_name}"
-            )
+            _record_invalid_canvas_collection(item, collection_name, report)
             skipped = True
             continue
-
-        copied_collection: list[Any] = []
-        for index, entry in enumerate(collection):
-            if not isinstance(entry, dict):
-                copied_collection.append(entry)
-                report["skipped_fields"] += 1
-                continue
-            copied_entry = dict(entry)
-            entry_data = entry.get("data")
-            if not isinstance(entry_data, dict):
-                copied_collection.append(copied_entry)
-                continue
-
-            copied_data = dict(entry_data)
-            changed_entry = _rename_legacy_value(
-                copied_data,
-                f"{collection_name}[{index}].data",
-                report,
-            )
-
-            nested_properties = entry_data.get("properties")
-            if isinstance(nested_properties, dict):
-                copied_properties = dict(nested_properties)
-                changed_entry = (
-                    _rename_legacy_value(
-                        copied_properties,
-                        f"{collection_name}[{index}].data.properties",
-                        report,
-                    )
-                    or changed_entry
-                )
-                copied_data["properties"] = copied_properties
-            elif nested_properties is not None:
-                report["skipped_fields"] += 1
-
-            copied_entry["data"] = copied_data
-            copied_collection.append(copied_entry)
-            changed = changed_entry or changed
-
+        copied_collection, collection_changed = _migrate_canvas_collection(
+            collection, collection_name, report
+        )
         updated[collection_name] = copied_collection
+        changed = collection_changed or changed
 
     return updated, changed, skipped
+
+
+def _record_invalid_canvas_collection(
+    item: dict[str, Any], collection_name: str, report: dict[str, Any]
+) -> None:
+    report["skipped_records"] += 1
+    record_id = item.get("id", item.get("problemId", "<unknown>"))
+    report["skipped_details"].append(f"{record_id}: invalid {collection_name}")
+
+
+def _migrate_canvas_collection(
+    collection: list[Any], collection_name: str, report: dict[str, Any]
+) -> tuple[list[Any], bool]:
+    copied_collection = []
+    changed = False
+    for index, entry in enumerate(collection):
+        copied_entry, changed_entry = _migrate_canvas_entry(
+            entry, collection_name, index, report
+        )
+        copied_collection.append(copied_entry)
+        changed = changed_entry or changed
+    return copied_collection, changed
+
+
+def _migrate_canvas_entry(
+    entry: Any, collection_name: str, index: int, report: dict[str, Any]
+) -> tuple[Any, bool]:
+    if not isinstance(entry, dict):
+        report["skipped_fields"] += 1
+        return entry, False
+    copied_entry = dict(entry)
+    entry_data = entry.get("data")
+    if not isinstance(entry_data, dict):
+        return copied_entry, False
+    copied_data = dict(entry_data)
+    location = f"{collection_name}[{index}].data"
+    changed = _rename_legacy_value(copied_data, location, report)
+    nested_properties = entry_data.get("properties")
+    copied_properties, properties_changed = _migrate_nested_properties(
+        nested_properties, location, report
+    )
+    if copied_properties is not None:
+        copied_data["properties"] = copied_properties
+    copied_entry["data"] = copied_data
+    return copied_entry, changed or properties_changed
+
+
+def _migrate_nested_properties(
+    properties: Any, location: str, report: dict[str, Any]
+) -> tuple[dict[str, Any] | None, bool]:
+    if isinstance(properties, dict):
+        copied_properties = dict(properties)
+        changed = _rename_legacy_value(
+            copied_properties, f"{location}.properties", report
+        )
+        return copied_properties, changed
+    if properties is not None:
+        report["skipped_fields"] += 1
+    return None, False
 
 
 def _migrate_catalog_item(

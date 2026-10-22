@@ -352,6 +352,17 @@ async def _process_collaboration_message(
     data: Dict[str, Any],
 ) -> None:
     message_type = data.get("type")
+    if not isinstance(message_type, str):
+        await websocket.send_json(
+            {
+                "type": "error",
+                "message": "Message type must be a string",
+                "code": "INVALID_MESSAGE_FORMAT",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        return
+
     is_valid, validation_error = validate_message(message_type, data)
     if not is_valid:
         await websocket.send_json(
@@ -404,6 +415,31 @@ async def _process_collaboration_message(
         )
 
 
+async def _receive_message_or_timeout(websocket: WebSocket) -> Any:
+    try:
+        return await asyncio.wait_for(websocket.receive_json(), timeout=5)
+    except asyncio.TimeoutError:
+        return None
+
+
+def _validate_collaboration_session(token: str, last_check: float) -> float:
+    if time.monotonic() - last_check < 5:
+        return last_check
+    auth_session_service.validate(token)
+    return time.monotonic()
+
+
+async def _send_invalid_message_error(websocket: WebSocket) -> None:
+    await websocket.send_json(
+        {
+            "type": "error",
+            "message": "Invalid JSON received",
+            "code": "INVALID_MESSAGE_FORMAT",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+
+
 async def _receive_collaboration_messages(
     websocket: WebSocket,
     diagram_id: str,
@@ -414,32 +450,17 @@ async def _receive_collaboration_messages(
     last_session_check = time.monotonic()
     while True:
         try:
-            try:
-                data = await asyncio.wait_for(websocket.receive_json(), timeout=5)
-            except asyncio.TimeoutError:
-                data = None
-            if time.monotonic() - last_session_check >= 5:
-                auth_session_service.validate(token)
-                last_session_check = time.monotonic()
-            if data is None:
-                continue
-            await _process_collaboration_message(
-                websocket, diagram_id, user_id, user_info, data
-            )
+            data = await _receive_message_or_timeout(websocket)
+            last_session_check = _validate_collaboration_session(token, last_session_check)
+            if data is not None:
+                await _process_collaboration_message(websocket, diagram_id, user_id, user_info, data)
         except HTTPException as exc:
             code = "AUTH_UNAVAILABLE" if exc.status_code == status.HTTP_503_SERVICE_UNAVAILABLE else "INVALID_TOKEN"
             message = "Authentication is temporarily unavailable" if code == "AUTH_UNAVAILABLE" else "Session is invalid or revoked"
             await _reject_collaboration(websocket, message, code, 1013 if code == "AUTH_UNAVAILABLE" else 1008)
             return
         except json.JSONDecodeError:
-            await websocket.send_json(
-                {
-                    "type": "error",
-                    "message": "Invalid JSON received",
-                    "code": "INVALID_MESSAGE_FORMAT",
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                }
-            )
+            await _send_invalid_message_error(websocket)
 
 
 async def _remove_collaborator(

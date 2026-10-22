@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from redis import Redis
 from redis.exceptions import RedisError
@@ -30,7 +30,7 @@ class GoogleAuthHandoffStore(Protocol):
 class RedisGoogleAuthHandoffStore:
     """Redis-backed, one-time storage for redirect authentication results."""
 
-    def __init__(self, redis_client: Redis[str] | None = None) -> None:
+    def __init__(self, redis_client: Redis | None = None) -> None:
         settings = get_settings()
         self._redis = redis_client or (
             Redis.from_url(settings.redis_uri, decode_responses=True)
@@ -65,7 +65,7 @@ class RedisGoogleAuthHandoffStore:
 
         # GETDEL is atomic and prevents a redirect code from being replayed.
         try:
-            raw = self._redis.getdel(self._key(code))
+            raw = cast(str | bytes | None, self._redis.getdel(self._key(code)))
         except (RedisError, TypeError, ValueError):
             return None
         if not raw:

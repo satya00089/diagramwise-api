@@ -99,71 +99,62 @@ def _new_langfuse_trace_id() -> str | None:
         return None
 
 
-def _build_sdk_client(settings: Settings) -> tuple[Any, bool]:
-    """Build the selected SDK client, including optional tracing."""
-
-    provider = _provider_name(settings)
-    if provider == "openai":
-        if not settings.openai_api_key:
-            raise RuntimeError(
-                "OPENAI_API_KEY is required when LLM_PROVIDER=openai"
-            )
-        client_kwargs: dict[str, Any] = {"api_key": settings.openai_api_key}
-    elif provider == "azure_openai":
-        missing = [
-            name
-            for name, value in (
-                ("AZURE_OPENAI_API_KEY", settings.azure_openai_api_key),
-                ("AZURE_OPENAI_ENDPOINT", settings.azure_openai_endpoint),
-                ("AZURE_OPENAI_DEPLOYMENT", settings.azure_openai_deployment),
-            )
-            if not value
-        ]
-        if missing:
-            raise RuntimeError(
-                "Azure OpenAI configuration is incomplete; missing "
-                + ", ".join(missing)
-            )
-        client_kwargs = {
-            "api_key": settings.azure_openai_api_key,
-            "azure_endpoint": settings.azure_openai_endpoint,
-            "api_version": settings.azure_openai_api_version,
-        }
-    else:
+def _client_kwargs(provider: str, settings: Settings) -> dict[str, Any]:
+    builders = {
+        "openai": _openai_client_kwargs,
+        "azure_openai": _azure_client_kwargs,
+    }
+    builder = builders.get(provider)
+    if builder is None:
         raise ValueError(
             f"Unsupported LLM_PROVIDER={settings.llm_provider!r}; "
             "supported values are openai and azure_openai"
         )
+    return builder(settings)
 
-    if not is_langfuse_configured(settings):
-        if provider == "azure_openai":
-            return AsyncAzureOpenAI(**client_kwargs), False
-        return AsyncOpenAI(**client_kwargs), False
 
+def _openai_client_kwargs(settings: Settings) -> dict[str, Any]:
+    if not settings.openai_api_key:
+        raise RuntimeError("OPENAI_API_KEY is required when LLM_PROVIDER=openai")
+    return {"api_key": settings.openai_api_key}
+
+
+def _azure_client_kwargs(settings: Settings) -> dict[str, Any]:
+    credentials = (
+        ("AZURE_OPENAI_API_KEY", settings.azure_openai_api_key),
+        ("AZURE_OPENAI_ENDPOINT", settings.azure_openai_endpoint),
+        ("AZURE_OPENAI_DEPLOYMENT", settings.azure_openai_deployment),
+    )
+    missing = [name for name, value in credentials if not value]
+    if missing:
+        raise RuntimeError(
+            "Azure OpenAI configuration is incomplete; missing "
+            + ", ".join(missing)
+        )
+    return {
+        "api_key": settings.azure_openai_api_key,
+        "azure_endpoint": settings.azure_openai_endpoint,
+        "api_version": settings.azure_openai_api_version,
+    }
+
+
+def _create_sdk_client(provider: str, client_kwargs: dict[str, Any]) -> tuple[Any, bool]:
+    client_class = AsyncAzureOpenAI if provider == "azure_openai" else AsyncOpenAI
+    return client_class(**client_kwargs), False
+
+
+def _build_traced_client(
+    provider: str,
+    settings: Settings,
+    client_kwargs: dict[str, Any],
+) -> tuple[Any, bool]:
     global _langfuse_setup_attempted
     _configure_langfuse_environment(settings)
 
     try:
-        # Import only after environment variables have been loaded. This keeps
-        # Langfuse optional and lets the SDK read Cloud or self-hosted settings.
         if not _langfuse_setup_attempted:
-            from langfuse import Langfuse
-
-            langfuse_options: dict[str, Any] = {
-                "sample_rate": settings.langfuse_sample_rate,
-            }
-            if not settings.langfuse_capture_content:
-                langfuse_options["mask_otel_spans"] = _mask_otel_spans
-            Langfuse(**langfuse_options)
-
-            logger.info(
-                "Langfuse tracing enabled environment=%s sample_rate=%s capture_content=%s",
-                settings.langfuse_environment,
-                settings.langfuse_sample_rate,
-                settings.langfuse_capture_content,
-            )
+            _initialize_langfuse(settings)
             _langfuse_setup_attempted = True
-
         langfuse_class = _langfuse_client_class(provider)
         return langfuse_class(**client_kwargs), True
     except ImportError:
@@ -171,18 +162,41 @@ def _build_sdk_client(settings: Settings) -> tuple[Any, bool]:
             "Langfuse is configured but the optional package or provider wrapper "
             "is unavailable; continuing without telemetry"
         )
-        if provider == "azure_openai":
-            return AsyncAzureOpenAI(**client_kwargs), False
-        return AsyncOpenAI(**client_kwargs), False
+        return _create_sdk_client(provider, client_kwargs)
     except Exception:
         # Observability must not take down an assessment request because of a
         # client initialization/configuration issue.
         logger.exception(
             "Langfuse client initialization failed; continuing without telemetry"
         )
-        if provider == "azure_openai":
-            return AsyncAzureOpenAI(**client_kwargs), False
-        return AsyncOpenAI(**client_kwargs), False
+        return _create_sdk_client(provider, client_kwargs)
+
+
+def _initialize_langfuse(settings: Settings) -> None:
+    """Initialize tracing after exposing settings to the optional SDK."""
+    # Import only after environment variables have been loaded. This keeps
+    # Langfuse optional and lets the SDK read Cloud or self-hosted settings.
+    from langfuse import Langfuse
+
+    options: dict[str, Any] = {"sample_rate": settings.langfuse_sample_rate}
+    if not settings.langfuse_capture_content:
+        options["mask_otel_spans"] = _mask_otel_spans
+    Langfuse(**options)
+    logger.info(
+        "Langfuse tracing enabled environment=%s sample_rate=%s capture_content=%s",
+        settings.langfuse_environment,
+        settings.langfuse_sample_rate,
+        settings.langfuse_capture_content,
+    )
+
+
+def _build_sdk_client(settings: Settings) -> tuple[Any, bool]:
+    """Build the selected SDK client, including optional tracing."""
+    provider = _provider_name(settings)
+    client_kwargs = _client_kwargs(provider, settings)
+    if not is_langfuse_configured(settings):
+        return _create_sdk_client(provider, client_kwargs)
+    return _build_traced_client(provider, settings, client_kwargs)
 
 
 class OpenAICompatibleAdapter:

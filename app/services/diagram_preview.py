@@ -59,8 +59,10 @@ def _font(size: int, *, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFon
             except OSError:
                 pass
     try:
-        return ImageFont.load_default(size=size)
-    except TypeError:  # Pillow versions before the scalable default font.
+        # Pillow 11+ supports scalable defaults. Keep compatibility with older
+        # runtimes without passing an unsupported keyword at the call site.
+        return ImageFont.load_default(**{"size": size})
+    except TypeError:
         return ImageFont.load_default()
 
 
@@ -132,14 +134,7 @@ def _node_subtitle(node: dict[str, Any]) -> str:
     return str(data.get("subtitle") or data.get("description") or "").strip()
 
 
-def _node_theme(node: dict[str, Any]) -> tuple[str, str, str]:
-    """Return accent, badge background, and semantic icon kind."""
-
-    data = _node_data(node)
-    provider = str(data.get("provider") or data.get("catalogRef") or "").lower()
-    category = str(data.get("category") or "").lower()
-    ref = str(data.get("componentId") or data.get("catalogRef") or "").lower()
-
+def _provider_theme(provider: str, ref: str, category: str) -> tuple[str, str, str] | None:
     if "aws" in provider or ref.startswith("aws-"):
         return "#f59e0b", "#3a2a12", category or "cloud"
     if "azure" in provider or ref.startswith("azure-"):
@@ -148,19 +143,31 @@ def _node_theme(node: dict[str, Any]) -> tuple[str, str, str]:
         return "#60a5fa", "#172f50", category or "cloud"
     if "kubernetes" in provider or ref.startswith("k8s"):
         return "#4f8fe8", "#152b4d", category or "compute"
-    if category in {"database", "data", "data layer"} or "database" in ref or "postgres" in ref:
-        return "#8b5cf6", "#2b1c4b", "database"
-    if category == "cache" or "redis" in ref or "cache" in ref:
-        return "#ef5da8", "#4a1e39", "cache"
-    if category in {"storage", "object storage"} or "storage" in ref or "s3" in ref:
-        return "#e879f9", "#431b4c", "storage"
-    if category in {"network", "delivery", "cdn", "frontend"} or "cdn" in ref or "cloudfront" in ref:
-        return "#22d3ee", "#103b45", "network"
-    if category in {"messaging", "queue", "stream"} or "queue" in ref or "topic" in ref:
-        return "#34d399", "#123d31", "queue"
-    if category in {"compute", "services", "service"} or "service" in ref or "server" in ref:
-        return "#a78bfa", "#2b2250", "compute"
+    return None
+
+
+def _semantic_theme(category: str, ref: str) -> tuple[str, str, str]:
+    rules = (
+        ({"database", "data", "data layer"}, ("database", "postgres"), ("#8b5cf6", "#2b1c4b", "database")),
+        ({"cache"}, ("redis", "cache"), ("#ef5da8", "#4a1e39", "cache")),
+        ({"storage", "object storage"}, ("storage", "s3"), ("#e879f9", "#431b4c", "storage")),
+        ({"network", "delivery", "cdn", "frontend"}, ("cdn", "cloudfront"), ("#22d3ee", "#103b45", "network")),
+        ({"messaging", "queue", "stream"}, ("queue", "topic"), ("#34d399", "#123d31", "queue")),
+        ({"compute", "services", "service"}, ("service", "server"), ("#a78bfa", "#2b2250", "compute")),
+    )
+    for categories, indicators, theme in rules:
+        if category in categories or any(indicator in ref for indicator in indicators):
+            return theme
     return BRAND, "#451d36", "custom"
+
+
+def _node_theme(node: dict[str, Any]) -> tuple[str, str, str]:
+    """Return accent, badge background, and semantic icon kind."""
+    data = _node_data(node)
+    provider = str(data.get("provider") or data.get("catalogRef") or "").lower()
+    category = str(data.get("category") or "").lower()
+    ref = str(data.get("componentId") or data.get("catalogRef") or "").lower()
+    return _provider_theme(provider, ref, category) or _semantic_theme(category, ref)
 
 
 def _anchor(
@@ -174,9 +181,9 @@ def _anchor(
         fallback,
     )
     fraction = 0.5
-    if normalized.endswith("-top") or normalized.endswith("-left"):
+    if normalized.endswith(("-top", "-left")):
         fraction = 0.25
-    elif normalized.endswith("-bottom") or normalized.endswith("-right"):
+    elif normalized.endswith(("-bottom", "-right")):
         fraction = 0.75
     x, y = position
     if side in {"top", "bottom"}:
@@ -184,37 +191,57 @@ def _anchor(
     return x if side == "left" else x + CARD_WIDTH, y + CARD_HEIGHT * fraction, side
 
 
+def _vertical_edge_route(
+    source: tuple[float, float, str],
+    target: tuple[float, float, str],
+    source_y: float,
+    target_y: float,
+) -> list[tuple[float, float]]:
+    side = "top" if source[2] == "top" or target[2] == "top" else "bottom"
+    lane = min(source_y, target_y) - 34 if side == "top" else max(source_y + CARD_HEIGHT, target_y + CARD_HEIGHT) + 34
+    return [source[:2], (source[0], lane), (target[0], lane), target[:2]]
+
+
+def _backward_edge_route(
+    source: tuple[float, float, str],
+    target: tuple[float, float, str],
+    source_y: float,
+    target_y: float,
+    forward: bool,
+) -> list[tuple[float, float]]:
+    lane = min(source_y, target_y) - 34 if source_y <= target_y else max(source_y + CARD_HEIGHT, target_y + CARD_HEIGHT) + 34
+    bend = 32 if forward else -32
+    return [
+        source[:2],
+        (source[0] + bend, source[1]),
+        (source[0] + bend, lane),
+        (target[0] - bend, lane),
+        (target[0] - bend, target[1]),
+        target[:2],
+    ]
+
+
 def _edge_points(
     edge: dict[str, Any],
     positions: dict[str, tuple[float, float]],
 ) -> list[tuple[float, float]] | None:
-    source_id = str(edge.get("source"))
-    target_id = str(edge.get("target"))
-    source_position = positions.get(source_id)
-    target_position = positions.get(target_id)
-    if not source_position or not target_position:
+    source_position = positions.get(str(edge.get("source")))
+    target_position = positions.get(str(edge.get("target")))
+    if source_position is None or target_position is None:
         return None
 
-    data = edge.get("data") or {}
-    source_x, source_y = source_position
-    target_x, target_y = target_position
-    forward = target_x >= source_x
+    source_y, target_y = source_position[1], target_position[1]
+    forward = target_position[0] >= source_position[0]
     source_fallback = "right" if forward else "left"
     target_fallback = "left" if forward else "right"
     source = _anchor(source_position, edge.get("sourceHandle"), source_fallback)
     target = _anchor(target_position, edge.get("targetHandle"), target_fallback)
-    routing_kind = str(data.get("routingKind") or "forward")
+    routing_kind = str((edge.get("data") or {}).get("routingKind") or "forward")
 
     if source[2] in {"top", "bottom"} or target[2] in {"top", "bottom"}:
-        side = "top" if source[2] == "top" or target[2] == "top" else "bottom"
-        lane = min(source_y, target_y) - 34 if side == "top" else max(source_y + CARD_HEIGHT, target_y + CARD_HEIGHT) + 34
-        return [source[:2], (source[0], lane), (target[0], lane), target[:2]]
-
+        return _vertical_edge_route(source, target, source_y, target_y)
     if routing_kind in {"cycle", "backward"} or not forward:
-        lane = min(source_y, target_y) - 34 if source_y <= target_y else max(source_y + CARD_HEIGHT, target_y + CARD_HEIGHT) + 34
-        bend = 32 if forward else -32
-        return [source[:2], (source[0] + bend, source[1]), (source[0] + bend, lane), (target[0] - bend, lane), (target[0] - bend, target[1]), target[:2]]
-
+        return _backward_edge_route(source, target, source_y, target_y, forward)
     mid_x = (source[0] + target[0]) / 2
     return [source[:2], (mid_x, source[1]), (mid_x, target[1]), target[:2]]
 
@@ -394,6 +421,104 @@ def _draw_png_brand_header(
             draw.text((PADDING, 106 + index * 17), line, fill=MUTED, font=body_font)
 
 
+def _draw_edge_arrow(draw: ImageDraw.ImageDraw, points: list[tuple[float, float]]) -> None:
+    draw.line(points, fill=EDGE, width=2, joint="curve")
+    previous, target = points[-2], points[-1]
+    dx, dy = target[0] - previous[0], target[1] - previous[1]
+    length = max(hypot(dx, dy), 1)
+    ux, uy = dx / length, dy / length
+    px, py = -uy, ux
+    arrow_size = 9
+    base = (target[0] - ux * arrow_size, target[1] - uy * arrow_size)
+    draw.polygon(
+        [
+            target,
+            (base[0] + px * arrow_size * 0.55, base[1] + py * arrow_size * 0.55),
+            (base[0] - px * arrow_size * 0.55, base[1] - py * arrow_size * 0.55),
+        ],
+        fill=EDGE,
+    )
+
+
+def _label_overlaps(
+    rect: tuple[float, float, float, float],
+    positions: dict[str, tuple[float, float]],
+    occupied: list[tuple[float, float, float, float]],
+) -> bool:
+    overlaps_node = any(
+        rect[0] < node_x + CARD_WIDTH + 12
+        and rect[2] > node_x - 12
+        and rect[1] < node_y + CARD_HEIGHT + 12
+        and rect[3] > node_y - 12
+        for node_x, node_y in positions.values()
+    )
+    overlaps_label = any(
+        rect[0] < other[2] and rect[2] > other[0]
+        and rect[1] < other[3] and rect[3] > other[1]
+        for other in occupied
+    )
+    return overlaps_node or overlaps_label
+
+
+def _draw_edge_label(
+    draw: ImageDraw.ImageDraw,
+    edge: dict[str, Any],
+    points: list[tuple[float, float]],
+    positions: dict[str, tuple[float, float]],
+    label_font: Any,
+    occupied: list[tuple[float, float, float, float]],
+) -> None:
+    data = edge.get("data") or {}
+    label = str(data.get("label") or edge.get("label") or "").strip()
+    if not label:
+        return
+    x, y, dx, dy = _polyline_label_point(points)
+    length = max(hypot(dx, dy), 1)
+    nx, ny = -dy / length, dx / length
+    offset = 16 + min(max(float(data.get("labelOffset") or 0) * 28, 0), 22)
+    lines = _fit_lines(label, max_chars=28, max_lines=2)
+    max_width = max((draw.textbbox((0, 0), line, font=label_font)[2] for line in lines), default=0)
+    label_width = max(74, min(230, max_width + 24))
+    label_height = 18 + len(lines) * 15
+    outside_offset = CARD_HEIGHT / 2 + label_height / 2 + 16
+    candidates = [
+        (x + nx * offset, y + ny * offset),
+        (x - nx * offset, y - ny * offset),
+        (x + nx * outside_offset, y + ny * outside_offset),
+        (x - nx * outside_offset, y - ny * outside_offset),
+    ]
+    chosen = candidates[0]
+    for candidate in candidates:
+        rect = (
+            candidate[0] - label_width / 2,
+            candidate[1] - label_height / 2,
+            candidate[0] + label_width / 2,
+            candidate[1] + label_height / 2,
+        )
+        if _label_overlaps(rect, positions, occupied):
+            continue
+        chosen = candidate
+        occupied.append(rect)
+        break
+    left = chosen[0] - label_width / 2
+    top = chosen[1] - label_height / 2
+    draw.rounded_rectangle(
+        (left, top, left + label_width, top + label_height),
+        radius=7,
+        fill=LABEL_SURFACE,
+        outline=LABEL_BORDER,
+        width=1,
+    )
+    for index, line in enumerate(lines):
+        draw.text(
+            (chosen[0], top + 8 + index * 15),
+            line,
+            fill=TEXT,
+            font=label_font,
+            anchor="ma",
+        )
+
+
 def _draw_png_edges(
     draw: ImageDraw.ImageDraw,
     edges: list[Any],
@@ -409,86 +534,10 @@ def _draw_png_edges(
         points = _edge_points(edge, positions)
         if not points:
             continue
-        data = edge.get("data") or {}
-        if not draw_labels:
-            draw.line(points, fill=EDGE, width=2, joint="curve")
-            previous = points[-2]
-            target = points[-1]
-            dx = target[0] - previous[0]
-            dy = target[1] - previous[1]
-            length = max(hypot(dx, dy), 1)
-            ux, uy = dx / length, dy / length
-            px, py = -uy, ux
-            arrow_size = 9
-            base = (target[0] - ux * arrow_size, target[1] - uy * arrow_size)
-            draw.polygon(
-                [
-                    target,
-                    (base[0] + px * arrow_size * 0.55, base[1] + py * arrow_size * 0.55),
-                    (base[0] - px * arrow_size * 0.55, base[1] - py * arrow_size * 0.55),
-                ],
-                fill=EDGE,
-            )
-
-        if not draw_labels:
-            continue
-        label = str(data.get("label") or edge.get("label") or "").strip()
-        if not label:
-            continue
-        x, y, dx, dy = _polyline_label_point(points)
-        length = max(hypot(dx, dy), 1)
-        nx, ny = -dy / length, dx / length
-        offset = 16 + min(max(float(data.get("labelOffset") or 0) * 28, 0), 22)
-        lines = _fit_lines(label, max_chars=28, max_lines=2)
-        max_width = max((draw.textbbox((0, 0), line, font=label_font)[2] for line in lines), default=0)
-        label_width = max(74, min(230, max_width + 24))
-        label_height = 18 + len(lines) * 15
-        outside_offset = CARD_HEIGHT / 2 + label_height / 2 + 16
-        candidates = [
-            (x + nx * offset, y + ny * offset),
-            (x - nx * offset, y - ny * offset),
-            (x + nx * outside_offset, y + ny * outside_offset),
-            (x - nx * outside_offset, y - ny * outside_offset),
-        ]
-        chosen = candidates[0]
-        for candidate in candidates:
-            rect = (
-                candidate[0] - label_width / 2,
-                candidate[1] - label_height / 2,
-                candidate[0] + label_width / 2,
-                candidate[1] + label_height / 2,
-            )
-            overlaps_node = any(
-                rect[0] < node_x + CARD_WIDTH + 12
-                and rect[2] > node_x - 12
-                and rect[1] < node_y + CARD_HEIGHT + 12
-                and rect[3] > node_y - 12
-                for node_x, node_y in positions.values()
-            )
-            if not overlaps_node and not any(
-                rect[0] < other[2] and rect[2] > other[0] and rect[1] < other[3] and rect[3] > other[1]
-                for other in occupied
-            ):
-                chosen = candidate
-                occupied.append(rect)
-                break
-        left = chosen[0] - label_width / 2
-        top = chosen[1] - label_height / 2
-        draw.rounded_rectangle(
-            (left, top, left + label_width, top + label_height),
-            radius=7,
-            fill=LABEL_SURFACE,
-            outline=LABEL_BORDER,
-            width=1,
-        )
-        for index, line in enumerate(lines):
-            draw.text(
-                (chosen[0], top + 8 + index * 15),
-                line,
-                fill=TEXT,
-                font=label_font,
-                anchor="ma",
-            )
+        if draw_labels:
+            _draw_edge_label(draw, edge, points, positions, label_font, occupied)
+        else:
+            _draw_edge_arrow(draw, points)
 
 
 def _draw_png_nodes(

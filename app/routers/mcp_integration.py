@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hmac
-from typing import Any, Literal
+from typing import Annotated, Any, Literal, TypedDict
 from uuid import NAMESPACE_URL, uuid5
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -96,6 +96,11 @@ class McpArchitectureCreateResponse(BaseModel):
     public: bool = True
 
 
+class McpResponseLinks(TypedDict, total=False):
+    previewUrl: str
+    editorUrl: str
+
+
 def _require_mcp_service(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
@@ -145,6 +150,14 @@ def _require_mcp_service(
         )
         return delegated_user.id, author_name, True
 
+    if service_user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "MCP_INTEGRATION_NOT_CONFIGURED",
+                "message": "MCP architecture persistence is not configured",
+            },
+        )
     return service_user_id, settings.mcp_integration_author_name, False
 
 
@@ -152,14 +165,148 @@ def _stable_diagram_id(user_id: str, idempotency_key: str) -> str:
     return str(uuid5(NAMESPACE_URL, f"diagramwise:mcp:{user_id}:{idempotency_key}"))
 
 
+def _response_links(public_id: str, canonical_id: str, delegated_user: bool) -> McpResponseLinks:
+    settings = get_settings()
+    links: McpResponseLinks = {
+        "previewUrl": (
+            f"{getattr(settings, 'public_api_url', 'https://api.diagramwise.com').rstrip('/')}/api/v1/public/diagrams/"
+            f"{public_id}/preview.png"
+        )
+    }
+    if delegated_user:
+        links["editorUrl"] = (
+            f"{settings.frontend_url.rstrip('/')}/playground/free?diagramId={canonical_id}"
+        )
+    return links
+
+
+def _existing_canvas(existing: Any) -> tuple[list[Any], list[Any]]:
+    nodes, edges = existing.nodes, existing.edges
+    diagrams_table = getattr(dynamodb_service, "diagrams_table", None)
+    owner_id = getattr(existing, "userId", None)
+    if diagrams_table is None or not owner_id:
+        return nodes, edges
+    repository = CanvasRepository(
+        diagrams_table, owner_id, getattr(existing, "title", "Untitled Design")
+    )
+    summaries = repository.list_canvas_summaries(existing.id)
+    if not summaries:
+        return nodes, edges
+    primary = repository.get_canvas(existing.id, summaries[0]["id"])
+    if primary is not None:
+        return primary.nodes, primary.edges
+    return nodes, edges
+
+
+def _assert_same_idempotent_architecture(
+    existing: Any,
+    request: McpArchitectureCreateRequest,
+    existing_nodes: list[Any],
+    existing_edges: list[Any],
+) -> None:
+    existing_document = getattr(existing, "canonicalDocument", None)
+    is_different = (
+        existing.title != request.title
+        or existing.description != request.description
+        or existing_nodes != request.nodes
+        or existing_edges != request.edges
+        or (
+            existing_document is not None
+            and request.document is not None
+            and existing_document != request.document
+        )
+    )
+    if is_different:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "IDEMPOTENCY_CONFLICT",
+                "message": "The idempotency key was already used for a different architecture",
+            },
+        )
+
+
+def _existing_architecture_response(
+    existing: Any,
+    request: McpArchitectureCreateRequest,
+    user_id: str,
+    author_name: str,
+    delegated_user: bool,
+) -> McpArchitectureCreateResponse:
+    existing_nodes, existing_edges = _existing_canvas(existing)
+    _assert_same_idempotent_architecture(existing, request, existing_nodes, existing_edges)
+    published = {"diagramId": existing.publicSnapshotId or existing.id}
+    if not existing.isPublic:
+        published = dynamodb_service.publish_diagram(
+            user_id=user_id, diagram_id=existing.id, author_name=author_name
+        ) or {}
+    public_id = published.get("diagramId")
+    if not public_id:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={
+                "code": "PUBLISH_FAILED",
+                "message": "Diagramwise could not publish the existing architecture",
+            },
+        )
+    return McpArchitectureCreateResponse(
+        status="existing",
+        architectureId=public_id,
+        url=f"{get_settings().frontend_url.rstrip('/')}/public/{public_id}",
+        **_response_links(public_id, existing.id, delegated_user),
+    )
+
+
+def _create_public_architecture(
+    request: McpArchitectureCreateRequest,
+    user_id: str,
+    author_name: str,
+    delegated_user: bool,
+    diagram_id: str,
+) -> McpArchitectureCreateResponse:
+    diagram = dynamodb_service.create_diagram(
+        user_id=user_id,
+        title=request.title,
+        description=request.description,
+        nodes=request.nodes,
+        edges=request.edges,
+        reasoning_context=dict(request.reasoningContext),
+        diagram_id=diagram_id,
+        canonical_document=(
+            request.document.model_dump(by_alias=True, exclude_none=True)
+            if request.document is not None
+            else None
+        ),
+    )
+    published = dynamodb_service.publish_diagram(
+        user_id=user_id, diagram_id=diagram.id, author_name=author_name
+    )
+    if not published:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={
+                "code": "PUBLISH_FAILED",
+                "message": "Diagramwise created the architecture but could not publish it",
+            },
+        )
+    public_id = published["diagramId"]
+    return McpArchitectureCreateResponse(
+        status="created",
+        architectureId=public_id,
+        url=f"{get_settings().frontend_url.rstrip('/')}/public/{public_id}",
+        **_response_links(public_id, diagram.id, delegated_user),
+    )
+
+
 @router.post(
     "/architectures",
-    response_model=McpArchitectureCreateResponse,
     status_code=status.HTTP_201_CREATED,
 )
 async def create_mcp_architecture(
     request: McpArchitectureCreateRequest,
-    service: tuple[str, str, bool] | tuple[str, str] = Depends(_require_mcp_service),
+    service: Annotated[
+        tuple[str, str, bool] | tuple[str, str], Depends(_require_mcp_service)
+    ],
 ) -> McpArchitectureCreateResponse:
     """Persist and publish one explicitly public MCP-created architecture.
 
@@ -173,113 +320,10 @@ async def create_mcp_architecture(
     delegated_user = len(service) > 2 and bool(service[2])
     diagram_id = _stable_diagram_id(user_id, request.idempotencyKey)
     existing = dynamodb_service.get_diagram(user_id=user_id, diagram_id=diagram_id)
-    reasoning_context = dict(request.reasoningContext)
-
-    def response_links(public_id: str, canonical_id: str) -> dict[str, str]:
-        settings = get_settings()
-        links = {
-            "previewUrl": (
-                f"{getattr(settings, 'public_api_url', 'https://api.diagramwise.com').rstrip('/')}/api/v1/public/diagrams/"
-                f"{public_id}/preview.png"
-            )
-        }
-        if delegated_user:
-            links["editorUrl"] = (
-                f"{settings.frontend_url.rstrip('/')}/playground/free?diagramId={canonical_id}"
-            )
-        return links
-
     if existing:
-        existing_nodes = existing.nodes
-        existing_edges = existing.edges
-        diagrams_table = getattr(dynamodb_service, "diagrams_table", None)
-        owner_id = getattr(existing, "userId", None)
-        if diagrams_table is not None and owner_id:
-            repository = CanvasRepository(
-                diagrams_table, owner_id, getattr(existing, "title", "Untitled Design")
-            )
-            canvas_summaries = repository.list_canvas_summaries(existing.id)
-            if canvas_summaries:
-                primary = repository.get_canvas(existing.id, canvas_summaries[0]["id"])
-                if primary is not None:
-                    existing_nodes = primary.nodes
-                    existing_edges = primary.edges
-        existing_document = getattr(existing, "canonicalDocument", None)
-        if (
-            existing.title != request.title
-            or existing.description != request.description
-            or existing_nodes != request.nodes
-            or existing_edges != request.edges
-            or (
-                existing_document is not None
-                and request.document is not None
-                and existing_document != request.document
-            )
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    "code": "IDEMPOTENCY_CONFLICT",
-                    "message": "The idempotency key was already used for a different architecture",
-                },
-            )
-        published = {
-            "diagramId": existing.publicSnapshotId or existing.id,
-        }
-        if not existing.isPublic:
-            published = dynamodb_service.publish_diagram(
-                user_id=user_id,
-                diagram_id=existing.id,
-                author_name=author_name,
-            ) or {}
-        public_id = published.get("diagramId")
-        if not public_id:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail={
-                    "code": "PUBLISH_FAILED",
-                    "message": "Diagramwise could not publish the existing architecture",
-                },
-            )
-        return McpArchitectureCreateResponse(
-            status="existing",
-            architectureId=public_id,
-            url=f"{get_settings().frontend_url.rstrip('/')}/public/{public_id}",
-            **response_links(public_id, existing.id),
+        return _existing_architecture_response(
+            existing, request, user_id, author_name, delegated_user
         )
-
-    diagram = dynamodb_service.create_diagram(
-        user_id=user_id,
-        title=request.title,
-        description=request.description,
-        nodes=request.nodes,
-        edges=request.edges,
-        reasoning_context=reasoning_context,
-        diagram_id=diagram_id,
-        canonical_document=(
-            request.document.model_dump(by_alias=True, exclude_none=True)
-            if request.document is not None
-            else None
-        ),
-    )
-    published = dynamodb_service.publish_diagram(
-        user_id=user_id,
-        diagram_id=diagram.id,
-        author_name=author_name,
-    )
-    if not published:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail={
-                "code": "PUBLISH_FAILED",
-                "message": "Diagramwise created the architecture but could not publish it",
-            },
-        )
-
-    public_id = published["diagramId"]
-    return McpArchitectureCreateResponse(
-        status="created",
-        architectureId=public_id,
-        url=f"{get_settings().frontend_url.rstrip('/')}/public/{public_id}",
-        **response_links(public_id, diagram.id),
+    return _create_public_architecture(
+        request, user_id, author_name, delegated_user, diagram_id
     )

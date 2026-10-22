@@ -106,7 +106,21 @@ def save(service, **overrides):
         "difficulty": None, "category": None, "nodes": [], "edges": [],
     }
     args.update(overrides)
-    return service.create_or_update_attempt(**args)
+    user_id = args.pop("user_id")
+    field_names = {
+        "problem_id": "problemId",
+        "elapsed_time": "elapsedTime",
+        "last_assessment": "lastAssessment",
+        "last_assessment_check": "lastAssessmentCheck",
+        "problem_requirement_spec": "problemRequirementSpec",
+        "reasoning_context": "reasoningContext",
+        "interview_session": "interviewSession",
+        "addressed_finding_ids": "addressedFindingIds",
+    }
+    request = AttemptCreate(**{
+        field_names.get(name, name): value for name, value in args.items()
+    })
+    return service.create_or_update_attempt(user_id=user_id, request=request)
 
 
 @pytest.mark.parametrize("fallback", [
@@ -321,8 +335,9 @@ def test_current_frontend_autosave_does_not_upgrade_legacy_attempt_context():
 
 def test_unknown_supplied_revision_is_rejected_before_writing():
     service = service_with(spec=requirement_spec("r2"))
+    stale_spec = requirement_spec("r1")
     with pytest.raises(ValueError, match="revision is not available"):
-        save(service, problem_requirement_spec=requirement_spec("r1"))
+        save(service, problem_requirement_spec=stale_spec)
     assert service.attempts_table.writes == []
 
 

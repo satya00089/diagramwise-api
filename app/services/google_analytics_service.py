@@ -183,7 +183,7 @@ def get_google_analytics_report(
             "Default Credentials on the API server.",
             property_id,
         )
-    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+    except (TypeError, ValueError) as exc:
         logger.warning(
             "Google Analytics service-account configuration is invalid (%s)",
             type(exc).__name__,

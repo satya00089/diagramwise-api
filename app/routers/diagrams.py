@@ -55,7 +55,7 @@ def _decode_diagram_cursor(cursor: Optional[str]) -> Dict[str, Any]:
     try:
         padding = "=" * (-len(cursor) % 4)
         state = json.loads(base64.urlsafe_b64decode(cursor + padding).decode())
-    except (ValueError, UnicodeDecodeError, binascii.Error) as exc:
+    except (ValueError, binascii.Error) as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid diagrams cursor",
@@ -250,7 +250,7 @@ async def create_diagram(
     return enrich_diagram_response(diagram, user_id)
 
 
-@router.get("/diagrams", response_model=DiagramPage)
+@router.get("/diagrams")
 async def get_diagrams(
     limit: int = Query(
         default=DIAGRAM_PAGE_SIZE,

@@ -47,9 +47,10 @@ def auth_response() -> AuthResponse:
 
 @pytest.mark.asyncio
 async def test_google_redirect_requires_google_double_submit_cookie():
+    request = request_with_cookie("cookie-token")
     with pytest.raises(HTTPException) as error:
         await auth.google_auth_redirect(
-            request_with_cookie("cookie-token"),
+            request,
             credential="credential",
             csrf_token="different-token",
         )

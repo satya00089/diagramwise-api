@@ -13,6 +13,8 @@ from app.models.admin_models import (
     AdminApiLatencyReport,
     AdminGoogleAnalyticsReport,
     AdminFeedbackItem,
+    AdminAnalyticsSummary,
+    AdminFeedbackSummary,
     AdminOverviewResponse,
     GrantAdminRequest,
     UpdateFeedbackStatusRequest,
@@ -65,7 +67,7 @@ def _feedback_item(
     return AdminFeedbackItem.model_validate(response_item)
 
 
-@router.get("/admin/overview", response_model=AdminOverviewResponse)
+@router.get("/admin/overview")
 async def get_admin_overview(
     _admin_user=Depends(require_super_admin),
     days: int = Query(30, ge=7, le=90),
@@ -88,14 +90,14 @@ async def get_admin_overview(
     return AdminOverviewResponse(
         fromDate=from_date.isoformat(),
         toDate=to_date.isoformat(),
-        analytics=analytics,
-        feedback=feedback_summary,
+        analytics=AdminAnalyticsSummary.model_validate(analytics),
+        feedback=AdminFeedbackSummary.model_validate(feedback_summary),
         recentFeedback=[_feedback_item(item, user_cache) for item in feedback[:12]],
     )
 
 
 @router.get(
-    "/admin/google-analytics", response_model=AdminGoogleAnalyticsReport
+    "/admin/google-analytics"
 )
 async def get_admin_google_analytics(
     _admin_user=Depends(require_super_admin),
@@ -108,7 +110,7 @@ async def get_admin_google_analytics(
     return AdminGoogleAnalyticsReport.model_validate(report)
 
 
-@router.get("/admin/api-latency", response_model=AdminApiLatencyReport)
+@router.get("/admin/api-latency")
 async def get_admin_api_latency(
     _admin_user=Depends(require_super_admin),
     days: int = Query(30, ge=7, le=90),

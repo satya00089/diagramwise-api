@@ -1,7 +1,6 @@
 """API router for problem-related endpoints."""
 
 import base64
-import binascii
 import json
 import logging
 from typing import Annotated, Any, Dict, List, Optional
@@ -50,13 +49,7 @@ async def get_all_problems(
                 start_key = json.loads(
                     base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8")
                 )
-            except (
-                TypeError,
-                ValueError,
-                UnicodeDecodeError,
-                binascii.Error,
-                json.JSONDecodeError,
-            ) as exc:
+            except (TypeError, ValueError) as exc:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Invalid problems cursor",

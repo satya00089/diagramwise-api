@@ -110,8 +110,9 @@ def test_unsupported_new_apply_action_is_not_silently_ignored(guide):
 def test_missing_or_changed_active_requirement_revision_rejected(guide):
     spec = {"schemaVersion": 1, "revision": "stale", "functional": [], "nonFunctional": [], "assumptions": []}
     problem = {"id": "p1", "title": "Public", "description": "Brief"}
+    architecture = build_architecture(guide)
     with pytest.raises(FixtureError, match="revision"):
-        make_request(problem, guide, build_architecture(guide), spec)
+        make_request(problem, guide, architecture, spec)
 
 
 def test_bundle_has_negative_and_equivalent_alternative_drafts_separate_from_requests(bundle):
@@ -211,7 +212,8 @@ def test_duplicate_missing_extra_runs_and_failed_run_cannot_be_cherry_picked(bun
 def test_local_runner_calls_each_planned_input_once_and_keeps_error(bundle):
     calls = []
     async def reviewer(request):
-        assert "expected" not in request and "minScore" not in request
+        assert "expected" not in request
+        assert "minScore" not in request
         calls.append(request)
         if len(calls) == 1:
             raise RuntimeError("record this failure")
@@ -219,8 +221,9 @@ def test_local_runner_calls_each_planned_input_once_and_keeps_error(bundle):
     experiment = recorded(bundle)["experiment"]
     # This fake reviewer has no I/O, so drive the coroutine without creating
     # Windows named pipes or selector sockets in a pure local test.
+    evaluation = run_evaluation(bundle, reviewer, experiment)
     with pytest.raises(StopIteration) as completed:
-        run_evaluation(bundle, reviewer, experiment).send(None)
+        evaluation.send(None)
     output = completed.value.value
     assert len(calls) == len(output["runs"]) == 15
     assert output["runs"][0]["error"] == "RuntimeError: record this failure"

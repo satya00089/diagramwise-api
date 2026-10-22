@@ -6,7 +6,7 @@ import json
 import logging
 import time
 import uuid
-from typing import Any, Callable, Optional, TypeVar
+from typing import Any, Callable, Optional, TypeVar, cast
 from urllib.parse import quote
 
 from redis import Redis
@@ -33,7 +33,7 @@ class ProblemCatalogCountCache:
     _lock_wait_seconds = 5
     _lock_wait_interval_seconds = 0.05
 
-    def __init__(self, redis_client: Redis[str] | None = None) -> None:
+    def __init__(self, redis_client: Redis | None = None) -> None:
         if redis_client is not None:
             self._redis = redis_client
             return
@@ -106,43 +106,48 @@ class ProblemCatalogCountCache:
         if acquired is None:
             return loader()
         if acquired:
-            try:
-                # Another worker may have filled the key between the first
-                # read and lock acquisition.
-                cached = reader()
-                if cached is not None:
-                    return cached
-                value = loader()
-                if value is not None:
-                    writer(value)
-                return value
-            finally:
-                self._release_lock(cache_key, owner)
+            return self._load_under_lock(cache_key, owner, reader, loader, writer)
+        return self._wait_for_cache_or_lock(cache_key, owner, reader, loader, writer)
 
+    def _load_under_lock(
+        self,
+        cache_key: str,
+        owner: str,
+        reader: CacheReader[CacheValue],
+        loader: CacheLoader[CacheValue],
+        writer: CacheWriter[CacheValue],
+    ) -> CacheValue | None:
+        try:
+            cached = reader()
+            if cached is not None:
+                return cached
+            value = loader()
+            if value is not None:
+                writer(value)
+            return value
+        finally:
+            self._release_lock(cache_key, owner)
+
+    def _wait_for_cache_or_lock(
+        self,
+        cache_key: str,
+        owner: str,
+        reader: CacheReader[CacheValue],
+        loader: CacheLoader[CacheValue],
+        writer: CacheWriter[CacheValue],
+    ) -> CacheValue | None:
         deadline = time.monotonic() + self._lock_wait_seconds
         while time.monotonic() < deadline:
             time.sleep(self._lock_wait_interval_seconds)
             cached = reader()
             if cached is not None:
                 return cached
-
             acquired = self._try_acquire_lock(cache_key, owner)
             if acquired is None:
                 return loader()
             if acquired:
-                try:
-                    cached = reader()
-                    if cached is not None:
-                        return cached
-                    value = loader()
-                    if value is not None:
-                        writer(value)
-                    return value
-                finally:
-                    self._release_lock(cache_key, owner)
-
-        # Preserve availability if the first loader is slow or failed to
-        # populate the cache after the bounded wait.
+                return self._load_under_lock(cache_key, owner, reader, loader, writer)
+        # Preserve availability if the first loader is slow or did not populate the key.
         return loader()
 
     @classmethod
@@ -164,7 +169,7 @@ class ProblemCatalogCountCache:
             if self._redis is None:
                 return None
             try:
-                cached = self._redis.get(key)
+                cached = cast(str | bytes | None, self._redis.get(key))
                 if cached is None:
                     return None
                 value = int(cached)
@@ -194,7 +199,7 @@ class ProblemCatalogCountCache:
         if self._redis is None:
             return None
         try:
-            cached = self._redis.get(self._key(category, difficulty))
+            cached = cast(str | bytes | None, self._redis.get(self._key(category, difficulty)))
             value = int(cached) if cached is not None else None
             return value if value is not None and value >= 0 else None
         except (RedisError, TypeError, ValueError):
@@ -229,14 +234,17 @@ class ProblemCatalogCountCache:
             return None
 
         try:
-            cached = self._redis.get(self._page_key(category, difficulty, limit, cursor))
+            cached = cast(
+                str | bytes | None,
+                self._redis.get(self._page_key(category, difficulty, limit, cursor)),
+            )
             if cached is None:
                 return None
             payload = json.loads(cached)
             if isinstance(payload, dict) and isinstance(payload.get("items"), list):
                 return payload
             return None
-        except (RedisError, TypeError, ValueError, json.JSONDecodeError):
+        except (RedisError, TypeError, ValueError):
             logger.warning("Problem catalog page cache read failed", exc_info=True)
             return None
 
