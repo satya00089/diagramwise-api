@@ -77,14 +77,8 @@ def validate_sharing_permission(
 
     Returns (has_permission, error_message)
     """
-    # Check if user is the owner
-    diagram = dynamodb_service.get_diagram(user_id, diagram_id)
-    if diagram:
-        return True, ""  # Owner has full access
-
-    # Check if user is a collaborator with sufficient permission
-    permission = dynamodb_service.check_collaborator_permission(diagram_id, user_id)
-    if permission is None:
+    diagram, permission = dynamodb_service.get_diagram_for_user(user_id, diagram_id)
+    if not diagram or permission is None:
         return False, "Access denied: You do not have permission to access this diagram"
 
     if required_permission == Permission.EDIT and permission == Permission.READ:

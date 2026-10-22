@@ -11,9 +11,11 @@ content saves require the caller's expected version to match.
 """
 
 from datetime import datetime, timezone
+import time
 from typing import Any, Dict, List, Optional
 
 from boto3.dynamodb.conditions import Attr, Key
+from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
 from botocore.exceptions import ClientError
 
 from app.models.canvas_models import CanvasRecord
@@ -137,6 +139,14 @@ class CanvasRepository:
                 break
             query["ExclusiveStartKey"] = last_key
 
+        legacy_canvas_ids = [
+            str(item["canvasId"])
+            for item in items
+            if item.get("deletedAt") is None
+            and (item.get("nodeCount") is None or item.get("edgeCount") is None)
+        ]
+        legacy_items = self._batch_get_legacy_canvases(workspace_id, legacy_canvas_ids)
+
         summaries: List[Dict[str, Any]] = []
         for item in items:
             if item.get("deletedAt") is not None:
@@ -145,11 +155,11 @@ class CanvasRepository:
             edge_count = item.get("edgeCount")
             if node_count is None or edge_count is None:
                 # Legacy rows lack counts; fetch only those rows until their next save.
-                canvas = self.get_canvas(workspace_id, item["canvasId"])
-                if canvas is None:
+                legacy_item = legacy_items.get(str(item["canvasId"]))
+                if legacy_item is None or legacy_item.get("deletedAt") is not None:
                     continue
-                node_count = len(canvas.nodes)
-                edge_count = len(canvas.edges)
+                node_count = len(legacy_item.get("nodes") or [])
+                edge_count = len(legacy_item.get("edges") or [])
             summaries.append(
                 {
                     "id": item["canvasId"],
@@ -164,6 +174,59 @@ class CanvasRepository:
                 }
             )
         return sorted(summaries, key=lambda canvas: canvas["order"])
+
+    def _batch_get_legacy_canvases(
+        self, workspace_id: str, canvas_ids: List[str]
+    ) -> Dict[str, Dict[str, Any]]:
+        """Load old canvas graph payloads in bounded batches for missing counts."""
+        if not canvas_ids:
+            return {}
+
+        client = self.table.meta.client
+        serializer = TypeSerializer()
+        deserializer = TypeDeserializer()
+        items: Dict[str, Dict[str, Any]] = {}
+        table_name = self.table.name
+        for offset in range(0, len(canvas_ids), 100):
+            keys = [
+                self._key(workspace_id, canvas_id)
+                for canvas_id in canvas_ids[offset : offset + 100]
+            ]
+            request: Dict[str, Any] = {
+                "Keys": [
+                    {name: serializer.serialize(value) for name, value in key.items()}
+                    for key in keys
+                ],
+                "ProjectionExpression": (
+                    "#user, #sort, #canvas, #nodes, #edges, #deleted"
+                ),
+                "ExpressionAttributeNames": {
+                    "#user": "userId",
+                    "#sort": "id",
+                    "#canvas": "canvasId",
+                    "#nodes": "nodes",
+                    "#edges": "edges",
+                    "#deleted": "deletedAt",
+                },
+            }
+            pending: Dict[str, Any] = {table_name: request}
+            retries = 0
+            while pending:
+                response = client.batch_get_item(RequestItems=pending)
+                for raw_item in response.get("Responses", {}).get(table_name, []):
+                    item = {
+                        name: deserializer.deserialize(value)
+                        for name, value in raw_item.items()
+                    }
+                    if item.get("canvasId"):
+                        items[str(item["canvasId"])] = item
+                pending = response.get("UnprocessedKeys", {})
+                if pending:
+                    retries += 1
+                    if retries >= 5:
+                        raise RuntimeError("DynamoDB left legacy canvas keys unprocessed")
+                    time.sleep(0.05 * (2 ** (retries - 1)))
+        return items
 
     def get_canvas(self, workspace_id: str, canvas_id: str) -> Optional[CanvasRecord]:
         response = self.table.get_item(Key=self._key(workspace_id, canvas_id))

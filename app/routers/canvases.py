@@ -23,12 +23,11 @@ from app.models.canvas_models import (
     legacy_canvas_from_diagram,
     primary_canvas,
 )
-from app.models.diagram_models import Diagram, DiagramSummaryResponse
+from app.models.diagram_models import Diagram, DiagramSummaryResponse, Permission
 from app.routers.auth import get_current_user
 from app.services.canvas_repository import CanvasRepository, CanvasVersionConflict
 from app.services.canvas_service import CanvasNotFound, CanvasService
 from app.services.dynamodb_service import dynamodb_service
-from app.services.validation import validate_diagram_access
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -70,18 +69,17 @@ def _canvas_service(
 
 def _load_workspace(user_id: str, diagram_id: str, action: str):
     """Return (diagram, legacy_fallback) after checking the caller's permission."""
-    # Owner reads are authorized by the owner-scoped lookup. Validate only shared access.
-    diagram = dynamodb_service.get_diagram(user_id, diagram_id)
-    if not diagram:
-        has_access, error_msg = validate_diagram_access(user_id, diagram_id, action)
-        if not has_access:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN, detail=error_msg
-            )
-        shared = dynamodb_service.get_shared_diagrams_for_user(user_id)
-        diagram = next((d for d in shared if d.id == diagram_id), None)
-    if not diagram:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=WORKSPACE_NOT_FOUND)
+    diagram, permission = dynamodb_service.get_diagram_for_user(user_id, diagram_id)
+    if not diagram or permission is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied: You do not have permission to access this diagram",
+        )
+    if action in {"update", "delete", "share"} and permission == Permission.READ:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied: You only have read permission for this diagram",
+        )
 
     legacy = legacy_canvas_from_diagram(
         diagram.id,

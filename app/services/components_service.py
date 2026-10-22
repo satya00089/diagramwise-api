@@ -5,7 +5,10 @@ Handles DynamoDB operations for component management
 
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone
+import threading
+import time
 import boto3
+from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
 from mypy_boto3_dynamodb.service_resource import DynamoDBServiceResource
 from boto3.dynamodb.conditions import Key, Attr
 from app.utils.config import get_settings
@@ -15,6 +18,8 @@ settings = get_settings()
 
 class ComponentsService:
     """Service for managing components in DynamoDB"""
+
+    _catalog_cache_ttl_seconds = 300
 
     def __init__(self):
         """Initialize DynamoDB client and table"""
@@ -26,6 +31,36 @@ class ComponentsService:
         )
         self.table_name = settings.components_table_name
         self.table = self.dynamodb.Table(self.table_name)
+        self._catalog_cache: tuple[float, List[Dict[str, Any]]] | None = None
+        self._catalog_cache_lock = threading.Lock()
+
+    def _get_active_catalog(self) -> List[Dict[str, Any]]:
+        """Cache the small active catalog used by search and metadata endpoints."""
+        now = time.monotonic()
+        cached = self._catalog_cache
+        if cached and now - cached[0] < self._catalog_cache_ttl_seconds:
+            return cached[1]
+
+        with self._catalog_cache_lock:
+            now = time.monotonic()
+            cached = self._catalog_cache
+            if cached and now - cached[0] < self._catalog_cache_ttl_seconds:
+                return cached[1]
+
+            items: List[Dict[str, Any]] = []
+            scan_params: Dict[str, Any] = {
+                "FilterExpression": Attr("isActive").eq(True),
+            }
+            while True:
+                response = self.table.scan(**scan_params)
+                items.extend(response.get("Items", []))
+                last_key = response.get("LastEvaluatedKey")
+                if not last_key:
+                    break
+                scan_params["ExclusiveStartKey"] = last_key
+
+            self._catalog_cache = (time.monotonic(), items)
+            return items
 
     def get_components_by_provider(
         self,
@@ -149,46 +184,28 @@ class ComponentsService:
             Dict with matching items
         """
         try:
-            # Build scan parameters (Note: Scan is less efficient than Query)
-            # For production, consider using ElasticSearch or DynamoDB Streams + Lambda
-            scan_params: Dict[str, Any] = {
-                "Limit": limit,
-                "FilterExpression": Attr("isActive").eq(True),
-            }
+            term = search_term.casefold()
 
-            # Add search filter
-            search_lower = search_term.lower()
-            search_filter = (
-                Attr("name").contains(search_lower)
-                | Attr("displayName").contains(search_term)
-                | Attr("description").contains(search_term)
-                | Attr("tags").contains(search_lower)
-            )
+            def matches(value: Any) -> bool:
+                if isinstance(value, str):
+                    return term in value.casefold()
+                if isinstance(value, list):
+                    return any(term in str(item).casefold() for item in value)
+                return False
 
-            # Combine with existing filter
-            scan_params["FilterExpression"] = (
-                scan_params["FilterExpression"] & search_filter
-            )
+            matching_items = []
+            for item in self._get_active_catalog():
+                if provider and str(item.get("provider", "")).casefold() != provider.casefold():
+                    continue
+                if category and str(item.get("category", "")).casefold() != category.casefold():
+                    continue
+                if any(
+                    matches(item.get(field))
+                    for field in ("name", "displayName", "description", "tags")
+                ):
+                    matching_items.append(item)
 
-            # Add provider filter if provided
-            if provider:
-                scan_params["FilterExpression"] = scan_params[
-                    "FilterExpression"
-                ] & Attr("provider").eq(provider)
-
-            # Add category filter if provided
-            if category:
-                scan_params["FilterExpression"] = scan_params[
-                    "FilterExpression"
-                ] & Attr("category").eq(category)
-
-            # Execute scan
-            response = self.table.scan(**scan_params)
-
-            return {
-                "items": response.get("Items", []),
-                "count": response.get("Count", 0),
-            }
+            return {"items": matching_items[:limit], "count": min(len(matching_items), limit)}
 
         except Exception as e:
             print(f"Error searching components: {e}")
@@ -205,31 +222,86 @@ class ComponentsService:
             Component data or None if not found
         """
         try:
-            # Extract platform from component ID (e.g., "aws-s3" -> "aws")
-            platform_prefix = (
-                component_id.split("-")[0].lower() if "-" in component_id else ""
-            )
-
-            # Map platform prefix to platform name (matching DynamoDB values)
-            platform_map = {
-                "aws": "AWS",
-                "azure": "Azure",
-                "gcp": "GCP",
-                "kubernetes": "Kubernetes",
-                "k8s": "Kubernetes",
-            }
-
-            platform = platform_map.get(platform_prefix, platform_prefix.capitalize())
-
             # Use composite key (platform + id) for get_item
             response = self.table.get_item(
-                Key={"platform": platform, "id": component_id}
+                Key=self._component_key(component_id)
             )
             return response.get("Item")
 
         except Exception as e:
             print(f"Error getting component by ID: {e}")
             raise
+
+    @staticmethod
+    def _component_key(component_id: str) -> Dict[str, str]:
+        """Build the component table key from its provider-prefixed ID."""
+        platform_prefix = (
+            component_id.split("-")[0].lower() if "-" in component_id else ""
+        )
+        platform_map = {
+            "aws": "AWS",
+            "azure": "Azure",
+            "gcp": "GCP",
+            "kubernetes": "Kubernetes",
+            "k8s": "Kubernetes",
+        }
+        platform = platform_map.get(platform_prefix, platform_prefix.capitalize())
+        return {"platform": platform, "id": component_id}
+
+    def get_components_by_ids(
+        self, component_ids: List[str], minimal: bool = False
+    ) -> List[Dict[str, Any]]:
+        """Fetch component records in DynamoDB batches, preserving request order."""
+        ids = list(dict.fromkeys(component_ids))
+        if not ids:
+            return []
+        if len(ids) > 100:
+            raise ValueError("At most 100 component IDs can be fetched at once")
+
+        serializer = TypeSerializer()
+        deserializer = TypeDeserializer()
+        keys = [self._component_key(component_id) for component_id in ids]
+        request: Dict[str, Any] = {
+            "Keys": [
+                {name: serializer.serialize(value) for name, value in key.items()}
+                for key in keys
+            ]
+        }
+        if minimal:
+            request["ProjectionExpression"] = "#id, #provider, #label, #description, #group, #icon, #tags, #node_type"
+            request["ExpressionAttributeNames"] = {
+                "#id": "id",
+                "#provider": "provider",
+                "#label": "label",
+                "#description": "description",
+                "#group": "group",
+                "#icon": "iconUrl",
+                "#tags": "tags",
+                "#node_type": "nodeType",
+            }
+
+        client = self.table.meta.client
+        pending: Dict[str, Any] = {self.table_name: request}
+        records: List[Dict[str, Any]] = []
+        attempts = 0
+        while pending:
+            response = client.batch_get_item(RequestItems=pending)
+            records.extend(
+                {
+                    name: deserializer.deserialize(value)
+                    for name, value in item.items()
+                }
+                for item in response.get("Responses", {}).get(self.table_name, [])
+            )
+            pending = response.get("UnprocessedKeys", {})
+            if pending:
+                attempts += 1
+                if attempts >= 5:
+                    raise RuntimeError("DynamoDB left component keys unprocessed")
+                time.sleep(0.05 * (2 ** (attempts - 1)))
+
+        by_id = {str(item["id"]): item for item in records if item.get("id")}
+        return [by_id[component_id] for component_id in ids if component_id in by_id]
 
     def get_all_components(
         self, limit: int = 100, last_evaluated_key: Optional[Dict[str, Any]] = None
@@ -316,30 +388,13 @@ class ComponentsService:
             List of provider names
         """
         try:
-            # Scan and collect unique providers
-            # For production, consider maintaining a separate table or cache
-            response = self.table.scan(
-                ProjectionExpression="provider",
-                FilterExpression=Attr("isActive").eq(True),
+            return sorted(
+                {
+                    str(item["provider"])
+                    for item in self._get_active_catalog()
+                    if item.get("provider")
+                }
             )
-
-            providers: set[str] = set()
-            for item in response.get("Items", []):
-                if "provider" in item:
-                    providers.add(str(item["provider"]))
-
-            # Handle pagination
-            while "LastEvaluatedKey" in response:
-                response = self.table.scan(
-                    ProjectionExpression="provider",
-                    FilterExpression=Attr("isActive").eq(True),
-                    ExclusiveStartKey=response["LastEvaluatedKey"],
-                )
-                for item in response.get("Items", []):
-                    if "provider" in item:
-                        providers.add(str(item["provider"]))
-
-            return sorted(providers)
 
         except Exception as e:
             print(f"Error getting providers: {e}")
@@ -353,29 +408,13 @@ class ComponentsService:
             List of category names
         """
         try:
-            # Scan and collect unique categories
-            response = self.table.scan(
-                ProjectionExpression="category",
-                FilterExpression=Attr("isActive").eq(True),
+            return sorted(
+                {
+                    str(item["category"])
+                    for item in self._get_active_catalog()
+                    if item.get("category")
+                }
             )
-
-            categories: set[str] = set()
-            for item in response.get("Items", []):
-                if "category" in item:
-                    categories.add(str(item["category"]))
-
-            # Handle pagination
-            while "LastEvaluatedKey" in response:
-                response = self.table.scan(
-                    ProjectionExpression="category",
-                    FilterExpression=Attr("isActive").eq(True),
-                    ExclusiveStartKey=response["LastEvaluatedKey"],
-                )
-                for item in response.get("Items", []):
-                    if "category" in item:
-                        categories.add(str(item["category"]))
-
-            return sorted(categories)
 
         except Exception as e:
             print(f"Error getting categories: {e}")

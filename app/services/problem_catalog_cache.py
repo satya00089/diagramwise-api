@@ -187,6 +187,20 @@ class ProblemCatalogCountCache:
 
         return self._cache_aside(key, read_count, load_count, write_count)
 
+    def get_cached_count(
+        self, category: Optional[str] = None, difficulty: Optional[str] = None
+    ) -> Optional[int]:
+        """Read a cached count without triggering a DynamoDB load on a miss."""
+        if self._redis is None:
+            return None
+        try:
+            cached = self._redis.get(self._key(category, difficulty))
+            value = int(cached) if cached is not None else None
+            return value if value is not None and value >= 0 else None
+        except (RedisError, TypeError, ValueError):
+            logger.warning("Problem catalog count cache read failed", exc_info=True)
+            return None
+
     @classmethod
     def _page_key(
         cls,

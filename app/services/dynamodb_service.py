@@ -2,12 +2,14 @@
 
 from datetime import datetime, timezone
 from decimal import Decimal
+import time
 from typing import Any, Dict, List, Optional, cast
 from uuid import uuid4
 
 import boto3
 from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import ClientError
+from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
 from mypy_boto3_dynamodb.service_resource import Table
 from pydantic import BaseModel
 
@@ -24,10 +26,6 @@ DDB_ZERO_VALUE = ":zero"
 # Canvas items share the diagrams table; this marks them so diagram lists skip them.
 CANVAS_RECORD_TYPE = "canvas"
 DDB_UPDATED_VALUE = ":updated"
-DDB_COLLABORATORS_VALUE = ":collaborators"
-DDB_COLLABORATORS_UPDATE = (
-    f"SET collaborators = {DDB_COLLABORATORS_VALUE}, updatedAt = {DDB_UPDATED_VALUE}"
-)
 
 def _is_canvas_record(item: Dict[str, Any]) -> bool:
     return item.get("recordType") == CANVAS_RECORD_TYPE
@@ -104,11 +102,63 @@ class DynamoDBService:
         )
         self.users_table: Table = dynamodb.Table(settings.dynamodb_users_table)
         self.diagrams_table: Table = dynamodb.Table(settings.dynamodb_diagrams_table)
+        self.diagram_shares_table: Table = dynamodb.Table(
+            settings.dynamodb_diagram_shares_table
+        )
         self.problems_table: Table = dynamodb.Table(settings.dynamodb_problems_table)
         self.attempts_table: Table = dynamodb.Table(settings.dynamodb_attempts_table)
         self.feedback_table: Table = dynamodb.Table(settings.dynamodb_feedback_table)
         self.walkthroughs_table: Table = dynamodb.Table(settings.dynamodb_walkthroughs_table)
         self.auth_sessions_table: Table = dynamodb.Table(settings.dynamodb_auth_sessions_table)
+
+    @staticmethod
+    def _serialize_item(item: Dict[str, Any]) -> Dict[str, Any]:
+        serializer = TypeSerializer()
+        return {name: serializer.serialize(value) for name, value in item.items()}
+
+    @staticmethod
+    def _deserialize_item(item: Dict[str, Any]) -> Dict[str, Any]:
+        deserializer = TypeDeserializer()
+        return {name: deserializer.deserialize(value) for name, value in item.items()}
+
+    def _batch_get_items(
+        self,
+        table: Table,
+        keys: List[Dict[str, Any]],
+        projection_expression: Optional[str] = None,
+        expression_attribute_names: Optional[Dict[str, str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Batch-get items in groups of 100 and retry DynamoDB's unprocessed keys."""
+        if not keys:
+            return []
+
+        table_name = table.name
+        client = table.meta.client
+        items: List[Dict[str, Any]] = []
+        for offset in range(0, len(keys), 100):
+            request: Dict[str, Any] = {
+                "Keys": [self._serialize_item(key) for key in keys[offset : offset + 100]]
+            }
+            if projection_expression:
+                request["ProjectionExpression"] = projection_expression
+            if expression_attribute_names:
+                request["ExpressionAttributeNames"] = expression_attribute_names
+
+            pending: Dict[str, Any] = {table_name: request}
+            attempts = 0
+            while pending:
+                response = client.batch_get_item(RequestItems=pending)
+                items.extend(
+                    self._deserialize_item(item)
+                    for item in response.get("Responses", {}).get(table_name, [])
+                )
+                pending = response.get("UnprocessedKeys", {})
+                if pending:
+                    attempts += 1
+                    if attempts >= 5:
+                        raise RuntimeError("DynamoDB left diagram keys unprocessed")
+                    time.sleep(0.05 * (2 ** (attempts - 1)))
+        return items
 
     # User operations
     def _resolve_existing_user(
@@ -299,6 +349,41 @@ class DynamoDBService:
             return None
         except ClientError:
             return None
+
+    def get_user_profiles_by_ids(
+        self, user_ids: List[str]
+    ) -> Dict[str, Optional[Dict[str, Any]]]:
+        """Batch-load the small user profile projection used by diagram lists."""
+        ids = list(dict.fromkeys(user_ids))
+        if not ids:
+            return {}
+        try:
+            users = self._batch_get_items(
+                self.users_table,
+                [{"id": user_id} for user_id in ids],
+                "#id, #name, #email, #picture, #avatar_key",
+                {
+                    "#id": "id",
+                    "#name": "name",
+                    "#email": "email",
+                    "#picture": "picture",
+                    "#avatar_key": "avatarKey",
+                },
+            )
+            by_id = {
+                str(user["id"]): {
+                    "id": user["id"],
+                    "name": user.get("name") or "Anonymous",
+                    "email": user.get("email"),
+                    "pictureUrl": user.get("picture") or None,
+                    "avatarKey": user.get("avatarKey"),
+                }
+                for user in users
+                if user.get("id")
+            }
+            return {user_id: by_id.get(user_id) for user_id in ids}
+        except (ClientError, RuntimeError):
+            return {user_id: None for user_id in ids}
 
     def update_user_profile(
         self, user_id: str, first_name: str, last_name: str
@@ -724,11 +809,14 @@ class DynamoDBService:
             print(f"Error querying diagram summary page: {e}")
             return [], None
 
-    def get_diagram(self, user_id: str, diagram_id: str) -> Optional[Diagram]:
+    def get_diagram(
+        self, user_id: str, diagram_id: str, consistent_read: bool = False
+    ) -> Optional[Diagram]:
         """Get a specific diagram."""
         try:
             response = self.diagrams_table.get_item(
-                Key={"userId": user_id, "id": diagram_id}
+                Key={"userId": user_id, "id": diagram_id},
+                ConsistentRead=consistent_read,
             )
             item = response.get("Item")
             if item:
@@ -834,12 +922,54 @@ class DynamoDBService:
     def delete_diagram(self, user_id: str, diagram_id: str) -> bool:
         """Delete a diagram."""
         try:
-            diagram = self.get_diagram(user_id, diagram_id)
-            self.diagrams_table.delete_item(Key={"userId": user_id, "id": diagram_id})
-            if diagram and diagram.publicSnapshotId:
-                self.diagrams_table.delete_item(
-                    Key={"userId": user_id, "id": diagram.publicSnapshotId}
+            diagram = self.get_diagram(user_id, diagram_id, consistent_read=True)
+            if not diagram:
+                return False
+
+            transaction: List[Dict[str, Any]] = [
+                {
+                    "Delete": {
+                        "TableName": self.diagrams_table.name,
+                        "Key": self._serialize_item({"userId": user_id, "id": diagram_id}),
+                        "ConditionExpression": "#updated = :updated",
+                        "ExpressionAttributeNames": {"#updated": "updatedAt"},
+                        "ExpressionAttributeValues": self._serialize_item(
+                            {":updated": diagram.updatedAt}
+                        ),
+                    }
+                }
+            ]
+            if diagram.publicSnapshotId and diagram.publicSnapshotId != diagram_id:
+                transaction.append(
+                    {
+                        "Delete": {
+                            "TableName": self.diagrams_table.name,
+                            "Key": self._serialize_item(
+                                {"userId": user_id, "id": diagram.publicSnapshotId}
+                            ),
+                        }
+                    }
                 )
+            self.diagrams_table.meta.client.transact_write_items(
+                TransactItems=transaction
+            )
+
+            # Remove memberships after the parent is gone. Reads are denied as
+            # soon as the parent delete commits, and the batch writer avoids the
+            # 100-action transaction limit for legacy diagrams with many shares.
+            seen_collaborators: set[str] = set()
+            with self.diagram_shares_table.batch_writer() as batch:
+                for collaborator in diagram.collaborators or []:
+                    if collaborator.userId in seen_collaborators:
+                        continue
+                    seen_collaborators.add(collaborator.userId)
+                    batch.delete_item(
+                        Key={
+                            "collaboratorUserId": collaborator.userId,
+                            "diagramId": diagram_id,
+                        }
+                    )
+
             self._delete_canvas_records(user_id, diagram_id)
             return True
         except ClientError:
@@ -864,76 +994,148 @@ class DynamoDBService:
             query["ExclusiveStartKey"] = last_key
 
     # Sharing operations
+    def _get_diagram_share(
+        self, diagram_id: str, collaborator_user_id: str
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            response = self.diagram_shares_table.get_item(
+                Key={
+                    "collaboratorUserId": collaborator_user_id,
+                    "diagramId": diagram_id,
+                },
+                ConsistentRead=True,
+            )
+            return response.get("Item")
+        except ClientError:
+            return None
+
+    @staticmethod
+    def _diagram_share_item(
+        diagram_id: str, owner_id: str, collaborator: Collaborator
+    ) -> Dict[str, Any]:
+        return {
+            "collaboratorUserId": collaborator.userId,
+            "diagramId": diagram_id,
+            "ownerId": owner_id,
+            "permission": collaborator.permission.value,
+            "email": collaborator.email,
+            "name": collaborator.name,
+            "picture": collaborator.picture,
+            "addedAt": collaborator.addedAt,
+        }
+
+    def _persist_collaborator_change(
+        self,
+        diagram_id: str,
+        owner_id: str,
+        collaborator_user_id: str,
+        collaborator: Optional[Collaborator],
+    ) -> bool:
+        """Atomically update the legacy diagram snapshot and indexed membership."""
+        try:
+            for _ in range(3):
+                diagram = self.get_diagram(owner_id, diagram_id, consistent_read=True)
+                if not diagram:
+                    return False
+
+                collaborators = list(diagram.collaborators or [])
+                existing = next(
+                    (item for item in collaborators if item.userId == collaborator_user_id),
+                    None,
+                )
+                if collaborator is None:
+                    collaborators = [
+                        item for item in collaborators
+                        if item.userId != collaborator_user_id
+                    ]
+                elif existing:
+                    collaborators = [
+                        collaborator if item.userId == collaborator_user_id else item
+                        for item in collaborators
+                    ]
+                else:
+                    collaborators.append(collaborator)
+
+                now = datetime.now(timezone.utc).isoformat()
+                names = {"#id": "id", "#updated": "updatedAt", "#collaborators": "collaborators"}
+                values: Dict[str, Any] = {
+                    ":collaborators": convert_floats_to_decimal(
+                        [item.model_dump(mode="json") for item in collaborators]
+                    ),
+                    ":updated": now,
+                }
+                condition = "attribute_exists(#id)"
+                if diagram.updatedAt:
+                    condition += " AND #updated = :old_updated"
+                    values[":old_updated"] = diagram.updatedAt
+                else:
+                    condition += " AND attribute_not_exists(#updated)"
+
+                update_request: Dict[str, Any] = {
+                    "TableName": self.diagrams_table.name,
+                    "Key": self._serialize_item({"userId": owner_id, "id": diagram_id}),
+                    "UpdateExpression": "SET #collaborators = :collaborators, #updated = :updated",
+                    "ConditionExpression": condition,
+                    "ExpressionAttributeNames": names,
+                    "ExpressionAttributeValues": self._serialize_item(values),
+                }
+                share_item = self._diagram_share_item(
+                    diagram_id,
+                    owner_id,
+                    collaborator or existing,
+                ) if collaborator or existing else None
+                transaction: List[Dict[str, Any]] = [{"Update": update_request}]
+                if share_item:
+                    transaction.append(
+                        {
+                            "Put": {
+                                "TableName": self.diagram_shares_table.name,
+                                "Item": self._serialize_item(share_item),
+                            }
+                        }
+                    )
+                else:
+                    transaction.append(
+                        {
+                            "Delete": {
+                                "TableName": self.diagram_shares_table.name,
+                                "Key": self._serialize_item(
+                                    {
+                                        "collaboratorUserId": collaborator_user_id,
+                                        "diagramId": diagram_id,
+                                    }
+                                ),
+                            }
+                        }
+                    )
+
+                try:
+                    self.diagrams_table.meta.client.transact_write_items(
+                        TransactItems=transaction
+                    )
+                    return True
+                except ClientError as error:
+                    if error.response.get("Error", {}).get("Code") != "TransactionCanceledException":
+                        raise
+            return False
+        except ClientError:
+            return False
+
     def share_diagram(
         self, diagram_id: str, owner_id: str, collaborator: Collaborator
     ) -> bool:
-        """Share a diagram with a collaborator."""
-        try:
-            # Get the current diagram
-            diagram = self.get_diagram(owner_id, diagram_id)
-            if not diagram:
-                return False
-
-            # Check if collaborator already exists
-            existing_collaborator = next(
-                (c for c in diagram.collaborators if c.userId == collaborator.userId),
-                None,
-            )
-
-            if existing_collaborator:
-                # Update existing collaborator's permission
-                existing_collaborator.permission = collaborator.permission
-                existing_collaborator.addedAt = collaborator.addedAt
-            else:
-                # Add new collaborator
-                diagram.collaborators.append(collaborator)
-
-            # Update the diagram in DynamoDB
-            self.diagrams_table.update_item(
-                Key={"userId": owner_id, "id": diagram_id},
-                UpdateExpression=DDB_COLLABORATORS_UPDATE,
-                ExpressionAttributeValues={
-                    DDB_COLLABORATORS_VALUE: [
-                        convert_floats_to_decimal(c.model_dump())
-                        for c in diagram.collaborators
-                    ],
-                    DDB_UPDATED_VALUE: datetime.now(timezone.utc).isoformat(),
-                },
-            )
-            return True
-        except ClientError:
-            return False
+        """Share a diagram and atomically maintain its indexed membership row."""
+        return self._persist_collaborator_change(
+            diagram_id, owner_id, collaborator.userId, collaborator
+        )
 
     def remove_collaborator(
         self, diagram_id: str, owner_id: str, collaborator_user_id: str
     ) -> bool:
-        """Remove a collaborator from a diagram."""
-        try:
-            # Get the current diagram
-            diagram = self.get_diagram(owner_id, diagram_id)
-            if not diagram:
-                return False
-
-            # Remove the collaborator
-            diagram.collaborators = [
-                c for c in diagram.collaborators if c.userId != collaborator_user_id
-            ]
-
-            # Update the diagram in DynamoDB
-            self.diagrams_table.update_item(
-                Key={"userId": owner_id, "id": diagram_id},
-                UpdateExpression=DDB_COLLABORATORS_UPDATE,
-                ExpressionAttributeValues={
-                    DDB_COLLABORATORS_VALUE: [
-                        convert_floats_to_decimal(c.model_dump())
-                        for c in diagram.collaborators
-                    ],
-                    DDB_UPDATED_VALUE: datetime.now(timezone.utc).isoformat(),
-                },
-            )
-            return True
-        except ClientError:
-            return False
+        """Remove a collaborator and their indexed membership atomically."""
+        return self._persist_collaborator_change(
+            diagram_id, owner_id, collaborator_user_id, None
+        )
 
     def update_collaborator_permission(
         self,
@@ -942,43 +1144,30 @@ class DynamoDBService:
         collaborator_user_id: str,
         permission: Permission,
     ) -> bool:
-        """Update a collaborator's permission level."""
+        """Update permission in the diagram snapshot and membership item."""
         try:
-            # Get the current diagram
-            diagram = self.get_diagram(owner_id, diagram_id)
+            diagram = self.get_diagram(owner_id, diagram_id, consistent_read=True)
             if not diagram:
                 return False
-
-            # Find and update the collaborator
-            for collaborator in diagram.collaborators:
-                if collaborator.userId == collaborator_user_id:
-                    collaborator.permission = permission
-                    break
-            else:
-                return False  # Collaborator not found
-
-            # Update the diagram in DynamoDB
-            self.diagrams_table.update_item(
-                Key={"userId": owner_id, "id": diagram_id},
-                UpdateExpression=DDB_COLLABORATORS_UPDATE,
-                ExpressionAttributeValues={
-                    DDB_COLLABORATORS_VALUE: [
-                        convert_floats_to_decimal(c.model_dump())
-                        for c in diagram.collaborators
-                    ],
-                    DDB_UPDATED_VALUE: datetime.now(timezone.utc).isoformat(),
-                },
+            collaborator = next(
+                (item for item in diagram.collaborators if item.userId == collaborator_user_id),
+                None,
             )
-            return True
+            if collaborator is None:
+                return False
+            updated = collaborator.model_copy(update={"permission": permission})
+            return self._persist_collaborator_change(
+                diagram_id, owner_id, collaborator_user_id, updated
+            )
         except ClientError:
             return False
 
     def get_diagram_collaborators(
         self, diagram_id: str, owner_id: str
     ) -> List[Collaborator]:
-        """Get all collaborators for a diagram."""
+        """Return collaborators from the strongly consistent diagram snapshot."""
         try:
-            diagram = self.get_diagram(owner_id, diagram_id)
+            diagram = self.get_diagram(owner_id, diagram_id, consistent_read=True)
             return diagram.collaborators if diagram else []
         except ClientError:
             return []
@@ -986,60 +1175,93 @@ class DynamoDBService:
     def check_collaborator_permission(
         self, diagram_id: str, user_id: str
     ) -> Optional[Permission]:
-        """Check if a user has access to a diagram and return their permission level."""
+        """Check shared access with a strongly consistent membership read."""
+        share = self._get_diagram_share(diagram_id, user_id)
+        if not share:
+            return None
         try:
-            # First check if user is the owner
-            diagram = self.get_diagram(user_id, diagram_id)
+            return Permission(share["permission"])
+        except (KeyError, ValueError):
+            return None
+
+    def get_diagram_for_user(
+        self, user_id: str, diagram_id: str
+    ) -> tuple[Optional[Diagram], Optional[Permission]]:
+        """Resolve an owned or shared diagram without scanning or loading a shared list."""
+        try:
+            diagram = self.get_diagram(user_id, diagram_id, consistent_read=True)
             if diagram:
-                return Permission.EDIT  # Owner has edit permission
+                return diagram, Permission.EDIT
 
-            # Check if user is a collaborator
-            # We need to find the diagram by scanning or using a GSI
-            # For now, we'll scan the table (not efficient for production)
-            response = self.diagrams_table.scan()
-            items = response.get("Items", [])
+            share = self._get_diagram_share(diagram_id, user_id)
+            if not share:
+                return None, None
+            owner_id = str(share.get("ownerId", ""))
+            if not owner_id:
+                return None, None
+            diagram = self.get_diagram(owner_id, diagram_id)
+            if not diagram:
+                return None, None
+            return diagram, Permission(str(share["permission"]))
+        except (ClientError, KeyError, ValueError):
+            return None, None
 
-            for item in items:
-                item_float = convert_decimal_to_float(item)
-                if item_float.get("id") == diagram_id:
-                    collaborators = item_float.get("collaborators", [])
-                    for collab_data in collaborators:
-                        if collab_data.get("userId") == user_id:
-                            return Permission(collab_data.get("permission"))
+    def _shared_memberships(self, user_id: str) -> List[Dict[str, Any]]:
+        items: List[Dict[str, Any]] = []
+        query: Dict[str, Any] = {
+            "KeyConditionExpression": Key("collaboratorUserId").eq(user_id),
+        }
+        response = self.diagram_shares_table.query(**query)
+        items.extend(response.get("Items", []))
+        while response.get("LastEvaluatedKey"):
+            response = self.diagram_shares_table.query(
+                **query, ExclusiveStartKey=response["LastEvaluatedKey"]
+            )
+            items.extend(response.get("Items", []))
+        return items
 
-            return None
-        except ClientError:
-            return None
+    def _load_shared_diagrams(
+        self,
+        memberships: List[Dict[str, Any]],
+        summary_only: bool = False,
+    ) -> List[Diagram]:
+        keys = [
+            {"userId": item["ownerId"], "id": item["diagramId"]}
+            for item in memberships
+            if item.get("ownerId") and item.get("diagramId")
+        ]
+        items = self._batch_get_items(
+            self.diagrams_table,
+            keys,
+            DIAGRAM_SUMMARY_PROJECTION if summary_only else None,
+            DIAGRAM_SUMMARY_NAMES if summary_only else None,
+        )
+        by_key = {(str(item.get("userId")), str(item.get("id"))): item for item in items}
+        diagrams: List[Diagram] = []
+        for membership in memberships:
+            item = by_key.get((str(membership.get("ownerId")), str(membership.get("diagramId"))))
+            if not item:
+                continue
+            diagram = Diagram(**convert_decimal_to_float(item))
+            if summary_only:
+                diagram.collaborators = [
+                    Collaborator(
+                        userId=str(membership["collaboratorUserId"]),
+                        email=membership.get("email", ""),
+                        name=membership.get("name", ""),
+                        picture=membership.get("picture"),
+                        permission=Permission(str(membership["permission"])),
+                        addedAt=membership.get("addedAt", ""),
+                    )
+                ]
+            diagrams.append(diagram)
+        return diagrams
 
     def get_shared_diagrams_for_user(self, user_id: str) -> List[Diagram]:
-        """Get all full diagrams shared with a user."""
+        """Load full shared diagrams using membership queries and batched item reads."""
         try:
-            shared_diagrams: List[Diagram] = []
-
-            # Scan all diagrams to find those where user is a collaborator
-            response = self.diagrams_table.scan()
-            items = response.get("Items", [])
-
-            # Handle pagination
-            while "LastEvaluatedKey" in response:
-                response = self.diagrams_table.scan(
-                    ExclusiveStartKey=response["LastEvaluatedKey"]
-                )
-                items.extend(response.get("Items", []))
-
-            for item in items:
-                item_float = convert_decimal_to_float(item)
-                collaborators = item_float.get("collaborators", [])
-
-                # Check if user is a collaborator
-                for collab_data in collaborators:
-                    if collab_data.get("userId") == user_id:
-                        diagram = Diagram(**item_float)
-                        shared_diagrams.append(diagram)
-                        break
-
-            return shared_diagrams
-        except ClientError:
+            return self._load_shared_diagrams(self._shared_memberships(user_id))
+        except (ClientError, RuntimeError):
             return []
 
     # Problem operations
@@ -1064,32 +1286,10 @@ class DynamoDBService:
     def get_shared_diagram_summaries_for_user(self, user_id: str) -> List[Diagram]:
         """Get shared diagram metadata without loading canvas arrays."""
         try:
-            shared_diagrams: List[Diagram] = []
-            scan_kwargs = {
-                "ProjectionExpression": DIAGRAM_SUMMARY_PROJECTION,
-                "ExpressionAttributeNames": DIAGRAM_SUMMARY_NAMES,
-            }
-            response = self.diagrams_table.scan(**scan_kwargs)
-            items = response.get("Items", [])
-
-            while response.get("LastEvaluatedKey"):
-                response = self.diagrams_table.scan(
-                    **scan_kwargs,
-                    ExclusiveStartKey=response["LastEvaluatedKey"],
-                )
-                items.extend(response.get("Items", []))
-
-            for item in items:
-                item_float = convert_decimal_to_float(item)
-                collaborators = item_float.get("collaborators", [])
-                if any(
-                    collab_data.get("userId") == user_id
-                    for collab_data in collaborators
-                ):
-                    shared_diagrams.append(Diagram(**item_float))
-
-            return shared_diagrams
-        except ClientError:
+            return self._load_shared_diagrams(
+                self._shared_memberships(user_id), summary_only=True
+            )
+        except (ClientError, RuntimeError):
             return []
 
     def get_shared_diagram_summary_page_for_user(
@@ -1098,44 +1298,29 @@ class DynamoDBService:
         limit: int,
         exclusive_start_key: Optional[Dict[str, Any]] = None,
     ) -> tuple[List[Diagram], Optional[Dict[str, Any]]]:
-        """Get one projected page of shared diagram metadata.
-
-        DynamoDB's scan limit applies before the collaborator filter, so keep
-        scanning until this page is full or the table is exhausted.
-        """
+        """Query one indexed page of shared membership and batch-load summaries."""
         try:
-            shared_diagrams: List[Diagram] = []
-            last_key = exclusive_start_key
-
-            while len(shared_diagrams) < limit:
-                scan_kwargs: Dict[str, Any] = {
-                    "ProjectionExpression": DIAGRAM_SUMMARY_PROJECTION,
-                    "ExpressionAttributeNames": DIAGRAM_SUMMARY_NAMES,
-                    "Limit": max(limit - len(shared_diagrams), 1),
-                }
-                if last_key:
-                    scan_kwargs["ExclusiveStartKey"] = last_key
-
-                response = self.diagrams_table.scan(**scan_kwargs)
-                for item in response.get("Items", []):
-                    item_float = convert_decimal_to_float(item)
-                    collaborators = item_float.get("collaborators", [])
-                    if any(
-                        collab_data.get("userId") == user_id
-                        for collab_data in collaborators
-                    ):
-                        shared_diagrams.append(Diagram(**item_float))
-                        if len(shared_diagrams) >= limit:
-                            break
-
-                last_key = response.get("LastEvaluatedKey")
-                if not last_key:
-                    return shared_diagrams, None
-
-            return shared_diagrams, last_key
-        except ClientError as e:
-            print(f"Error scanning shared diagram summary page: {e}")
+            query: Dict[str, Any] = {
+                "KeyConditionExpression": Key("collaboratorUserId").eq(user_id),
+                "Limit": limit,
+            }
+            if exclusive_start_key:
+                query["ExclusiveStartKey"] = exclusive_start_key
+            response = self.diagram_shares_table.query(**query)
+            memberships = response.get("Items", [])
+            diagrams = self._load_shared_diagrams(memberships, summary_only=True)
+            return diagrams, response.get("LastEvaluatedKey")
+        except (ClientError, RuntimeError) as e:
+            print(f"Error querying shared diagram summary page: {e}")
             return [], None
+
+    def check_problems_table(self) -> None:
+        """Perform one inexpensive data-plane read and let DynamoDB errors surface."""
+        self.problems_table.get_item(
+            Key={"id": "__health_probe__"},
+            ProjectionExpression="#id",
+            ExpressionAttributeNames={"#id": "id"},
+        )
 
     def get_problems_page(
         self,
@@ -1207,19 +1392,17 @@ class DynamoDBService:
     def get_problem_by_slug(self, slug: str) -> Optional[Dict[str, Any]]:
         """Get a problem by its public slug."""
         try:
-            scan_params: Dict[str, Any] = {
-                "FilterExpression": Attr("slug").eq(slug),
-            }
-            while True:
-                response = self.problems_table.scan(**scan_params)
-                items = response.get("Items", [])
-                if items:
-                    return items[0]
-                if "LastEvaluatedKey" not in response:
-                    return None
-                scan_params["ExclusiveStartKey"] = response["LastEvaluatedKey"]
+            response = self.problems_table.query(
+                IndexName="slug-index",
+                KeyConditionExpression=Key("slug").eq(slug),
+                Limit=2,
+            )
+            items = response.get("Items", [])
+            if len(items) > 1:
+                raise RuntimeError(f"Multiple problems use the slug '{slug}'")
+            return items[0] if items else None
         except ClientError:
-            return None
+            raise
 
     def get_problems_by_category(self, category: str) -> List[Dict[str, Any]]:
         """Get problems by category using GSI."""
@@ -1513,6 +1696,17 @@ class DynamoDBService:
         else:
             item["createdAt"] = existing_attempt.createdAt
 
+        if existing_attempt and existing_attempt.isPublic:
+            assessment = DynamoDBService._qualifying_attempt_assessment(
+                {
+                    "lastAssessment": preserved_assessment,
+                    "lastAssessmentCheck": last_assessment_check,
+                }
+            )
+            if assessment:
+                item["leaderboardProblemId"] = problem_id
+                item["leaderboardScore"] = assessment["score"]
+
         return item
 
     @staticmethod
@@ -1579,10 +1773,13 @@ class DynamoDBService:
         addressed_finding_ids: Optional[List[str]] = None,
         last_assessment_check: Optional[Dict[str, Any]] = None,
         problem_requirement_spec: Optional[Dict[str, Any]] = None,
+        _conflict_retries: int = 0,
     ) -> AttemptResponse:
         """Create or update a problem attempt (upsert operation)."""
         try:
-            existing_attempt = self.get_attempt_by_problem(user_id, problem_id)
+            existing_attempt = self.get_attempt_by_problem(
+                user_id, problem_id, consistent_read=True
+            )
             now = datetime.now(timezone.utc).isoformat()
             (
                 assessment_count,
@@ -1645,13 +1842,73 @@ class DynamoDBService:
                 if key in ("createdAt", "problemRequirementSpec"):
                     value = f"if_not_exists(#a{i}, :a{i})"
                 updates.append(f"#a{i} = {value}")
-            saved = self.attempts_table.update_item(
-                Key={"userId": user_id, "problemId": problem_id},
-                UpdateExpression="SET " + ", ".join(updates),
-                ExpressionAttributeNames=names,
-                ExpressionAttributeValues=values,
-                ReturnValues="ALL_NEW",
-            )
+            remove_attributes = [
+                key
+                for key in ("leaderboardProblemId", "leaderboardScore")
+                if key not in attributes
+            ]
+            remove_expression = ""
+            if remove_attributes:
+                for index, key in enumerate(remove_attributes):
+                    names[f"#remove{index}"] = key
+                remove_expression = " REMOVE " + ", ".join(
+                    f"#remove{index}" for index in range(len(remove_attributes))
+                )
+            condition_parts = []
+            names["#condition_user"] = "userId"
+            if existing_attempt is None:
+                condition_parts.append("attribute_not_exists(#condition_user)")
+            else:
+                condition_parts.append("attribute_exists(#condition_user)")
+                names["#condition_updated"] = "updatedAt"
+                if existing_attempt.updatedAt is None:
+                    condition_parts.append("attribute_not_exists(#condition_updated)")
+                else:
+                    condition_parts.append("#condition_updated = :expected_updated")
+                    values[":expected_updated"] = existing_attempt.updatedAt
+                names["#condition_public"] = "isPublic"
+                values[":expected_public"] = existing_attempt.isPublic
+                if existing_attempt.isPublic:
+                    condition_parts.append("#condition_public = :expected_public")
+                else:
+                    condition_parts.append(
+                        "(attribute_not_exists(#condition_public) "
+                        "OR #condition_public = :expected_public)"
+                    )
+
+            try:
+                saved = self.attempts_table.update_item(
+                    Key={"userId": user_id, "problemId": problem_id},
+                    UpdateExpression="SET " + ", ".join(updates) + remove_expression,
+                    ConditionExpression=" AND ".join(condition_parts),
+                    ExpressionAttributeNames=names,
+                    ExpressionAttributeValues=values,
+                    ReturnValues="ALL_NEW",
+                )
+            except ClientError as error:
+                is_conflict = (
+                    error.response.get("Error", {}).get("Code")
+                    == "ConditionalCheckFailedException"
+                )
+                if is_conflict and _conflict_retries < 2:
+                    return self.create_or_update_attempt(
+                        user_id=user_id,
+                        problem_id=problem_id,
+                        title=title,
+                        difficulty=difficulty,
+                        category=category,
+                        nodes=nodes,
+                        edges=edges,
+                        elapsed_time=elapsed_time,
+                        last_assessment=last_assessment,
+                        reasoning_context=reasoning_context,
+                        interview_session=interview_session,
+                        addressed_finding_ids=addressed_finding_ids,
+                        last_assessment_check=last_assessment_check,
+                        problem_requirement_spec=problem_requirement_spec,
+                        _conflict_retries=_conflict_retries + 1,
+                    )
+                raise
             if saved.get("Attributes"):
                 saved_item = convert_decimal_to_float(saved["Attributes"])
                 saved_item["id"] = f"{user_id}#{problem_id}"
@@ -1687,12 +1944,13 @@ class DynamoDBService:
             raise
 
     def get_attempt_by_problem(
-        self, user_id: str, problem_id: str
+        self, user_id: str, problem_id: str, consistent_read: bool = False
     ) -> Optional[AttemptResponse]:
         """Get a user's attempt for a specific problem using direct key lookup."""
         try:
             response = self.attempts_table.get_item(
-                Key={"userId": user_id, "problemId": problem_id}
+                Key={"userId": user_id, "problemId": problem_id},
+                ConsistentRead=consistent_read,
             )
 
             item = response.get("Item")
@@ -1773,7 +2031,9 @@ class DynamoDBService:
     ) -> Optional[Dict[str, Any]]:
         """Mark an attempt as public and stamp author metadata."""
         try:
-            existing = self.get_attempt_by_problem(user_id, problem_id)
+            existing = self.get_attempt_by_problem(
+                user_id, problem_id, consistent_read=True
+            )
             if not existing:
                 return None
             if self._qualifying_attempt_assessment(existing.model_dump()) is None:
@@ -1789,7 +2049,9 @@ class DynamoDBService:
                 UpdateExpression=(
                     "SET isPublic = :pub, publishedAt = :ts, "
                     "authorName = :name, authorPicture = :pic, "
-                    "viewCount = if_not_exists(viewCount, :zero)"
+                    "viewCount = if_not_exists(viewCount, :zero), "
+                    "leaderboardProblemId = :leaderboard_problem, "
+                    "leaderboardScore = :leaderboard_score"
                 ),
                 ConditionExpression=(
                     "attribute_exists(userId) AND attribute_exists(problemId) "
@@ -1803,6 +2065,10 @@ class DynamoDBService:
                     ":ts": now,
                     ":name": author_name,
                     ":pic": author_picture or "",
+                    ":leaderboard_problem": problem_id,
+                    ":leaderboard_score": convert_floats_to_decimal(
+                        self._qualifying_attempt_assessment(existing.model_dump())["score"]
+                    ),
                     DDB_ZERO_VALUE: 0,
                     ":assessment": convert_floats_to_decimal(existing.lastAssessment),
                     ":check": convert_floats_to_decimal(existing.lastAssessmentCheck),
@@ -1818,7 +2084,9 @@ class DynamoDBService:
         try:
             self.attempts_table.update_item(
                 Key={"userId": user_id, "problemId": problem_id},
-                UpdateExpression="SET isPublic = :f",
+                UpdateExpression=(
+                    "SET isPublic = :f REMOVE leaderboardProblemId, leaderboardScore"
+                ),
                 ExpressionAttributeValues={":f": False},
             )
             return True
@@ -1875,49 +2143,41 @@ class DynamoDBService:
     def get_problem_leaderboard(
         self, problem_id: str, limit: int = 10
     ) -> List[LeaderboardEntry]:
-        """Scan for top public solutions for a problem (sorted by score desc)."""
+        """Query indexed public solutions for a problem in score order."""
         try:
-            # Scan with filter — small dataset per problem, acceptable cost
-            response = self.attempts_table.scan(
-                FilterExpression=(
-                    "problemId = :pid AND isPublic = :t"
-                ),
-                ExpressionAttributeValues={
-                    ":pid": problem_id,
-                    ":t": True,
-                },
-            )
-            items = list(response.get("Items", []))
-            while response.get("LastEvaluatedKey"):
-                response = self.attempts_table.scan(
-                    FilterExpression="problemId = :pid AND isPublic = :t",
-                    ExpressionAttributeValues={":pid": problem_id, ":t": True},
-                    ExclusiveStartKey=response["LastEvaluatedKey"],
-                )
-                items.extend(response.get("Items", []))
-
             entries: List[LeaderboardEntry] = []
-            for item in items:
-                item_float = convert_decimal_to_float(item)
-                assessment = self._qualifying_attempt_assessment(item_float)
-                if assessment is None:
-                    continue
-                score = assessment["score"]
-                uid = item_float.get("userId", "")
-                pid = item_float.get("problemId", "")
-                entries.append(
-                    LeaderboardEntry(
-                        attemptId=f"{uid}#{pid}",
-                        authorName=item_float.get("authorName"),
-                        authorPicture=item_float.get("authorPicture"),
-                        score=score,
-                        publishedAt=item_float.get("publishedAt"),
-                        elapsedTime=int(item_float.get("elapsedTime", 0)),
+            query: Dict[str, Any] = {
+                "IndexName": "leaderboard-index",
+                "KeyConditionExpression": Key("leaderboardProblemId").eq(problem_id),
+                "ScanIndexForward": False,
+                "Limit": max(1, min(limit, 100)),
+            }
+            while len(entries) < max(limit, 1):
+                response = self.attempts_table.query(**query)
+                for item in response.get("Items", []):
+                    item_float = convert_decimal_to_float(item)
+                    assessment = self._qualifying_attempt_assessment(item_float)
+                    if assessment is None or not item_float.get("isPublic"):
+                        continue
+                    uid = item_float.get("userId", "")
+                    pid = item_float.get("problemId", "")
+                    entries.append(
+                        LeaderboardEntry(
+                            attemptId=f"{uid}#{pid}",
+                            authorName=item_float.get("authorName"),
+                            authorPicture=item_float.get("authorPicture"),
+                            score=assessment["score"],
+                            publishedAt=item_float.get("publishedAt"),
+                            elapsedTime=int(item_float.get("elapsedTime", 0)),
+                        )
                     )
-                )
+                    if len(entries) >= limit:
+                        break
 
-            # Sort by score descending, return top N
-            entries.sort(key=lambda e: e.score, reverse=True)
+                last_key = response.get("LastEvaluatedKey")
+                if not last_key or len(entries) >= limit:
+                    break
+                query["ExclusiveStartKey"] = last_key
             return entries[:limit]
         except ClientError as e:
             print(f"Error fetching leaderboard: {e}")
