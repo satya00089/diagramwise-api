@@ -23,6 +23,13 @@ from app.services.diagram_preview import render_architecture_png, render_archite
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+PUBLIC_DIAGRAM_NOT_FOUND = "Diagram not found or not publicly available."
+
+
+def _safe_log_identifier(value: str) -> str:
+    """Keep request-controlled identifiers on one bounded log line."""
+    return "".join(character if character.isprintable() and character not in "\r\n" else "?"
+                   for character in value)[:128]
 
 
 async def _capture_browser_preview(diagram_id: str) -> bytes | None:
@@ -39,6 +46,7 @@ async def _capture_browser_preview(diagram_id: str) -> bytes | None:
     if not renderer_url or not renderer_token:
         return None
 
+    safe_diagram_id = _safe_log_identifier(diagram_id)
     try:
         async with httpx.AsyncClient(timeout=32.0, follow_redirects=False) as client:
             response = await client.get(
@@ -52,15 +60,15 @@ async def _capture_browser_preview(diagram_id: str) -> bytes | None:
                 "Browser preview unavailable status=%s content_type=%s diagram_id=%s",
                 response.status_code,
                 content_type or "<missing>",
-                diagram_id,
+                safe_diagram_id,
             )
             return None
         if len(response.content) > 5_000_000:
-            logger.warning("Browser preview too large diagram_id=%s", diagram_id)
+            logger.warning("Browser preview too large diagram_id=%s", safe_diagram_id)
             return None
         return response.content
     except httpx.HTTPError:
-        logger.warning("Browser preview request failed diagram_id=%s", diagram_id, exc_info=True)
+        logger.warning("Browser preview request failed diagram_id=%s", safe_diagram_id, exc_info=True)
         return None
 
 
@@ -219,7 +227,7 @@ async def get_public_diagram(diagram_id: str):
     if not diagram:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Diagram not found or not publicly available.",
+            detail=PUBLIC_DIAGRAM_NOT_FOUND,
         )
     return diagram
 
@@ -236,7 +244,7 @@ async def get_public_diagram_preview(diagram_id: str):
     if not diagram:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Diagram not found or not publicly available.",
+            detail=PUBLIC_DIAGRAM_NOT_FOUND,
         )
     svg = render_architecture_svg(
         title=diagram.title,
@@ -262,7 +270,7 @@ async def get_public_diagram_preview_png(diagram_id: str):
     if not diagram:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Diagram not found or not publicly available.",
+            detail=PUBLIC_DIAGRAM_NOT_FOUND,
         )
     png = await _capture_browser_preview(diagram_id)
     if png is None:

@@ -19,7 +19,18 @@ from app.utils.config import get_settings
 
 
 async def no_reference_lookup(_):
+    await asyncio.sleep(0)
     return []
+
+
+def repository_path(path: Path) -> Path:
+    """Resolve a CLI path and reject traversal outside this checkout."""
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(ROOT)
+    except ValueError as error:
+        raise ValueError("Diagnostic paths must stay inside the API repository") from error
+    return resolved
 
 
 # Prevent even constructing the DynamoDB singleton on the fallback path.
@@ -71,6 +82,8 @@ if __name__ == "__main__":
     parser.add_argument("--problem-id", required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    args.session = repository_path(args.session)
+    args.output = repository_path(args.output)
     if args.output.exists():
         parser.error("Output exists; preserve every recorded run")
     asyncio.run(run(args))

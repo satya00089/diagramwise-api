@@ -107,8 +107,9 @@ def test_repeated_scan_cursor_is_not_accepted():
     class Scan:
         def scan(self, **kwargs):
             return {"Items": [], "LastEvaluatedKey": {"id": "a"}}
+    table = Scan()
     with pytest.raises(MigrationError, match="Repeated scan"):
-        scan_public(Scan())
+        scan_public(table)
 
 
 def test_draft_preserves_every_sentence_provenance_and_original_scope(problem):
@@ -150,7 +151,8 @@ def test_dry_run_never_contacts_table(problem):
     table = MockTable(problem)
     report = apply_manifest(table, make_draft(export_snapshot([problem])))
     assert report["remoteWrites"] is False
-    assert not table.writes and not table.reads
+    assert not table.writes
+    assert not table.reads
     assert report["changes"][0]["before"]["requirementSpec"] == {"exists": False}
 
 
@@ -178,13 +180,15 @@ def test_apply_and_rollback_modify_only_approved_attributes(problem):
     assert applied["status"] == "verified"
     assert table.item["requirements"] == original["requirements"]
     assert table.item["constraints"] == original["constraints"]
-    assert table.item["id"] == original["id"] and table.item["slug"] == original["slug"]
+    assert table.item["id"] == original["id"]
+    assert table.item["slug"] == original["slug"]
     assert table.item["unrelatedField"] == original["unrelatedField"]
     assert all(call["ConsistentRead"] for call in table.reads)
     table.item["unrelatedField"] = {"owner": "later-unrelated-edit"}
     rolled = rollback_manifest(table, manifest, applied, apply=True, save_journal=journals.append)
     assert rolled["status"] == "rolled_back"
-    assert "requirementSpec" not in table.item and "requirementSpecProvenance" not in table.item
+    assert "requirementSpec" not in table.item
+    assert "requirementSpecProvenance" not in table.item
     assert table.item["unrelatedField"] == {"owner": "later-unrelated-edit"}
     assert table.item["constraints"] == original["constraints"]
     assert table.writes[-1]["UpdateExpression"].startswith("REMOVE")
@@ -206,8 +210,9 @@ def test_conditional_update_rejects_race_after_preflight(problem):
     table = MockTable(problem)
     table.before_update = lambda item: item["requirements"].append("Concurrent change")
     journals = []
+    manifest = approved(problem)
     with pytest.raises(MigrationError, match="ConditionalCheckFailed"):
-        apply_manifest(table, approved(problem), apply=True, save_journal=journals.append)
+        apply_manifest(table, manifest, apply=True, save_journal=journals.append)
     assert not table.writes
     assert journals[-1]["status"] == "stopped"
 
@@ -216,8 +221,9 @@ def test_readback_mismatch_is_preserved_in_rollback_journal(problem):
     table = MockTable(problem)
     table.corrupt_readback = True
     journals = []
+    manifest = approved(problem)
     with pytest.raises(MigrationError, match="concurrent"):
-        apply_manifest(table, approved(problem), apply=True, save_journal=journals.append)
+        apply_manifest(table, manifest, apply=True, save_journal=journals.append)
     assert len(table.writes) == 1
     assert journals[-1]["entries"][0]["status"] == "applied"
     assert "error" in journals[-1]["entries"][0]
@@ -283,5 +289,7 @@ def test_cli_local_export_and_default_apply_are_offline(tmp_path, problem, monke
     write_json(manifest_path, manifest)
     assert main(["apply", "--manifest", str(manifest_path), "--output", str(report_path)]) == 0
     assert not read_json(report_path)["remoteWrites"]
+    unsafe_args = ["apply", "--manifest", str(manifest_path), "--apply",
+                   "--output", str(tmp_path / "unused.json")]
     with pytest.raises(SystemExit):
-        main(["apply", "--manifest", str(manifest_path), "--apply", "--output", str(tmp_path / "unused.json")])
+        main(unsafe_args)

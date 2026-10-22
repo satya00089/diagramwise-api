@@ -41,12 +41,12 @@ def assessment_response_format(dimensions: dict[str, float]) -> dict:
             "category": enum(item.value for item in FeedbackCategory),
             "priority": {"type": "integer", "minimum": 1, "maximum": 5},
         })),
-        "detailed_analysis": obj({key: text for key in (
+        "detailed_analysis": obj(dict.fromkeys((
             "scalability", "reliability", "security", "maintainability", "performance",
             "cost_efficiency", "observability", "deliverability",
-        )}),
-        **{key: strings for key in ("strengths", "improvements", "missing_components",
-            "missing_descriptions", "unclear_connections", "suggestions", "interview_questions")},
+        ), text)),
+        **dict.fromkeys(("strengths", "improvements", "missing_components",
+            "missing_descriptions", "unclear_connections", "suggestions", "interview_questions"), strings),
     }
     return {"type": "json_schema", "json_schema": {
         "name": "architecture_review_v2", "strict": True, "schema": obj(properties),

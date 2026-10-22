@@ -65,7 +65,7 @@ def _feedback_item(
     return AdminFeedbackItem.model_validate(response_item)
 
 
-@router.get("/admin/overview", response_model=AdminOverviewResponse)
+@router.get("/admin/overview")
 async def get_admin_overview(
     _admin_user=Depends(require_super_admin),
     days: int = Query(30, ge=7, le=90),
@@ -95,7 +95,7 @@ async def get_admin_overview(
 
 
 @router.get(
-    "/admin/google-analytics", response_model=AdminGoogleAnalyticsReport
+    "/admin/google-analytics"
 )
 async def get_admin_google_analytics(
     _admin_user=Depends(require_super_admin),
@@ -108,7 +108,7 @@ async def get_admin_google_analytics(
     return AdminGoogleAnalyticsReport.model_validate(report)
 
 
-@router.get("/admin/api-latency", response_model=AdminApiLatencyReport)
+@router.get("/admin/api-latency")
 async def get_admin_api_latency(
     _admin_user=Depends(require_super_admin),
     days: int = Query(30, ge=7, le=90),

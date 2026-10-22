@@ -143,8 +143,9 @@ def test_legacy_coverage_still_rejects_unknown_or_partial_anchor_sets():
     output["findings"][0]["requirement_ids"] = ["legacy-constraint:1"]
     output["requirement_coverage"] = [{"requirement_id": "legacy-requirement:1", "status": "supported",
                                        "explanation": "Document API stores", "evidence_ids": ["api"]}]
+    assessor = service(SequenceLLM(output))
     with pytest.raises(ValueError, match="every supplied requirement"):
-        service(SequenceLLM(output))._transform_ai_response(output, request)
+        assessor._transform_ai_response(output, request)
 
 
 @pytest.mark.parametrize("fault", ["duplicate", "scope", "schema", "revision", "empty_text"])
@@ -167,10 +168,14 @@ def test_invalid_specifications_rejected(fault):
 def test_prompt_has_readable_grounding_and_distinct_assumptions():
     prompt = get_assessment_prompt(architecture())
     assert 'ID: api;' in prompt
-    assert 'api (Document API)' in prompt and 'store (Document Store)' in prompt
-    assert 'ID: write;' in prompt and 'HTTPS' in prompt
-    assert 'FUNCTIONAL REQUIREMENTS' in prompt and 'NON-FUNCTIONAL REQUIREMENTS' in prompt
-    assert 'REFERENCE ASSUMPTIONS' in prompt and 'One region is the reference scenario' in prompt
+    assert 'api (Document API)' in prompt
+    assert 'store (Document Store)' in prompt
+    assert 'ID: write;' in prompt
+    assert 'HTTPS' in prompt
+    assert 'FUNCTIONAL REQUIREMENTS' in prompt
+    assert 'NON-FUNCTIONAL REQUIREMENTS' in prompt
+    assert 'REFERENCE ASSUMPTIONS' in prompt
+    assert 'One region is the reference scenario' in prompt
     assert 'Candidate: Skipped' in prompt
     assert 'interview:answered' in prompt
     assert 'selected' not in prompt
@@ -184,14 +189,19 @@ def test_prompt_has_readable_grounding_and_distinct_assumptions():
 async def test_complete_review_preserves_scores_and_provenance_without_reference_fetch(reference_calls):
     adapter = SequenceLLM(review())
     result = await service(adapter).assess_design(architecture())
-    assert result.overall_score == 98 and result.score_available and result.is_valid
-    assert result.requirement_revision == "approved-r3" and result.rubric_version == "2.0"
-    assert result.model_version == "test-model" and result.problem_id == "catalog-doc"
+    assert result.overall_score == 98
+    assert result.score_available
+    assert result.is_valid
+    assert result.requirement_revision == "approved-r3"
+    assert result.rubric_version == "2.0"
+    assert result.model_version == "test-model"
+    assert result.problem_id == "catalog-doc"
     assert adapter.requests[0].metadata["requirement_revision"] == "approved-r3"
     assert adapter.requests[0].metadata["model_version"] == "test-model"
     assert adapter.requests[0].metadata["rubric_version"] == "2.0"
     assert result.trace_id == "0123456789abcdef0123456789abcdef"
-    assert result.structural_checks == [] and reference_calls == []
+    assert result.structural_checks == []
+    assert reference_calls == []
 
 
 @pytest.mark.asyncio
@@ -202,7 +212,9 @@ async def test_missing_optional_extension_does_not_lower_or_invalidate_core_revi
     output["requirement_coverage"].append({"requirement_id": "export", "status": "missing", "explanation": "Optional archives are not represented", "evidence_ids": []})
     output["findings"].append({"title": "Optional archive export", "explanation": "An extra capability beyond required scope", "kind": "extension", "severity": "improvement", "requirement_ids": ["export"], "evidence_ids": [], "criterion": None})
     result = await service(SequenceLLM(output)).assess_design(request)
-    assert result.score_available and result.is_valid and result.overall_score == 98
+    assert result.score_available
+    assert result.is_valid
+    assert result.overall_score == 98
 
 
 def invalid_review(fault):
@@ -255,12 +267,18 @@ async def test_invalid_output_gets_exactly_one_repair_then_honest_fallback(fault
     adapter = SequenceLLM(invalid_review(fault))
     result = await service(adapter).assess_design(architecture())
     assert len(adapter.requests) == 2
-    assert len(adapter.requests[0].messages) == 2 and len(adapter.requests[1].messages) == 4
-    assert result.source == "rule_based" and not result.score_available and not result.is_valid
-    assert result.overall_score == 0 and result.verdict == "unavailable"
-    assert result.model_version == "test-model" and result.requirement_revision == "approved-r3"
+    assert len(adapter.requests[0].messages) == 2
+    assert len(adapter.requests[1].messages) == 4
+    assert result.source == "rule_based"
+    assert not result.score_available
+    assert not result.is_valid
+    assert result.overall_score == 0
+    assert result.verdict == "unavailable"
+    assert result.model_version == "test-model"
+    assert result.requirement_revision == "approved-r3"
     assert all(score == 0 for score in result.scores.model_dump().values())
-    assert len(reference_calls) == 1 and len(result.structural_checks) == 1
+    assert len(reference_calls) == 1
+    assert len(result.structural_checks) == 1
 
 
 @pytest.mark.asyncio
@@ -268,8 +286,10 @@ async def test_invalid_output_gets_exactly_one_repair_then_honest_fallback(fault
 async def test_malformed_output_is_repaired_once(invalid, reference_calls):
     adapter = SequenceLLM(invalid, review())
     result = await service(adapter).assess_design(architecture())
-    assert result.source == "ai" and result.overall_score == 98
-    assert len(adapter.requests) == 2 and reference_calls == []
+    assert result.source == "ai"
+    assert result.overall_score == 98
+    assert len(adapter.requests) == 2
+    assert reference_calls == []
 
 
 @pytest.mark.asyncio
@@ -287,8 +307,10 @@ async def test_critical_finding_prevents_pass_without_changing_server_score():
     output["verdict"] = "needs_revision"
     output["findings"] = [{"title": "Contradictory commit description", "explanation": "The write description contradicts the chosen acknowledgement behavior.", "kind": "defect", "severity": "critical", "criterion": "reliability", "requirement_ids": ["durability"], "evidence_ids": ["write"]}]
     result = await service(SequenceLLM(output)).assess_design(architecture())
-    assert result.score_available and result.overall_score == 98
-    assert not result.is_valid and result.verdict == "needs_revision"
+    assert result.score_available
+    assert result.overall_score == 98
+    assert not result.is_valid
+    assert result.verdict == "needs_revision"
     assert result.findings[0].severity == "critical"
 
 
@@ -300,7 +322,9 @@ async def test_low_scores_and_missing_core_are_not_raised_to_a_floor():
     output["requirement_coverage"][0].update(status="missing", evidence_ids=[])
     output["findings"] = [{"title": "Missing create capability", "explanation": "The submitted API has no required create flow.", "kind": "defect", "severity": "important", "criterion": "requirements_alignment", "requirement_ids": ["create"], "evidence_ids": ["api"], "scored_gap": True, "recommendation": "Add the document creation path."}]
     result = await service(SequenceLLM(output)).assess_design(architecture())
-    assert result.score_available and result.scores.requirements_alignment == 20 and not result.is_valid
+    assert result.score_available
+    assert result.scores.requirements_alignment == 20
+    assert not result.is_valid
     assert result.overall_score == 93
 
 
@@ -308,7 +332,9 @@ async def test_low_scores_and_missing_core_are_not_raised_to_a_floor():
 async def test_provider_failure_is_not_retried_as_malformed_output(reference_calls):
     adapter = SequenceLLM(RuntimeError("provider unavailable"))
     result = await service(adapter).assess_design(architecture())
-    assert not result.score_available and len(adapter.requests) == 1 and len(reference_calls) == 1
+    assert not result.score_available
+    assert len(adapter.requests) == 1
+    assert len(reference_calls) == 1
     assert [check.status for check in result.integrity_checks] == ["passed"] * 3
 
 
@@ -329,7 +355,7 @@ def test_timeout_environment_and_azure_model_provenance(monkeypatch):
         LANGFUSE_ENABLED=False,
     )
     assessor = AIAssessorService(llm=SequenceLLM(review()), settings=settings)
-    assert assessor.assessment_timeout_seconds == 12
+    assert assessor._assessment_timeout_seconds == 12
     assessor.settings = Settings.model_construct(llm_provider="azure_openai", azure_openai_deployment="review-deployment", llm_model="configured-base-model")
     assert assessor._fallback_assessment(architecture()).model_version == "review-deployment"
 
@@ -340,7 +366,9 @@ async def test_invalid_diagram_ids_never_receive_ai_grade(reference_calls):
     request.connections[0].target = "absent"
     adapter = SequenceLLM(review())
     result = await service(adapter).assess_design(request)
-    assert not result.score_available and adapter.requests == [] and reference_calls == []
+    assert not result.score_available
+    assert adapter.requests == []
+    assert reference_calls == []
     assert result.integrity_checks[-1].status == "failed"
 
 
@@ -362,7 +390,8 @@ async def test_approved_resolution_runs_off_event_loop_and_preserves_learner_ans
     assert resolved.problem.title == "Approved documents"
     assert resolved.problem.requirementRevision == "approved-r3"
     assert resolved.interviewSession == request.interviewSession
-    assert resolved.explanation == request.explanation and resolved.keyPoints == request.keyPoints
+    assert resolved.explanation == request.explanation
+    assert resolved.keyPoints == request.keyPoints
     assert "DO-NOT-LEAK" not in get_assessment_prompt(resolved)
 
 
@@ -382,8 +411,11 @@ async def test_backend_replaces_unapproved_client_spec_and_legacy_records_do_not
 async def test_revision_conflict_requires_a_visible_context_update():
     request = architecture()
     request.problem.requirementRevision = "saved-r1"
+    approved_spec = specification()
+    async def lookup(_):
+        return {"requirementSpec": approved_spec}
     with pytest.raises(HTTPException) as error:
-        await assessment_router.resolve_problem_context(request, lambda _: {"requirementSpec": specification()})
+        await assessment_router.resolve_problem_context(request, lookup)
     assert error.value.status_code == 409
     assert error.value.detail["requested_revision"] == "saved-r1"
 
@@ -407,8 +439,9 @@ async def test_catalog_outage_does_not_trust_client_scope():
     def unavailable(_):
         raise RuntimeError("catalog down")
 
+    request = architecture()
     with pytest.raises(HTTPException) as error:
-        await assessment_router.resolve_problem_context(architecture(), unavailable)
+        await assessment_router.resolve_problem_context(request, unavailable)
     assert error.value.status_code == 503
 
 
@@ -421,9 +454,12 @@ def test_http_route_uses_injected_catalog_and_returns_the_trust_contract():
     response = TestClient(app).post("/api/v1/assess", json=architecture().model_dump())
     assert response.status_code == 200
     data = response.json()
-    assert data["score_available"] and data["verdict"] == "strong_alignment"
-    assert data["assessment_id"] and data["requirement_revision"] == "approved-r3"
-    assert len(data["requirement_coverage"]) == 2 and data["model_version"] == "test-model"
+    assert data["score_available"]
+    assert data["verdict"] == "strong_alignment"
+    assert data["assessment_id"]
+    assert data["requirement_revision"] == "approved-r3"
+    assert len(data["requirement_coverage"]) == 2
+    assert data["model_version"] == "test-model"
 
 
 def scored_defect_review():
@@ -447,8 +483,10 @@ async def test_material_deduction_without_a_scored_gap_is_rejected(dimension):
     output["scores"][dimension] = 94
     adapter = SequenceLLM(output)
     result = await service(adapter).assess_design(architecture())
-    assert len(adapter.requests) == 2 and not result.score_available
-    assert result.overall_score == 0 and output["scores"][dimension] == 94
+    assert len(adapter.requests) == 2
+    assert not result.score_available
+    assert result.overall_score == 0
+    assert output["scores"][dimension] == 94
     assert dimension in adapter.requests[1].messages[-1]["content"]
 
 
@@ -477,7 +515,8 @@ async def test_material_scored_gaps_require_actionable_core_evidence(fault):
         gap["scored_gap"] = "true"
     adapter = SequenceLLM(output)
     result = await service(adapter).assess_design(architecture())
-    assert not result.score_available and len(adapter.requests) == 2
+    assert not result.score_available
+    assert len(adapter.requests) == 2
 
 
 @pytest.mark.asyncio
@@ -486,15 +525,18 @@ async def test_justified_material_deduction_is_preserved():
     request.connections[0].description = "Acknowledge before the durable write completes."
     adapter = SequenceLLM(scored_defect_review())
     result = await service(adapter).assess_design(request)
-    assert result.score_available and result.scores.reliability == 84
-    assert result.overall_score == 96 and not result.is_valid
+    assert result.score_available
+    assert result.scores.reliability == 84
+    assert result.overall_score == 96
+    assert not result.is_valid
     assert len(adapter.requests) == 1
 
 
 @pytest.mark.asyncio
 async def test_positive_only_complete_qualitative_review_is_not_forced_to_100():
     result = await service(SequenceLLM(review(96))).assess_design(architecture())
-    assert result.score_available and result.overall_score == 96
+    assert result.score_available
+    assert result.overall_score == 96
 
 
 @pytest.mark.asyncio
@@ -504,7 +546,8 @@ async def test_positive_only_review_is_rejected_for_unexplained_deductions():
     adapter = SequenceLLM(deepcopy(archived_result))
     result = await service(adapter).assess_design(request)
     assert all(finding["kind"] == "strength" for finding in archived_result["findings"])
-    assert not result.score_available and len(adapter.requests) == 2
+    assert not result.score_available
+    assert len(adapter.requests) == 2
     assert "Material score deductions require scored_gap" in adapter.requests[1].messages[-1]["content"]
 
 
@@ -517,7 +560,8 @@ def test_legacy_scope_references_preserve_the_original_text():
     refs = get_assessment_requirement_refs(request)
     assert refs["legacy-requirement:2"].text == "Support collaboration"
     assert refs["legacy-constraint:1"].text == "Low latency for collaboration"
-    assert request.model_dump() == original and request.problem.requirementSpec is None
+    assert request.model_dump() == original
+    assert request.problem.requirementSpec is None
 
 
 @pytest.mark.asyncio
@@ -530,7 +574,8 @@ async def test_legacy_scope_can_support_an_actionable_deduction():
     for finding in output["findings"]:
         finding["requirement_ids"] = ["legacy-requirement:1"]
     result = await service(SequenceLLM(output)).assess_design(request)
-    assert result.score_available and result.scores.reliability == 84
+    assert result.score_available
+    assert result.scores.reliability == 84
 
 
 @pytest.mark.asyncio
@@ -549,17 +594,21 @@ async def test_repair_can_return_a_grounded_lower_score_without_inflation():
     adapter = SequenceLLM(review(92), scored_defect_review())
     result = await service(adapter).assess_design(architecture())
     assert len(adapter.requests) == 2
-    assert result.score_available and result.scores.reliability == 84
-    assert not result.is_valid and result.findings[-1].scored_gap
+    assert result.score_available
+    assert result.scores.reliability == 84
+    assert not result.is_valid
+    assert result.findings[-1].scored_gap
 
 
 @pytest.mark.asyncio
 async def test_generation_and_repair_use_the_same_strict_output_schema():
     adapter = SequenceLLM(review(92), scored_defect_review())
     result = await service(adapter).assess_design(architecture())
-    assert result.score_available and result.scores.reliability == 84
+    assert result.score_available
+    assert result.scores.reliability == 84
     first, repair = [item.response_format for item in adapter.requests]
-    assert first == repair and first["type"] == "json_schema"
+    assert first == repair
+    assert first["type"] == "json_schema"
     assert first["json_schema"]["strict"] is True
     schema = first["json_schema"]["schema"]
     assert set(schema["properties"]["scores"]["required"]) == set(AIAssessorService._SCORE_WEIGHTS)

@@ -158,19 +158,31 @@ def get_assessment_evidence_ids(request: AssessmentRequest) -> set[str]:
     return ids
 
 
+def _legacy_refs_for_field(
+    request: AssessmentRequest,
+    field: str,
+    prefix: str,
+) -> dict[str, RequirementItem]:
+    problem = request.problem
+    problem_value = getattr(problem, field) if problem else None
+    value = problem_value if problem_value is not None else getattr(request, field)
+    return {
+        f"{prefix}:{index}": RequirementItem(
+            id=f"{prefix}:{index}", text=text, scope="core"
+        )
+        for index, text in enumerate((value or "").splitlines(), 1)
+        if text.strip()
+    }
+
+
 def get_assessment_requirement_refs(request: AssessmentRequest) -> dict[str, RequirementItem]:
     """Anchor legacy findings to unchanged brief text, without inventing a spec."""
     problem = request.problem
     if problem and problem.requirementSpec:
         return {item.id: item for item in problem.requirementSpec.functional + problem.requirementSpec.nonFunctional}
-    refs: dict[str, RequirementItem] = {}
-    for field in ("requirements", "constraints"):
-        value = getattr(problem, field) if problem and getattr(problem, field) is not None else getattr(request, field)
-        prefix = "legacy-requirement" if field == "requirements" else "legacy-constraint"
-        for index, text in enumerate((value or "").splitlines(), 1):
-            if text.strip():
-                identifier = f"{prefix}:{index}"
-                refs[identifier] = RequirementItem(id=identifier, text=text, scope="core")
+    refs = {}
+    refs.update(_legacy_refs_for_field(request, "requirements", "legacy-requirement"))
+    refs.update(_legacy_refs_for_field(request, "constraints", "legacy-constraint"))
     if not refs and problem and problem.description.strip():
         refs["problem-brief"] = RequirementItem(id="problem-brief", text=problem.description, scope="core")
     return refs

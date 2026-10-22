@@ -160,13 +160,13 @@ def test_mcp_architecture_rejects_idempotency_conflict(monkeypatch):
     )
     monkeypatch.setattr(mcp_integration.dynamodb_service, "get_diagram", lambda **_: existing)
 
+    request = request_payload()
+    coroutine = mcp_integration.create_mcp_architecture(
+        request,
+        service=("mcp-service-user", "Diagramwise MCP"),
+    )
     with pytest.raises(HTTPException) as error:
-        asyncio.run(
-            mcp_integration.create_mcp_architecture(
-                request_payload(),
-                service=("mcp-service-user", "Diagramwise MCP"),
-            )
-        )
+        asyncio.run(coroutine)
 
     assert error.value.status_code == 409
 

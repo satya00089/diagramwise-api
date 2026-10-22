@@ -19,6 +19,12 @@ import tempfile
 from typing import Any, Callable
 
 
+ROOT = Path(__file__).resolve().parents[1]
+READ_ROOTS = (ROOT, ROOT.parent, Path(tempfile.gettempdir()).resolve())
+WRITE_ROOTS = (ROOT, Path(tempfile.gettempdir()).resolve())
+DYNAMODB_DECIMAL_KEY = "$dynamodbDecimal"
+
+
 PUBLIC_FIELDS = (
     "id", "slug", "title", "description", "requirements", "constraints",
     "requirementSpec", "requirementSpecProvenance", "difficulty", "category",
@@ -51,12 +57,12 @@ def _json_default(value: Any) -> Any:
     if isinstance(value, Decimal):
         if value == value.to_integral_value():
             return int(value)
-        return {"$dynamodbDecimal": str(value)}
+        return {DYNAMODB_DECIMAL_KEY: str(value)}
     raise TypeError(f"Unsupported public value: {type(value).__name__}")
 
 
 def _json_hook(value: dict) -> Any:
-    return Decimal(value["$dynamodbDecimal"]) if set(value) == {"$dynamodbDecimal"} else value
+    return Decimal(value[DYNAMODB_DECIMAL_KEY]) if set(value) == {DYNAMODB_DECIMAL_KEY} else value
 
 
 def canonical(value: Any) -> str:
@@ -68,13 +74,24 @@ def digest(value: Any) -> str:
     return hashlib.sha256(canonical(value).encode("utf-8")).hexdigest()
 
 
+def _validated_local_path(path: str | Path, *, writing: bool = False) -> Path:
+    """Resolve local CLI paths and reject traversal through or around symlinks."""
+    candidate = Path(path).expanduser().resolve()
+    roots = WRITE_ROOTS if writing else READ_ROOTS
+    if not any(candidate == root or root in candidate.parents for root in roots):
+        access = "write" if writing else "read"
+        raise MigrationError(f"Refusing to {access} outside approved local directories: {path}")
+    return candidate
+
+
 def read_json(path: str | Path) -> Any:
-    return json.loads(Path(path).read_text(encoding="utf-8-sig"), object_hook=_json_hook)
+    safe_path = _validated_local_path(path)
+    return json.loads(safe_path.read_text(encoding="utf-8-sig"), object_hook=_json_hook)
 
 
 def write_json(path: str | Path, value: Any, *, replace: bool = False) -> None:
     """Keep reports local and refuse accidental overwrites; journal refresh is atomic."""
-    target = Path(path)
+    target = _validated_local_path(path, writing=True)
     target.parent.mkdir(parents=True, exist_ok=True)
     content = json.dumps(value, indent=2, ensure_ascii=False, default=_json_default,
                          allow_nan=False) + "\n"
@@ -175,41 +192,43 @@ def classify(text: str) -> tuple[str, str | None]:
     return "functional", None
 
 
+def _draft_change(item: dict, revision: str | None) -> dict:
+    original = {key: attribute_state(item, key) for key in GUARD_FIELDS}
+    prior = item.get("requirementSpec") or {}
+    existing = {entry["text"]: (bucket, entry) for bucket in ("functional", "nonFunctional")
+                for entry in prior.get(bucket, [])}
+    spec = {"schemaVersion": 1, "revision": revision or f"catalog-v1-{digest(original)[:12]}",
+            "functional": [], "nonFunctional": [], "assumptions": deepcopy(prior.get("assumptions", []))}
+    provenance = []
+    for row in source_rows(item):
+        bucket, category = classify(row["text"])
+        if row["sourceAttribute"] == "constraints":
+            bucket, category = "constraint", None
+        previous_bucket, previous = existing.get(row["text"], (None, {}))
+        bucket = previous_bucket or bucket
+        req_id = previous.get("id") or "req-" + digest([item["id"], row])[:16]
+        scope = row["originalScope"] or previous.get("scope") or "core"
+        entry = {"id": req_id, "text": row["text"], "scope": scope}
+        category = previous.get("category") or category
+        if category:
+            entry["category"] = category
+        if bucket != "constraint":
+            spec[bucket].append(entry)
+        provenance.append({**row, "id": req_id, "classification": bucket, "scope": scope,
+                           "category": category, "status": "needs_review",
+                           "reviewer": None, "reason": "Heuristic suggestion; original exercise scope requires review."})
+    return {"id": item["id"], "slug": item.get("slug"),
+            "baseRevision": prior.get("revision"), "original": original,
+            "sourceHash": digest(original), "proposedSpec": spec,
+            "provenance": provenance,
+            "review": {"status": "needs_review", "reviewer": None}}
+
+
 def make_draft(snapshot: dict, revision: str | None = None) -> dict:
     items = records(snapshot)
     if snapshot.get("recordsHash") != digest(items):
         raise MigrationError("Snapshot records hash mismatch")
-    changes = []
-    for item in items:
-        original = {key: attribute_state(item, key) for key in GUARD_FIELDS}
-        prior = item.get("requirementSpec") or {}
-        existing = {entry["text"]: (bucket, entry) for bucket in ("functional", "nonFunctional")
-                    for entry in prior.get(bucket, [])}
-        spec = {"schemaVersion": 1, "revision": revision or f"catalog-v1-{digest(original)[:12]}",
-                "functional": [], "nonFunctional": [], "assumptions": deepcopy(prior.get("assumptions", []))}
-        provenance = []
-        for row in source_rows(item):
-            bucket, category = classify(row["text"])
-            if row["sourceAttribute"] == "constraints":
-                bucket, category = "constraint", None
-            previous_bucket, previous = existing.get(row["text"], (None, {}))
-            bucket = previous_bucket or bucket
-            req_id = previous.get("id") or "req-" + digest([item["id"], row])[:16]
-            scope = row["originalScope"] or previous.get("scope") or "core"
-            entry = {"id": req_id, "text": row["text"], "scope": scope}
-            category = previous.get("category") or category
-            if category:
-                entry["category"] = category
-            if bucket != "constraint":
-                spec[bucket].append(entry)
-            provenance.append({**row, "id": req_id, "classification": bucket, "scope": scope,
-                               "category": category, "status": "needs_review",
-                               "reviewer": None, "reason": "Heuristic suggestion; original exercise scope requires review."})
-        changes.append({"id": item["id"], "slug": item.get("slug"),
-                        "baseRevision": prior.get("revision"), "original": original,
-                        "sourceHash": digest(original), "proposedSpec": spec,
-                        "provenance": provenance,
-                        "review": {"status": "needs_review", "reviewer": None}})
+    changes = [_draft_change(item, revision) for item in items]
     return {"formatVersion": 1, "kind": "requirement-migration-manifest", "createdAt": now(),
             "source": deepcopy(snapshot["source"]), "snapshotHash": snapshot["recordsHash"],
             "changes": changes, "approved": False,
@@ -221,6 +240,9 @@ def make_draft(snapshot: dict, revision: str | None = None) -> dict:
 
 
 def audit_catalog(snapshot: dict, guide_dir: Path) -> dict:
+    guide_dir = _validated_local_path(guide_dir)
+    if not guide_dir.is_dir():
+        raise MigrationError(f"Guide directory does not exist: {guide_dir}")
     items = records(snapshot)
     if snapshot.get("recordsHash") != digest(items):
         raise MigrationError("Snapshot hash mismatch")
@@ -258,37 +280,50 @@ def audit_catalog(snapshot: dict, guide_dir: Path) -> dict:
                         for slug in static_only], "matrix": matrix}
 
 
-def validate_spec(spec: dict) -> list[str]:
+def _validate_spec_header(spec: dict) -> list[str]:
     errors = []
-    if not isinstance(spec, dict):
-        return ["requirementSpec must be an object"]
     if set(spec) != {"schemaVersion", "revision", "functional", "nonFunctional", "assumptions"}:
         errors.append("requirementSpec has missing or unexpected fields")
     if type(spec.get("schemaVersion")) not in (int, Decimal) or spec.get("schemaVersion") != 1:
         errors.append("schemaVersion must be 1")
     if not isinstance(spec.get("revision"), str) or not spec["revision"].strip():
         errors.append("revision must be a nonempty string")
+    return errors
+
+
+def _validate_requirement_row(row: dict) -> list[str]:
+    errors = []
+    if set(row) - {"id", "text", "scope", "category"}:
+        errors.append("Unexpected requirement fields")
+    if not all(isinstance(row.get(field), str) and row[field].strip() for field in ("id", "text")):
+        errors.append("Requirement id/text must be nonempty strings")
+    if row.get("scope") not in ("core", "extension"):
+        errors.append("Invalid requirement scope")
+    if "category" in row and row["category"] is not None and not isinstance(row["category"], str):
+        errors.append("category must be a string or null")
+    return errors
+
+
+def validate_spec(spec: dict) -> list[str]:
+    if not isinstance(spec, dict):
+        return ["requirementSpec must be an object"]
+    errors = _validate_spec_header(spec)
     ids = []
     for bucket in ("functional", "nonFunctional"):
-        if not isinstance(spec.get(bucket), list):
+        rows = spec.get(bucket)
+        if not isinstance(rows, list):
             errors.append(f"{bucket} must be a list")
             continue
-        for row in spec[bucket]:
+        for row in rows:
             if not isinstance(row, dict):
                 errors.append("requirement must be an object")
                 continue
-            if set(row) - {"id", "text", "scope", "category"}:
-                errors.append("Unexpected requirement fields")
-            if not all(isinstance(row.get(field), str) and row[field].strip() for field in ("id", "text")):
-                errors.append("Requirement id/text must be nonempty strings")
-            if row.get("scope") not in ("core", "extension"):
-                errors.append("Invalid requirement scope")
-            if "category" in row and row["category"] is not None and not isinstance(row["category"], str):
-                errors.append("category must be a string or null")
+            errors.extend(_validate_requirement_row(row))
             ids.append(row.get("id"))
     if len(ids) != len(set(map(str, ids))):
         errors.append("Duplicate requirement IDs")
-    if not isinstance(spec.get("assumptions"), list) or any(not isinstance(x, str) for x in spec.get("assumptions", [])):
+    assumptions = spec.get("assumptions")
+    if not isinstance(assumptions, list) or any(not isinstance(value, str) for value in assumptions):
         errors.append("assumptions must be a string list")
     return errors
 
@@ -297,90 +332,149 @@ def approval_digest(manifest: dict) -> str:
     return digest({key: value for key, value in manifest.items() if key not in ("approval", "approved")})
 
 
-def validation_errors(manifest: dict, *, publish: bool = False) -> list[str]:
+def _original_item(change: dict, prefix: str) -> tuple[dict | None, list[str]]:
+    original = change.get("original", {})
+    if set(original) != set(GUARD_FIELDS) or digest(original) != change.get("sourceHash"):
+        return None, [prefix + "Invalid originals/source hash"]
+    malformed = any(
+        not isinstance(state, dict)
+        or type(state.get("exists")) is not bool
+        or set(state) != ({"exists", "value"} if state.get("exists") else {"exists"})
+        for state in original.values()
+    )
+    if malformed:
+        return None, [prefix + "Malformed original attribute states"]
+    return (
+        {field: state["value"] for field, state in original.items() if state["exists"]},
+        [],
+    )
+
+
+def _validate_provenance_row(
+    row: dict,
+    source: dict,
+    prior_entries: dict,
+    *,
+    publish: bool,
+    prefix: str,
+) -> tuple[list[str], str | None, dict | None]:
     errors = []
+    if any(row.get(key) != value for key, value in source.items()):
+        errors.append(prefix + "Original sentence/source/scope altered")
+    if source["originalScope"] is not None and row.get("scope") != source["originalScope"]:
+        errors.append(prefix + "Explicit original scope altered")
+    if source["text"] in prior_entries:
+        previous = prior_entries[source["text"]]
+        if row.get("id") != previous["id"] or row.get("scope") != previous["scope"]:
+            errors.append(prefix + "Existing requirement ID/scope altered")
+
+    bucket = row.get("classification")
+    if bucket not in ("functional", "nonFunctional", "constraint") or row.get("scope") not in ("core", "extension"):
+        errors.append(prefix + "Invalid classification/scope")
+        bucket = None
+    if bucket == "constraint" and row.get("sourceAttribute") != "constraints":
+        errors.append(prefix + "Legacy requirement omitted from specification")
+    entry = None
+    if bucket in ("functional", "nonFunctional"):
+        entry = {key: row.get(key) for key in ("id", "text", "scope")}
+        if row.get("category"):
+            entry["category"] = row["category"]
+    if publish and (row.get("status") != "reviewed" or not row.get("reviewer") or not row.get("reason")):
+        errors.append(prefix + "Unreviewed/ambiguous sentence blocks publishing")
+    return errors, bucket, entry
+
+
+def _project_provenance(
+    provenance: list[dict],
+    expected_rows: list[dict],
+    prior: dict,
+    *,
+    publish: bool,
+    prefix: str,
+) -> tuple[dict[str, list[dict]], list[str]]:
+    projected: dict[str, list[dict]] = {"functional": [], "nonFunctional": []}
+    prior_entries = {entry["text"]: entry for bucket in projected for entry in prior.get(bucket, [])}
+    errors = []
+    for row, source in zip(provenance, expected_rows):
+        if not isinstance(row, dict):
+            errors.append(prefix + "Malformed provenance row")
+            continue
+        row_errors, bucket, entry = _validate_provenance_row(
+            row, source, prior_entries, publish=publish, prefix=prefix
+        )
+        errors.extend(row_errors)
+        if entry is not None and bucket in projected:
+            projected[bucket].append(entry)
+    return projected, errors
+
+
+def _validate_change(change: dict, *, publish: bool) -> list[str]:
+    prefix = str(change.get("id")) + ": "
+    item, errors = _original_item(change, prefix)
+    if item is None:
+        return errors
+    if item.get("id") != change.get("id") or item.get("slug") != change.get("slug"):
+        errors.append(prefix + "Identity/slug changed")
+    prior = item.get("requirementSpec") or {}
+    if prior.get("revision") != change.get("baseRevision"):
+        errors.append(prefix + "Active base revision mismatch")
+
+    spec = change.get("proposedSpec", {})
+    spec_errors = validate_spec(spec)
+    errors.extend(prefix + error for error in spec_errors)
+    if spec_errors:
+        return errors
+    if spec["revision"] == change.get("baseRevision"):
+        errors.append(prefix + "New content requires a new revision")
+    if spec["assumptions"] != prior.get("assumptions", []):
+        errors.append(prefix + "Assumptions changed; scope-changing editorial revisions need separate review")
+    try:
+        expected_rows = source_rows(item)
+    except MigrationError as error:
+        errors.append(str(error))
+        return errors
+    provenance = change.get("provenance", [])
+    if len(provenance) != len(expected_rows):
+        errors.append(prefix + "Original sentences omitted or duplicated")
+        return errors
+    projected, provenance_errors = _project_provenance(
+        provenance, expected_rows, prior, publish=publish, prefix=prefix
+    )
+    errors.extend(provenance_errors)
+    if any(spec[bucket] != projected[bucket] for bucket in projected):
+        errors.append(prefix + "Spec differs from preserved source/provenance; guide imports are prohibited")
+    prior_ids = {entry["id"] for bucket in projected for entry in prior.get(bucket, [])}
+    new_ids = {entry["id"] for bucket in projected for entry in spec[bucket]}
+    if not prior_ids <= new_ids:
+        errors.append(prefix + "Existing spec requirements would be lost")
+    if publish and (change.get("review", {}).get("status") != "reviewed" or not change.get("review", {}).get("reviewer")):
+        errors.append(prefix + "Problem review required")
+    return errors
+
+
+def _validate_publish_gates(manifest: dict) -> list[str]:
+    errors = []
+    gate = manifest.get("readerCompatibility", {})
+    if gate.get("status") != "verified" or 1 not in gate.get("schemaVersions", []) or not gate.get("deployment") or not gate.get("evidence"):
+        errors.append("Deployed forward-reader compatibility evidence required")
+    cache = manifest.get("cachePlan", {})
+    if cache.get("reviewed") is not True or not cache.get("releaseVersion") or not cache.get("notes"):
+        errors.append("Reviewed targeted cache/static release plan required")
+    return errors
+
+
+def validation_errors(manifest: dict, *, publish: bool = False) -> list[str]:
     if manifest.get("formatVersion") != 1 or manifest.get("kind") != "requirement-migration-manifest":
         return ["Unsupported manifest format"]
     changes = manifest.get("changes", [])
     if not isinstance(changes, list) or not changes:
         return ["Manifest must contain changes"]
     ids = [row.get("id") for row in changes]
-    if len(ids) != len(set(map(str, ids))):
-        errors.append("Duplicate manifest IDs")
+    errors = ["Duplicate manifest IDs"] if len(ids) != len(set(map(str, ids))) else []
     for change in changes:
-        prefix = str(change.get("id")) + ": "
-        original = change.get("original", {})
-        if set(original) != set(GUARD_FIELDS) or digest(original) != change.get("sourceHash"):
-            errors.append(prefix + "Invalid originals/source hash")
-            continue
-        if any(not isinstance(state, dict) or type(state.get("exists")) is not bool or
-               set(state) != ({"exists", "value"} if state.get("exists") else {"exists"})
-               for state in original.values()):
-            errors.append(prefix + "Malformed original attribute states")
-            continue
-        item = {field: state["value"] for field, state in original.items() if state["exists"]}
-        if item.get("id") != change.get("id") or item.get("slug") != change.get("slug"):
-            errors.append(prefix + "Identity/slug changed")
-        prior = item.get("requirementSpec") or {}
-        if prior.get("revision") != change.get("baseRevision"):
-            errors.append(prefix + "Active base revision mismatch")
-        spec = change.get("proposedSpec", {})
-        spec_errors = validate_spec(spec)
-        errors.extend(prefix + error for error in spec_errors)
-        if spec_errors:
-            continue
-        if spec["revision"] == change.get("baseRevision"):
-            errors.append(prefix + "New content requires a new revision")
-        if spec["assumptions"] != prior.get("assumptions", []):
-            errors.append(prefix + "Assumptions changed; scope-changing editorial revisions need separate review")
-        try:
-            expected_rows = source_rows(item)
-        except MigrationError as error:
-            errors.append(str(error))
-            continue
-        provenance = change.get("provenance", [])
-        if len(provenance) != len(expected_rows):
-            errors.append(prefix + "Original sentences omitted or duplicated")
-            continue
-        projected = {"functional": [], "nonFunctional": []}
-        prior_entries = {entry["text"]: entry for bucket in projected for entry in prior.get(bucket, [])}
-        for row, source in zip(provenance, expected_rows):
-            if any(row.get(key) != value for key, value in source.items()):
-                errors.append(prefix + "Original sentence/source/scope altered")
-            if source["originalScope"] is not None and row.get("scope") != source["originalScope"]:
-                errors.append(prefix + "Explicit original scope altered")
-            if source["text"] in prior_entries:
-                previous = prior_entries[source["text"]]
-                if row.get("id") != previous["id"] or row.get("scope") != previous["scope"]:
-                    errors.append(prefix + "Existing requirement ID/scope altered")
-            bucket = row.get("classification")
-            if bucket not in (*projected, "constraint") or row.get("scope") not in ("core", "extension"):
-                errors.append(prefix + "Invalid classification/scope")
-            elif bucket == "constraint":
-                if row.get("sourceAttribute") != "constraints":
-                    errors.append(prefix + "Legacy requirement omitted from specification")
-            else:
-                entry = {key: row.get(key) for key in ("id", "text", "scope")}
-                if row.get("category"):
-                    entry["category"] = row["category"]
-                projected[bucket].append(entry)
-            if publish and (row.get("status") != "reviewed" or not row.get("reviewer") or not row.get("reason")):
-                errors.append(prefix + "Unreviewed/ambiguous sentence blocks publishing")
-        if any(spec[bucket] != projected[bucket] for bucket in projected):
-            errors.append(prefix + "Spec differs from preserved source/provenance; guide imports are prohibited")
-        prior_ids = {entry["id"] for bucket in projected for entry in prior.get(bucket, [])}
-        new_ids = {entry["id"] for bucket in projected for entry in spec[bucket]}
-        if not prior_ids <= new_ids:
-            errors.append(prefix + "Existing spec requirements would be lost")
-        if publish and (change.get("review", {}).get("status") != "reviewed" or not change.get("review", {}).get("reviewer")):
-            errors.append(prefix + "Problem review required")
+        errors.extend(_validate_change(change, publish=publish))
     if publish:
-        gate = manifest.get("readerCompatibility", {})
-        if gate.get("status") != "verified" or 1 not in gate.get("schemaVersions", []) or not gate.get("deployment") or not gate.get("evidence"):
-            errors.append("Deployed forward-reader compatibility evidence required")
-        cache = manifest.get("cachePlan", {})
-        if cache.get("reviewed") is not True or not cache.get("releaseVersion") or not cache.get("notes"):
-            errors.append("Reviewed targeted cache/static release plan required")
+        errors.extend(_validate_publish_gates(manifest))
     return errors
 
 
@@ -496,9 +590,7 @@ def apply_manifest(table: Any, manifest: dict, *, apply: bool = False,
     return journal
 
 
-def rollback_manifest(table: Any, manifest: dict, journal: dict, *, apply: bool = False,
-                      save_journal: Callable[[dict], None] | None = None) -> dict:
-    require_approval(manifest)
+def _validate_rollback_journal(manifest: dict, journal: dict) -> None:
     if journal.get("kind") != "requirement-rollback-journal" or journal.get("manifestDigest") != approval_digest(manifest) or journal.get("source") != manifest["source"]:
         raise MigrationError("Rollback journal does not match approved manifest")
     approved = {row["id"]: row for row in manifest["changes"]}
@@ -509,6 +601,52 @@ def rollback_manifest(table: Any, manifest: dict, journal: dict, *, apply: bool 
         change = approved.get(entry["id"])
         if not change or entry["original"] != change["original"] or entry["written"] != new_attributes(change):
             raise MigrationError("Tampered rollback originals/current values")
+
+
+def _entry_is_already_restored(entry: dict, current: dict | None) -> bool:
+    return (
+        entry["status"] in ("pending", "rolled_back")
+        and current is not None
+        and all(attribute_state(current, key) == state for key, state in entry["original"].items())
+    )
+
+
+def _restore_rollback_entry(
+    table: Any,
+    entry: dict,
+    result: dict,
+    save_journal: Callable[[dict], None],
+) -> None:
+    expected = {**entry["original"], **entry["written"]}
+    current = table.get_item(Key={"id": entry["id"]}, ConsistentRead=True).get("Item")
+    # Pending may represent a failed request or a write whose acknowledgement was lost.
+    if _entry_is_already_restored(entry, current):
+        entry["status"] = "rolled_back"
+        save_journal(deepcopy(result))
+        return
+    assert_current(current, expected, entry["id"])
+    try:
+        conditional_update(
+            table,
+            entry["id"],
+            expected,
+            {key: entry["original"][key] for key in WRITE_FIELDS},
+        )
+        current = table.get_item(Key={"id": entry["id"]}, ConsistentRead=True).get("Item")
+        assert_current(current, entry["original"], entry["id"])
+        entry["status"] = "rolled_back"
+        save_journal(deepcopy(result))
+    except Exception as error:
+        result["status"] = "rollback_stopped"
+        entry["rollbackError"] = str(error)
+        save_journal(deepcopy(result))
+        raise MigrationError(f"Rollback conflict/failure at {entry['id']}: {error}") from error
+
+
+def rollback_manifest(table: Any, manifest: dict, journal: dict, *, apply: bool = False,
+                      save_journal: Callable[[dict], None] | None = None) -> dict:
+    require_approval(manifest)
+    _validate_rollback_journal(manifest, journal)
     result = deepcopy(journal)
     if not apply:
         return {"kind": "requirement-rollback-dry-run", "remoteWrites": False,
@@ -518,26 +656,7 @@ def rollback_manifest(table: Any, manifest: dict, journal: dict, *, apply: bool 
     if save_journal is None:
         raise MigrationError("Durable rollback journal required")
     for entry in reversed(result["entries"]):
-        expected = {**entry["original"], **entry["written"]}
-        current = table.get_item(Key={"id": entry["id"]}, ConsistentRead=True).get("Item")
-        # Pending may represent a failed request or a write whose acknowledgement was lost.
-        if entry["status"] in ("pending", "rolled_back") and current is not None and all(attribute_state(current, key) == state for key, state in entry["original"].items()):
-            entry["status"] = "rolled_back"
-            save_journal(deepcopy(result))
-            continue
-        assert_current(current, expected, entry["id"])
-        try:
-            conditional_update(table, entry["id"], expected,
-                               {key: entry["original"][key] for key in WRITE_FIELDS})
-            current = table.get_item(Key={"id": entry["id"]}, ConsistentRead=True).get("Item")
-            assert_current(current, entry["original"], entry["id"])
-            entry["status"] = "rolled_back"
-            save_journal(deepcopy(result))
-        except Exception as error:
-            result["status"] = "rollback_stopped"
-            entry["rollbackError"] = str(error)
-            save_journal(deepcopy(result))
-            raise MigrationError(f"Rollback conflict/failure at {entry['id']}: {error}") from error
+        _restore_rollback_entry(table, entry, result, save_journal)
     result["status"] = "rolled_back"
     save_journal(deepcopy(result))
     return result
@@ -585,6 +704,14 @@ def main(argv: list[str] | None = None) -> int:
         command.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
+        if args.output is not None:
+            args.output = _validated_local_path(args.output, writing=True)
+        for name in ("input", "snapshot", "manifest", "approved", "journal"):
+            value = getattr(args, name, None)
+            if value is not None:
+                setattr(args, name, _validated_local_path(value))
+        if getattr(args, "guide_dir", None) is not None:
+            args.guide_dir = _validated_local_path(args.guide_dir)
         if args.command == "export":
             if args.remote_read == bool(args.input):
                 parser.error("export needs exactly one of --input or explicit --remote-read")

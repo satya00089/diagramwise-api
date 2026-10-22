@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol, Sequence
 
@@ -68,6 +69,7 @@ class MockLLMAdapter:
 
     async def generate(self, request: LLMRequest) -> LLMResponse:
         self.requests.append(request)
+        await asyncio.sleep(0)
         return LLMResponse(
             content=self.content,
             model="mock",

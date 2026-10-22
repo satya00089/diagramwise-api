@@ -53,7 +53,12 @@ def percentile_upper_bound(
         return None
 
     sample_count = sum(counts)
-    minimum_samples = 100 if percentile >= 99 else 20 if percentile >= 95 else 1
+    if percentile >= 99:
+        minimum_samples = 100
+    elif percentile >= 95:
+        minimum_samples = 20
+    else:
+        minimum_samples = 1
     if sample_count < minimum_samples:
         return None
 

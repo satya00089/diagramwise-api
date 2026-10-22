@@ -64,11 +64,11 @@ class AIAssessorService:
         self.settings = settings or get_settings()
         self.llm = llm or create_llm_provider(self.settings)
         configured_timeout = getattr(self.settings, "llm_assessment_timeout_seconds", self.ASSESSMENT_TIMEOUT_SECONDS)
-        self.assessment_timeout_seconds = (
+        self._assessment_timeout_seconds = (
             assessment_timeout_seconds if assessment_timeout_seconds is not None
             else float(configured_timeout)
         )
-        if not math.isfinite(self.assessment_timeout_seconds) or self.assessment_timeout_seconds <= 0:
+        if not math.isfinite(self._assessment_timeout_seconds) or self._assessment_timeout_seconds <= 0:
             raise ValueError("The assessment timeout must be a positive finite number")
 
     async def _generate_json(
@@ -131,13 +131,41 @@ class AIAssessorService:
     async def assess_design(self, request: AssessmentRequest) -> AssessmentResponse:
         """Review with strict output validation and at most one bounded repair."""
         start_time = time.monotonic()
-        deadline = start_time + self.assessment_timeout_seconds
+        deadline = start_time + self._assessment_timeout_seconds
         trace_id: str | None = None
         rejection_reason: str | None = None
         if any(check.status == "failed" for check in self._integrity_checks(request)):
             return self._fallback_assessment(request, processing_time_ms=0)
 
-        messages: list[dict[str, str]] = [
+        messages = self._assessment_messages(request)
+        metadata = self._assessment_metadata(request)
+        try:
+            for attempt in range(2):
+                assessment, trace_id, rejection_reason = await self._assessment_attempt(
+                    request=request,
+                    messages=messages,
+                    metadata=metadata,
+                    attempt=attempt,
+                    deadline=deadline,
+                    trace_id=trace_id,
+                )
+                if assessment is not None:
+                    return self._complete_assessment(
+                        assessment, trace_id, start_time
+                    )
+        except Exception as error:
+            logger.warning(
+                "AI assessment unavailable error_type=%s rejection_reason=%s elapsed_ms=%s",
+                type(error).__name__, rejection_reason, int((time.monotonic() - start_time) * 1000),
+            )
+
+        return await self._fallback_after_assessment_failure(
+            request, start_time, trace_id
+        )
+
+    @staticmethod
+    def _assessment_messages(request: AssessmentRequest) -> list[dict[str, str]]:
+        return [
             {
                 "role": "system",
                 "content": (
@@ -149,83 +177,112 @@ class AIAssessorService:
             },
             {"role": "user", "content": get_assessment_prompt(request)},
         ]
+
+    def _assessment_metadata(self, request: AssessmentRequest) -> dict[str, object]:
         problem = request.problem
-        revision = self._requirement_revision(request)
-        metadata: dict[str, object] = {
+        return {
             "component_count": len(request.components),
             "connection_count": len(request.connections or []),
             "has_problem": problem is not None,
             "problem_id": problem.id if problem else None,
-            "requirement_revision": revision,
+            "requirement_revision": self._requirement_revision(request),
             "rubric_version": self.RUBRIC_VERSION,
             "model_version": self._model_version(),
         }
+
+    async def _assessment_attempt(
+        self,
+        *,
+        request: AssessmentRequest,
+        messages: list[dict[str, str]],
+        metadata: dict[str, object],
+        attempt: int,
+        deadline: float,
+        trace_id: str | None,
+    ) -> tuple[AssessmentResponse | None, str | None, str | None]:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Assessment deadline exceeded")
+        response = await asyncio.wait_for(
+            self._generate_json(
+                task="assessment.evaluate-design" if attempt == 0 else "assessment.repair-design",
+                messages=messages,
+                tags=("assessment", "design") if attempt == 0 else ("assessment", "repair"),
+                metadata={**metadata, "attempt": attempt, "repair_of_trace_id": trace_id},
+                response_format=assessment_response_format(self._SCORE_WEIGHTS),
+            ),
+            timeout=remaining,
+        )
+        trace_id = response.trace_id or trace_id
         try:
-            for attempt in range(2):
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError("Assessment deadline exceeded")
-                response = await asyncio.wait_for(
-                    self._generate_json(
-                        task="assessment.evaluate-design" if attempt == 0 else "assessment.repair-design",
-                        messages=messages,
-                        tags=("assessment", "design") if attempt == 0 else ("assessment", "repair"),
-                        metadata={**metadata, "attempt": attempt, "repair_of_trace_id": trace_id},
-                        response_format=assessment_response_format(self._SCORE_WEIGHTS),
-                    ),
-                    timeout=remaining,
-                )
-                trace_id = response.trace_id or trace_id
-                try:
-                    if response.refusal_present or response.finish_reason in {"length", "content_filter"}:
-                        raise ValueError("Provider returned a refused or incomplete assessment")
-                    assessment = self._transform_ai_response(
-                        self._parse_json_response(response.content), request=request
-                    )
-                except ValueError as error:
-                    # Log a fixed code, never provider content or learner text.
-                    rejection_reason = self._validation_error_code(error)
-                    if attempt == 1:
-                        raise
-                    logger.info("AI assessment output rejected reason=%s; attempting one repair", rejection_reason)
-                    messages.extend([
-                        {
-                            "role": "assistant",
-                            "content": (response.content or "")[:self.MAX_REPAIR_CONTENT_CHARS],
-                        },
-                        {
-                            "role": "user",
-                            "content": (
-                                "The preceding output failed validation: "
-                                + str(error)[:4000]
-                                + "\\nReturn a complete corrected JSON object using the original "
-                                "rubric and submitted evidence. Include all twelve integer scores, "
-                                "the verdict, finding kinds and exact references, and every "
-                                "requirement coverage entry. Every material deduction needs a "
-                                "scored_gap=true defect with criterion, submitted evidence, core "
-                                "requirement reference and actionable recommendation. Clarifications "
-                                "and optional suggestions are unscored. Do not invent evidence to repair an "
-                                "invalid reference or change scores to satisfy an acceptance target. "
-                                "Keep detailed_analysis limited to eight dimension strings. Put strengths, "
-                                "improvements, missing_components, missing_descriptions, unclear_connections, "
-                                "suggestions and interview_questions at the top level, never inside detailed_analysis."
-                            ),
-                        },
-                    ])
-                    continue
-                assessment.trace_id = trace_id
-                assessment.processing_time_ms = int((time.monotonic() - start_time) * 1000)
-                logger.info(
-                    "AI assessment succeeded score=%s verdict=%s rubric=%s revision=%s",
-                    assessment.overall_score, assessment.verdict.value,
-                    assessment.rubric_version, assessment.requirement_revision,
-                )
-                return assessment
-        except Exception as error:
-            logger.warning(
-                "AI assessment unavailable error_type=%s rejection_reason=%s elapsed_ms=%s",
-                type(error).__name__, rejection_reason, int((time.monotonic() - start_time) * 1000),
+            if response.refusal_present or response.finish_reason in {"length", "content_filter"}:
+                raise ValueError("Provider returned a refused or incomplete assessment")
+            assessment = self._transform_ai_response(
+                self._parse_json_response(response.content), request=request
             )
+        except ValueError as error:
+            reason = self._validation_error_code(error)
+            if attempt == 1:
+                raise
+            logger.info(
+                "AI assessment output rejected reason=%s; attempting one repair", reason
+            )
+            self._append_repair_prompt(messages, response.content, error)
+            return None, trace_id, reason
+        return assessment, trace_id, None
+
+    def _append_repair_prompt(
+        self,
+        messages: list[dict[str, str]],
+        content: str | None,
+        error: ValueError,
+    ) -> None:
+        messages.extend([
+            {
+                "role": "assistant",
+                "content": (content or "")[:self.MAX_REPAIR_CONTENT_CHARS],
+            },
+            {
+                "role": "user",
+                "content": (
+                    "The preceding output failed validation: "
+                    + str(error)[:4000]
+                    + "\\nReturn a complete corrected JSON object using the original "
+                    "rubric and submitted evidence. Include all twelve integer scores, "
+                    "the verdict, finding kinds and exact references, and every "
+                    "requirement coverage entry. Every material deduction needs a "
+                    "scored_gap=true defect with criterion, submitted evidence, core "
+                    "requirement reference and actionable recommendation. Clarifications "
+                    "and optional suggestions are unscored. Do not invent evidence to repair an "
+                    "invalid reference or change scores to satisfy an acceptance target. "
+                    "Keep detailed_analysis limited to eight dimension strings. Put strengths, "
+                    "improvements, missing_components, missing_descriptions, unclear_connections, "
+                    "suggestions and interview_questions at the top level, never inside detailed_analysis."
+                ),
+            },
+        ])
+
+    def _complete_assessment(
+        self,
+        assessment: AssessmentResponse,
+        trace_id: str | None,
+        start_time: float,
+    ) -> AssessmentResponse:
+        assessment.trace_id = trace_id
+        assessment.processing_time_ms = int((time.monotonic() - start_time) * 1000)
+        logger.info(
+            "AI assessment succeeded score=%s verdict=%s rubric=%s revision=%s",
+            assessment.overall_score, assessment.verdict.value,
+            assessment.rubric_version, assessment.requirement_revision,
+        )
+        return assessment
+
+    async def _fallback_after_assessment_failure(
+        self,
+        request: AssessmentRequest,
+        start_time: float,
+        trace_id: str | None,
+    ) -> AssessmentResponse:
 
         fallback = self._fallback_assessment(
             request, processing_time_ms=int((time.monotonic() - start_time) * 1000)
@@ -415,15 +472,30 @@ class AIAssessorService:
         self, assessment: AssessmentResponse, request: AssessmentRequest
     ) -> None:
         evidence_ids = get_assessment_evidence_ids(request)
+        requirement_refs = get_assessment_requirement_refs(request)
+        missing_core, core_coverage = self._validate_coverage(
+            assessment, request, requirement_refs, evidence_ids
+        )
+        for finding in assessment.findings:
+            self._validate_finding_grounding(
+                finding, evidence_ids, requirement_refs, missing_core
+            )
+        self._validate_material_deductions(assessment)
+        self._validate_verdict_coverage(assessment, core_coverage)
+
+    def _validate_coverage(
+        self,
+        assessment: AssessmentResponse,
+        request: AssessmentRequest,
+        requirement_refs: dict[str, Any],
+        evidence_ids: set[str],
+    ) -> tuple[set[str], list[RequirementCoverage]]:
         spec = request.problem.requirementSpec if request.problem else None
         requirements = {
             item.id: item for item in spec.functional + spec.nonFunctional
         } if spec else {}
-        requirement_refs = get_assessment_requirement_refs(request)
         coverage = assessment.requirement_coverage
-        # Legacy anchors preserve the exact brief without pretending it is a
-        # typed specification. A model may return no legacy coverage or a full
-        # grounded map; never reject a complete legacy map as unknown scope.
+        # Legacy anchors retain the exact brief without pretending it is typed.
         if spec is None and coverage:
             requirements = requirement_refs
         coverage_ids = [item.requirement_id for item in coverage]
@@ -433,43 +505,85 @@ class AIAssessorService:
             item.requirement_id for item in coverage
             if item.status == "missing" and requirements[item.requirement_id].scope == "core"
         }
-
         for item in coverage:
-            if not set(item.evidence_ids) <= evidence_ids:
-                raise ValueError("Coverage contains unknown evidence IDs")
-            if item.status in {"supported", "partial"} and not item.evidence_ids:
-                raise ValueError("Supported or partial coverage requires submitted evidence")
+            self._validate_coverage_evidence(item, evidence_ids)
+        core_coverage = [
+            item for item in coverage
+            if requirements[item.requirement_id].scope == "core"
+        ]
+        return missing_core, core_coverage
 
-        for finding in assessment.findings:
-            if not set(finding.evidence_ids) <= evidence_ids:
-                raise ValueError("Finding contains unknown evidence IDs")
-            if not set(finding.requirement_ids) <= set(requirement_refs):
-                raise ValueError("Finding contains unknown requirement IDs")
-            if finding.criterion is not None and finding.criterion not in self._SCORE_WEIGHTS:
-                raise ValueError("Finding criterion must be a rubric dimension")
-            if finding.kind == FindingKind.DEFECT:
-                if not finding.criterion:
-                    raise ValueError("A scored defect must name an applicable rubric criterion")
-                if not finding.evidence_ids and not set(finding.requirement_ids) & missing_core:
-                    raise ValueError("A defect needs submitted evidence or a missing core requirement")
-                if finding.requirement_ids and all(
-                    requirement_refs[identifier].scope == "extension" for identifier in finding.requirement_ids
-                ):
-                    raise ValueError("An extension-only gap cannot be a required-scope defect")
-            if finding.kind == FindingKind.STRENGTH and not finding.evidence_ids:
-                raise ValueError("A strength must cite submitted evidence")
-            if finding.kind != FindingKind.DEFECT and (finding.scored_gap or finding.criterion is not None):
-                raise ValueError("Strengths, clarifications and optional extensions cannot justify deductions")
-            if finding.scored_gap:
-                if finding.kind != FindingKind.DEFECT or not finding.criterion:
-                    raise ValueError("A scored_gap must be a defect with an applicable rubric criterion")
-                if not finding.evidence_ids or not any(
-                    requirement_refs[identifier].scope == "core" for identifier in finding.requirement_ids
-                ):
-                    raise ValueError("A scored_gap requires submitted evidence and a core requirement reference")
-                if not finding.recommendation or not finding.recommendation.strip():
-                    raise ValueError("A scored_gap requires an actionable recommendation")
+    @staticmethod
+    def _validate_coverage_evidence(
+        item: RequirementCoverage, evidence_ids: set[str]
+    ) -> None:
+        if not set(item.evidence_ids) <= evidence_ids:
+            raise ValueError("Coverage contains unknown evidence IDs")
+        if item.status in {"supported", "partial"} and not item.evidence_ids:
+            raise ValueError("Supported or partial coverage requires submitted evidence")
 
+    def _validate_finding_grounding(
+        self,
+        finding: ReviewFinding,
+        evidence_ids: set[str],
+        requirement_refs: dict[str, Any],
+        missing_core: set[str],
+    ) -> None:
+        self._validate_finding_references(finding, evidence_ids, requirement_refs)
+        if finding.kind == FindingKind.DEFECT:
+            self._validate_defect_grounding(finding, requirement_refs, missing_core)
+        if finding.kind == FindingKind.STRENGTH and not finding.evidence_ids:
+            raise ValueError("A strength must cite submitted evidence")
+        if finding.kind != FindingKind.DEFECT and (finding.scored_gap or finding.criterion is not None):
+            raise ValueError("Strengths, clarifications and optional extensions cannot justify deductions")
+        if finding.scored_gap:
+            self._validate_scored_gap(finding, requirement_refs)
+
+    def _validate_finding_references(
+        self,
+        finding: ReviewFinding,
+        evidence_ids: set[str],
+        requirement_refs: dict[str, Any],
+    ) -> None:
+        if not set(finding.evidence_ids) <= evidence_ids:
+            raise ValueError("Finding contains unknown evidence IDs")
+        if not set(finding.requirement_ids) <= set(requirement_refs):
+            raise ValueError("Finding contains unknown requirement IDs")
+        if finding.criterion is not None and finding.criterion not in self._SCORE_WEIGHTS:
+            raise ValueError("Finding criterion must be a rubric dimension")
+
+    @staticmethod
+    def _validate_defect_grounding(
+        finding: ReviewFinding,
+        requirement_refs: dict[str, Any],
+        missing_core: set[str],
+    ) -> None:
+        if not finding.criterion:
+            raise ValueError("A scored defect must name an applicable rubric criterion")
+        if not finding.evidence_ids and not set(finding.requirement_ids) & missing_core:
+            raise ValueError("A defect needs submitted evidence or a missing core requirement")
+        if finding.requirement_ids and all(
+            requirement_refs[identifier].scope == "extension"
+            for identifier in finding.requirement_ids
+        ):
+            raise ValueError("An extension-only gap cannot be a required-scope defect")
+
+    @staticmethod
+    def _validate_scored_gap(
+        finding: ReviewFinding, requirement_refs: dict[str, Any]
+    ) -> None:
+        if finding.kind != FindingKind.DEFECT or not finding.criterion:
+            raise ValueError("A scored_gap must be a defect with an applicable rubric criterion")
+        has_core_requirement = any(
+            requirement_refs[identifier].scope == "core"
+            for identifier in finding.requirement_ids
+        )
+        if not finding.evidence_ids or not has_core_requirement:
+            raise ValueError("A scored_gap requires submitted evidence and a core requirement reference")
+        if not finding.recommendation or not finding.recommendation.strip():
+            raise ValueError("A scored_gap requires an actionable recommendation")
+
+    def _validate_material_deductions(self, assessment: AssessmentResponse) -> None:
         justified_dimensions = {finding.criterion for finding in assessment.findings if finding.scored_gap}
         unexplained = [
             dimension for dimension in self._SCORE_WEIGHTS
@@ -482,9 +596,10 @@ class AIAssessorService:
                 "core requirement link and action: " + ", ".join(unexplained)
             )
 
-        core_coverage = [
-            item for item in coverage if requirements[item.requirement_id].scope == "core"
-        ]
+    @staticmethod
+    def _validate_verdict_coverage(
+        assessment: AssessmentResponse, core_coverage: list[RequirementCoverage]
+    ) -> None:
         if assessment.verdict == AssessmentVerdict.STRONG_ALIGNMENT and any(
             item.status != "supported" for item in core_coverage
         ):
@@ -504,47 +619,15 @@ class AIAssessorService:
         self, ai_result: JsonObject, request: AssessmentRequest | None = None
     ) -> AssessmentResponse:
         """Validate AI output, preserving legacy response fields but no partial grades."""
-        raw_scores = ai_result.get("scores")
-        if not isinstance(raw_scores, dict) or set(raw_scores) != set(self._SCORE_WEIGHTS):
-            raise ValueError("AI response must include exactly all twelve rubric scores")
-        if any(type(value) is not int for value in raw_scores.values()):
-            raise ValueError("All rubric scores must be integers, not null, booleans or strings")
-        scores = ScoreBreakdown.model_validate(raw_scores)
-        overall_score = round(
-            sum(raw_scores[field] * weight for field, weight in self._SCORE_WEIGHTS.items())
-            / sum(self._SCORE_WEIGHTS.values())
-        )
-
-        raw_findings = ai_result.get("findings")
-        if not isinstance(raw_findings, list):
-            raise ValueError("AI response field 'findings' must be a list")
-        for item in raw_findings:
-            if not isinstance(item, dict) or not {"kind", "evidence_ids", "requirement_ids"} <= set(item):
-                raise ValueError("Each AI finding must include kind, evidence_ids and requirement_ids")
-        findings = [ReviewFinding.model_validate(item) for item in raw_findings]
+        scores, overall_score = self._parse_score_breakdown(ai_result)
+        findings = self._parse_review_findings(ai_result)
         verdict = AssessmentVerdict(ai_result.get("verdict"))
-        if verdict == AssessmentVerdict.UNAVAILABLE:
-            raise ValueError("Unavailable AI output cannot carry an architecture score")
-
-        for finding in findings:
-            if (finding.kind == FindingKind.STRENGTH) != (finding.severity == FindingSeverity.POSITIVE):
-                raise ValueError("Positive severity and strength kind must agree")
-            if finding.kind == FindingKind.EXTENSION and finding.severity != FindingSeverity.IMPROVEMENT:
-                raise ValueError("Optional extensions must use improvement severity")
-            if finding.kind == FindingKind.CLARIFICATION and finding.severity == FindingSeverity.CRITICAL:
-                raise ValueError("Unknown decisions cannot be critical demonstrated defects")
-        critical = any(finding.severity == FindingSeverity.CRITICAL for finding in findings)
-        if critical and verdict != AssessmentVerdict.NEEDS_REVISION:
-            raise ValueError("A critical finding requires a needs_revision verdict")
-        if verdict == AssessmentVerdict.STRONG_ALIGNMENT and (
-            overall_score < 50 or any(finding.kind in {FindingKind.DEFECT, FindingKind.CLARIFICATION} for finding in findings)
-        ):
-            raise ValueError("Strong alignment conflicts with unresolved defects, clarifications or low scores")
-
+        self._validate_findings_against_verdict(findings, verdict, overall_score)
         if "requirement_coverage" not in ai_result:
             raise ValueError("AI output must include requirement_coverage")
+
         assessment = AssessmentResponse(
-            is_valid=verdict == AssessmentVerdict.STRONG_ALIGNMENT and not critical,
+            is_valid=verdict == AssessmentVerdict.STRONG_ALIGNMENT,
             overall_score=overall_score,
             score_available=True,
             verdict=verdict,
@@ -571,6 +654,59 @@ class AIAssessorService:
             self._validate_grounding(assessment, request)
         return assessment
 
+    def _parse_score_breakdown(
+        self, ai_result: JsonObject
+    ) -> tuple[ScoreBreakdown, int]:
+        raw_scores = ai_result.get("scores")
+        if not isinstance(raw_scores, dict) or set(raw_scores) != set(self._SCORE_WEIGHTS):
+            raise ValueError("AI response must include exactly all twelve rubric scores")
+        if any(type(value) is not int for value in raw_scores.values()):
+            raise ValueError("All rubric scores must be integers, not null, booleans or strings")
+        scores = ScoreBreakdown.model_validate(raw_scores)
+        overall_score = round(
+            sum(raw_scores[field] * weight for field, weight in self._SCORE_WEIGHTS.items())
+            / sum(self._SCORE_WEIGHTS.values())
+        )
+        return scores, overall_score
+
+    @staticmethod
+    def _parse_review_findings(ai_result: JsonObject) -> list[ReviewFinding]:
+        raw_findings = ai_result.get("findings")
+        if not isinstance(raw_findings, list):
+            raise ValueError("AI response field 'findings' must be a list")
+        for item in raw_findings:
+            if not isinstance(item, dict) or not {"kind", "evidence_ids", "requirement_ids"} <= set(item):
+                raise ValueError("Each AI finding must include kind, evidence_ids and requirement_ids")
+        findings = [ReviewFinding.model_validate(item) for item in raw_findings]
+        return findings
+
+    def _validate_findings_against_verdict(
+        self,
+        findings: list[ReviewFinding],
+        verdict: AssessmentVerdict,
+        overall_score: int,
+    ) -> None:
+        if verdict == AssessmentVerdict.UNAVAILABLE:
+            raise ValueError("Unavailable AI output cannot carry an architecture score")
+        for finding in findings:
+            self._validate_finding_severity(finding)
+        critical = any(finding.severity == FindingSeverity.CRITICAL for finding in findings)
+        if critical and verdict != AssessmentVerdict.NEEDS_REVISION:
+            raise ValueError("A critical finding requires a needs_revision verdict")
+        if verdict == AssessmentVerdict.STRONG_ALIGNMENT and (
+            overall_score < 50 or any(finding.kind in {FindingKind.DEFECT, FindingKind.CLARIFICATION} for finding in findings)
+        ):
+            raise ValueError("Strong alignment conflicts with unresolved defects, clarifications or low scores")
+
+    @staticmethod
+    def _validate_finding_severity(finding: ReviewFinding) -> None:
+        if (finding.kind == FindingKind.STRENGTH) != (finding.severity == FindingSeverity.POSITIVE):
+            raise ValueError("Positive severity and strength kind must agree")
+        if finding.kind == FindingKind.EXTENSION and finding.severity != FindingSeverity.IMPROVEMENT:
+            raise ValueError("Optional extensions must use improvement severity")
+        if finding.kind == FindingKind.CLARIFICATION and finding.severity == FindingSeverity.CRITICAL:
+            raise ValueError("Unknown decisions cannot be critical demonstrated defects")
+
     def _fallback_assessment(
         self,
         request: AssessmentRequest,
@@ -584,7 +720,7 @@ class AIAssessorService:
             overall_score=0,
             score_available=False,
             verdict=AssessmentVerdict.UNAVAILABLE,
-            scores=ScoreBreakdown(**{field: 0 for field in self._SCORE_WEIGHTS}),
+            scores=ScoreBreakdown(**dict.fromkeys(self._SCORE_WEIGHTS, 0)),
             feedback=[
                 ValidationFeedback(
                     type=FeedbackType.WARNING,

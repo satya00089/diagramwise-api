@@ -1,6 +1,7 @@
 """DynamoDB service for managing users and diagrams."""
 
 from datetime import datetime, timezone
+from dataclasses import dataclass
 from decimal import Decimal
 import time
 from typing import Any, Dict, List, Optional, Tuple, cast
@@ -16,16 +17,40 @@ from pydantic import BaseModel
 from app.utils.config import get_settings
 from app.models.auth_models import User
 from app.models.diagram_models import Diagram, Collaborator, Permission, PublicDiagramResponse
-from app.models.attempt_models import AttemptResponse, PublicSolutionResponse, LeaderboardEntry
+from app.models.attempt_models import AttemptCreate, AttemptResponse, PublicSolutionResponse, LeaderboardEntry
 from app.models.feedback_models import FeedbackCreate, FeedbackResponse
 from app.models.problem_models import RequirementSpec
 
 settings = get_settings()
 
 DDB_ZERO_VALUE = ":zero"
+DDB_NODES_NAME = "#nodes"
+DDB_EDGES_NAME = "#edges"
 # Canvas items share the diagrams table; this marks them so diagram lists skip them.
 CANVAS_RECORD_TYPE = "canvas"
 DDB_UPDATED_VALUE = ":updated"
+
+
+@dataclass
+class PreparedAttemptState:
+    assessment_count: int
+    preserved_assessment: Optional[Dict[str, Any]]
+    preserved_reasoning_context: Optional[Dict[str, Any]]
+    preserved_interview_session: Optional[Dict[str, Any]]
+    existing_data: Dict[str, Any]
+    assessment_history: List[Dict[str, Any]]
+    addressed_finding_ids: List[str]
+    preserved_check: Optional[Dict[str, Any]]
+
+
+@dataclass
+class AttemptSaveState:
+    user_id: str
+    request: AttemptCreate
+    existing_attempt: Optional[AttemptResponse]
+    prepared: PreparedAttemptState
+    updated_at: str
+    problem_requirement_spec: Optional[Dict[str, Any]]
 
 def _is_canvas_record(item: Dict[str, Any]) -> bool:
     return item.get("recordType") == CANVAS_RECORD_TYPE
@@ -856,18 +881,18 @@ class DynamoDBService:
                 expression_values[":description"] = description
 
             if nodes is not None:
-                update_expression += ", #nodes = :nodes"
+                update_expression += f", {DDB_NODES_NAME} = :nodes"
                 # Convert floats to Decimal for DynamoDB
                 expression_values[":nodes"] = convert_floats_to_decimal(nodes)
-                expression_names["#nodes"] = "nodes"
+                expression_names[DDB_NODES_NAME] = "nodes"
                 update_expression += ", nodeCount = :node_count"
                 expression_values[":node_count"] = len(nodes)
 
             if edges is not None:
-                update_expression += ", #edges = :edges"
+                update_expression += f", {DDB_EDGES_NAME} = :edges"
                 # Convert floats to Decimal for DynamoDB
                 expression_values[":edges"] = convert_floats_to_decimal(edges)
-                expression_names["#edges"] = "edges"
+                expression_names[DDB_EDGES_NAME] = "edges"
                 update_expression += ", edgeCount = :edge_count"
                 expression_values[":edge_count"] = len(edges)
 
@@ -907,9 +932,9 @@ class DynamoDBService:
                 Key={"userId": user_id, "id": diagram_id},
                 UpdateExpression=(
                     "SET nodeCount = :node_count, edgeCount = :edge_count, "
-                    f"updatedAt = {DDB_UPDATED_VALUE} REMOVE #nodes, #edges"
+                    f"updatedAt = {DDB_UPDATED_VALUE} REMOVE {DDB_NODES_NAME}, {DDB_EDGES_NAME}"
                 ),
-                ExpressionAttributeNames={"#nodes": "nodes", "#edges": "edges"},
+                ExpressionAttributeNames={DDB_NODES_NAME: "nodes", DDB_EDGES_NAME: "edges"},
                 ExpressionAttributeValues={
                     ":node_count": node_count,
                     ":edge_count": edge_count,
@@ -1547,16 +1572,7 @@ class DynamoDBService:
         interview_session: Optional[Dict[str, Any]],
         addressed_finding_ids: Optional[List[str]],
         last_assessment_check: Optional[Dict[str, Any]] = None,
-    ) -> tuple[
-        int,
-        Optional[Dict[str, Any]],
-        Optional[Dict[str, Any]],
-        Optional[Dict[str, Any]],
-        Dict[str, Any],
-        List[Dict[str, Any]],
-        List[str],
-        Optional[Dict[str, Any]],
-    ]:
+    ) -> PreparedAttemptState:
         existing_data = (
             existing_attempt.model_dump() if existing_attempt is not None else {}
         )
@@ -1564,20 +1580,12 @@ class DynamoDBService:
         preserved_assessment = cast(
             Optional[Dict[str, Any]], existing_data.get("lastAssessment")
         )
-
-        if reasoning_context is not None:
-            preserved_reasoning_context = convert_floats_to_decimal(
-                reasoning_context
-            )
-        else:
-            preserved_reasoning_context = existing_data.get("reasoningContext")
-
-        if interview_session is not None:
-            preserved_interview_session = convert_floats_to_decimal(
-                interview_session
-            )
-        else:
-            preserved_interview_session = existing_data.get("interviewSession")
+        preserved_reasoning_context = DynamoDBService._preserve_attempt_context(
+            reasoning_context, existing_data.get("reasoningContext")
+        )
+        preserved_interview_session = DynamoDBService._preserve_attempt_context(
+            interview_session, existing_data.get("interviewSession")
+        )
 
         incoming_assessment = DynamoDBService._normalize_attempt_assessment(
             last_assessment
@@ -1585,15 +1593,57 @@ class DynamoDBService:
         incoming_check = DynamoDBService._normalize_attempt_assessment(
             last_assessment_check
         )
-        previous_assessment = DynamoDBService._normalize_attempt_assessment(
-            preserved_assessment
-        )
         preserved_check = cast(
             Optional[Dict[str, Any]], existing_data.get("lastAssessmentCheck")
         )
+        assessment_count, preserved_assessment, preserved_check, new_reviews = (
+            DynamoDBService._merge_attempt_reviews(
+                assessment_count,
+                preserved_assessment,
+                preserved_check,
+                incoming_assessment,
+                incoming_check,
+            )
+        )
+
+        preserved_addressed_finding_ids = list(
+            addressed_finding_ids
+            if addressed_finding_ids is not None
+            else existing_data.get("addressedFindingIds", [])
+        )
+        assessment_history = list(existing_data.get("assessmentHistory", []))[-10:]
+        assessment_history = DynamoDBService._append_attempt_history(
+            assessment_history, new_reviews, preserved_addressed_finding_ids
+        )
+        return PreparedAttemptState(
+            assessment_count=assessment_count,
+            preserved_assessment=preserved_assessment,
+            preserved_reasoning_context=preserved_reasoning_context,
+            preserved_interview_session=preserved_interview_session,
+            existing_data=existing_data,
+            assessment_history=assessment_history,
+            addressed_finding_ids=preserved_addressed_finding_ids,
+            preserved_check=preserved_check,
+        )
+
+    @staticmethod
+    def _preserve_attempt_context(
+        incoming: Optional[Dict[str, Any]], existing: Optional[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        return convert_floats_to_decimal(incoming) if incoming is not None else existing
+
+    @staticmethod
+    def _merge_attempt_reviews(
+        assessment_count: int,
+        preserved_assessment: Optional[Dict[str, Any]],
+        preserved_check: Optional[Dict[str, Any]],
+        incoming_assessment: Optional[Dict[str, Any]],
+        incoming_check: Optional[Dict[str, Any]],
+    ) -> tuple[int, Optional[Dict[str, Any]], Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+        previous_assessment = DynamoDBService._normalize_attempt_assessment(
+            preserved_assessment
+        )
         original_check = DynamoDBService._normalize_attempt_assessment(preserved_check)
-        # Preserve legacy lastAssessment content on ordinary saves. New failed
-        # checks never displace a successful review, even when both are supplied.
         new_reviews: List[Dict[str, Any]] = []
         for review in (incoming_assessment, incoming_check):
             if review is None:
@@ -1611,15 +1661,16 @@ class DynamoDBService:
                 if review != original_check and review not in new_reviews:
                     new_reviews.append(review)
                 preserved_check = review
+        return assessment_count, preserved_assessment, preserved_check, new_reviews
 
-        preserved_addressed_finding_ids = list(
-            addressed_finding_ids
-            if addressed_finding_ids is not None
-            else existing_data.get("addressedFindingIds", [])
-        )
-        assessment_history = list(existing_data.get("assessmentHistory", []))[-10:]
+    @staticmethod
+    def _append_attempt_history(
+        history: List[Dict[str, Any]],
+        new_reviews: List[Dict[str, Any]],
+        addressed_finding_ids: List[str],
+    ) -> List[Dict[str, Any]]:
         for review in new_reviews:
-            assessment_history.append(
+            history.append(
                 {
                     "id": str(review.get("assessmentId") or uuid4()),
                     "score": review["score"],
@@ -1627,7 +1678,7 @@ class DynamoDBService:
                     "findingCount": len(review.get("findings", []) or review.get("feedback", []) or []),
                     "createdAt": datetime.now(timezone.utc).isoformat(),
                     "source": review.get("source"),
-                    "addressedFindingIds": preserved_addressed_finding_ids,
+                    "addressedFindingIds": addressed_finding_ids,
                     **{
                         field: review.get(field)
                         for field in (
@@ -1637,18 +1688,8 @@ class DynamoDBService:
                     },
                 }
             )
-            assessment_history = assessment_history[-10:]
-
-        return (
-            assessment_count,
-            preserved_assessment,
-            preserved_reasoning_context,
-            preserved_interview_session,
-            existing_data,
-            assessment_history,
-            preserved_addressed_finding_ids,
-            preserved_check,
-        )
+            history = history[-10:]
+        return history
 
     def _resolve_attempt_requirement_spec(
         self,
@@ -1684,112 +1725,91 @@ class DynamoDBService:
         return approved.model_dump()
 
     @staticmethod
-    def _build_attempt_item(
-        user_id: str,
-        problem_id: str,
-        title: str,
-        difficulty: Optional[str],
-        category: Optional[str],
-        nodes: List[Any],
-        edges: List[Any],
-        elapsed_time: int,
-        preserved_assessment: Optional[Dict[str, Any]],
-        preserved_reasoning_context: Optional[Dict[str, Any]],
-        preserved_interview_session: Optional[Dict[str, Any]],
-        assessment_count: int,
-        assessment_history: List[Dict[str, Any]],
-        addressed_finding_ids: List[str],
-        now: str,
-        existing_attempt: Optional[AttemptResponse],
-        last_assessment_check: Optional[Dict[str, Any]],
-        problem_requirement_spec: Optional[Dict[str, Any]],
-    ) -> Dict[str, Any]:
+    def _build_attempt_item(state: AttemptSaveState) -> Dict[str, Any]:
+        request = state.request
+        prepared = state.prepared
         item: Dict[str, Any] = {
-            "userId": user_id,
-            "problemId": problem_id,
-            "title": title,
-            "difficulty": difficulty or "Medium",
-            "category": category or "General",
-            "nodes": convert_floats_to_decimal(nodes),
-            "edges": convert_floats_to_decimal(edges),
-            "elapsedTime": elapsed_time,
-            "lastAssessment": preserved_assessment,
-            "lastAssessmentCheck": last_assessment_check,
-            "reasoningContext": preserved_reasoning_context,
-            "interviewSession": preserved_interview_session,
-            "assessmentCount": assessment_count,
-            "assessmentHistory": convert_floats_to_decimal(assessment_history),
-            "addressedFindingIds": addressed_finding_ids,
-            "updatedAt": now,
-            "lastAttemptedAt": now,
+            "userId": state.user_id,
+            "problemId": request.problemId,
+            "title": request.title,
+            "difficulty": request.difficulty or "Medium",
+            "category": request.category or "General",
+            "nodes": convert_floats_to_decimal(request.nodes),
+            "edges": convert_floats_to_decimal(request.edges),
+            "elapsedTime": request.elapsedTime,
+            "lastAssessment": prepared.preserved_assessment,
+            "lastAssessmentCheck": prepared.preserved_check,
+            "reasoningContext": prepared.preserved_reasoning_context,
+            "interviewSession": prepared.preserved_interview_session,
+            "assessmentCount": prepared.assessment_count,
+            "assessmentHistory": convert_floats_to_decimal(prepared.assessment_history),
+            "addressedFindingIds": prepared.addressed_finding_ids,
+            "updatedAt": state.updated_at,
+            "lastAttemptedAt": state.updated_at,
         }
-        if problem_requirement_spec is not None:
-            item["problemRequirementSpec"] = problem_requirement_spec
+        if state.problem_requirement_spec is not None:
+            item["problemRequirementSpec"] = state.problem_requirement_spec
 
-        if existing_attempt is None:
-            item["createdAt"] = now
+        if state.existing_attempt is None:
+            item["createdAt"] = state.updated_at
         else:
-            item["createdAt"] = existing_attempt.createdAt
+            item["createdAt"] = state.existing_attempt.createdAt
 
-        if existing_attempt and existing_attempt.isPublic:
+        if state.existing_attempt and state.existing_attempt.isPublic:
             assessment = DynamoDBService._qualifying_attempt_assessment(
                 {
-                    "lastAssessment": preserved_assessment,
-                    "lastAssessmentCheck": last_assessment_check,
+                    "lastAssessment": prepared.preserved_assessment,
+                    "lastAssessmentCheck": prepared.preserved_check,
                 }
             )
             if assessment:
-                item["leaderboardProblemId"] = problem_id
+                item["leaderboardProblemId"] = request.problemId
                 item["leaderboardScore"] = assessment["score"]
 
         return item
 
     @staticmethod
     def _build_attempt_response(
-        user_id: str,
-        problem_id: str,
-        title: str,
-        difficulty: Optional[str],
-        category: Optional[str],
-        nodes: List[Any],
-        edges: List[Any],
-        elapsed_time: int,
-        last_assessment: Optional[Dict[str, Any]],
-        reasoning_context: Optional[Dict[str, Any]],
-        interview_session: Optional[Dict[str, Any]],
-        assessment_count: int,
-        assessment_history: List[Dict[str, Any]],
-        addressed_finding_ids: List[str],
-        item: Dict[str, Any],
-        now: str,
-        existing_attempt: Optional[AttemptResponse],
+        state: AttemptSaveState, item: Dict[str, Any]
     ) -> AttemptResponse:
+        request = state.request
+        prepared = state.prepared
+        reasoning_context = (
+            request.reasoningContext.model_dump(exclude_none=True)
+            if request.reasoningContext
+            else prepared.existing_data.get("reasoningContext")
+        )
+        interview_session = (
+            request.interviewSession.model_dump(exclude_none=True)
+            if request.interviewSession
+            else prepared.existing_data.get("interviewSession")
+        )
         return AttemptResponse(
-            id=f"{user_id}#{problem_id}",
-            userId=user_id,
-            problemId=problem_id,
-            title=title,
-            difficulty=difficulty or "Medium",
-            category=category or "General",
-            nodes=nodes,
-            edges=edges,
-            elapsedTime=elapsed_time,
-            lastAssessment=last_assessment,
-            lastAssessmentCheck=item.get("lastAssessmentCheck"),
-            problemRequirementSpec=item.get("problemRequirementSpec"),
+            id=f"{state.user_id}#{request.problemId}",
+            userId=state.user_id,
+            problemId=request.problemId,
+            title=request.title,
+            difficulty=request.difficulty or "Medium",
+            category=request.category or "General",
+            nodes=request.nodes,
+            edges=request.edges,
+            elapsedTime=request.elapsedTime,
+            lastAssessment=convert_decimal_to_float(prepared.preserved_assessment),
+            lastAssessmentCheck=prepared.preserved_check,
+            problemRequirementSpec=state.problem_requirement_spec,
             reasoningContext=reasoning_context,
             interviewSession=interview_session,
-            assessmentCount=assessment_count,
-            assessmentHistory=assessment_history,
-            addressedFindingIds=addressed_finding_ids,
+            assessmentCount=prepared.assessment_count,
+            assessmentHistory=prepared.assessment_history,
+            addressedFindingIds=prepared.addressed_finding_ids,
             createdAt=item["createdAt"],
-            updatedAt=now,
-            lastAttemptedAt=now,
-            isPublic=existing_attempt.isPublic if existing_attempt else False,
-            publishedAt=existing_attempt.publishedAt if existing_attempt else None,
-            authorName=existing_attempt.authorName if existing_attempt else None,
-            authorPicture=existing_attempt.authorPicture if existing_attempt else None,
-            viewCount=existing_attempt.viewCount if existing_attempt else 0,
+            updatedAt=state.updated_at,
+            lastAttemptedAt=state.updated_at,
+            isPublic=state.existing_attempt.isPublic if state.existing_attempt else False,
+            publishedAt=state.existing_attempt.publishedAt if state.existing_attempt else None,
+            authorName=state.existing_attempt.authorName if state.existing_attempt else None,
+            authorPicture=state.existing_attempt.authorPicture if state.existing_attempt else None,
+            viewCount=state.existing_attempt.viewCount if state.existing_attempt else 0,
         )
 
     @staticmethod
@@ -1876,70 +1896,39 @@ class DynamoDBService:
     def create_or_update_attempt(
         self,
         user_id: str,
-        problem_id: str,
-        title: str,
-        difficulty: Optional[str],
-        category: Optional[str],
-        nodes: List[Any],
-        edges: List[Any],
-        elapsed_time: int = 0,
-        last_assessment: Optional[Dict[str, Any]] = None,
-        reasoning_context: Optional[Dict[str, Any]] = None,
-        interview_session: Optional[Dict[str, Any]] = None,
-        addressed_finding_ids: Optional[List[str]] = None,
-        last_assessment_check: Optional[Dict[str, Any]] = None,
-        problem_requirement_spec: Optional[Dict[str, Any]] = None,
+        request: AttemptCreate,
         _conflict_retries: int = 0,
     ) -> AttemptResponse:
         """Create or update a problem attempt (upsert operation)."""
+        problem_id = request.problemId
         try:
             existing_attempt = self.get_attempt_by_problem(
                 user_id, problem_id, consistent_read=True
             )
             now = datetime.now(timezone.utc).isoformat()
-            (
-                assessment_count,
-                preserved_assessment,
-                preserved_reasoning_context,
-                preserved_interview_session,
-                existing_data,
-                assessment_history,
-                preserved_addressed_finding_ids,
-                preserved_check,
-            ) = self._prepare_attempt_state(
+            prepared = self._prepare_attempt_state(
                 existing_attempt,
-                last_assessment,
-                reasoning_context,
-                interview_session,
-                addressed_finding_ids,
-                last_assessment_check,
+                request.lastAssessment,
+                request.reasoningContext.model_dump(exclude_none=True) if request.reasoningContext else None,
+                request.interviewSession.model_dump(exclude_none=True) if request.interviewSession else None,
+                request.addressedFindingIds,
+                request.lastAssessmentCheck,
             )
             pinned_spec = self._resolve_attempt_requirement_spec(
                 problem_id,
                 existing_attempt,
-                problem_requirement_spec,
-                last_assessment_check or last_assessment,
+                request.problemRequirementSpec.model_dump() if request.problemRequirementSpec else None,
+                request.lastAssessmentCheck or request.lastAssessment,
             )
-            item = self._build_attempt_item(
-                user_id,
-                problem_id,
-                title,
-                difficulty,
-                category,
-                nodes,
-                edges,
-                elapsed_time,
-                preserved_assessment,
-                preserved_reasoning_context,
-                preserved_interview_session,
-                assessment_count,
-                assessment_history,
-                preserved_addressed_finding_ids,
-                now,
-                existing_attempt,
-                preserved_check,
-                pinned_spec,
+            state = AttemptSaveState(
+                user_id=user_id,
+                request=request,
+                existing_attempt=existing_attempt,
+                prepared=prepared,
+                updated_at=now,
+                problem_requirement_spec=pinned_spec,
             )
+            item = self._build_attempt_item(state)
 
             update_request = self._attempt_update_request(
                 user_id, problem_id, item, existing_attempt
@@ -1954,19 +1943,7 @@ class DynamoDBService:
                 if is_conflict and _conflict_retries < 2:
                     return self.create_or_update_attempt(
                         user_id=user_id,
-                        problem_id=problem_id,
-                        title=title,
-                        difficulty=difficulty,
-                        category=category,
-                        nodes=nodes,
-                        edges=edges,
-                        elapsed_time=elapsed_time,
-                        last_assessment=last_assessment,
-                        reasoning_context=reasoning_context,
-                        interview_session=interview_session,
-                        addressed_finding_ids=addressed_finding_ids,
-                        last_assessment_check=last_assessment_check,
-                        problem_requirement_spec=problem_requirement_spec,
+                        request=request,
                         _conflict_retries=_conflict_retries + 1,
                     )
                 raise
@@ -1974,32 +1951,7 @@ class DynamoDBService:
                 saved_item = convert_decimal_to_float(saved["Attributes"])
                 saved_item["id"] = f"{user_id}#{problem_id}"
                 return AttemptResponse(**saved_item)
-            response_reasoning_context = reasoning_context
-            if response_reasoning_context is None:
-                response_reasoning_context = existing_data.get("reasoningContext")
-            response_interview_session = interview_session
-            if response_interview_session is None:
-                response_interview_session = existing_data.get("interviewSession")
-
-            return self._build_attempt_response(
-                user_id,
-                problem_id,
-                title,
-                difficulty,
-                category,
-                nodes,
-                edges,
-                elapsed_time,
-                convert_decimal_to_float(preserved_assessment),
-                response_reasoning_context,
-                response_interview_session,
-                assessment_count,
-                assessment_history,
-                preserved_addressed_finding_ids,
-                item,
-                now,
-                existing_attempt,
-            )
+            return self._build_attempt_response(state, item)
         except ClientError as e:
             print(f"Error creating/updating attempt: {e}")
             raise

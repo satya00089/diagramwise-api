@@ -122,27 +122,53 @@ def update_document(guide: dict, problem: dict) -> None:
         steps[number]["requirementIds"] = [requirement_id(problem, field, index) for field, index in rows]
 
 
+def _prior_component(steps: list[dict], step: dict) -> dict | None:
+    prior = [candidate["component"] for candidate in steps
+             if candidate.get("component") and candidate["stepNumber"] < step["stepNumber"]]
+    return prior[-1] if prior else None
+
+
+def _capture_decision(steps: list[dict], step: dict) -> None:
+    choice = step["decision"]
+    anchor = _prior_component(steps, step)
+    if anchor is None:
+        return
+    step["componentUpdate"] = {
+        "nodeId": anchor["nodeId"],
+        "properties": {
+            f"decision_{step['id']}": (
+                f"{choice['question']} Choice: {choice['chosen']}. "
+                f"Rationale: {choice['chosenReason']}"
+            )
+        },
+    }
+
+
+def _capture_scale_trigger(steps: list[dict], step: dict) -> None:
+    trigger = step["scaleTrigger"]
+    if not any(candidate.get("component") for candidate in steps):
+        return
+    anchor = _prior_component(steps, step)
+    if anchor is None:
+        return
+    step["componentUpdate"] = {
+        "nodeId": anchor["nodeId"],
+        "properties": {
+            f"scale_{step['id']}": (
+                f"When {trigger['metric']}: {trigger['action']}. "
+                f"Impact: {trigger['impact']}"
+            )
+        },
+    }
+
+
 def capture_explicit_choices(guide: dict) -> None:
-    components = [step["component"] for step in guide["steps"] if step.get("component")]
-    for step in guide["steps"]:
+    steps = guide["steps"]
+    for step in steps:
         if step.get("decision"):
-            choice = step["decision"]
-            # Explicitly accepted global decision lives on an existing anchor component.
-            prior = [candidate["component"] for candidate in guide["steps"]
-                     if candidate.get("component") and candidate["stepNumber"] < step["stepNumber"]]
-            if prior:
-                step["componentUpdate"] = {"nodeId": prior[-1]["nodeId"], "properties": {
-                    f"decision_{step['id']}": f"{choice['question']} Choice: {choice['chosen']}. Rationale: {choice['chosenReason']}"
-                }}
+            _capture_decision(steps, step)
         if step.get("scaleTrigger"):
-            trigger = step["scaleTrigger"]
-            if components:
-                prior = [candidate["component"] for candidate in guide["steps"]
-                         if candidate.get("component") and candidate["stepNumber"] < step["stepNumber"]]
-                if prior:
-                    step["componentUpdate"] = {"nodeId": prior[-1]["nodeId"], "properties": {
-                        f"scale_{step['id']}": f"When {trigger['metric']}: {trigger['action']}. Impact: {trigger['impact']}"
-                    }}
+            _capture_scale_trigger(steps, step)
 
 
 def fill_required_behaviors(guide: dict) -> None:
@@ -180,14 +206,48 @@ def fill_required_behaviors(guide: dict) -> None:
         retry_step["content"] += "\n\n### Apply the retry recovery decision\n\n" + retry_step["componentUpdate"]["properties"]["retryPromotion"]
 
 
+def repository_path(path: Path) -> Path:
+    """Resolve CLI paths and keep generated fixtures inside this checkout."""
+    resolved = path.resolve()
+    allowed_roots = (ROOT, (ROOT.parent / "diagramwise").resolve())
+    if not any(resolved == root or root in resolved.parents for root in allowed_roots):
+        raise ValueError("Fixture paths must stay inside the API or frontend repository")
+    return resolved
+
+
+def repository_output_file(directory: Path, name: str) -> Path:
+    """Reject generated child paths redirected through pre-existing symlinks."""
+    target = directory / name
+    if target.is_symlink():
+        raise ValueError("Generated fixture files must not be symlinks")
+    resolved = target.resolve()
+    if resolved.parent != directory:
+        raise ValueError("Generated fixture files must stay inside their output directory")
+    return resolved
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--frontend-fixture", type=Path, help="Optional generated document apply-path fixture for the frontend test suite")
     parser.add_argument("--frontend-fixture-dir", type=Path, help="Optional generated apply-path fixtures for all five frontend tests")
     args = parser.parse_args()
-    OUTPUT.mkdir(parents=True, exist_ok=True)
-    problems = {p["id"]: p for p in json.loads((SNAPSHOTS / "problems.json").read_text(encoding="utf-8"))}
-    for source in sorted(SNAPSHOTS.glob("*.json")):
+    if args.frontend_fixture:
+        args.frontend_fixture = repository_path(args.frontend_fixture)
+    if args.frontend_fixture_dir:
+        args.frontend_fixture_dir = repository_path(args.frontend_fixture_dir)
+    snapshot_dir = repository_path(SNAPSHOTS)
+    output_dir = repository_path(OUTPUT)
+    if snapshot_dir != SNAPSHOTS or output_dir != OUTPUT:
+        raise ValueError("Fixture input/output directories must not redirect through symlinks")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    problems_path = repository_path(snapshot_dir / "problems.json")
+    if problems_path.parent != snapshot_dir:
+        raise ValueError("Problem snapshot must stay inside the walkthrough fixtures directory")
+    problems = {p["id"]: p for p in json.loads(problems_path.read_text(encoding="utf-8"))}
+    for source in sorted(snapshot_dir.glob("*.json")):
+        source = repository_path(source)
+        if source.parent != snapshot_dir:
+            raise ValueError("Walkthrough snapshots must stay inside their fixture directory")
         if source.name == "problems.json":
             continue
         guide = json.loads(source.read_text(encoding="utf-8"))
@@ -198,20 +258,29 @@ def main() -> None:
             update_document(guide, problems[DOCUMENT_ID])
         capture_explicit_choices(guide)
         fill_required_behaviors(guide)
-        (OUTPUT / source.name).write_text(json.dumps(guide, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        repository_output_file(output_dir, source.name).write_text(
+            json.dumps(guide, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
         if args.frontend_fixture and guide["problem_id"] == DOCUMENT_ID:
             # Derived test data, not an independently edited guide or runtime source.
             fixture = {"problem_id": guide["problem_id"], "version": guide["version"],
                        "requirementRevision": guide["requirementRevision"],
                        "steps": [step for step in guide["steps"] if step.get("component") or step.get("connection") or step.get("componentUpdate")]}
             args.frontend_fixture.parent.mkdir(parents=True, exist_ok=True)
-            args.frontend_fixture.write_text(json.dumps(fixture, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            frontend_fixture = repository_output_file(
+                args.frontend_fixture.parent, args.frontend_fixture.name
+            )
+            frontend_fixture.write_text(
+                json.dumps(fixture, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+            )
         if args.frontend_fixture_dir:
             fixture = {"problem_id": guide["problem_id"], "version": guide["version"], "requirementRevision": guide["requirementRevision"],
                        "steps": [step for step in guide["steps"] if step.get("component") or step.get("connection") or step.get("componentUpdate")]}
             args.frontend_fixture_dir.mkdir(parents=True, exist_ok=True)
-            (args.frontend_fixture_dir / source.name).write_text(json.dumps(fixture, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    print(json.dumps({"candidateGuides": len(list(OUTPUT.glob('*.json'))), "status": "not_published"}))
+            repository_output_file(args.frontend_fixture_dir, source.name).write_text(
+                json.dumps(fixture, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+            )
+    print(json.dumps({"candidateGuides": len(list(output_dir.glob("*.json"))), "status": "not_published"}))
 
 
 if __name__ == "__main__":

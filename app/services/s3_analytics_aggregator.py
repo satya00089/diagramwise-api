@@ -9,7 +9,7 @@ import json
 import logging
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List
 
 import boto3
@@ -136,6 +136,27 @@ class RedisAnalyticsAggregator:
                 return {}, None
             raise
 
+    def _merge_latency_field(
+        self,
+        parts: list[str],
+        value: str,
+        latency_map: Dict[str, Any],
+    ) -> bool:
+        if len(parts) != 4 or parts[0] != "latency":
+            return False
+        route = self._decode(parts[1])
+        status_group = parts[2]
+        try:
+            bucket = int(parts[3])
+        except ValueError:
+            return True
+        if status_group not in {"2xx", "3xx", "4xx", "5xx"} or not 0 <= bucket < len(LATENCY_BUCKETS_MS):
+            return True
+        counts = latency_map.setdefault(route, {}).setdefault(status_group, {})
+        bucket_key = str(bucket)
+        counts[bucket_key] = counts.get(bucket_key, 0) + int(value)
+        return True
+
     def _merge_snapshot(
         self, existing: Dict[str, Any], fields: Dict[str, str]
     ) -> Dict[str, Any]:
@@ -154,26 +175,9 @@ class RedisAnalyticsAggregator:
 
         for field, value in fields.items():
             parts = field.split("|")
+            if self._merge_latency_field(parts, value, latency_map):
+                continue
             if len(parts) < 3 or parts[0] not in ("count", "session"):
-                if len(parts) != 4 or parts[0] != "latency":
-                    continue
-                route = self._decode(parts[1])
-                status_group = parts[2]
-                try:
-                    bucket = int(parts[3])
-                except ValueError:
-                    continue
-                if (
-                    status_group not in {"2xx", "3xx", "4xx", "5xx"}
-                    or not 0 <= bucket < len(LATENCY_BUCKETS_MS)
-                ):
-                    continue
-                counts = (
-                    latency_map.setdefault(route, {})
-                    .setdefault(status_group, {})
-                )
-                bucket_key = str(bucket)
-                counts[bucket_key] = counts.get(bucket_key, 0) + int(value)
                 continue
             name = self._decode(parts[1])
             route = self._decode(parts[2])
@@ -193,74 +197,73 @@ class RedisAnalyticsAggregator:
         existing["updated_at"] = datetime.now(timezone.utc).isoformat()
         return existing
 
-    def summarize_api_latency(self, from_date: str, to_date: str) -> Dict[str, Any]:
-        """Merge daily histogram counts, then derive estimates for the range."""
-        from app.services.api_latency import summarize_buckets
+    def _add_snapshot_latency(
+        self, snapshot: Dict[str, Any], route_counts: Dict[str, List[int]]
+    ) -> None:
+        if snapshot.get("api_latency_schema_version", 1) != API_LATENCY_SCHEMA_VERSION:
+            return
+        for route, status_groups in snapshot.get("api_latency", {}).items():
+            if not isinstance(status_groups, dict):
+                continue
+            counts = route_counts.setdefault(route, [0] * len(LATENCY_BUCKETS_MS))
+            self._add_status_group_counts(status_groups, counts)
 
-        start = datetime.fromisoformat(from_date).date()
-        end = datetime.fromisoformat(to_date).date()
-        route_counts: Dict[str, List[int]] = {}
-        overall_counts = [0] * len(LATENCY_BUCKETS_MS)
-
-        def add_snapshot(snapshot: Dict[str, Any]) -> None:
-            schema_version = snapshot.get("api_latency_schema_version", 1)
-            if schema_version != API_LATENCY_SCHEMA_VERSION:
-                return
-            for route, status_groups in snapshot.get("api_latency", {}).items():
-                if not isinstance(status_groups, dict):
+    @staticmethod
+    def _add_status_group_counts(status_groups: Dict[str, Any], counts: List[int]) -> None:
+        for bucket_map in status_groups.values():
+            if not isinstance(bucket_map, dict):
+                continue
+            for bucket_text, count in bucket_map.items():
+                try:
+                    bucket = int(bucket_text)
+                    value = max(0, int(count))
+                except (TypeError, ValueError):
                     continue
-                counts = route_counts.setdefault(
-                    route, [0] * len(LATENCY_BUCKETS_MS)
-                )
-                for bucket_map in status_groups.values():
-                    if not isinstance(bucket_map, dict):
-                        continue
-                    for bucket_text, count in bucket_map.items():
-                        try:
-                            bucket = int(bucket_text)
-                            value = max(0, int(count))
-                        except (TypeError, ValueError):
-                            continue
-                        if 0 <= bucket < len(LATENCY_BUCKETS_MS):
-                            counts[bucket] += value
+                if 0 <= bucket < len(LATENCY_BUCKETS_MS):
+                    counts[bucket] += value
 
+    def _add_redis_latency(self, date_key: str, route_counts: Dict[str, List[int]]) -> None:
+        if self._redis is None:
+            return
+        fields = self._redis.hgetall(self._latency_redis_key(date_key))
+        for field, value in fields.items():
+            parts = field.split("|")
+            if len(parts) != 4 or parts[0] != "latency":
+                continue
+            try:
+                route = self._decode(parts[1])
+                bucket = int(parts[3])
+                increment = max(0, int(value))
+            except (ValueError, TypeError):
+                continue
+            if parts[2] not in {"2xx", "3xx", "4xx", "5xx"} or not 0 <= bucket < len(LATENCY_BUCKETS_MS):
+                continue
+            route_counts.setdefault(route, [0] * len(LATENCY_BUCKETS_MS))[bucket] += increment
+
+    def _collect_latency_counts(self, start: date, end: date) -> Dict[str, List[int]]:
+        route_counts: Dict[str, List[int]] = {}
         cursor = start
         while cursor <= end:
             date_key = cursor.isoformat()
             snapshot, _etag = self._get_existing(self._s3_key(date_key))
-            add_snapshot(snapshot)
-
-            # Include observations that have not yet been exported to S3.
-            if self._redis is not None:
-                for field, value in self._redis.hgetall(
-                    self._latency_redis_key(date_key)
-                ).items():
-                    parts = field.split("|")
-                    if len(parts) != 4 or parts[0] != "latency":
-                        continue
-                    try:
-                        route = self._decode(parts[1])
-                        bucket = int(parts[3])
-                        increment = max(0, int(value))
-                    except (ValueError, TypeError):
-                        continue
-                    if (
-                        parts[2] not in {"2xx", "3xx", "4xx", "5xx"}
-                        or not 0 <= bucket < len(LATENCY_BUCKETS_MS)
-                    ):
-                        continue
-                    route_counts.setdefault(
-                        route, [0] * len(LATENCY_BUCKETS_MS)
-                    )[bucket] += increment
+            self._add_snapshot_latency(snapshot, route_counts)
+            self._add_redis_latency(date_key, route_counts)
             cursor += timedelta(days=1)
+        return route_counts
 
+    @staticmethod
+    def _overall_latency_counts(route_counts: Dict[str, List[int]]) -> List[int]:
+        totals = [0] * len(LATENCY_BUCKETS_MS)
         for counts in route_counts.values():
             for index, count in enumerate(counts):
-                overall_counts[index] += count
+                totals[index] += count
+        return totals
 
-        routes = []
-        for route, counts in route_counts.items():
-            routes.append({"route": route, **summarize_buckets(counts)})
+    @staticmethod
+    def _rank_latency_routes(route_counts: Dict[str, List[int]]) -> list[dict]:
+        from app.services.api_latency import summarize_buckets
+
+        routes = [{"route": route, **summarize_buckets(counts)} for route, counts in route_counts.items()]
         routes.sort(
             key=lambda item: (
                 item["p95Ms"] is not None,
@@ -269,6 +272,17 @@ class RedisAnalyticsAggregator:
             ),
             reverse=True,
         )
+        return routes
+
+    def summarize_api_latency(self, from_date: str, to_date: str) -> Dict[str, Any]:
+        """Merge daily histogram counts, then derive estimates for the range."""
+        from app.services.api_latency import summarize_buckets
+
+        start = datetime.fromisoformat(from_date).date()
+        end = datetime.fromisoformat(to_date).date()
+        route_counts = self._collect_latency_counts(start, end)
+        overall_counts = self._overall_latency_counts(route_counts)
+        routes = self._rank_latency_routes(route_counts)
         return {
             "fromDate": from_date,
             "toDate": to_date,
