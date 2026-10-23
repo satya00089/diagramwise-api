@@ -12,6 +12,8 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, st
 from app.services.dynamodb_service import dynamodb_service
 from app.services.validation import validate_diagram_access
 from app.services.auth_sessions import auth_session_service
+from app.services.browser_auth import AUTH_SESSION_COOKIE, require_allowed_origin
+from app.utils.config import get_settings
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -352,6 +354,17 @@ async def _process_collaboration_message(
     data: Dict[str, Any],
 ) -> None:
     message_type = data.get("type")
+    if not isinstance(message_type, str):
+        await websocket.send_json(
+            {
+                "type": "error",
+                "message": "Message type must be a string",
+                "code": "INVALID_MESSAGE_FORMAT",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        return
+
     is_valid, validation_error = validate_message(message_type, data)
     if not is_valid:
         await websocket.send_json(
@@ -429,6 +442,21 @@ async def _send_invalid_message_error(websocket: WebSocket) -> None:
     )
 
 
+async def _receive_and_process_collaboration_message(
+    websocket: WebSocket,
+    diagram_id: str,
+    user_id: str,
+    user_info: Dict[str, Any],
+    token: str,
+    last_session_check: float,
+) -> float:
+    data = await _receive_message_or_timeout(websocket)
+    last_session_check = _validate_collaboration_session(token, last_session_check)
+    if data is not None:
+        await _process_collaboration_message(websocket, diagram_id, user_id, user_info, data)
+    return last_session_check
+
+
 async def _receive_collaboration_messages(
     websocket: WebSocket,
     diagram_id: str,
@@ -439,10 +467,9 @@ async def _receive_collaboration_messages(
     last_session_check = time.monotonic()
     while True:
         try:
-            data = await _receive_message_or_timeout(websocket)
-            last_session_check = _validate_collaboration_session(token, last_session_check)
-            if data is not None:
-                await _process_collaboration_message(websocket, diagram_id, user_id, user_info, data)
+            last_session_check = await _receive_and_process_collaboration_message(
+                websocket, diagram_id, user_id, user_info, token, last_session_check
+            )
         except HTTPException as exc:
             code = "AUTH_UNAVAILABLE" if exc.status_code == status.HTTP_503_SERVICE_UNAVAILABLE else "INVALID_TOKEN"
             message = "Authentication is temporarily unavailable" if code == "AUTH_UNAVAILABLE" else "Session is invalid or revoked"
@@ -481,11 +508,22 @@ async def collaborate_on_diagram(
     token: Optional[str] = None,
 ):
     """WebSocket endpoint for real-time collaboration on diagrams."""
+    try:
+        require_allowed_origin(websocket.headers.get("origin"), get_settings())
+    except HTTPException:
+        await websocket.close(code=1008)
+        return
+
     await websocket.accept()
     user_id: Optional[str] = None
     user_info: Dict[str, Any] = {}
     try:
-        authenticated = await _authenticate_collaborator(websocket, diagram_id, token)
+        # Prefer the HttpOnly cookie; keep query-token support temporarily for
+        # already-open older clients during the frontend rollout.
+        session_token = websocket.cookies.get(AUTH_SESSION_COOKIE) or token
+        authenticated = await _authenticate_collaborator(
+            websocket, diagram_id, session_token
+        )
         if not authenticated:
             return
         user_id, user_info = authenticated
@@ -504,7 +542,9 @@ async def collaborate_on_diagram(
         await websocket.send_json(
             _welcome_message(user_info, collaborators, diagram_data)
         )
-        await _receive_collaboration_messages(websocket, diagram_id, user_id, user_info, token or "")
+        await _receive_collaboration_messages(
+            websocket, diagram_id, user_id, user_info, session_token or ""
+        )
     except WebSocketDisconnect:
         pass
     finally:

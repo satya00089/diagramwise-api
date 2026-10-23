@@ -13,6 +13,8 @@ from app.models.admin_models import (
     AdminApiLatencyReport,
     AdminGoogleAnalyticsReport,
     AdminFeedbackItem,
+    AdminAnalyticsSummary,
+    AdminFeedbackSummary,
     AdminOverviewResponse,
     GrantAdminRequest,
     UpdateFeedbackStatusRequest,
@@ -88,8 +90,8 @@ async def get_admin_overview(
     return AdminOverviewResponse(
         fromDate=from_date.isoformat(),
         toDate=to_date.isoformat(),
-        analytics=analytics,
-        feedback=feedback_summary,
+        analytics=AdminAnalyticsSummary.model_validate(analytics),
+        feedback=AdminFeedbackSummary.model_validate(feedback_summary),
         recentFeedback=[_feedback_item(item, user_cache) for item in feedback[:12]],
     )
 

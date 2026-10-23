@@ -10,6 +10,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
+from typing import cast
 from unittest.mock import patch
 import json
 import os
@@ -17,6 +18,7 @@ import os
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from mypy_boto3_dynamodb.service_resource import Table
 
 if os.environ.get("E2E_LIVE_PROVIDER") != "1":
     raise RuntimeError("Explicit E2E_LIVE_PROVIDER=1 required; this is a local test harness")
@@ -47,6 +49,7 @@ with patch("boto3.resource", return_value=GuardResource()):
 
 from app.services.ai_assessor import AIAssessorService
 from app.services.dynamodb_service import DynamoDBService, convert_decimal_to_float
+from app.services.llm_port import LLMRequest, LLMResponse
 from app.utils.config import get_settings
 
 problem_rows = json.loads((ROOT / "tests/fixtures/walkthroughs/problems.json").read_text(encoding="utf-8"))
@@ -103,20 +106,20 @@ class MemoryProblems:
 
 storage = MemoryAttempts()
 service = DynamoDBService.__new__(DynamoDBService)
-service.attempts_table = storage
-service.problems_table = MemoryProblems()
+service.attempts_table = cast(Table, storage)
+service.problems_table = cast(Table, MemoryProblems())
 service.get_problem_by_id = lambda problem_id: deepcopy(problem_data.get(problem_id))
 service.get_problem_by_slug = lambda slug: next((deepcopy(row) for row in problem_data.values() if row.get("slug") == slug), None)
 service.get_walkthrough_by_problem_id = lambda problem_id: deepcopy(guide_data.get(problem_id))
-database_module.dynamodb_service = service
+setattr(database_module, "dynamodb_service", service)
 for module in (attempts, problems, walkthroughs):
-    module.dynamodb_service = service
+    setattr(module, "dynamodb_service", service)
 
 settings = get_settings().model_copy(update={"langfuse_enabled": False})
 
 
 class OutageLLM:
-    async def generate(self, _):
+    async def generate(self, request: LLMRequest) -> LLMResponse:
         raise RuntimeError("Simulated provider outage: local E2E fault injection")
 
 

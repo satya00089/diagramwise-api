@@ -9,7 +9,10 @@ from __future__ import annotations
 import json
 import hashlib
 import argparse
+import os
 import re
+import secrets
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,6 +20,7 @@ SNAPSHOTS = ROOT / "tests/fixtures/walkthroughs"
 OUTPUT = ROOT / "data/assessment-reference-candidates/walkthroughs"
 DOCUMENT_ID = "6901ef1b9420d83630aca871"
 SNAPSHOT_STEM_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+FIXTURE_PATH_ERROR = "Fixture paths must stay inside the API or frontend repository"
 
 
 def requirement_id(problem: dict, field: str, index: int) -> str:
@@ -213,21 +217,49 @@ def repository_path(path: Path) -> Path:
     resolved = path.resolve()
     allowed_roots = (ROOT, (ROOT.parent / "diagramwise").resolve())
     if not any(resolved == root or root in resolved.parents for root in allowed_roots):
-        raise ValueError("Fixture paths must stay inside the API or frontend repository")
+        raise ValueError(FIXTURE_PATH_ERROR)
     return resolved
+
+
+def repository_output_path(path: Path) -> Path:
+    """Keep output paths lexical so the writer can reject every symlink hop."""
+    target = Path(os.path.abspath(path))
+    resolved = target.resolve()
+    allowed_roots = (ROOT.resolve(), (ROOT.parent / "diagramwise").resolve())
+    if not any(target == root or root in target.parents for root in allowed_roots):
+        raise ValueError(FIXTURE_PATH_ERROR)
+    if not any(resolved == root or root in resolved.parents for root in allowed_roots):
+        raise ValueError(FIXTURE_PATH_ERROR)
+    if resolved != target:
+        raise ValueError("Fixture output paths must not traverse symlinks")
+    return target
 
 
 def repository_output_file(directory: Path, name: str) -> Path:
     """Reject generated child paths redirected through pre-existing symlinks."""
     if Path(name).name != name or name in (".", ".."):
         raise ValueError("Generated fixture filenames must be simple child names")
-    target = directory / name
+    directory = Path(os.path.abspath(directory))
+    if directory.resolve() != directory:
+        raise ValueError("Generated fixture directory must not traverse symlinks")
+    target = Path(os.path.abspath(directory / name))
+    if target.parent != directory:
+        raise ValueError("Generated fixture files must stay inside their output directory")
     if target.is_symlink():
         raise ValueError("Generated fixture files must not be symlinks")
     resolved = target.resolve()
-    if resolved.parent != directory:
+    if resolved != target:
         raise ValueError("Generated fixture files must stay inside their output directory")
     return resolved
+
+
+def _repository_output_root(path: Path) -> tuple[Path, Path]:
+    target = repository_output_path(path)
+    roots = (ROOT.resolve(), (ROOT.parent / "diagramwise").resolve())
+    for root in roots:
+        if target == root or root in target.parents:
+            return root, target.relative_to(root)
+    raise ValueError(FIXTURE_PATH_ERROR)
 
 
 def _parse_arguments() -> argparse.Namespace:
@@ -236,9 +268,9 @@ def _parse_arguments() -> argparse.Namespace:
     parser.add_argument("--frontend-fixture-dir", type=Path, help="Optional generated apply-path fixtures for all five frontend tests")
     args = parser.parse_args()
     if args.frontend_fixture:
-        args.frontend_fixture = repository_path(args.frontend_fixture)
+        args.frontend_fixture = repository_output_path(args.frontend_fixture)
     if args.frontend_fixture_dir:
-        args.frontend_fixture_dir = repository_path(args.frontend_fixture_dir)
+        args.frontend_fixture_dir = repository_output_path(args.frontend_fixture_dir)
     return args
 
 
@@ -299,15 +331,96 @@ def _frontend_fixture(guide: dict) -> dict:
     }
 
 
-def _write_frontend_fixture(path: Path, fixture: dict) -> None:
+def _write_repository_fixture(path: Path, fixture: dict) -> None:
+    """Write JSON only to a checked repository path without following a file symlink."""
+    root, relative_path = _repository_output_root(path)
+    if not relative_path.parts:
+        raise ValueError("Generated fixture path must name a file")
+    payload = json.dumps(fixture, indent=2, ensure_ascii=False) + "\n"
+    if _supports_directory_relative_open():
+        _write_repository_fixture_relative(root, relative_path, payload)
+    else:
+        _write_repository_fixture_path(path, payload)
+
+
+def _supports_directory_relative_open() -> bool:
+    return (
+        hasattr(os, "O_NOFOLLOW")
+        and hasattr(os, "O_DIRECTORY")
+        and os.open in os.supports_dir_fd
+        and os.mkdir in os.supports_dir_fd
+        and os.rename in os.supports_dir_fd
+        and os.unlink in os.supports_dir_fd
+    )
+
+
+def _write_repository_fixture_relative(root: Path, relative_path: Path, payload: str) -> None:
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    directory_fd = os.open(root, directory_flags)
+    opened_directories = [directory_fd]
+    try:
+        for part in relative_path.parts[:-1]:
+            try:
+                os.mkdir(part, dir_fd=directory_fd)
+            except FileExistsError:
+                pass
+            directory_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+            opened_directories.append(directory_fd)
+        _replace_repository_file(directory_fd, relative_path.parts[-1], payload)
+    finally:
+        for opened_fd in reversed(opened_directories):
+            os.close(opened_fd)
+
+
+def _replace_repository_file(directory_fd: int, filename: str, payload: str) -> None:
+    temporary_name = f".{filename}.{secrets.token_hex(16)}.tmp"
+    temporary_fd = os.open(
+        temporary_name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o666,
+        dir_fd=directory_fd,
+    )
+    try:
+        with os.fdopen(temporary_fd, "w", encoding="utf-8") as stream:
+            stream.write(payload)
+        os.rename(temporary_name, filename, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+    finally:
+        try:
+            os.unlink(temporary_name, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+
+
+def _write_repository_fixture_path(path: Path, payload: str) -> None:
+    """Use path checks on platforms without directory-relative no-follow opens."""
+    path = repository_output_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     output = repository_output_file(path.parent, path.name)
-    output.write_text(json.dumps(fixture, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=output.parent, prefix=f".{output.name}.",
+            suffix=".tmp", delete=False,
+        ) as stream:
+            stream.write(payload)
+            temporary_path = Path(stream.name)
+        output = repository_output_file(output.parent, output.name)
+        temporary_path.replace(output)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
-def _write_candidate_outputs(guide: dict, filename: str, output_dir: Path, args: argparse.Namespace) -> None:
-    payload = json.dumps(guide, indent=2, ensure_ascii=False) + "\n"
-    repository_output_file(output_dir, filename).write_text(payload, encoding="utf-8")
+def _write_frontend_fixture(path: Path, fixture: dict) -> None:
+    _write_repository_fixture(path, fixture)
+
+
+def _write_candidate_outputs(guide: dict, source: Path, output_dir: Path, args: argparse.Namespace) -> None:
+    filename = _candidate_filename(source)
+    if guide.get("problem_id") != source.stem:
+        raise ValueError("Candidate problem ID must match its validated snapshot filename")
+    output_dir = repository_output_path(output_dir)
+    _write_repository_fixture(output_dir / filename, guide)
     if args.frontend_fixture and guide["problem_id"] == DOCUMENT_ID:
         _write_frontend_fixture(args.frontend_fixture, _frontend_fixture(guide))
     if args.frontend_fixture_dir:
@@ -320,7 +433,7 @@ def main() -> None:
     problems = _load_problems(snapshot_dir)
     for source in _snapshot_sources(snapshot_dir):
         guide = _prepare_guide(source, problems)
-        _write_candidate_outputs(guide, _candidate_filename(source), output_dir, args)
+        _write_candidate_outputs(guide, source, output_dir, args)
     print(json.dumps({"candidateGuides": len(list(output_dir.glob("*.json"))), "status": "not_published"}))
 
 

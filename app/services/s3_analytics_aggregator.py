@@ -10,7 +10,7 @@ import logging
 import time
 import uuid
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, cast
 
 import boto3
 from botocore.exceptions import ClientError
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 class RedisAnalyticsAggregator:
     """Collect counters atomically in Redis and export them to S3 in batches."""
 
-    _redis: Redis[str] | None
+    _redis: Redis | None
     _client: S3Client
 
     def __init__(self) -> None:
@@ -93,7 +93,7 @@ class RedisAnalyticsAggregator:
             route_key = self._encode(route)
             pipe.hincrby(key, f"count|{name_key}|{route_key}", 1)
             if session_hash:
-                pipe.hset(key, f"session|{name_key}|{route_key}|{session_hash}", 1)
+                pipe.hset(key, f"session|{name_key}|{route_key}|{session_hash}", "1")
         pipe.expire(key, 60 * 60 * 24 * 8)
         pipe.execute()
 
@@ -225,7 +225,10 @@ class RedisAnalyticsAggregator:
     def _add_redis_latency(self, date_key: str, route_counts: Dict[str, List[int]]) -> None:
         if self._redis is None:
             return
-        fields = self._redis.hgetall(self._latency_redis_key(date_key))
+        fields = cast(
+            dict[str, str],
+            self._redis.hgetall(self._latency_redis_key(date_key)),
+        )
         for field, value in fields.items():
             parts = field.split("|")
             if len(parts) != 4 or parts[0] != "latency":
@@ -294,7 +297,7 @@ class RedisAnalyticsAggregator:
     def _flush_snapshot(self, snapshot_key: str, date: str) -> bool:
         if self._redis is None:
             return False
-        fields = self._redis.hgetall(snapshot_key)
+        fields = cast(dict[str, str], self._redis.hgetall(snapshot_key))
         if not fields:
             self._redis.delete(snapshot_key)
             return True
