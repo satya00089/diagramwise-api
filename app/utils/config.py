@@ -253,6 +253,22 @@ class Settings(BaseSettings):
 
     # Redis is the hot aggregation store; S3 receives periodic snapshots.
     redis_uri: str | None = Field(None, validation_alias="REDIS_URI")
+    simulation_capacity_enabled: bool = Field(
+        False, validation_alias="SIMULATION_CAPACITY_ENABLED"
+    )
+    simulation_ai_requests_per_hour: int = Field(
+        10, ge=1, le=100, validation_alias="SIMULATION_AI_REQUESTS_PER_HOUR"
+    )
+    simulation_ai_global_requests_per_hour: int = Field(
+        500, ge=1, le=5000, validation_alias="SIMULATION_AI_GLOBAL_REQUESTS_PER_HOUR"
+    )
+    simulation_ai_concurrency: int = Field(
+        3, ge=1, le=20, validation_alias="SIMULATION_AI_CONCURRENCY"
+    )
+    dynamodb_simulation_runs_table: str = Field(
+        "diagrammatic_simulation_runs",
+        validation_alias="DYNAMODB_SIMULATION_RUNS_TABLE",
+    )
     analytics_flush_interval_seconds: int = Field(
         60, validation_alias="ANALYTICS_FLUSH_INTERVAL_SECONDS"
     )

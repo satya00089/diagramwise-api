@@ -116,3 +116,30 @@ def test_ai_cannot_invent_a_connection_for_a_simulation_route():
 
     with pytest.raises(SimulationPreparationError, match="invented a connection"):
         validate_preparation(components, connections, draft)
+
+
+def test_interior_client_in_a_simulation_route_is_blocked():
+    components, connections, draft = graph_with_optional_direct_cache_edge()
+    components.append({"id": "downstream-client", "type": "client", "label": "Downstream client"})
+    connections.extend([
+        {"id": "app-downstream-client", "source": "app", "target": "downstream-client"},
+        {"id": "downstream-client-db", "source": "downstream-client", "target": "db"},
+    ])
+    draft["component_roles"].append({
+        "node_id": "downstream-client",
+        "role": "client",
+        "evidence": "A second client component",
+    })
+    draft["connection_checks"].extend([
+        {"edge_id": "app-downstream-client", "status": "supported", "explanation": "Valid for this path."},
+        {"edge_id": "downstream-client-db", "status": "supported", "explanation": "Valid for this path."},
+    ])
+    draft["routes"][0]["node_ids"] = ["client", "gateway", "app", "downstream-client", "db"]
+    draft["routes"][0]["edge_ids"] = [
+        "client-gateway", "gateway-app", "app-downstream-client", "downstream-client-db"
+    ]
+
+    result = validate_preparation(components, connections, draft)
+
+    assert result.status == "blocked"
+    assert any("must run from a client" in blocker for blocker in result.blockers)

@@ -19,6 +19,11 @@ from app.models.simulation_models import (
 )
 from app.services.llm_client import create_llm_provider
 from app.services.llm_port import LLMPort, LLMRequest
+from app.services.simulation_protection import (
+    SimulationProtection,
+    SimulationProtectionUnavailable,
+    get_simulation_protection,
+)
 from app.utils.config import Settings, get_settings
 
 
@@ -44,14 +49,17 @@ class SimulationPreparationError(RuntimeError):
 
 class SimulationPreparationService:
     MAX_TIMEOUT_SECONDS = 35.0
+    MAX_AI_INPUT_BYTES = 64 * 1024
 
     def __init__(
         self,
         llm: LLMPort | None = None,
         settings: Settings | None = None,
+        protection: SimulationProtection | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.llm = llm
+        self.protection = protection
         configured_timeout = float(
             getattr(self.settings, "llm_assessment_timeout_seconds", 45.0)
         )
@@ -60,7 +68,7 @@ class SimulationPreparationService:
         )
 
     async def prepare(
-        self, request: SimulationPreparationRequest
+        self, request: SimulationPreparationRequest, actor: str | None = None
     ) -> SimulationPreparationResponse:
         """Map a diagram into supported paths and validate all references."""
 
@@ -108,10 +116,20 @@ or reliability claims.
             "Return one JSON "
             "object that follows this schema exactly:\n"
             + json.dumps(SimulationPreparationDraft.model_json_schema())
-            + "\nDiagram input:\n"
-            + request.model_dump_json(exclude_none=True)
         )
+        serialized_request = request.model_dump_json(exclude_none=True)
+        if len(serialized_request.encode("utf-8")) > self.MAX_AI_INPUT_BYTES:
+            raise SimulationPreparationError(
+                "This diagram is too large for AI path preparation. Simplify it and try again."
+            )
+        user_prompt += "\nDiagram input:\n" + serialized_request
 
+        if not actor:
+            raise SimulationProtectionUnavailable(
+                "AI preparation requires a rate-limit identity"
+            )
+        protection = self.protection or get_simulation_protection()
+        reservation = await protection.reserve_ai_call(actor)
         try:
             llm = self.llm or create_llm_provider(self.settings)
             response = await asyncio.wait_for(
@@ -155,6 +173,8 @@ or reliability claims.
             raise SimulationPreparationError(
                 "AI could not prepare this diagram. No simulation metrics were produced."
             ) from error
+        finally:
+            await protection.release_ai_call(reservation)
 
         if response.refusal_present:
             raise SimulationPreparationError(
@@ -382,7 +402,12 @@ or reliability claims.
                     f"AI invented a component in the {operation_label} route. Retry the check."
                 )
             roles = [role_by_id[node_id] for node_id in route.node_ids]
-            if roles[0] != "client" or roles[-1] != "database" or "compute" not in roles:
+            if (
+                roles[0] != "client"
+                or roles[-1] != "database"
+                or "compute" not in roles
+                or "client" in roles[1:]
+            ):
                 blockers.append(
                     f"The {operation_label} route must run from a client through application "
                     "logic to a database for this model."

@@ -2,24 +2,35 @@
 
 import uuid
 import asyncio
+import ipaddress
 import logging
 
 from typing import Annotated, Any, Callable
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from starlette.concurrency import run_in_threadpool
 from app.models.problem_models import RequirementSpec, problem_slug
 from app.models.request_models import AssessmentRequest
 from app.models.response_models import AssessmentResponse
 from app.models.simulation_models import (
+    SimulationAvailabilityResponse,
     SimulationPreparationRequest,
     SimulationPreparationResponse,
+    SimulationRunCreate,
+    SimulationSavedRunResponse,
 )
 from app.services.ai_assessor import AIAssessorService
+from app.services.dynamodb_service import SimulationRunLimitReached, dynamodb_service
+from app.routers.auth import get_current_user
 from app.services.simulation_preparation import (
     SimulationPreparationError,
     SimulationPreparationService,
 )
+from app.services.simulation_protection import (
+    SimulationProtectionUnavailable,
+    SimulationRateLimitError,
+)
+from app.utils.config import get_settings
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -100,30 +111,9 @@ async def resolve_simulation_problem(
     request: SimulationPreparationRequest, lookup: ProblemLookup
 ) -> SimulationPreparationRequest:
     """Bind the simulator to the current, approved URL-shortener brief."""
-    try:
-        record = await asyncio.wait_for(
-            run_in_threadpool(lookup, request.problem.id), timeout=10.0
-        )
-    except Exception as error:
-        logger.warning("Simulation catalog lookup failed error_type=%s", type(error).__name__)
-        raise HTTPException(status_code=503, detail="The exercise brief is temporarily unavailable.") from error
-    if record is None:
-        raise HTTPException(status_code=404, detail="The exercise was not found in the catalog.")
-
-    slug = record.get("slug") or problem_slug(str(record.get("title", "")))
-    if slug != request.problem.slug:
-        raise HTTPException(status_code=422, detail="This exercise does not support the URL-shortener simulator.")
-    raw_spec = record.get("requirementSpec")
-    spec = RequirementSpec.model_validate(raw_spec) if raw_spec is not None else None
-    revision = spec.revision if spec else None
-    if request.problem.requirement_revision != revision:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "message": "The exercise requirements changed. Reload the brief before preparing paths.",
-                "current_revision": revision,
-            },
-        )
+    record, revision = await resolve_simulation_catalog_record(
+        request.problem.id, request.problem.requirement_revision, lookup
+    )
     def catalog_text(field: str, limit: int) -> str:
         value = record.get(field) or ""
         return ("\n".join(map(str, value)) if isinstance(value, list) else str(value))[:limit]
@@ -135,6 +125,36 @@ async def resolve_simulation_problem(
         "constraints": catalog_text("constraints", 12000),
     })
     return request.model_copy(update={"problem": approved_problem})
+
+
+async def resolve_simulation_catalog_record(
+    problem_id: str, requested_revision: str | None, lookup: ProblemLookup
+) -> tuple[dict[str, Any], str | None]:
+    """Resolve the approved exercise and reject stale revision snapshots."""
+    try:
+        record = await asyncio.wait_for(
+            run_in_threadpool(lookup, problem_id), timeout=10.0
+        )
+    except Exception as error:
+        logger.warning("Simulation catalog lookup failed error_type=%s", type(error).__name__)
+        raise HTTPException(status_code=503, detail="The exercise brief is temporarily unavailable.") from error
+    if record is None:
+        raise HTTPException(status_code=404, detail="The exercise was not found in the catalog.")
+    slug = record.get("slug") or problem_slug(str(record.get("title", "")))
+    if slug != "url-shortener-like-bit-ly":
+        raise HTTPException(status_code=422, detail="This exercise does not support the URL-shortener simulator.")
+    spec_data = record.get("requirementSpec")
+    spec = RequirementSpec.model_validate(spec_data) if spec_data is not None else None
+    revision = spec.revision if spec else None
+    if requested_revision != revision:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "The exercise requirements changed. Reload the brief before continuing.",
+                "current_revision": revision,
+            },
+        )
+    return record, revision
 
 
 @router.post(
@@ -186,12 +206,14 @@ async def assess_system_design(
     "/simulation/prepare",
     response_model=SimulationPreparationResponse,
     responses={
+        429: {"description": "The actor exceeded the AI preparation quota."},
         422: {"description": "The diagram could not be safely prepared."},
         503: {"description": "AI preparation is temporarily unavailable."},
     },
 )
 async def prepare_simulation(
     request: SimulationPreparationRequest,
+    http_request: Request,
     preparer: Annotated[
         SimulationPreparationService,
         Depends(get_simulation_preparation_service),
@@ -200,14 +222,31 @@ async def prepare_simulation(
 ) -> SimulationPreparationResponse:
     """Interpret a diagram for the supported educational simulation model."""
     try:
+        settings = get_settings()
+        if not settings.simulation_capacity_enabled:
+            raise HTTPException(
+                status_code=503,
+                detail="Capacity simulation is temporarily unavailable.",
+            )
         resolved = await resolve_simulation_problem(request, problem_lookup)
-        prepared = await preparer.prepare(resolved)
+        prepared = await preparer.prepare(resolved, _simulation_actor(http_request, settings.trusted_proxy_ips))
         return prepared.model_copy(update={
             "exercise_id": resolved.problem.id,
             "requirement_revision": resolved.problem.requirement_revision,
         })
     except HTTPException:
         raise
+    except SimulationRateLimitError as error:
+        raise HTTPException(
+            status_code=429,
+            detail=str(error),
+            headers={"Retry-After": str(error.retry_after)},
+        ) from error
+    except SimulationProtectionUnavailable as error:
+        raise HTTPException(
+            status_code=503,
+            detail="AI-assisted path preparation is temporarily unavailable. Try again later.",
+        ) from error
     except SimulationPreparationError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     except Exception as error:
@@ -216,6 +255,129 @@ async def prepare_simulation(
             status_code=503,
             detail="AI preparation is temporarily unavailable. No simulation metrics were produced.",
         ) from error
+
+
+def _simulation_actor(request: Request, trusted_proxy_ips: list[str]) -> str:
+    peer = request.client.host if request.client else "unknown"
+    try:
+        peer_address = ipaddress.ip_address(peer)
+    except ValueError:
+        return "ip:unknown"
+    trusted = set()
+    for address in trusted_proxy_ips:
+        try:
+            trusted.add(str(ipaddress.ip_address(address)))
+        except ValueError:
+            continue
+    if str(peer_address) not in trusted:
+        return f"ip:{peer_address}"
+
+    forwarded = request.headers.get("x-forwarded-for", "")
+    try:
+        forwarded_addresses = [
+            ipaddress.ip_address(address.strip())
+            for address in forwarded.split(",")
+            if address.strip()
+        ]
+    except ValueError:
+        forwarded_addresses = []
+    for address in reversed(forwarded_addresses):
+        if str(address) not in trusted:
+            return f"ip:{address}"
+    return f"ip:{peer_address}"
+
+
+@router.get("/simulation/status", response_model=SimulationAvailabilityResponse)
+async def get_simulation_status() -> SimulationAvailabilityResponse:
+    """Report whether the capacity explorer is enabled by its server-side kill switch."""
+    settings = get_settings()
+    return SimulationAvailabilityResponse(enabled=settings.simulation_capacity_enabled)
+
+
+@router.post(
+    "/simulation/runs",
+    response_model=SimulationSavedRunResponse,
+    status_code=status.HTTP_201_CREATED,
+    responses={
+        409: {"description": "The account has reached its saved-run limit or the exercise revision changed."},
+        503: {"description": "Saved-run storage is temporarily unavailable."},
+    },
+)
+async def save_simulation_run(
+    request: SimulationRunCreate,
+    current_user: Annotated[dict[str, Any], Depends(get_current_user)],
+    problem_lookup: Annotated[ProblemLookup, Depends(get_problem_lookup)],
+) -> SimulationSavedRunResponse:
+    """Save one private, bounded educational estimate for its owner."""
+    if not get_settings().simulation_capacity_enabled:
+        raise HTTPException(status_code=503, detail="Capacity simulation is temporarily unavailable.")
+    await resolve_simulation_catalog_record(
+        request.problem_id, request.requirement_revision, problem_lookup
+    )
+    try:
+        saved = await run_in_threadpool(
+            dynamodb_service.save_simulation_run,
+            current_user["user_id"],
+            request.problem_id,
+            request.snapshot.model_dump(mode="json", by_alias=True),
+        )
+    except SimulationRunLimitReached as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except Exception as error:
+        logger.exception("Simulation run save failed error_type=%s", type(error).__name__)
+        raise HTTPException(status_code=503, detail="The run could not be saved. Try again shortly.") from error
+    return SimulationSavedRunResponse(
+        runId=saved["runId"],
+        createdAt=saved["createdAt"],
+        expiresAt=saved["expiresAt"],
+        snapshot=request.snapshot,
+    )
+
+
+@router.get("/simulation/runs", response_model=list[SimulationSavedRunResponse])
+async def list_simulation_runs(
+    problem_id: Annotated[str, Query(alias="problemId", min_length=1, max_length=160)],
+    current_user: Annotated[dict[str, Any], Depends(get_current_user)],
+) -> list[SimulationSavedRunResponse]:
+    """List private saved runs, including runs from older exercise revisions."""
+    try:
+        items = await run_in_threadpool(
+            dynamodb_service.get_simulation_runs, current_user["user_id"], problem_id
+        )
+    except Exception as error:
+        logger.exception("Simulation run listing failed error_type=%s", type(error).__name__)
+        raise HTTPException(status_code=503, detail="Saved runs are temporarily unavailable.") from error
+    return [
+        SimulationSavedRunResponse(
+            runId=item["runId"],
+            createdAt=item["createdAt"],
+            expiresAt=int(item["expiresAt"]),
+            snapshot=item["snapshot"],
+        )
+        for item in items
+    ]
+
+
+@router.delete("/simulation/runs/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_simulation_run(
+    run_id: str,
+    current_user: Annotated[dict[str, Any], Depends(get_current_user)],
+) -> Response:
+    """Delete a saved run only from the authenticated user's private partition."""
+    if len(run_id) > 64:
+        raise HTTPException(status_code=404, detail="Saved run not found.")
+    try:
+        deleted = await run_in_threadpool(
+            dynamodb_service.delete_simulation_run,
+            current_user["user_id"],
+            run_id,
+        )
+    except Exception as error:
+        logger.exception("Simulation run deletion failed error_type=%s", type(error).__name__)
+        raise HTTPException(status_code=503, detail="The saved run could not be deleted. Try again shortly.") from error
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Saved run not found.")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/health")

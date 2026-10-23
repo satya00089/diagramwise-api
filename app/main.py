@@ -38,6 +38,7 @@ from app.routers import (
 )
 from app.middleware.rate_limiter import RateLimitMiddleware
 from app.middleware.api_latency import ApiLatencyMiddleware
+from app.middleware.request_size_limit import SimulationRequestSizeLimitMiddleware
 from app.services.dynamodb_service import dynamodb_service
 from app.services.s3_analytics_aggregator import redis_analytics_aggregator
 from app.services.llm_client import flush_langfuse
@@ -148,6 +149,7 @@ app.add_middleware(
 app.add_middleware(ApiLatencyMiddleware)
 
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.trusted_hosts)
+app.add_middleware(SimulationRequestSizeLimitMiddleware)
 
 # CORS must be the outermost middleware so error responses also receive the
 # appropriate CORS headers. Starlette wraps the most recently added middleware

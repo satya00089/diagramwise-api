@@ -53,6 +53,10 @@ class AttemptSaveState:
     updated_at: str
     problem_requirement_spec: Optional[Dict[str, Any]]
 
+
+class SimulationRunLimitReached(RuntimeError):
+    """The account already has the maximum number of active saved runs."""
+
 def _is_canvas_record(item: Dict[str, Any]) -> bool:
     return item.get("recordType") == CANVAS_RECORD_TYPE
 
@@ -133,6 +137,9 @@ class DynamoDBService:
         )
         self.problems_table: Table = dynamodb.Table(settings.dynamodb_problems_table)
         self.attempts_table: Table = dynamodb.Table(settings.dynamodb_attempts_table)
+        self.simulation_runs_table: Table = dynamodb.Table(
+            settings.dynamodb_simulation_runs_table
+        )
         self.feedback_table: Table = dynamodb.Table(settings.dynamodb_feedback_table)
         self.walkthroughs_table: Table = dynamodb.Table(settings.dynamodb_walkthroughs_table)
         self.auth_sessions_table: Table = dynamodb.Table(settings.dynamodb_auth_sessions_table)
@@ -2025,6 +2032,120 @@ class DynamoDBService:
             return True
         except ClientError:
             return False
+
+    def _query_simulation_run_items(self, user_id: str) -> List[Dict[str, Any]]:
+        items: List[Dict[str, Any]] = []
+        start_key = None
+        while True:
+            query_args: Dict[str, Any] = {
+                "KeyConditionExpression": Key("userId").eq(user_id),
+                "ConsistentRead": True,
+                # Ask for one more than the supported maximum so an actually
+                # overfull partition is detected even when DynamoDB paginates
+                # responses at its 1 MiB response-size boundary.
+                "Limit": 51 - len(items),
+            }
+            if start_key is not None:
+                query_args["ExclusiveStartKey"] = start_key
+            response = self.simulation_runs_table.query(**query_args)
+            items.extend(response.get("Items", []))
+            if len(items) > 50:
+                raise RuntimeError("Simulation run storage exceeded the per-user bound")
+            start_key = response.get("LastEvaluatedKey")
+            if not start_key:
+                break
+        return [convert_decimal_to_float(item) for item in items]
+
+    def get_simulation_runs(self, user_id: str, problem_id: str) -> List[Dict[str, Any]]:
+        """Return only unexpired saved runs owned by this user for this exercise."""
+        now = int(time.time())
+        return sorted(
+            (
+                item for item in self._query_simulation_run_items(user_id)
+                if item.get("problemId") == problem_id
+                and int(item.get("expiresAt", 0)) > now
+            ),
+            key=lambda item: item.get("createdAt", ""),
+            reverse=True,
+        )
+
+    def save_simulation_run(
+        self,
+        user_id: str,
+        problem_id: str,
+        snapshot: Dict[str, Any],
+        ttl_seconds: int = 90 * 24 * 60 * 60,
+        max_runs_per_user: int = 50,
+    ) -> Dict[str, Any]:
+        """Save an immutable private snapshot in one of a user's bounded slots."""
+        now = int(time.time())
+        created_at = datetime.now(timezone.utc).isoformat()
+        run_id = uuid4().hex
+        for _ in range(5):
+            items = self._query_simulation_run_items(user_id)
+            active = [item for item in items if int(item.get("expiresAt", 0)) > now]
+            if len(active) >= max_runs_per_user:
+                raise SimulationRunLimitReached(
+                    "Delete a saved run before saving another one."
+                )
+            by_slot = {str(item["runSlot"]): item for item in items}
+            slot_indexes = range(max_runs_per_user)
+            empty_slots = [f"{index:02d}" for index in slot_indexes if f"{index:02d}" not in by_slot]
+            if empty_slots:
+                slot_suffix = empty_slots[0]
+            else:
+                expired = [item for item in items if int(item.get("expiresAt", 0)) <= now]
+                if not expired:
+                    raise SimulationRunLimitReached(
+                        "Delete a saved run before saving another one."
+                    )
+                oldest = min(expired, key=lambda item: item.get("createdAt", ""))
+                slot_suffix = str(oldest["runSlot"])
+
+            slot_key = slot_suffix
+            existing = by_slot.get(slot_key)
+            item = {
+                "userId": user_id,
+                "runSlot": slot_key,
+                "runId": run_id,
+                "problemId": problem_id,
+                "createdAt": created_at,
+                "expiresAt": now + ttl_seconds,
+                "snapshot": snapshot,
+            }
+            condition = (
+                Attr("runId").not_exists()
+                if existing is None
+                else Attr("runId").eq(existing["runId"])
+            )
+            try:
+                self.simulation_runs_table.put_item(
+                    Item=convert_floats_to_decimal(item),
+                    ConditionExpression=condition,
+                )
+                return item
+            except ClientError as error:
+                if error.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                    continue
+                raise
+        raise RuntimeError("Could not reserve a saved simulation run slot")
+
+    def delete_simulation_run(self, user_id: str, run_id: str) -> bool:
+        """Delete a saved run only when its owning user matches the partition key."""
+        for item in self._query_simulation_run_items(user_id):
+            if item.get("runId") != run_id:
+                continue
+            try:
+                self.simulation_runs_table.delete_item(
+                    Key={"userId": user_id, "runSlot": item["runSlot"]},
+                    ConditionExpression=Attr("runId").eq(run_id),
+                )
+                return True
+            except ClientError as error:
+                if error.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                    return False
+                raise
+        return False
 
     # ------------------------------------------------------------------
     # Public sharing
