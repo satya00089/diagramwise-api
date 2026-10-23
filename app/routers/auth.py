@@ -11,7 +11,7 @@ from typing import Annotated, Any, Dict
 from urllib.parse import quote, urlencode, urlparse
 
 import httpx
-from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
+from fastapi import APIRouter, Cookie, Depends, Form, HTTPException, Request, Response, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.responses import RedirectResponse
 
@@ -21,6 +21,7 @@ from app.models.auth_models import (
     GoogleAuthRequest,
     GoogleAuthHandoffRequest,
     AuthResponse,
+    SessionAuthResponse,
     SignupPendingResponse,
     VerifyEmailRequest,
     ResendVerificationRequest,
@@ -35,10 +36,16 @@ from app.services.admin_access import is_super_admin_user
 from app.services.dynamodb_service import dynamodb_service
 from app.services.email_service import email_service, EmailDeliveryError
 from app.services.google_auth_handoff import google_auth_handoff_store
+from app.services.browser_auth import (
+    AUTH_SESSION_COOKIE,
+    clear_auth_session_cookie,
+    require_allowed_origin,
+    set_auth_session_cookie,
+)
 from app.utils.config import get_settings
 
 router = APIRouter()
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 settings = get_settings()
 logger = logging.getLogger(__name__)
 
@@ -87,6 +94,14 @@ def _authenticated_user_response(user: Any) -> AuthResponse:
     )
     auth_session_service.register(auth_service.decode_token(token))
     return AuthResponse(user=_user_response(user), token=token)
+
+
+def _set_browser_session(
+    response: Response, user_response: UserResponse, token: str
+) -> SessionAuthResponse:
+    """Set the browser credential without returning it to JavaScript."""
+    set_auth_session_cookie(response, token, settings)
+    return SessionAuthResponse(user=user_response)
 
 
 def _hash_verification_token(token: str) -> str:
@@ -183,10 +198,23 @@ async def _issue_verification_email(user: Any, verification_return_url: str | No
 
 
 def get_current_user(
-    credentials: Annotated[HTTPAuthorizationCredentials, Depends(security)],
+    request: Request,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(security)],
+    session_cookie: Annotated[str | None, Cookie(alias=AUTH_SESSION_COOKIE)] = None,
 ) -> Dict[str, Any]:
-    """Dependency to get current authenticated user from JWT token."""
-    token = credentials.credentials
+    """Authenticate with a bearer token or the browser's HttpOnly session cookie."""
+    # Prefer the browser cookie when an older cached client also sends its
+    # stale bearer token after another tab has upgraded the shared session.
+    token = session_cookie or (credentials.credentials if credentials else None)
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if session_cookie and request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        require_allowed_origin(request.headers.get("origin"), settings)
+
     payload = auth_session_service.validate(token)
     user_id = payload.get("user_id")
     if not user_id:
@@ -204,19 +232,30 @@ def get_current_user(
 
 
 @router.post("/auth/logout", status_code=status.HTTP_204_NO_CONTENT)
+@router.post("/auth/session/logout", status_code=status.HTTP_204_NO_CONTENT)
 async def logout(
-    credentials: Annotated[HTTPAuthorizationCredentials, Depends(security)],
+    request: Request,
+    response: Response,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(security)],
+    session_cookie: Annotated[str | None, Cookie(alias=AUTH_SESSION_COOKIE)] = None,
 ) -> Response:
-    """Revoke the current access-token session."""
-    token = credentials.credentials
-    try:
-        auth_session_service.revoke(token)
-    except HTTPException as exc:
-        # An expired or malformed token is already unusable; make logout
-        # idempotent while still surfacing session-store outages.
-        if exc.status_code != status.HTTP_401_UNAUTHORIZED:
-            raise
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    """Revoke the current session and clear its browser cookie when present."""
+    if session_cookie:
+        require_allowed_origin(request.headers.get("origin"), settings)
+    tokens = [session_cookie]
+    if credentials:
+        tokens.append(credentials.credentials)
+    for token in dict.fromkeys(value for value in tokens if value):
+        try:
+            auth_session_service.revoke(token)
+        except HTTPException as exc:
+            # An expired or malformed token is already unusable; make logout
+            # idempotent while still surfacing session-store outages.
+            if exc.status_code != status.HTTP_401_UNAUTHORIZED:
+                raise
+    clear_auth_session_cookie(response, settings)
+    response.status_code = status.HTTP_204_NO_CONTENT
+    return response
 
 
 @router.post("/auth/signup", response_model=SignupPendingResponse)
@@ -336,6 +375,64 @@ async def login(request: LoginRequest):
     return _authenticated_user_response(user)
 
 
+@router.post("/auth/session/login", response_model=SessionAuthResponse)
+async def login_with_browser_session(
+    login_request: LoginRequest,
+    request: Request,
+    response: Response,
+) -> SessionAuthResponse:
+    """Sign in a browser using an HttpOnly cookie instead of returning a JWT."""
+    require_allowed_origin(request.headers.get("origin"), settings)
+    authenticated = await login(login_request)
+    if not authenticated.token:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not create a browser session",
+        )
+    return _set_browser_session(response, authenticated.user, authenticated.token)
+
+
+@router.post("/auth/session/upgrade", response_model=SessionAuthResponse)
+async def upgrade_browser_session(
+    request: Request,
+    response: Response,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(security)],
+) -> SessionAuthResponse:
+    """Rotate a legacy browser bearer token into an HttpOnly cookie session."""
+    require_allowed_origin(request.headers.get("origin"), settings)
+    if not credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="A legacy bearer session is required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    old_token = credentials.credentials
+    payload = auth_session_service.validate(old_token)
+    user_id = payload.get("user_id")
+    user = dynamodb_service.get_user_by_id(user_id) if user_id else None
+    if not user or not _is_email_verified(user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Please verify your email address before continuing",
+        )
+
+    new_token = auth_service.create_access_token(
+        data={"user_id": user.id, "email": user.email}
+    )
+    auth_session_service.register(auth_service.decode_token(new_token))
+    try:
+        auth_session_service.revoke(old_token)
+    except HTTPException:
+        try:
+            auth_session_service.revoke(new_token)
+        except HTTPException:
+            logger.exception("Could not revoke an unissued browser session")
+        raise
+
+    return _set_browser_session(response, _user_response(user), new_token)
+
+
 def _authenticate_google_credential(credential: str) -> AuthResponse:
     """Resolve one verified Google credential into a Diagramwise session."""
     # Verify Google credential
@@ -387,6 +484,23 @@ def _authenticate_google_credential(credential: str) -> AuthResponse:
 async def google_auth(request: GoogleAuthRequest):
     """Authenticate user with Google Sign-In credential."""
     return _authenticate_google_credential(request.credential)
+
+
+@router.post("/auth/session/google", response_model=SessionAuthResponse)
+async def google_auth_with_browser_session(
+    google_request: GoogleAuthRequest,
+    request: Request,
+    response: Response,
+) -> SessionAuthResponse:
+    """Authenticate a browser with Google without exposing its JWT to JavaScript."""
+    require_allowed_origin(request.headers.get("origin"), settings)
+    authenticated = _authenticate_google_credential(google_request.credential)
+    if not authenticated.token:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not create a browser session",
+        )
+    return _set_browser_session(response, authenticated.user, authenticated.token)
 
 
 @router.get("/auth/google/redirect/start", include_in_schema=False)
@@ -555,6 +669,38 @@ async def exchange_google_auth_handoff(request: GoogleAuthHandoffRequest):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Invalid Google authentication handoff",
         ) from exc
+
+
+@router.post(
+    "/auth/session/google/redirect/exchange",
+    response_model=SessionAuthResponse,
+)
+async def exchange_google_auth_handoff_for_browser_session(
+    handoff_request: GoogleAuthHandoffRequest,
+    request: Request,
+    response: Response,
+) -> SessionAuthResponse:
+    """Consume a Google handoff and keep its JWT in an HttpOnly cookie."""
+    require_allowed_origin(request.headers.get("origin"), settings)
+    payload = google_auth_handoff_store.consume(handoff_request.code)
+    if not payload:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google authentication link is invalid or expired",
+        )
+    try:
+        authenticated = AuthResponse.model_validate(payload)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Invalid Google authentication handoff",
+        ) from exc
+    if not authenticated.token:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Google authentication handoff did not contain a session",
+        )
+    return _set_browser_session(response, authenticated.user, authenticated.token)
 
 
 @router.get("/auth/me")
