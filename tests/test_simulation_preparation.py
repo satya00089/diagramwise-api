@@ -44,12 +44,12 @@ def graph_with_optional_direct_cache_edge():
         "component_roles": roles,
         "connection_checks": checks,
         "routes": [
-            {"operation": "read", **route},
-            {"operation": "write", **route},
+            {"operation": "redirect", **route},
+            {"operation": "create-link", **route},
         ],
-        "assumptions": ["Read and write operations have equal modeled cost."],
+        "assumptions": ["Redirect reads and link writes have equal modeled cost."],
         "unresolved": [],
-        "summary": "The read/write paths are supported by the graph.",
+        "summary": "The redirect and create-link paths are supported by the graph.",
     }
     return components, connections, draft
 
@@ -94,7 +94,10 @@ def test_valid_directed_read_write_path_is_ready():
     result = validate_preparation(components, connections, draft)
 
     assert result.status == "ready"
-    assert [route.operation for route in result.routes] == ["read", "write"]
+    assert [route.operation for route in result.routes] == [
+        "redirect",
+        "create-link",
+    ]
     assert result.routes[0].node_ids == ["client", "gateway", "app", "db"]
     assert result.component_roles[0].role == "client"
     assert result.component_roles[2].role == "compute"

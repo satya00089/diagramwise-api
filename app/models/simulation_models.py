@@ -15,7 +15,7 @@ SimulationRole = Literal[
     "other",
 ]
 CompatibilityStatus = Literal["supported", "incompatible", "uncertain"]
-SimulationOperation = Literal["read", "write"]
+SimulationOperation = Literal["redirect", "create-link"]
 
 
 class SimulationComponent(BaseModel):
@@ -42,6 +42,10 @@ class SimulationConnection(BaseModel):
 class SimulationProblem(BaseModel):
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
+    id: str | None = Field(default=None, max_length=160)
+    requirement_revision: str | None = Field(
+        default=None, alias="requirementRevision", max_length=200
+    )
     title: str = Field(default="System design", max_length=240)
     description: str = Field(default="", max_length=8000)
     requirements: str | None = Field(default=None, max_length=12000)

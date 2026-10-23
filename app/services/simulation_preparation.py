@@ -63,24 +63,29 @@ component as unlimited-capacity pass-through.
 Check every supplied connection in context. The status `incompatible` means the edge
 cannot perform its apparent job in this scenario; `uncertain` means the evidence is not
 enough to decide. An API gateway or other ingress connected directly to Redis/cache or a
-database bypasses application logic and is incompatible for this read/write request
+database bypasses application logic and is incompatible for this redirect/create-link
 model. A cache or database should be reached from a compute component. Do not claim
 that this is a universal cloud-product limitation: explain that it is unsupported by
 this scenario model. Do not mark an edge incompatible only because it is unusual.
 
-Provide at most one directed `read` route and one directed `write` route, in execution
+Provide one directed `redirect` route and one directed `create-link` route, in execution
 order, using only the exact supplied node and edge IDs. Each route must start at a client,
-include a compute component, and end at a database. A read route may pass through a cache
-before the database; a write route should reflect the supplied graph. If a route cannot
-be supported by the graph, return empty node_ids and edge_ids for that operation and add
-a concise unresolved item. Paths must not invent missing application layers.
+include a compute component, and end at exactly one database. A redirect route may pass
+through at most one cache before the database. A create-link route must not pass through a
+cache in this model. If a route cannot be supported by the graph, return empty node_ids
+and edge_ids for that operation and add a concise unresolved item. Paths must not invent
+missing application layers. A read replica or second database is unsupported because
+this model has no replica routing or freshness behavior.
 
 Distinguish explicit graph facts from assumptions. Keep the result concise and tied to
-the supplied IDs. The simulator will calculate capacity from editable educational
-profiles; do not provide numeric capacity, latency, failure-rate, or reliability claims.
+the supplied IDs. An exercise ID and revision are context only; do not derive numeric
+workload or capacity from unstructured prose. The simulator will calculate capacity from
+editable educational profiles; do not provide numeric capacity, latency, failure-rate,
+or reliability claims.
 """.strip()
         user_prompt = (
-            "Prepare this graph for the read/write capacity model. Return one JSON "
+            "Prepare this graph for the URL-shortener redirect/create-link capacity model. "
+            "Return one JSON "
             "object that follows this schema exactly:\n"
             + json.dumps(SimulationPreparationDraft.model_json_schema())
             + "\nDiagram input:\n"
@@ -180,9 +185,9 @@ profiles; do not provide numeric capacity, latency, failure-rate, or reliability
         routes_by_operation = {route.operation: route for route in draft.routes}
         if len(routes_by_operation) != len(draft.routes) or set(
             routes_by_operation
-        ) != {"read", "write"}:
+        ) != {"redirect", "create-link"}:
             raise SimulationPreparationError(
-                "AI did not return one read route and one write route. Retry the check."
+                "AI did not return one redirect route and one create-link route. Retry the check."
             )
 
         # Core catalog roles have explicit identities, so retain those facts even if
@@ -241,49 +246,78 @@ profiles; do not provide numeric capacity, latency, failure-rate, or reliability
                 )
 
         for operation, route in routes_by_operation.items():
+            operation_label = operation
             if not route.node_ids or not route.edge_ids:
                 blockers.append(
-                    f"AI could not map a supported {operation} route through this graph."
+                    f"AI could not map a supported {operation_label} route through this graph."
                 )
                 continue
             if len(route.node_ids) != len(route.edge_ids) + 1:
                 raise SimulationPreparationError(
-                    f"AI returned a malformed {operation} route. Retry the check."
+                    f"AI returned a malformed {operation_label} route. Retry the check."
                 )
             if len(route.node_ids) != len(set(route.node_ids)):
                 blockers.append(
-                    f"The {operation} route contains a loop that this model does not support."
+                    f"The {operation_label} route contains a loop that this model does not support."
                 )
             if any(node_id not in component_by_id for node_id in route.node_ids):
                 raise SimulationPreparationError(
-                    f"AI invented a component in the {operation} route. Retry the check."
+                    f"AI invented a component in the {operation_label} route. Retry the check."
                 )
             roles = [role_by_id[node_id] for node_id in route.node_ids]
             if roles[0] != "client" or roles[-1] != "database" or "compute" not in roles:
                 blockers.append(
-                    f"The {operation} route must run from a client through application "
+                    f"The {operation_label} route must run from a client through application "
                     "logic to a database for this model."
                 )
+            database_positions = [
+                index for index, role in enumerate(roles) if role == "database"
+            ]
+            if len(database_positions) != 1:
+                blockers.append(
+                    f"The {operation_label} route must contain exactly one database; "
+                    "replica routing is not modeled."
+                )
+            cache_positions = [
+                index for index, role in enumerate(roles) if role == "cache"
+            ]
+            if operation == "create-link" and cache_positions:
+                blockers.append(
+                    "The create-link route cannot pass through a cache in this model."
+                )
+            if operation == "redirect":
+                if len(cache_positions) > 1:
+                    blockers.append(
+                        "The redirect route supports at most one cache in this model."
+                    )
+                elif (
+                    cache_positions
+                    and database_positions
+                    and cache_positions[0] > database_positions[0]
+                ):
+                    blockers.append(
+                        "The redirect cache must appear before the database in the route."
+                    )
             if any(role in {"other", "queue"} for role in roles):
                 blockers.append(
-                    f"The {operation} route contains a component role not modeled yet."
+                    f"The {operation_label} route contains a component role not modeled yet."
                 )
             for index, edge_id in enumerate(route.edge_ids):
                 edge = connection_by_id.get(edge_id)
                 if edge is None:
                     raise SimulationPreparationError(
-                        f"AI invented a connection in the {operation} route. Retry the check."
+                        f"AI invented a connection in the {operation_label} route. Retry the check."
                     )
                 if (edge.source, edge.target) != (
                     route.node_ids[index],
                     route.node_ids[index + 1],
                 ):
                     raise SimulationPreparationError(
-                        f"AI returned a disconnected {operation} route. Retry the check."
+                        f"AI returned a disconnected {operation_label} route. Retry the check."
                     )
                 if check_by_id[edge_id].status != "supported":
                     blockers.append(
-                        f"The {operation} route uses a connection that is not validated."
+                        f"The {operation_label} route uses a connection that is not validated."
                     )
 
         # Preserve the model's declared role and edge order for stable UI rendering.
@@ -306,7 +340,10 @@ profiles; do not provide numeric capacity, latency, failure-rate, or reliability
             status=status,
             component_roles=checked_roles,
             connection_checks=checked_edges,
-            routes=[routes_by_operation["read"], routes_by_operation["write"]],
+            routes=[
+                routes_by_operation["redirect"],
+                routes_by_operation["create-link"],
+            ],
             assumptions=draft.assumptions,
             unresolved=list(dict.fromkeys(unresolved)),
             summary=draft.summary,
