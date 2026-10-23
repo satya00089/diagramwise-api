@@ -12,6 +12,8 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, st
 from app.services.dynamodb_service import dynamodb_service
 from app.services.validation import validate_diagram_access
 from app.services.auth_sessions import auth_session_service
+from app.services.browser_auth import AUTH_SESSION_COOKIE, require_allowed_origin
+from app.utils.config import get_settings
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -506,11 +508,22 @@ async def collaborate_on_diagram(
     token: Optional[str] = None,
 ):
     """WebSocket endpoint for real-time collaboration on diagrams."""
+    try:
+        require_allowed_origin(websocket.headers.get("origin"), get_settings())
+    except HTTPException:
+        await websocket.close(code=1008)
+        return
+
     await websocket.accept()
     user_id: Optional[str] = None
     user_info: Dict[str, Any] = {}
     try:
-        authenticated = await _authenticate_collaborator(websocket, diagram_id, token)
+        # Prefer the HttpOnly cookie; keep query-token support temporarily for
+        # already-open older clients during the frontend rollout.
+        session_token = websocket.cookies.get(AUTH_SESSION_COOKIE) or token
+        authenticated = await _authenticate_collaborator(
+            websocket, diagram_id, session_token
+        )
         if not authenticated:
             return
         user_id, user_info = authenticated
@@ -529,7 +542,9 @@ async def collaborate_on_diagram(
         await websocket.send_json(
             _welcome_message(user_info, collaborators, diagram_data)
         )
-        await _receive_collaboration_messages(websocket, diagram_id, user_id, user_info, token or "")
+        await _receive_collaboration_messages(
+            websocket, diagram_id, user_id, user_info, session_token or ""
+        )
     except WebSocketDisconnect:
         pass
     finally:

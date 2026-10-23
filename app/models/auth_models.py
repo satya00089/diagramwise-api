@@ -74,6 +74,12 @@ class AuthResponse(BaseModel):
     token: str
 
 
+class SessionAuthResponse(BaseModel):
+    """Browser login response; the credential is held only in an HttpOnly cookie."""
+
+    user: UserResponse
+
+
 class SignupPendingResponse(BaseModel):
     """Response returned after a password signup awaits email activation."""
 
