@@ -375,7 +375,7 @@ async def login(request: LoginRequest):
     return _authenticated_user_response(user)
 
 
-@router.post("/auth/session/login", response_model=SessionAuthResponse)
+@router.post("/auth/session/login")
 async def login_with_browser_session(
     login_request: LoginRequest,
     request: Request,
@@ -392,7 +392,7 @@ async def login_with_browser_session(
     return _set_browser_session(response, authenticated.user, authenticated.token)
 
 
-@router.post("/auth/session/upgrade", response_model=SessionAuthResponse)
+@router.post("/auth/session/upgrade")
 async def upgrade_browser_session(
     request: Request,
     response: Response,
@@ -486,7 +486,7 @@ async def google_auth(request: GoogleAuthRequest):
     return _authenticate_google_credential(request.credential)
 
 
-@router.post("/auth/session/google", response_model=SessionAuthResponse)
+@router.post("/auth/session/google")
 async def google_auth_with_browser_session(
     google_request: GoogleAuthRequest,
     request: Request,
@@ -673,7 +673,6 @@ async def exchange_google_auth_handoff(request: GoogleAuthHandoffRequest):
 
 @router.post(
     "/auth/session/google/redirect/exchange",
-    response_model=SessionAuthResponse,
 )
 async def exchange_google_auth_handoff_for_browser_session(
     handoff_request: GoogleAuthHandoffRequest,
