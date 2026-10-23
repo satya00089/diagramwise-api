@@ -8,7 +8,7 @@ from typing import Annotated, Any, Callable
 
 from fastapi import APIRouter, Depends, HTTPException
 from starlette.concurrency import run_in_threadpool
-from app.models.problem_models import RequirementSpec
+from app.models.problem_models import RequirementSpec, problem_slug
 from app.models.request_models import AssessmentRequest
 from app.models.response_models import AssessmentResponse
 from app.models.simulation_models import (
@@ -96,6 +96,47 @@ async def resolve_problem_context(
     return request.model_copy(update={"problem": approved_problem})
 
 
+async def resolve_simulation_problem(
+    request: SimulationPreparationRequest, lookup: ProblemLookup
+) -> SimulationPreparationRequest:
+    """Bind the simulator to the current, approved URL-shortener brief."""
+    try:
+        record = await asyncio.wait_for(
+            run_in_threadpool(lookup, request.problem.id), timeout=10.0
+        )
+    except Exception as error:
+        logger.warning("Simulation catalog lookup failed error_type=%s", type(error).__name__)
+        raise HTTPException(status_code=503, detail="The exercise brief is temporarily unavailable.") from error
+    if record is None:
+        raise HTTPException(status_code=404, detail="The exercise was not found in the catalog.")
+
+    slug = record.get("slug") or problem_slug(str(record.get("title", "")))
+    if slug != request.problem.slug:
+        raise HTTPException(status_code=422, detail="This exercise does not support the URL-shortener simulator.")
+    raw_spec = record.get("requirementSpec")
+    spec = RequirementSpec.model_validate(raw_spec) if raw_spec is not None else None
+    revision = spec.revision if spec else None
+    if request.problem.requirement_revision != revision:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "The exercise requirements changed. Reload the brief before preparing paths.",
+                "current_revision": revision,
+            },
+        )
+    def catalog_text(field: str, limit: int) -> str:
+        value = record.get(field) or ""
+        return ("\n".join(map(str, value)) if isinstance(value, list) else str(value))[:limit]
+
+    approved_problem = request.problem.model_copy(update={
+        "title": catalog_text("title", 240),
+        "description": catalog_text("description", 8000),
+        "requirements": catalog_text("requirements", 12000),
+        "constraints": catalog_text("constraints", 12000),
+    })
+    return request.model_copy(update={"problem": approved_problem})
+
+
 @router.post(
     "/assess",
     responses={
@@ -155,10 +196,18 @@ async def prepare_simulation(
         SimulationPreparationService,
         Depends(get_simulation_preparation_service),
     ],
+    problem_lookup: Annotated[ProblemLookup, Depends(get_problem_lookup)],
 ) -> SimulationPreparationResponse:
     """Interpret a diagram for the supported educational simulation model."""
     try:
-        return await preparer.prepare(request)
+        resolved = await resolve_simulation_problem(request, problem_lookup)
+        prepared = await preparer.prepare(resolved)
+        return prepared.model_copy(update={
+            "exercise_id": resolved.problem.id,
+            "requirement_revision": resolved.problem.requirement_revision,
+        })
+    except HTTPException:
+        raise
     except SimulationPreparationError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     except Exception as error:

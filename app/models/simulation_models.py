@@ -42,7 +42,8 @@ class SimulationConnection(BaseModel):
 class SimulationProblem(BaseModel):
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
-    id: str | None = Field(default=None, max_length=160)
+    id: str = Field(min_length=1, max_length=160)
+    slug: Literal["url-shortener-like-bit-ly"]
     requirement_revision: str | None = Field(
         default=None, alias="requirementRevision", max_length=200
     )
@@ -55,9 +56,11 @@ class SimulationProblem(BaseModel):
 class SimulationPreparationRequest(BaseModel):
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
+    contract_version: Literal["1"] = Field(alias="contractVersion")
+    scenario_id: Literal["url-shortener-capacity"] = Field(alias="scenarioId")
     components: list[SimulationComponent] = Field(min_length=1, max_length=100)
     connections: list[SimulationConnection] = Field(default_factory=list, max_length=200)
-    problem: SimulationProblem | None = None
+    problem: SimulationProblem
 
     @model_validator(mode="after")
     def validate_graph_references(self) -> "SimulationPreparationRequest":
@@ -108,6 +111,10 @@ class SimulationPreparationDraft(BaseModel):
 
 
 class SimulationPreparationResponse(SimulationPreparationDraft):
+    contract_version: Literal["1"] = "1"
+    scenario_id: Literal["url-shortener-capacity"] = "url-shortener-capacity"
+    exercise_id: str | None = None
+    requirement_revision: str | None = None
     status: Literal["ready", "blocked", "needs_review"]
     blockers: list[str] = Field(default_factory=list, max_length=30)
 

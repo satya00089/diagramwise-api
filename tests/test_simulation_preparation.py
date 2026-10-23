@@ -56,6 +56,9 @@ def graph_with_optional_direct_cache_edge():
 
 def validate_preparation(components, connections, draft):
     request = SimulationPreparationRequest(
+        contractVersion="1",
+        scenarioId="url-shortener-capacity",
+        problem={"id": "url-shortener-exercise", "slug": "url-shortener-like-bit-ly"},
         components=components,
         connections=connections,
     )

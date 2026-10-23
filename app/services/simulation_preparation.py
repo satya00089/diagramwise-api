@@ -9,10 +9,13 @@ import logging
 from pydantic import ValidationError
 
 from app.models.simulation_models import (
+    SimulationComponentRole,
+    SimulationConnectionCheck,
     SimulationPreparationDraft,
     SimulationPreparationRequest,
     SimulationPreparationResponse,
     SimulationRole,
+    SimulationRoute,
 )
 from app.services.llm_client import create_llm_provider
 from app.services.llm_port import LLMPort, LLMRequest
@@ -20,6 +23,19 @@ from app.utils.config import Settings, get_settings
 
 
 logger = logging.getLogger(__name__)
+
+KNOWN_CATALOG_ROLES: dict[str, SimulationRole] = {
+    "client": "client",
+    "frontend": "client",
+    "api-gateway": "ingress",
+    "load-balancer": "ingress",
+    "web-server": "compute",
+    "application-server": "compute",
+    "microservice": "compute",
+    "backend": "compute",
+    "cache": "cache",
+    "database": "database",
+}
 
 
 class SimulationPreparationError(RuntimeError):
@@ -35,7 +51,7 @@ class SimulationPreparationService:
         settings: Settings | None = None,
     ) -> None:
         self.settings = settings or get_settings()
-        self.llm = llm or create_llm_provider(self.settings)
+        self.llm = llm
         configured_timeout = float(
             getattr(self.settings, "llm_assessment_timeout_seconds", 45.0)
         )
@@ -47,6 +63,10 @@ class SimulationPreparationService:
         self, request: SimulationPreparationRequest
     ) -> SimulationPreparationResponse:
         """Map a diagram into supported paths and validate all references."""
+
+        deterministic = self._prepare_simple_graph(request)
+        if deterministic is not None:
+            return deterministic
 
         system_prompt = """
 You prepare architecture diagrams for a small educational request-capacity simulator.
@@ -93,8 +113,9 @@ or reliability claims.
         )
 
         try:
+            llm = self.llm or create_llm_provider(self.settings)
             response = await asyncio.wait_for(
-                self.llm.generate(
+                llm.generate(
                     LLMRequest(
                         task="simulation-preparation",
                         messages=[
@@ -158,6 +179,114 @@ or reliability claims.
 
         return self._validate_graph_mapping(request, draft)
 
+    @classmethod
+    def _prepare_simple_graph(
+        cls, request: SimulationPreparationRequest
+    ) -> SimulationPreparationResponse | None:
+        """Use catalog roles when the read/write paths are unambiguous."""
+        roles: dict[str, SimulationRole] = {}
+        for component in request.components:
+            role = KNOWN_CATALOG_ROLES.get(component.type.casefold().replace("_", "-"))
+            if role is None:
+                return None
+            roles[component.id] = role
+
+        outgoing: dict[str, list[tuple[str, str]]] = {}
+        for edge in request.connections:
+            # Canvas defaults carry empty label fields. Anything with behavioral
+            # meaning needs the interpreter's semantic compatibility check.
+            if (
+                edge.type not in {"api-call", "http", "tcp", "database-connection"}
+                or edge.label
+                or edge.description
+                or any(
+                    key not in {"label", "hasLabel", "type", "purpose", "description"}
+                    or (key == "hasLabel" and value is not False)
+                    or (key == "type" and value != edge.type)
+                    or (key in {"label", "purpose", "description"} and value is not None and value != "")
+                    for key, value in edge.properties.items()
+                )
+            ):
+                return None
+            outgoing.setdefault(edge.source, []).append((edge.target, edge.id))
+
+        paths: list[tuple[list[str], list[str]]] = []
+        explored = 0
+        def walk(nodes: list[str], edges: list[str]) -> None:
+            nonlocal explored
+            explored += 1
+            if explored > 500 or len(paths) > 2 or len(nodes) > 10:
+                return
+            if roles[nodes[-1]] == "database":
+                paths.append((nodes, edges))
+                return
+            for target, edge_id in outgoing.get(nodes[-1], []):
+                if target not in nodes:
+                    walk([*nodes, target], [*edges, edge_id])
+
+        for node_id, role in roles.items():
+            if role == "client":
+                walk([node_id], [])
+        if explored > 500 or len(paths) > 2:
+            return None
+
+        direct: list[tuple[list[str], list[str]]] = []
+        cached: list[tuple[list[str], list[str]]] = []
+        for nodes, edges in paths:
+            path_roles = [roles[node] for node in nodes]
+            if (
+                "compute" not in path_roles
+                or path_roles[0] != "client"
+                or path_roles[-1] != "database"
+                or any(role not in {"client", "ingress", "compute", "cache", "database"} for role in path_roles)
+                or "client" in path_roles[1:]
+                or "database" in path_roles[:-1]
+            ):
+                continue
+            if "cache" in path_roles:
+                if path_roles.count("cache") == 1 and path_roles[-2] == "cache" and path_roles.index("compute") < len(path_roles) - 2:
+                    cached.append((nodes, edges))
+            else:
+                direct.append((nodes, edges))
+        if len(direct) != 1 or len(cached) > 1:
+            return None
+
+        redirect_nodes, redirect_edges = cached[0] if cached else direct[0]
+        create_nodes, create_edges = direct[0]
+        selected_edges = set(redirect_edges) | set(create_edges)
+        if any(
+            edge.id not in selected_edges
+            and not (roles[edge.source] == "ingress" and roles[edge.target] in {"cache", "database"})
+            for edge in request.connections
+        ):
+            return None
+        draft = SimulationPreparationDraft(
+            component_roles=[
+                SimulationComponentRole(
+                    node_id=component.id,
+                    role=roles[component.id],
+                    evidence=f"Catalog type {component.type}",
+                ) for component in request.components
+            ],
+            connection_checks=[
+                SimulationConnectionCheck(
+                    edge_id=edge.id,
+                    status="supported",
+                    explanation="Directed graph connection between catalog components.",
+                ) for edge in request.connections
+            ],
+            routes=[
+                SimulationRoute(operation="redirect", node_ids=redirect_nodes, edge_ids=redirect_edges,
+                                explanation="Unique directed redirect path through catalog components."),
+                SimulationRoute(operation="create-link", node_ids=create_nodes, edge_ids=create_edges,
+                                explanation="Unique directed link-creation path through catalog components."),
+            ],
+            assumptions=["Each uncached redirect reads once; each link creation writes once."],
+            unresolved=[],
+            summary="The directed catalog paths support the URL-shortener capacity model.",
+        )
+        return cls._validate_graph_mapping(request, draft)
+
     @staticmethod
     def _validate_graph_mapping(
         request: SimulationPreparationRequest,
@@ -193,23 +322,11 @@ or reliability claims.
         # Core catalog roles have explicit identities, so retain those facts even if
         # the model proposes a conflicting interpretation. Provider-specific aliases
         # and custom nodes remain the interpreter's responsibility.
-        known_catalog_roles: dict[str, SimulationRole] = {
-            "client": "client",
-            "frontend": "client",
-            "api-gateway": "ingress",
-            "load-balancer": "ingress",
-            "web-server": "compute",
-            "application-server": "compute",
-            "microservice": "compute",
-            "backend": "compute",
-            "cache": "cache",
-            "database": "database",
-        }
         for role_item in draft.component_roles:
             component_type = component_by_id[role_item.node_id].type.casefold().replace(
                 "_", "-"
             )
-            known_role = known_catalog_roles.get(component_type)
+            known_role = KNOWN_CATALOG_ROLES.get(component_type)
             if known_role and role_item.role != known_role:
                 role_item.role = known_role
                 role_item.evidence = (
@@ -290,13 +407,12 @@ or reliability claims.
                     blockers.append(
                         "The redirect route supports at most one cache in this model."
                     )
-                elif (
-                    cache_positions
-                    and database_positions
-                    and cache_positions[0] > database_positions[0]
+                elif cache_positions and (
+                    cache_positions[0] != len(roles) - 2
+                    or "compute" not in roles[:cache_positions[0]]
                 ):
                     blockers.append(
-                        "The redirect cache must appear before the database in the route."
+                        "The redirect cache must follow application logic and directly precede the database."
                     )
             if any(role in {"other", "queue"} for role in roles):
                 blockers.append(
