@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from decimal import Decimal
+import json
 import time
 from typing import Any, Dict, List, Optional, Tuple, cast
 from uuid import uuid4
@@ -2064,6 +2065,7 @@ class DynamoDBService:
                 item for item in self._query_simulation_run_items(user_id)
                 if item.get("problemId") == problem_id
                 and int(item.get("expiresAt", 0)) > now
+                and item.get("recordType", "capacity-v1") == "capacity-v1"
             ),
             key=lambda item: item.get("createdAt", ""),
             reverse=True,
@@ -2078,6 +2080,55 @@ class DynamoDBService:
         max_runs_per_user: int = 50,
     ) -> Dict[str, Any]:
         """Save an immutable private snapshot in one of a user's bounded slots."""
+        return self._save_simulation_run_item(
+            user_id,
+            {"recordType": "capacity-v1", "problemId": problem_id, "snapshot": snapshot},
+            ttl_seconds,
+            max_runs_per_user,
+        )
+
+    def get_event_simulation_runs(
+        self, user_id: str, design_id: str, canvas_id: str
+    ) -> List[Dict[str, Any]]:
+        """Read event artifacts from the owner's partition, scoped to one canvas."""
+        now = int(time.time())
+        items = [
+            item for item in self._query_simulation_run_items(user_id)
+            if item.get("recordType") == "event-v1"
+            and item.get("designId") == design_id
+            and item.get("canvasId") == canvas_id
+            and int(item.get("expiresAt", 0)) > now
+        ]
+        # JSON preserves integer fields such as seeds and counters. The legacy
+        # decimal-to-float conversion must not turn those into invalid replays.
+        return [
+            {**item, "snapshot": json.loads(item["snapshotJson"])}
+            for item in sorted(items, key=lambda row: row.get("createdAt", ""), reverse=True)
+        ]
+
+    def save_event_simulation_run(
+        self, user_id: str, snapshot: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Store a bounded replay JSON string; no server execution or scoring."""
+        serialized = json.dumps(snapshot, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        if len(serialized.encode("utf-8")) > 240 * 1024:
+            raise ValueError("Replay artifact exceeds the 240 KiB storage limit")
+        item = self._save_simulation_run_item(user_id, {
+            "recordType": "event-v1",
+            "designId": snapshot["scope"]["designId"],
+            "canvasId": snapshot["scope"]["canvasId"],
+            "snapshotJson": serialized,
+        })
+        return {**item, "snapshot": snapshot}
+
+    def _save_simulation_run_item(
+        self,
+        user_id: str,
+        payload: Dict[str, Any],
+        ttl_seconds: int = 90 * 24 * 60 * 60,
+        max_runs_per_user: int = 50,
+    ) -> Dict[str, Any]:
+        """Reserve one of the same 50 slots across both simulation versions."""
         now = int(time.time())
         created_at = datetime.now(timezone.utc).isoformat()
         run_id = uuid4().hex
@@ -2108,10 +2159,9 @@ class DynamoDBService:
                 "userId": user_id,
                 "runSlot": slot_key,
                 "runId": run_id,
-                "problemId": problem_id,
                 "createdAt": created_at,
                 "expiresAt": now + ttl_seconds,
-                "snapshot": snapshot,
+                **payload,
             }
             condition = (
                 Attr("runId").not_exists()
@@ -2130,10 +2180,12 @@ class DynamoDBService:
                 raise
         raise RuntimeError("Could not reserve a saved simulation run slot")
 
-    def delete_simulation_run(self, user_id: str, run_id: str) -> bool:
+    def delete_simulation_run(
+        self, user_id: str, run_id: str, record_type: str = "capacity-v1"
+    ) -> bool:
         """Delete a saved run only when its owning user matches the partition key."""
         for item in self._query_simulation_run_items(user_id):
-            if item.get("runId") != run_id:
+            if item.get("runId") != run_id or item.get("recordType", "capacity-v1") != record_type:
                 continue
             try:
                 self.simulation_runs_table.delete_item(

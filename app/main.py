@@ -35,6 +35,7 @@ from app.routers import (
     feedback,
     admin,
     mcp_integration,
+    event_simulation,
 )
 from app.middleware.rate_limiter import RateLimitMiddleware
 from app.middleware.api_latency import ApiLatencyMiddleware
@@ -164,6 +165,7 @@ app.add_middleware(
 
 # Include routers
 app.include_router(assessment.router, prefix=API_V1_PREFIX, tags=["assessment"])
+app.include_router(event_simulation.router, prefix="/api/v2", tags=["simulation"])
 app.include_router(interview.router, prefix=API_V1_PREFIX, tags=["interview"])
 app.include_router(problems.router, prefix=API_V1_PREFIX, tags=["problems"])
 app.include_router(auth.router, prefix=API_V1_PREFIX, tags=["auth"])

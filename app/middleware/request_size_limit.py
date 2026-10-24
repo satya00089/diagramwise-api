@@ -13,6 +13,7 @@ class SimulationRequestSizeLimitMiddleware:
     _limits = {
         ("POST", "/api/v1/simulation/prepare"): 256 * 1024,
         ("POST", "/api/v1/simulation/runs"): 56 * 1024,
+        ("POST", "/api/v2/simulation/runs"): 256 * 1024,
     }
 
     def __init__(self, app: ASGIApp):

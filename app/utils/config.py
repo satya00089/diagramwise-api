@@ -256,6 +256,11 @@ class Settings(BaseSettings):
     simulation_capacity_enabled: bool = Field(
         False, validation_alias="SIMULATION_CAPACITY_ENABLED"
     )
+    # Only optional cloud saves use this flag. The local event simulator does
+    # not call the API to check availability and never depends on this value.
+    simulation_event_history_enabled: bool = Field(
+        True, validation_alias="SIMULATION_EVENT_HISTORY_ENABLED"
+    )
     simulation_ai_requests_per_hour: int = Field(
         10, ge=1, le=100, validation_alias="SIMULATION_AI_REQUESTS_PER_HOUR"
     )
